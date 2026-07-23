@@ -54534,7 +54534,48 @@ class Scanner:
         if not _boolean_oracle:
             LOG.info("[Inference] Boolean oracle not detected after %d attempts", _bool_oracle_attempts)
 
-        #  HEADER ORACLE: For BH (header boolean-blind) technique 
+        # BUG-INFER-CALIB-SINGLE-PAIR-WASSERSTEIN FIX: the 3-attempt single-pair check
+        # above cannot reliably detect boolean oracles on large (100KB+) dynamic pages:
+        # individual TRUE/FALSE response hashes always differ due to timestamps/tokens, and
+        # body SIZE difference is < 10% so it's treated as noise — even though the BYTE
+        # DISTRIBUTION reliably separates TRUE from FALSE at dist=0.666 (same signal the
+        # detection phase used).  Multi-sample Wasserstein (N=12 pairs) aggregates the
+        # signal and fires where single-pair hash/size comparison misses.
+        if not _boolean_oracle:
+            LOG.info("[Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...")
+            _wass_pairs = []
+            for _wi in range(12):
+                try:
+                    await asyncio.sleep(_delay * 0.15)
+                    _wfp_t, _ = await _send_payload("1=1")
+                    _wfp_f, _ = await _send_payload("1=2")
+                    _wb_tb = _extract_body_safe(_wfp_t, func_name="infer_wass_true")
+                    _wb_fb = _extract_body_safe(_wfp_f, func_name="infer_wass_false")
+                    if _wb_tb and _wb_fb:
+                        _wass_pairs.append((_wfp_t, _wfp_f, _wb_tb, _wb_fb))
+                except Exception:
+                    pass
+            if len(_wass_pairs) >= 6:
+                _wass_dists = [
+                    WassersteinResponseOracle.wasserstein1(bt, bf)
+                    for _, _, bt, bf in _wass_pairs
+                ]
+                _wass_mean = sum(_wass_dists) / len(_wass_dists)
+                LOG.info("[Inference] Wasserstein mean=%.3f n=%d (threshold=0.25)",
+                         _wass_mean, len(_wass_dists))
+                if _wass_mean >= 0.25:
+                    _boolean_oracle = True
+                    _wfp_t_last, _wfp_f_last = _wass_pairs[-1][0], _wass_pairs[-1][1]
+                    _bool_norm_true = (
+                        ResponseNormaliser.normalise(_extract_body_safe(_wfp_t_last))
+                        if _validate_response(_wfp_t_last, allow_empty=True) else b"")
+                    _bool_norm_false = (
+                        ResponseNormaliser.normalise(_extract_body_safe(_wfp_f_last))
+                        if _validate_response(_wfp_f_last, allow_empty=True) else b"")
+                    print(f"[+] [Inference]  BOOLEAN ORACLE detected via Wasserstein! "
+                          f"dist={_wass_mean:.3f} (n={len(_wass_dists)} pairs)", flush=True)
+
+        #  HEADER ORACLE: For BH (header boolean-blind) technique
         # BH produces same status+body but DIFFERENT response headers.
         # Check for stable header differences between true/false probes.
         _bool_hdr_name = None
