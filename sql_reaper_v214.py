@@ -128511,11 +128511,21 @@ class MultiStrategyExtractor:
                 # returns True → oracle garbage. Compare the stored header key/val directly.
                 _hk = self._err_info.get("hdr_key")
                 _hev = self._err_info.get("hdr_err_val")
-                if _hk and _hev is not None:
+                # Per-request dynamic headers must never be used for oracle voting:
+                # each response gets a unique value, so comparison is always False
+                # → oracle silently fails with all-False votes → empty extraction.
+                _DYNAMIC_HDR = frozenset({
+                    "x-request-id", "x-trace-id", "x-correlation-id",
+                    "x-request-guid", "x-amz-request-id", "x-amz-id-2",
+                    "x-b3-traceid", "traceid", "x-transaction-id",
+                    "date", "age", "cf-ray",
+                })
+                if _hk and _hev is not None and _hk.lower() not in _DYNAMIC_HDR:
                     _fp_hdrs = dict(getattr(fp, "headers", {}) or {})
                     _vote = _fp_hdrs.get(_hk, "") == _hev
                 else:
-                    # Fallback: no header key stored → compare status (old behaviour)
+                    # Fallback: no header key stored, or header is per-request
+                    # dynamic (x-request-id, cf-ray, date, etc.) → compare status.
                     _vote = getattr(fp, "status_code", None) == self._err_info["err_status"]
             else:
                 _l = len(_safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else "")
@@ -147093,8 +147103,11 @@ class ConditionalErrorTypeOracle:
                 try:
                     _fp_waf_s, _ = await send_fn(_waf_chk_s)
                     _waf_s_status = getattr(_fp_waf_s, 'status_code', 0) if _fp_waf_s else 0
-                    if _waf_s_status == clean_status:
-                        # WAF challenge page matched true_sig status → oracle unreliable
+                    if _fp_waf_s is not None and _waf_s_status != err_status:
+                        # WAF interference: always-false condition means error expr
+                        # fires → response must be err_status. Any other status
+                        # (clean challenge page, 403 block, custom WAF page) means
+                        # extraction probes will also be blocked → oracle unreliable.
                         continue
                 except Exception:
                     pass  # WAF check failed → conservatively allow the oracle
@@ -147144,8 +147157,11 @@ class ConditionalErrorTypeOracle:
                     except Exception:
                         _fp_waf = None
                     _waf_len = getattr(_fp_waf, "content_length", 0) if _fp_waf else 0
-                    if abs(_waf_len - clean_len) < 20:
-                        # WAF blocked the complex probe and returned true_sig-sized response
+                    if _fp_waf is not None and abs(_waf_len - err_len) > 20:
+                        # WAF interference: always-false condition means error expr
+                        # fires → response must match err_len. Any size that doesn't
+                        # match err_len (WAF challenge page, 403 block body, etc.)
+                        # means extraction probes will also be interfered with → skip.
                         continue
                     return etype, clean_len, err_len, "length"
 
