@@ -43057,7 +43057,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                         _patched_baseline = dict(baseline)
                         _patched_baseline['mean_length'] = len(_extract_body_safe(_ei_fp_t))
                         _patched_baseline['std_length']  = max(10, len(_extract_body_safe(_ei_fp_t)) * 0.02)
-                        _patched_baseline['mean_words']  = _ei_fp_t.body_words
+                        _patched_baseline['mean_words']  = getattr(_ei_fp_t, 'body_words', 10)
                         _patched_baseline['std_words']   = max(5, getattr(_ei_fp_t, 'body_words', 10) * 0.05)
                         baseline = _patched_baseline
                         LOG.debug('[_extract_int] Self-calibrated baseline: '
