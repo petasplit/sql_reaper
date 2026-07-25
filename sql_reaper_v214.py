@@ -38372,9 +38372,24 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                 _bdet_dbms.exact_sent_payload = DetectionResult.compute_exact_payload(
                                     original + true_sfx, tamper_chain)
                                 # Mark FP-guard pre-confirmation so _post_confirm_verify_locked
-                                # can short-circuit to the pre-confirmed path if it runs
+                                # can short-circuit to the pre-confirmed path if it runs.
+                                # BUG-DIFF-PCV-VERIFIED FIX (CRITICAL): DIFFERENTIAL mode never
+                                # set _pcv_verified=True (FULL mode sets it at the corresponding
+                                # path in detect_boolean). Without this flag the scanner gate at
+                                # ~L51794 always runs PCV for DIFFERENTIAL detections, and
+                                # _inline_pcv_check Early Shortcut A (L103972) cannot fire.
+                                # PCV then sends SUBSTRING/LENGTH canary probes that never touch
+                                # application state → gap=0 → "no-gap-above-threshold" every run.
+                                _bdet_dbms._pcv_verified = True
                                 _bdet_dbms._fp_guards_preconfirmed = _diff_early_fpg_ok
                                 _bdet_dbms._fp_guards_confidence = float(confidence)
+                                # BUG-PCV-FALSE-PAYLOAD FIX: Store the original (pre-mutation)
+                                # false_sfx so PCV can re-run FP guards with the same payload pair
+                                # that detection used. Without this, PCV falls back to deriving a
+                                # false payload from the mutated true payload, which _make_false_payload
+                                # cannot invert → fallback " AND 1=2-- -" gets WAF-blocked → FP
+                                # guard returns False → PCV returns False before Check A even runs.
+                                _bdet_dbms._false_payload_orig = false_sfx
                             except Exception:
                                 pass
                             return _bdet_dbms
@@ -38854,6 +38869,9 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                             # returns True, so _post_confirm_verify_locked sees them if it runs.
                             det._fp_guards_preconfirmed = True
                             det._fp_guards_confidence = float(_b_fpg_conf)
+                            # BUG-PCV-FALSE-PAYLOAD FIX: Store original false_sfx so PCV can
+                            # re-run FP guards with the same payload pair used in detection.
+                            det._false_payload_orig = false_sfx
                         except Exception:
                             pass
                         return det
@@ -56665,9 +56683,9 @@ class Scanner:
                                 else 255)  # BUG-INF-CHAR-BITWISE-BITS FIX: was else 255 for all; BUG-INF-CHAR-BITWISE-TIDB-YG-REDSHIFT FIX: added TiDB/YG/Redshift→1114111
             return chr(_val) if 32 <= _val <= _bitwise_char_hi else None
 
-        async def _get_length_bitwise(query, max_bits=8):
+        async def _get_length_bitwise(query, max_bits=10):
             """Extract length using bitwise probes  no > operator needed.
-            8 probes for lengths up to 255. Uses ONLY & and = operators."""
+            10 probes for lengths up to 1023 (was 8/255). Uses ONLY & and = operators."""
             if _dbms == "MSSQL":
                 # BUG-BIT-LEN-MSSQL-FIX: LEN() strips trailing spaces (CHAR-padded
                 # columns return wrong length). Use DATALENGTH(NVARCHAR(MAX))/2.
@@ -58347,7 +58365,7 @@ class Scanner:
             if _use_bitwise_fallback:
                 LOG.info("[Inference] %s: all ops blocked — using bitwise length detection directly", label)
                 try:
-                    _length = await _get_length_bitwise(query, max_bits=8)
+                    _length = await _get_length_bitwise(query, max_bits=10)
                     if _length > 0:
                         LOG.info("[Inference] %s: bitwise length=%d", label, _length)
                     elif _length is None:
@@ -58388,7 +58406,7 @@ class Scanner:
                     LOG.info("[Inference] %s: comparison operators WAF-blocked — "
                              "trying bitwise length detection (& and = only)", label)
                     try:
-                        _length = await _get_length_bitwise(query, max_bits=8)
+                        _length = await _get_length_bitwise(query, max_bits=10)
                         if _length > 0:
                             LOG.info("[Inference] %s: bitwise length=%d", label, _length)
                         else:
@@ -58951,9 +58969,17 @@ class Scanner:
                     _san_t = await _eval("1=1")
                     await asyncio.sleep(_delay * 0.5)
                     _san_f = await _eval("1=2")
-                    if _san_t is True and _san_f is False:
+                    # BUG-ORACLE-SANITY-IS-CHECK FIX: `is True`/`is False` only matches Python
+                    # singleton booleans. Comparison operators (ms >= _thresh, _sim_gap > 0)
+                    # always produce singletons in CPython, but use explicit not/bool guards
+                    # to be defensive against numpy bools or other truthy/falsy non-singletons.
+                    _san_ok_normal   = (_san_t is not None and bool(_san_t) and
+                                        _san_f is not None and not bool(_san_f))
+                    _san_ok_inverted = (_san_t is not None and not bool(_san_t) and
+                                        _san_f is not None and bool(_san_f))
+                    if _san_ok_normal:
                         LOG.debug("[Inference] Deferred oracle sanity OK (1=1→True, 1=2→False)")
-                    elif _san_t is False and _san_f is True:
+                    elif _san_ok_inverted:
                         # BUG-ORACLE-INVERSION FIX (CRITICAL): inverted polarity oracle.
                         # The detection payload creates an OR/AND nesting that flips
                         # True↔False (e.g. `' || (1&1)IS0.1` — OR with IS NOT TRUE).
@@ -89173,14 +89199,22 @@ class ScannerV10(ScannerV9):
                     # Oracle ROWNUM, MSSQL CAST, PostgreSQL &&/||, etc.) causing
                     # _r3b_false == _r3b_true and silently skipping the FP guard entirely.
                     _r3b_true  = _det_for_pcv.payload or ""
-                    try:
-                        _r3b_false_mfp = TechniqueCascadeEngine._make_false_payload(_r3b_true)
-                        _r3b_false = _r3b_false_mfp if (_r3b_false_mfp and _r3b_false_mfp != _r3b_true) else (
-                            _r3b_true.replace("1=1","1=2").replace("'a'='a'","'a'='b'").replace("2=2","2=3"))
-                    except Exception:
-                        _r3b_false = (_r3b_true.replace("1=1","1=2")
-                                               .replace("'a'='a'","'a'='b'")
-                                               .replace("2=2","2=3"))
+                    # BUG-PCV-FALSE-PAYLOAD FIX (CRITICAL): PCV previously had to re-derive the
+                    # false payload from the stored (already WAF-mutated) detection payload.
+                    # _make_false_payload() cannot invert 20-layer obfuscated payloads and falls
+                    # back to " AND 1=2-- -" — which gets WAF-blocked since it bypasses no WAF
+                    # layers — causing FP guards to return False before Check A runs.
+                    # Fix: prefer the original pre-mutation false_sfx stored during detection.
+                    _r3b_false = getattr(_det_for_pcv, '_false_payload_orig', None) or None
+                    if not _r3b_false or _r3b_false == _r3b_true:
+                        try:
+                            _r3b_false_mfp = TechniqueCascadeEngine._make_false_payload(_r3b_true)
+                            _r3b_false = _r3b_false_mfp if (_r3b_false_mfp and _r3b_false_mfp != _r3b_true) else (
+                                _r3b_true.replace("1=1","1=2").replace("'a'='a'","'a'='b'").replace("2=2","2=3"))
+                        except Exception:
+                            _r3b_false = (_r3b_true.replace("1=1","1=2")
+                                                   .replace("'a'='a'","'a'='b'")
+                                                   .replace("2=2","2=3"))
                     # BUG-FIX-R3B-NEGATION (Issue 3/12): When _r3b_false == _r3b_true (complex
                     # payloads that _make_false_payload cannot negate AND simple substitutions
                     # don't match), the FP guard is silently skipped. The detection then goes
@@ -107384,8 +107418,18 @@ class TechniqueCascadeEngine:
                     # non-timing tech + failed Check A/C strong path, which already requires
                     # _fp_guards_preconfirmed or A+C together. A single header diff on top
                     # of that is sufficient additional evidence.
+                    # BUG-CHECKD-DYNAMIC-THRESHOLD FIX: The original >= 2 dynamic diffs
+                    # requirement meant content-length alone (the ONLY dynamic diff on
+                    # typical web apps) always failed Check D. Standard web apps expose no
+                    # x-query-time / observability headers (security_diffs = 0) and only
+                    # content-length changes between true/false SQL probes (dynamic_diffs = 1).
+                    # This made Check D structurally dead on all standard apps.
+                    # Lowered to >= 1 dynamic diff. Anti-FP: the confirmation decision tree
+                    # at ~L107897 already gates Check D confirmation on _d_pass AND _a_pass
+                    # together — a content-length diff alone never confirms without a
+                    # corroborating body-canary pass.
                     _d_pass = (len(_security_diffs) >= 1 or
-                               len(_dynamic_diffs) >= 2)
+                               len(_dynamic_diffs) >= 1)
                     # FIX-BUG-CHECKD-INDENT: moved _details["D"] and print inside the
                     # try block so they only execute when _d_pass/_d_count/_d_headers have
                     # been computed.  Previously they sat at 9-space indent — outside both
@@ -107930,7 +107974,13 @@ class TechniqueCascadeEngine:
                 # Safety: require direct_sim ≥ 0.88 (the standalone E threshold) to prevent
                 # false positives from borderline E passes on genuinely dynamic error pages.
                 try:
-                    _e_direct_sim_ep = float(_details.get("E", "direct_sim=0").split("direct_sim=")[1].split(" ")[0].split(")")[0])
+                    # BUG-CHECKD-SIMEP-PARSE FIX: when Check E was skipped, _details["E"]
+                    # contains "skipped(...)" with no "direct_sim=" substring. Calling
+                    # .split("direct_sim=")[1] raised IndexError, silently caught as 0.0.
+                    # The silent catch was harmless (0.0 < 0.88 → no confirmation), but
+                    # make it explicit to avoid masking future bugs.
+                    _e_str = _details.get("E", "direct_sim=0")
+                    _e_direct_sim_ep = float(_e_str.split("direct_sim=")[1].split(" ")[0].split(")")[0]) if "direct_sim=" in _e_str else 0.0
                 except Exception:
                     _e_direct_sim_ep = 0.0
                 if _e_direct_sim_ep >= 0.88:
