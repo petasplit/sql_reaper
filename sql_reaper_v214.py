@@ -47829,43 +47829,50 @@ class Enumerator:
             # ConditionalErrorOracle inline using the Enumerator's own context.
             # This covers edge cases where the oracle was not pre-wired by the
             # V14/V25 extraction setup code (e.g. schema enum called standalone).
-            try:
-                # BUG-EXTR-B FIX: The old code used 'id' as a fallback when
-                # self.result is None or has no param attribute.  Extracting via
-                # param="id" when the actual injection point is a different
-                # parameter means ALL oracle probes go to the wrong surface and
-                # always return empty string with no error or log message.
-                # Fix: derive param from self.original/self.data context if result
-                # is unavailable.  If truly unknowable, log a warning and skip
-                # self-calibration rather than silently probing "id".
-                _det_param_se = None
-                if self.result and hasattr(self.result, 'param') and self.result.param:
-                    _det_param_se = self.result.param
-                elif hasattr(self, 'original') and self.original is not None:
-                    # Try to infer the injection param from the Enumerator's own
-                    # attribute (set by the extraction setup code in scan_param).
-                    _det_param_se = getattr(self, '_injection_param', None)
-                if not _det_param_se:
-                    LOG.warning(
-                        "[_extract_str] Cannot determine injection param for "
-                        "self-calibration (result.param is None/missing and no "
-                        "_injection_param attr set).  Skipping self-calibration "
-                        "to avoid probing the wrong parameter with wrong SQL.")
-                    # Fall through to the "no oracle" warning below
-                else:
-                    _self_ceo = ConditionalErrorOracle(
-                        self.engine, self.config,
-                        self.method, self.url, self.data, self.data_fmt,
-                        _det_param_se, self.original, self.dbms, self.tamper_chain)
-                    _ceo_ok = await asyncio.wait_for(_self_ceo.calibrate(), timeout=15)
-                    if _ceo_ok:
-                        _eval_fn = _self_ceo.evaluate
-                        _oracle_name = "self_calibrated_error_oracle"
-                        LOG.debug("[_extract_str] Self-calibrated ConditionalErrorOracle OK")
-                        print(f"[+] [Extract] Self-calibrated oracle for {_det_param_se!r}",
-                              flush=True)
-            except Exception as _self_ceo_err:
-                LOG.debug(f"[_extract_str] Self-calibration failed: {_self_ceo_err}")
+            if getattr(self, '_ceo_perm_failed', False):
+                LOG.debug("[_extract_str] Skipping CEO self-calibration — permanently failed on prior attempt")
+            else:
+                try:
+                    # BUG-EXTR-B FIX: The old code used 'id' as a fallback when
+                    # self.result is None or has no param attribute.  Extracting via
+                    # param="id" when the actual injection point is a different
+                    # parameter means ALL oracle probes go to the wrong surface and
+                    # always return empty string with no error or log message.
+                    # Fix: derive param from self.original/self.data context if result
+                    # is unavailable.  If truly unknowable, log a warning and skip
+                    # self-calibration rather than silently probing "id".
+                    _det_param_se = None
+                    if self.result and hasattr(self.result, 'param') and self.result.param:
+                        _det_param_se = self.result.param
+                    elif hasattr(self, 'original') and self.original is not None:
+                        # Try to infer the injection param from the Enumerator's own
+                        # attribute (set by the extraction setup code in scan_param).
+                        _det_param_se = getattr(self, '_injection_param', None)
+                    if not _det_param_se:
+                        LOG.warning(
+                            "[_extract_str] Cannot determine injection param for "
+                            "self-calibration (result.param is None/missing and no "
+                            "_injection_param attr set).  Skipping self-calibration "
+                            "to avoid probing the wrong parameter with wrong SQL.")
+                        # Fall through to the "no oracle" warning below
+                    else:
+                        _self_ceo = ConditionalErrorOracle(
+                            self.engine, self.config,
+                            self.method, self.url, self.data, self.data_fmt,
+                            _det_param_se, self.original, self.dbms, self.tamper_chain)
+                        _ceo_ok = await asyncio.wait_for(_self_ceo.calibrate(), timeout=15)
+                        if _ceo_ok:
+                            _eval_fn = _self_ceo.evaluate
+                            _oracle_name = "self_calibrated_error_oracle"
+                            LOG.debug("[_extract_str] Self-calibrated ConditionalErrorOracle OK")
+                            print(f"[+] [Extract] Self-calibrated oracle for {_det_param_se!r}",
+                                  flush=True)
+                        else:
+                            self._ceo_perm_failed = True
+                            LOG.debug("[_extract_str] CEO self-calibration failed — marking permanently failed to avoid repeated calibration storms")
+                except Exception as _self_ceo_err:
+                    self._ceo_perm_failed = True
+                    LOG.debug(f"[_extract_str] Self-calibration failed: {_self_ceo_err}")
 
         if not _eval_fn:
             # FIX-BUG7: Timing oracle fallback for HQ/T/TH/BT/S/ST techniques.
@@ -47885,7 +47892,7 @@ class Enumerator:
                     getattr(self, '_mse_instance', None), '_boolean_oracle_is_timing', False)
                 if _bo_is_timing_gate:
                     _tech_tf = 'HQ'
-            _timing_techs_tf = ('T', 'TH', 'HQ', 'BT', 'S', 'ST', 'NV', 'WB', 'EX', 'HY')
+            _timing_techs_tf = ('T', 'TH', 'HQ', 'BT', 'S', 'ST')
             if _tech_tf in _timing_techs_tf:
                 _t_sec_tf = float(getattr(self.config, 'time_sec', 5) or 5)
                 _base_ms_tf = (self.baseline.get('mean_timing', 200)
@@ -62679,7 +62686,7 @@ class Scanner:
             _EXTRACT_STRIP = {"charencode","chardoubleencode","htmlencode","percentage",
                               "apostrophenullencode","between","betweennull","greatest",
                               "equaltolike","unicodeencode","utf8encode","htmlencode_all",
-                              "tripleurlencode","percentencode_selective",
+                              "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
             _tc_raw = getattr(self, "_tamper_chain", []) or []
             _tc = [t for t in _tc_raw if t not in _EXTRACT_STRIP]
@@ -62807,7 +62814,7 @@ class Scanner:
             _NOVEL_STRIP = {"charencode", "chardoubleencode", "htmlencode",
                             "percentage", "apostrophenullencode", "greatest", "between", "equaltolike",
                             "unicodeencode", "utf8encode", "htmlencode_all",
-                            "tripleurlencode", "percentencode_selective"}
+                            "tripleurlencode"}
             _novel_tc = [t for t in _novel_tc_raw if t not in _NOVEL_STRIP]
             _novel_method = getattr(cfg, "method", "GET")
             _novel_url = getattr(cfg, "url", "")
@@ -78645,7 +78652,7 @@ class FastExtractionEngine:
         _FEE_EXTRACT_STRIP = {"charencode","chardoubleencode","htmlencode","percentage",
                               "apostrophenullencode","between","betweennull","greatest",
                               "equaltolike","unicodeencode","utf8encode","htmlencode_all",
-                              "tripleurlencode","percentencode_selective",
+                              "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
         self.tamper_chain = [t for t in (tamper_chain or []) if t not in _FEE_EXTRACT_STRIP]
         self._requests    = 0
@@ -82403,7 +82410,7 @@ class BitwiseExtractor:
         _BWE_EXTRACT_STRIP = {"charencode","chardoubleencode","htmlencode","percentage",
                               "apostrophenullencode","between","betweennull","greatest",
                               "equaltolike","unicodeencode","utf8encode","htmlencode_all",
-                              "tripleurlencode","percentencode_selective",
+                              "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
         self.tamper_chain = [t for t in (tamper_chain or []) if t not in _BWE_EXTRACT_STRIP]
         self.baseline     = baseline
@@ -87135,7 +87142,7 @@ class GroupConcatExtractor:
         _GCE_EXTRACT_STRIP = {"charencode","chardoubleencode","htmlencode","percentage",
                               "apostrophenullencode","between","betweennull","greatest",
                               "equaltolike","unicodeencode","utf8encode","htmlencode_all",
-                              "tripleurlencode","percentencode_selective",
+                              "tripleurlencode",
                               "json_unicode_escape","hex_entities","unicode_fullwidth"}
         self.tamper_chain = [t for t in (tamper_chain or []) if t not in _GCE_EXTRACT_STRIP]
         self._requests    = 0
@@ -90050,7 +90057,7 @@ class ScannerV10(ScannerV9):
         _EXTRACT_STRIP = {"charencode","chardoubleencode","htmlencode","percentage",
                           "apostrophenullencode","between","betweennull","greatest",
                           "equaltolike","unicodeencode","utf8encode","htmlencode_all",
-                          "tripleurlencode","percentencode_selective",
+                          "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
         tamper_chain = [t for t in (tamper_chain or []) if t not in _EXTRACT_STRIP]
 
@@ -107943,6 +107950,11 @@ class TechniqueCascadeEngine:
 
         if _d_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS"):
             if _is_error_page:
+                if _d_count >= 2:
+                    print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count} headers) + body canary on error page ({_bl_status}) — multi-header evidence overrides error-page restriction", flush=True)
+                    _INJECTION_CONFIRMED[0] = True
+                    _SCAN_STOPPED[0] = True
+                    return True, 2, _details
                 print(f"[*]   [PCV] Header diff + body canary on error page ({_bl_status})  unreliable, need timing...", flush=True)
             else:
                 print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count}) + body canary ({_a_method})", flush=True)
@@ -137231,7 +137243,7 @@ class ScannerV15(ScannerV14):
         _EXTRACT_STRIP = {"charencode","chardoubleencode","htmlencode","percentage",
                           "apostrophenullencode","between","betweennull","greatest","equaltolike",
                           "unicodeencode","utf8encode","htmlencode_all",
-                          "tripleurlencode","percentencode_selective",
+                          "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
         tamper_chain = [t for t in (tamper_chain or []) if t not in _EXTRACT_STRIP]
 
@@ -140307,7 +140319,7 @@ class ExtractionOrchestrator:
         _EXTRACT_STRIP = {"charencode","chardoubleencode","htmlencode","percentage",
                           "apostrophenullencode","between","betweennull","greatest","equaltolike",
                           "unicodeencode","utf8encode","htmlencode_all",
-                          "tripleurlencode","percentencode_selective",
+                          "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
         self.tamper_chain = [t for t in (tamper_chain or []) if t not in _EXTRACT_STRIP]
         self.baseline = baseline
@@ -150049,19 +150061,28 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             except Exception:
                 _sanity_true_r = None
             if _sanity_true_r is False:
-                LOG.warning("[Novel] %s: oracle sanity FAILED — oracle is INVERTED "
-                            "(always-false→True, 1=1→False); corrupt oracle; aborting extraction",
+                LOG.warning("[Novel] %s: oracle sanity detected INVERTED polarity "
+                            "(always-false→True, 1=1→False); wrapping eval_fn to flip output "
+                            "and retrying extraction with corrected oracle",
                             label)
+                _orig_eval_fn = eval_fn
+                async def _inverted_eval_fn(cond, _fn=_orig_eval_fn):
+                    _r = await _fn(cond)
+                    if _r is None:
+                        return None
+                    return not bool(_r)
+                eval_fn = _inverted_eval_fn
             elif _sanity_true_r is True:
                 LOG.warning("[Novel] %s: oracle sanity FAILED — oracle is WAF-LIMITED "
                             "(both 1=1 and always-false return True = WAF blocks all "
                             "bitwise conditions and matches true_sig); aborting extraction",
                             label)
+                return ""
             else:
                 LOG.warning("[Novel] %s: oracle sanity FAILED — oracle state unknown "
                             "(always-false→True, 1=1→None); WAF likely blocking all probes; "
                             "aborting extraction", label)
-            return ""
+                return ""
     except Exception as _sanity_exc:
         LOG.debug("[Novel] %s: oracle sanity check error (non-fatal): %s", label, _sanity_exc)
     await asyncio.sleep(delay * 0.3)
@@ -163225,6 +163246,9 @@ class ConditionalErrorOracle:
         # Without this, evaluate() sends identical comment suffix (-- -) on every call
         # allowing WAFs to fingerprint and block the error-oracle extraction session.
         self._eval_count = 0
+        self._body_size_oracle: bool = False
+        self._true_oracle_size: int = 0
+        self._false_oracle_size: int = 0
         # BUG-REQ7-HEADER-CEO FIX: Auto-detect header injection surface.
         # When param starts with "header:" (set by header detection for BH/EH/TH
         # injections), the canonical param name IS the header name.  However the
@@ -163383,21 +163407,39 @@ class ConditionalErrorOracle:
                                   f"skipping (ctx={_prefix!r} tpl={tpl[:40]!r})",
                                   flush=True)
                             continue
-                        _t_body_waf = (getattr(_fp_t, 'text', '') or '')[:2000].lower()
+                        _t_body_raw = (getattr(_fp_t, 'text', '') or '')
+                        _t_body_len = len(_t_body_raw)
+                        _t_body_waf = _t_body_raw[:2000].lower()
                         _waf_sigs = ('cloudflare', 'ray id:', 'access denied', 'security check',
                                      'ddos protection', 'captcha', 'attention required',
                                      'rate limit', 'too many requests', 'challenge hidden',
                                      'please stand by', 'enable javascript', 'checking your browser',
                                      'akamai', 'incapsula', 'sucuri', 'imperva', 'bot protection')
-                        if any(sig in _t_body_waf for sig in _waf_sigs):
+                        _f_body_raw = (getattr(_fp_f, 'text', '') or '')
+                        _f_body_len = len(_f_body_raw)
+                        _body_size_diff = abs(_t_body_len - _f_body_len)
+                        if (_t_body_len > 400 and any(sig in _t_body_waf for sig in _waf_sigs)
+                                and _body_size_diff < 100):
                             print(f"[!] [ErrorOracle] True probe body looks like WAF challenge page "
-                                  f"(status={_t_st}) — skipping template to avoid false-positive "
+                                  f"(status={_t_st}, size={_t_body_len}B) — skipping template to avoid false-positive "
                                   f"oracle (ctx={_prefix!r} tpl={tpl[:40]!r})",
                                   flush=True)
                             continue
                         _ceo_cal_waf = {400, 403, 406, 429, 430, 503}
                         if (_t_st in _ceo_cal_waf and _t_st < 500
                                 and _t_st != self._baseline_status):
+                            # Still try body-size mode before skipping
+                            if (_f_st in _ceo_cal_waf and _body_size_diff >= 100
+                                    and _t_st == _f_st):
+                                self._working_template = tpl
+                                self._working_prefix = _prefix
+                                self._body_size_oracle = True
+                                self._true_oracle_size = _t_body_len
+                                self._false_oracle_size = _f_body_len
+                                print("[+] [ErrorOracle] Calibrated (body-size mode, WAF-blocked statuses): "
+                                      f"true={_t_body_len}B vs false={_f_body_len}B "
+                                      f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
+                                return True
                             continue  # WAF-block on true probe — can't calibrate from this template
                         _true_err = (_t_st >= 500 or _t_st != self._baseline_status)
                         _false_ok = (_f_st < 500 and _f_st == self._baseline_status)
@@ -163406,6 +163448,18 @@ class ConditionalErrorOracle:
                             self._working_prefix   = _prefix  # BUG-CEO-1 FIX: persist context
                             print("[+] [ErrorOracle] Calibrated: status "
                                   f"{_fp_t.status_code} vs {_fp_f.status_code} "
+                                  f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
+                            return True
+                        # Body-size fallback: status codes match baseline but body sizes differ
+                        if (_t_st == self._baseline_status and _f_st == self._baseline_status
+                                and _body_size_diff >= 100):
+                            self._working_template = tpl
+                            self._working_prefix = _prefix
+                            self._body_size_oracle = True
+                            self._true_oracle_size = _t_body_len
+                            self._false_oracle_size = _f_body_len
+                            print("[+] [ErrorOracle] Calibrated (body-size mode): "
+                                  f"true={_t_body_len}B vs false={_f_body_len}B "
                                   f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
                             return True
                 except Exception:
@@ -163522,6 +163576,11 @@ class ConditionalErrorOracle:
                         and _ceo_sc < 500
                         and _ceo_sc != self._baseline_status):
                     return None  # WAF-blocked probe -- indeterminate
+                if self._body_size_oracle:
+                    _resp_size = len(getattr(_fp, 'text', '') or '')
+                    _to_true = abs(_resp_size - self._true_oracle_size)
+                    _to_false = abs(_resp_size - self._false_oracle_size)
+                    return _to_true < _to_false
                 return _ceo_sc >= 500 or _ceo_sc != self._baseline_status
         except Exception:
             pass
