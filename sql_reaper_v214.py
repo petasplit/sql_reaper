@@ -89339,50 +89339,78 @@ class ScannerV10(ScannerV9):
                         LOG.debug(f"[PCV R3-3] {_pcv_tech}: could not derive false payload from detection "
                                   f"payload — using synthetic known-false tautology ({_r3b_false!r})")
                     if _r3b_false and _r3b_false != _r3b_true:
-                        try:
-                            _r3b_fp_t = await _pcv_cascade._safe_confirm(
-                                method, url, data, data_fmt, param,
-                                orig + _r3b_true, tamper_chain)
-                            _r3b_fp_f = await _pcv_cascade._safe_confirm(
-                                method, url, data, data_fmt, param,
-                                orig + _r3b_false, tamper_chain)
-                            _r3b_ok, _r3b_conf = await _run_fp_guards_boolean(
-                                self.engine, cfg, method, url, data, data_fmt,
-                                param, orig, tamper_chain, _bl_for_pcv,
-                                _r3b_true, _r3b_false, _r3b_fp_t, _r3b_fp_f)
-                            if not _r3b_ok:
-                                LOG.debug(f"[PCV R3-3] {_pcv_tech} boolean FP guard rejected: conf={_r3b_conf:.3f}")
-                                print(f"[!] PCV [{_pcv_tech}]: boolean FP guard rejected payload — not confirming", flush=True)
-                                return False
-                            print(f"[*] PCV [{_pcv_tech}]: boolean FP guard PASSED (conf={_r3b_conf:.3f}) — proceeding to _post_confirm_verify", flush=True)
-                            # BUG-BOOL-PCV-STRICT FIX (Issue 12): When all 3 FP guard layers pass
-                            # (FalsePositiveGuardV18 L1-L6 + WelchConfirmer t-test + FalsePositiveValidator),
-                            # mark the detection result so _post_confirm_verify_locked uses a lower
-                            # threshold for Check A.  Previously: even after 3 statistical layers confirmed
-                            # injection, a "borderline" Check A alone would reject it because Check C/E/D
-                            # don't fire for pure boolean techniques — leaving the injection never confirmed.
-                            # With this flag, _post_confirm_verify_locked treats a weak Check A pass
-                            # as sufficient for boolean techniques when pre-screening already passed.
-                            #
-                            # BUG-7 FIX (Req 12): Lowered threshold from 0.65 → 0.60.
-                            # The old threshold of 0.65 rejected detections with confidence 0.60-0.64
-                            # that had ALREADY passed all 3 FP guard layers. These detections were then
-                            # forwarded to _post_confirm_verify_locked's Check A (body-canary similarity
-                            # diff), which requires sending fresh probes. On CDN-cached targets, fresh
-                            # canary probes hit different cache nodes and return inconsistent body sizes
-                            # → gap = 0 → Check A rejects every confirmed boolean injection.
-                            # The 3-layer statistical filter (_run_fp_guards_boolean returning True) is
-                            # already a strong positive signal. When it passes with conf >= 0.60 (the
-                            # passing threshold of the FP guard itself), there is sufficient statistical
-                            # evidence to skip the body-canary Check A and mark as preconfirmed.
-                            if _r3b_conf >= 0.60:  # BUG-7 FIX: was 0.65
-                                try:
-                                    _det_for_pcv._fp_guards_preconfirmed = True
-                                    _det_for_pcv._fp_guards_confidence = float(_r3b_conf)
-                                except Exception:
-                                    pass
-                        except Exception as _r3b_err:
-                            LOG.debug(f"[PCV R3-3] {_pcv_tech} boolean FP guard error (non-fatal): {_r3b_err}")
+                        # BUG-PCV-FPGUARD-WASS-BYPASS FIX (CRITICAL):
+                        # When the Wasserstein oracle (or any prior oracle) has already set
+                        # _fp_guards_preconfirmed=True on the DetectionResult with confidence
+                        # >= 0.60, skip _run_fp_guards_boolean entirely.
+                        #
+                        # Root cause of the previous bug: _run_fp_guards_boolean was called
+                        # unconditionally at line 89349, and its statistical rejection (L1-L6
+                        # FalsePositiveGuardV18 + WelchConfirmer + FalsePositiveValidator)
+                        # returned False at line 89356 — which discarded the Wasserstein
+                        # pre-confirmation that had already been set at detection time (line
+                        # 113732 in _send_and_check: "if _wass_dist >= 0.55: _det_b._fp_guards_preconfirmed=True").
+                        # The FP boolean guards use B-bool score statistics (combined=0.663-0.784
+                        # vs threshold=0.800) — these scores are consistently borderline on
+                        # WAF-challenge targets.  Wasserstein uses a completely different
+                        # mechanism (byte-CDF earth-mover distance, dist=0.666 >> _wass_min=0.350),
+                        # so its confirmation is independent and must not be overridden by the
+                        # B-bool statistical guards.
+                        _already_preconfirmed = (
+                            getattr(_det_for_pcv, '_fp_guards_preconfirmed', False)
+                            and getattr(_det_for_pcv, '_fp_guards_confidence', 0.0) >= 0.60
+                        )
+                        if _already_preconfirmed:
+                            _r3b_conf = getattr(_det_for_pcv, '_fp_guards_confidence', 0.72)
+                            print(f"[*] PCV [{_pcv_tech}]: bypassing FP guard — detection already "
+                                  f"pre-confirmed by prior oracle (Wasserstein/etc), "
+                                  f"conf={_r3b_conf:.3f} ≥ 0.60 — skipping redundant boolean "
+                                  "statistical guard", flush=True)
+                        else:
+                            try:
+                                _r3b_fp_t = await _pcv_cascade._safe_confirm(
+                                    method, url, data, data_fmt, param,
+                                    orig + _r3b_true, tamper_chain)
+                                _r3b_fp_f = await _pcv_cascade._safe_confirm(
+                                    method, url, data, data_fmt, param,
+                                    orig + _r3b_false, tamper_chain)
+                                _r3b_ok, _r3b_conf = await _run_fp_guards_boolean(
+                                    self.engine, cfg, method, url, data, data_fmt,
+                                    param, orig, tamper_chain, _bl_for_pcv,
+                                    _r3b_true, _r3b_false, _r3b_fp_t, _r3b_fp_f)
+                                if not _r3b_ok:
+                                    LOG.debug(f"[PCV R3-3] {_pcv_tech} boolean FP guard rejected: conf={_r3b_conf:.3f}")
+                                    print(f"[!] PCV [{_pcv_tech}]: boolean FP guard rejected payload — not confirming", flush=True)
+                                    return False
+                                print(f"[*] PCV [{_pcv_tech}]: boolean FP guard PASSED (conf={_r3b_conf:.3f}) — proceeding to _post_confirm_verify", flush=True)
+                                # BUG-BOOL-PCV-STRICT FIX (Issue 12): When all 3 FP guard layers pass
+                                # (FalsePositiveGuardV18 L1-L6 + WelchConfirmer t-test + FalsePositiveValidator),
+                                # mark the detection result so _post_confirm_verify_locked uses a lower
+                                # threshold for Check A.  Previously: even after 3 statistical layers confirmed
+                                # injection, a "borderline" Check A alone would reject it because Check C/E/D
+                                # don't fire for pure boolean techniques — leaving the injection never confirmed.
+                                # With this flag, _post_confirm_verify_locked treats a weak Check A pass
+                                # as sufficient for boolean techniques when pre-screening already passed.
+                                #
+                                # BUG-7 FIX (Req 12): Lowered threshold from 0.65 → 0.60.
+                                # The old threshold of 0.65 rejected detections with confidence 0.60-0.64
+                                # that had ALREADY passed all 3 FP guard layers. These detections were then
+                                # forwarded to _post_confirm_verify_locked's Check A (body-canary similarity
+                                # diff), which requires sending fresh probes. On CDN-cached targets, fresh
+                                # canary probes hit different cache nodes and return inconsistent body sizes
+                                # → gap = 0 → Check A rejects every confirmed boolean injection.
+                                # The 3-layer statistical filter (_run_fp_guards_boolean returning True) is
+                                # already a strong positive signal. When it passes with conf >= 0.60 (the
+                                # passing threshold of the FP guard itself), there is sufficient statistical
+                                # evidence to skip the body-canary Check A and mark as preconfirmed.
+                                if _r3b_conf >= 0.60:  # BUG-7 FIX: was 0.65
+                                    try:
+                                        _det_for_pcv._fp_guards_preconfirmed = True
+                                        _det_for_pcv._fp_guards_confidence = float(_r3b_conf)
+                                    except Exception:
+                                        pass
+                            except Exception as _r3b_err:
+                                LOG.debug(f"[PCV R3-3] {_pcv_tech} boolean FP guard error (non-fatal): {_r3b_err}")
 
                 # FIX-ISSUE12-D: Initialize _pcv_ok before the call in case of exception.
                 _pcv_ok = False
@@ -107888,6 +107916,22 @@ class TechniqueCascadeEngine:
                 _e_canary_status = _get_safe_status_code(_e_fp_for_status) if _e_fp_for_status else 0
                 if _e_canary_status >= 500:
                     _e_canary_ok = False
+                elif 400 <= _e_canary_status < 500:
+                    # BUG-CHECKE-CANARY-400 FIX: Previous code only rejected 5xx and WAF-
+                    # fingerprint-detected blocks, NOT plain 400-499 responses.
+                    # When a WAF blocks the DBMS-SQL canary probe with a plain 400 (no WAF
+                    # fingerprint markers), _e_canary_ok stayed True.  In that scenario:
+                    #   - Detection replay is also WAF-blocked → _det_sim ≈ 1.0 (blocked
+                    #     page looks like baseline WAF page)
+                    #   - DBMS-SQL canary is also WAF-blocked → _e_direct_sim ≈ 1.0 (both
+                    #     blocked pages are identical)
+                    # This produced _e_direct_sim=1.000 ≥ 0.80 (passes) BUT _det_sim < 0.75
+                    # fails because detection page ≈ baseline WAF page.  The Check E print
+                    # then shows "FAIL inconsistent or no body change (1.000)" — the 1.000
+                    # is _e_direct_sim, and the failure is _det_sim condition.
+                    # With plain 400 canary also rejected, _e_canary_ok=False → _e_pass=False
+                    # prevents Check E from producing misleading partial passes on WAF targets.
+                    _e_canary_ok = False
                 elif _e_fp_for_status and WAFBlockDiscriminator.is_waf_block(_e_fp_for_status):
                     _e_canary_ok = False
             except Exception:
@@ -108102,12 +108146,38 @@ class TechniqueCascadeEngine:
 
         if _d_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS"):
             if _is_error_page:
+                # BUG-CHECKD-ERRORPAGE-STRONG-A FIX: The old guard required _d_count >= 2 on
+                # error pages, rejecting 1-diff confirmations.  When Check A has a strong gap
+                # (>= _strong_gap_min_a = 0.40), that is already reliable body evidence — the
+                # combination of body canary (gap 0.40+) AND at least 1 header diff (Check D)
+                # provides independent dual evidence even on error pages.
+                # The >=2 header threshold was designed to prevent FPs from content-length alone
+                # on error pages where body content varies.  But when Check A gap is strong
+                # (0.40+), the body canary already confirms body variation is injection-driven.
+                # In that context, even 1 header diff (content-length) is meaningful additional
+                # evidence.  The combination is hard to satisfy simultaneously by random noise.
+                # Use _gap_threshold (min 0.25, max 0.30+ via _dynamic_gap calibration)
+                # rather than _dynamic_gap directly.  _dynamic_gap = max(0.300, ...) which
+                # gives _strong_gap_min_d = max(0.40, 0.60) = 0.60 — too high for gap=0.500.
+                # _gap_threshold is smaller (0.25-0.30) and more appropriate here since it
+                # is the threshold ALREADY PASSED by Check A (gap=0.500 > _gap_threshold).
+                # Using 1.5× _gap_threshold: with _gap_threshold=0.30, _strong_gap_min_d=0.45,
+                # so gap=0.500 >= 0.45 → strong gap confirmed.
+                _strong_gap_min_d = max(0.40, _gap_threshold * 1.5)
+                _is_strong_body_gap_d = _a_gap >= _strong_gap_min_d
                 if _d_count >= 2:
                     print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count} headers) + body canary on error page ({_bl_status}) — multi-header evidence overrides error-page restriction", flush=True)
                     _INJECTION_CONFIRMED[0] = True
                     _SCAN_STOPPED[0] = True
                     return True, 2, _details
-                print(f"[*]   [PCV] Header diff + body canary on error page ({_bl_status})  unreliable, need timing...", flush=True)
+                elif _is_strong_body_gap_d:
+                    print(f"[*]   [PCV] Result: CONFIRMED  strong body canary (gap={_a_gap:.3f}≥{_strong_gap_min_d:.2f}) "
+                          f"+ header diff ({_d_count}) on error page ({_bl_status}) — dual independent evidence "
+                          "accepted (strong gap proves injection-driven body change, header diff corroborates)", flush=True)
+                    _INJECTION_CONFIRMED[0] = True
+                    _SCAN_STOPPED[0] = True
+                    return True, 2, _details
+                print(f"[*]   [PCV] Header diff + body canary on error page ({_bl_status})  unreliable, need timing or stronger gap (have {_a_gap:.3f}, need {_strong_gap_min_d:.2f})", flush=True)
             else:
                 print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count}) + body canary ({_a_method})", flush=True)
                 # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
@@ -110648,6 +110718,43 @@ class TechniqueCascadeEngine:
                          "for WAF-bypass detection", _bl_modal_status,
                          bool_thresh, _waf_thresh, 1.0 - bool_thresh, 1.0 - _waf_thresh)
                 bool_thresh = _waf_thresh
+        elif _bl_modal_status == 200 and not getattr(self.config, "no_stability", False):
+            # BUG-WAF-HTTP200-UNIFORM-THRESH FIX: When a WAF returns HTTP 200 with a uniform
+            # block-page body for ALL requests, the stability profiler sees zero response
+            # variance → assigns bool_thresh ≈ 0.20 → detection threshold = 0.800.
+            # WAF-bypass payloads return the real backend page (different body) while the
+            # false-condition probe gets the same WAF block page → combined ≈ 0.77, just
+            # below 0.800.  B-bool never fires.
+            # Detect uniform baselines by comparing pairwise similarity of baseline samples:
+            # if all samples are near-identical (min_sim > 0.92), the baseline is a
+            # uniform block page and the same threshold raise as for 4xx WAF applies.
+            try:
+                _bl_samples = baseline.get("samples", []) if isinstance(baseline, dict) else []
+                if len(_bl_samples) >= 3:
+                    _bl_bodies = []
+                    for _bls in _bl_samples[:5]:
+                        _blb = getattr(_bls, 'body', None) or b""
+                        _blbn = ResponseNormaliser.normalise(_blb)
+                        if _blbn:
+                            _bl_bodies.append(_blbn)
+                    if len(_bl_bodies) >= 3:
+                        _bl_sims = []
+                        for _bi in range(min(len(_bl_bodies), 4)):
+                            for _bj in range(_bi + 1, min(len(_bl_bodies), 4)):
+                                _bl_sims.append(SimHasher.body_similarity(_bl_bodies[_bi], _bl_bodies[_bj]))
+                        if _bl_sims and min(_bl_sims) > 0.92:
+                            _waf_thresh_200 = max(bool_thresh, 0.35)
+                            if _waf_thresh_200 > bool_thresh:
+                                LOG.info("[Cascade] Uniform HTTP-200 baseline detected "
+                                         "(min_body_sim=%.3f > 0.92 across %d samples) — "
+                                         "WAF block page at HTTP 200; raising bool_thresh "
+                                         "%.2f → %.2f (threshold %.2f → %.2f)",
+                                         min(_bl_sims), len(_bl_bodies),
+                                         bool_thresh, _waf_thresh_200,
+                                         1.0 - bool_thresh, 1.0 - _waf_thresh_200)
+                                bool_thresh = _waf_thresh_200
+            except Exception as _waf200_err:
+                LOG.debug("[Cascade] WAF-200-uniform check error (non-fatal): %s", _waf200_err)
         norm_base = ResponseNormaliser.normalise(
             (getattr(baseline.get("samples", [None])[0], "body", b"") if baseline.get("samples") else b""))
 
@@ -113635,15 +113742,37 @@ class TechniqueCascadeEngine:
                                     and abs(_wass_dist - _wass_noise_floor) < 0.06
                                 )
                                 # _wass_noise_range suppression also gated on no prior confirmation
+                                # BUG-WASS-SUPPRESS-DEADLOCK FIX: The previous suppression
+                                # fired unconditionally on _wass_noise_range=True (3+ consistent
+                                # probes, range<0.02) even when dist >> threshold (genuine injection
+                                # signal, not page noise).  The floor-establishment guard at line
+                                # 113616 (above) correctly requires dist < _wass_min*0.90 before
+                                # establishing a noise floor, but the suppression check did NOT use
+                                # the same guard — it suppressed regardless of dist magnitude.
+                                # Result: after 3 consistent injection probes at dist≈0.666 with
+                                # _wass_min=0.350, suppression fired (_wass_noise_range=True,
+                                # _wass_param_confirmed=False) → Wasserstein confirmed 0 times
+                                # beyond probe 2.  Deadlock: suppression blocks confirmation, no
+                                # confirmation means _wass_param_confirmed stays False, which keeps
+                                # suppression active.
+                                # Fix: mirror the floor-establishment guard in the suppression check:
+                                # only treat consistent signals as "page noise" when dist is clearly
+                                # below the detection threshold (< 90% of _wass_min).  Signals at
+                                # dist >= _wass_min*0.90 are potential injection even when consistent.
                                 _wass_suppressed = (
-                                    (_wass_noise_range and not _wass_param_confirmed)
+                                    (_wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90)
                                     or _wass_near_noise_floor
                                 )
-                                if _wass_noise_range and not _wass_param_confirmed:
+                                if _wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90:
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} CONSISTENT "
                                           f"(range={max(_wdh_p)-min(_wdh_p):.4f} < 0.02 over "
                                           f"{len(_wdh_p)} probes) -- page noise, NOT injection",
                                           flush=True)
+                                elif _wass_noise_range and not _wass_param_confirmed and _wass_dist >= _wass_min * 0.90:
+                                    LOG.debug("[Wasserstein] dist=%.4f consistent (range=%.4f < 0.02) "
+                                              "but dist >= _wass_min*0.90=%.3f — NOT treating as page "
+                                              "noise (may be genuine injection signal)",
+                                              _wass_dist, max(_wdh_p)-min(_wdh_p), _wass_min * 0.90)
                                 elif _wass_noise_range and _wass_param_confirmed:
                                     LOG.debug("[Wasserstein] dist=%.4f consistent range (%.4f) "
                                               "but injection already confirmed for %r — "
