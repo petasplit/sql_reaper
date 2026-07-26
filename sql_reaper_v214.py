@@ -47917,6 +47917,28 @@ class Enumerator:
                                 _oracle_name = ""
                         except Exception:
                             pass
+                        # FIX-CEO-REVALIDATE-SUBSTRING: CHAR_LENGTH uses a constant
+                        # expression that most WAFs allow through even when they block
+                        # SUBSTRING/ASCII(SUBSTRING(...)) — the exact form used in all
+                        # per-character extraction probes.  Add a final SUBSTRING probe
+                        # so any WAF that silently blocks SUBSTRING is caught here rather
+                        # than after hundreds of garbage extraction requests.
+                        # SUBSTRING('A',1,1)='A' is always true; ='B' always false.
+                        if _eval_fn is not None:
+                            try:
+                                _rv_sub_t = await _eo.evaluate("SUBSTRING('A',1,1)='A'")
+                                _rv_sub_f = await _eo.evaluate("SUBSTRING('A',1,1)='B'")
+                                if _rv_sub_t is not True or _rv_sub_f is not False:
+                                    LOG.warning(
+                                        "[_extract_str] error_oracle body-size re-validation "
+                                        "failed SUBSTRING probe (SUBSTRING('A',1,1)='A'→%r, "
+                                        "='B'→%r) — WAF blocks SUBSTRING; discarding body-size "
+                                        "oracle",
+                                        _rv_sub_t, _rv_sub_f)
+                                    _eval_fn = None
+                                    _oracle_name = ""
+                            except Exception:
+                                pass
                 except Exception:
                     pass
         
@@ -55297,8 +55319,13 @@ class Scanner:
             # FIX-BOTH-WAF-BLOCKED-GLOBAL: compute once; reused in all oracle sub-branches below.
             # When BOTH true and false probes return 4xx, any body/hash/SimHash/Wasserstein
             # difference is WAF page-size noise — NOT a SQL injection signal.
-            _both_waf_blocked = (_true_status is not None and _false_status is not None
-                                 and _true_status >= 400 and _false_status >= 400)
+            # BUG-BOTH-WAF-NONE-BYPASS FIX: use _get_safe_status_code() (always returns int,
+            # never None) so a None status_code (malformed response / network failure) does not
+            # silently zero out the guard and allow body-diff to fire a false oracle.
+            _infer_waf_4xx = {400, 403, 406, 412, 429, 430, 503}
+            _ts_safe = _get_safe_status_code(fp_true)
+            _fs_safe = _get_safe_status_code(fp_false)
+            _both_waf_blocked = (_ts_safe in _infer_waf_4xx and _fs_safe in _infer_waf_4xx)
 
             # FIX-INFER-STATUS-BOTH-WAF: skip status oracle when BOTH probes return
             # a WAF status code (e.g. true=400 and false=403) — different WAF codes
@@ -55318,11 +55345,8 @@ class Scanner:
                 _bl_pct = _bl_diff / _bl_max
                 # Minimum thresholds: 500B absolute OR 2% relative
                 # On 135KB pages, 200B difference is dynamic noise (timestamps, ads)
-                # FIX-BOOL-WAF-BLOCKED: if BOTH true and false probes are WAF-blocked
-                # (4xx), the body-length difference is just WAF page size variation —
-                # NOT a SQL injection signal.  Guard before accepting body-diff oracle.
-                _both_waf_blocked = (_true_status is not None and _false_status is not None
-                                     and _true_status >= 400 and _false_status >= 400)
+                # _both_waf_blocked is already computed above using _ts_safe/_fs_safe
+                # (BUG-BOTH-WAF-NONE-BYPASS FIX) — no re-assignment needed here.
                 if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and not _both_waf_blocked:
                     _boolean_oracle = True
                     _bool_true_len = len(_true_body)
@@ -111725,7 +111749,7 @@ class TechniqueCascadeEngine:
             and len(dbms_order) >= 2
             and "B" in tech_order
             and _t21_oracle_mode != OracleMode.TIMING_ONLY
-            and not _t21_skip_bool  # FIX-SKIP-BOOLEAN-T21: honour RDF skip_boolean
+            and not (_t21_skip_bool and _t21_oracle_mode != OracleMode.DIFFERENTIAL)  # FIX-SKIP-BOOL-DIFF: skip_boolean suppresses B battery, but NOT in DIFFERENTIAL mode where boolean detection is confirmed viable
         )
         if _t21_do_battery:
             try:
@@ -111911,7 +111935,11 @@ class TechniqueCascadeEngine:
                 # When WAF_GENERIC blocking is detected (all probes return same response),
                 # boolean-blind techniques produce false positives. PCV cannot reliably reject
                 # them because the WAF page itself is stable and passes the Welch t-test.
-                if (_dp_status or {}).get("skip_boolean") and tech in ("B", "BH", "IN"):
+                if (_dp_status or {}).get("skip_boolean") and tech in ("B", "BH", "IN") and _oracle_mode_main != OracleMode.DIFFERENTIAL:
+                    # FIX-SKIP-BOOL-DIFF-CASCADE: Don't suppress boolean techniques in DIFFERENTIAL
+                    # mode — DIFFERENTIAL was selected precisely because boolean injection IS viable.
+                    # Header-surface WAF_GENERIC can set skip_boolean=True but that must not bleed
+                    # into the parameter-surface cascade when the oracle mode confirms boolean works.
                     LOG.debug("[Cascade] Skipping %s: skip_boolean=True from RDF profile", tech)
                     continue
                 # BUG-F-TIMINGONLY-SKIP FIX (Req 12): In TIMING_ONLY oracle mode, non-timing
@@ -120878,8 +120906,19 @@ class UniversalScanOrchestrator:
                                                             _send_injected(_e, _m, _cb_u_ieo, _d, _df, _p,
                                                                 _o + _pay, _tc, extra_headers=_cdn_hdrs_ieo), timeout=15)
                                                         if _fp_e:
-                                                            return (_get_safe_status_code(_fp_e) >= 500 or
-                                                                    _get_safe_status_code(_fp_e) != _bs)
+                                                            _fp_e_st = _get_safe_status_code(_fp_e)
+                                                            # BUG-INLINE-EOB-WAF-FP FIX: when baseline is
+                                                            # non-WAF (e.g. 200) and the inline error oracle
+                                                            # probe is WAF-blocked (400/403/…), the status
+                                                            # mismatch is WAF noise — NOT a SQL error signal.
+                                                            # Without this guard _fp_e_st != _bs → True for
+                                                            # any WAF-blocked probe vs a 200 baseline, firing
+                                                            # false-positive inline error detections across
+                                                            # all 5 DBMSes.
+                                                            _ieo_waf = {400, 403, 406, 412, 429, 430, 503}
+                                                            if _fp_e_st in _ieo_waf and _bs not in _ieo_waf:
+                                                                return None  # WAF block vs non-WAF baseline — not a SQL signal
+                                                            return _fp_e_st >= 500 or _fp_e_st != _bs
                                                     except Exception:
                                                         pass
                                                     # Fallback: try all three standard injection contexts
@@ -131799,9 +131838,17 @@ class MultiStrategyExtractor:
             # this round so majority voting excludes it rather than amplifying noise.
             # Also guards against the pathological case where err_status==ok_status
             # (both 400 during calibration): if WAF now returns a different 4xx, skip.
-            _waf_block_statuses = {400, 403, 406, 429, 503}
+            _waf_block_statuses = {400, 403, 406, 412, 429, 430, 503}
+            # BUG-MSE-EVAL-ERROR-WAF-CAL FIX: the original guard only fired when
+            # _fp_status != _err_status_cal.  When calibration itself used a WAF
+            # code as the "error" signal (e.g. _err_status_cal=400 because the WAF
+            # returned 400 for the error-condition probe), extraction probes blocked
+            # by WAF also return 400, satisfying _fp_status == _err_status_cal → the
+            # guard never fires → probe is counted as True → oracle returns garbage.
+            # Fix: also skip when _err_status_cal is itself a WAF code, because any
+            # matching WAF response during extraction is indistinguishable from noise.
             if (_fp_status in _waf_block_statuses
-                    and _fp_status != _err_status_cal
+                    and (_fp_status != _err_status_cal or _err_status_cal in _waf_block_statuses)
                     and _fp_status != _ok_status_cal):
                 continue  # WAF blocked the probe — exclude from vote, not a DB signal
             _diff = self._err_info["diff"]
@@ -164844,7 +164891,7 @@ class ConditionalErrorOracle:
                         # Do NOT check _baseline_is_waf here — the false positive occurs
                         # regardless of baseline status. Only require that BOTH probes carry
                         # the same WAF code to eliminate the false positive on baseline=200.
-                        _ceo_cal_waf = {400, 403, 406, 429, 430, 503}
+                        _ceo_cal_waf = {400, 403, 406, 412, 429, 430, 503}  # FIX: added 412 to match WAFBlockDiscriminator.WAF_BLOCK_CODES
                         if (_t_st in _ceo_cal_waf and _f_st in _ceo_cal_waf
                                 and _t_st == _f_st
                                 and _body_size_diff >= 100):
@@ -165298,7 +165345,27 @@ class BatchedCharExtractor:
         result = [''] * length
         _pair_batch = 3  # 3 pairs (6 chars) at a time
         print(f"[+] [BatchExtract] Extracting {length} chars ({_pair_batch} pairs parallel)...", flush=True)
-        
+        # BUG-BATCH-SANITY FIX: pre-extraction always-False sanity probe, same pattern as
+        # BitwiseExtractorSimple.  Probe form: ASCII(SUBSTRING(sql_expr,1,1)) & 0 = 1.
+        # If the oracle returns True or None, extraction would yield garbage — abort early.
+        try:
+            _bce_sanity_expr = (f"{self._ascii_fn}({self._substr_fn}"
+                                f"(({sql_expr}),1,1))&0")
+            _bce_sanity = await self._eval(f"{_bce_sanity_expr}=1")
+            if _bce_sanity is True:
+                print(f"[!] [BatchExtract] Oracle sanity FAILED "
+                      f"(always-False probe returned True) — oracle inverted or "
+                      f"WAF-limited; aborting extraction to prevent garbage output",
+                      flush=True)
+                return '?' * length
+            if _bce_sanity is None:
+                print(f"[!] [BatchExtract] Oracle sanity returned None "
+                      f"(WAF blocked pre-flight probe) — aborting extraction",
+                      flush=True)
+                return '?' * length
+        except Exception:
+            pass  # sanity probe error → proceed optimistically
+
         # Build list of all pair positions
         _pairs = []
         for pos in range(1, length + 1, 2):
@@ -165522,7 +165589,30 @@ class BitwiseExtractorSimple:
         result = [''] * length
         _batch_size = min(self._max_parallel, 4)  # 4 chars at a time (each = 7 bit probes)
         print(f"[+] [BitwiseExtract] Extracting {length} chars ({_batch_size} parallel, 8 bits each)...", flush=True)  # BUG-FRESH-5 FIX: was '7 bits each' (stale after BUG-BITWISE-7BITS FIX changed range(7)→range(8))
-        
+        # BUG-BITWISE-SANITY FIX: send an always-False pre-extraction probe to catch
+        # inverted or WAF-limited oracles BEFORE starting the full extraction loop.
+        # Probe form: ASCII(SUBSTRING(sql_expr,1,1)) & 0 = 1  →  always False.
+        # If the oracle returns True here, extraction would yield garbage (all bits
+        # inverted → non-ASCII code points).  Mirrors the guard in
+        # _bitwise_extract_with_oracle() at line 151415.
+        try:
+            _bw_sanity_expr = (f"{self._ascii_fn}({self._substr_fn}"
+                               f"(({sql_expr}),1,1))&0")
+            _bw_sanity = await self._eval(f"{_bw_sanity_expr}=1")
+            if _bw_sanity is True:
+                print(f"[!] [BitwiseExtract] Oracle sanity FAILED "
+                      f"(always-False probe returned True) — oracle inverted or "
+                      f"WAF-limited; aborting extraction to prevent garbage output",
+                      flush=True)
+                return '?' * length
+            if _bw_sanity is None:
+                print(f"[!] [BitwiseExtract] Oracle sanity returned None "
+                      f"(WAF blocked pre-flight probe) — aborting extraction",
+                      flush=True)
+                return '?' * length
+        except Exception:
+            pass  # sanity probe error → proceed optimistically
+
         for batch_start in range(0, length, _batch_size):
             # BUG-BITWISESTOP FIX (Req 7/9): Abort when extraction is externally cancelled.
             # Without this check, BitwiseExtractorSimple continues launching asyncio.gather
