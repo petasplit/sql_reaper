@@ -19599,7 +19599,10 @@ class WAFBlockDetector:
         # Response content indicators
         block_keywords = [
             'blocked', 'forbidden', 'not acceptable',
-            'waf', 'firewall', 'security', 'threat detected',
+            'waf', 'firewall', 'threat detected',
+            # BUG-WAF-3 FIX: removed 'security' — far too broad; any page mentioning
+            # "security policy", "password security", or "login security tips" would be
+            # misclassified as a WAF block, triggering spurious recovery cycles.
             'access denied', 'request denied', 'rate limit'
         ]
         
@@ -19633,27 +19636,29 @@ class WAFBlockDetector:
     
     def _is_blocking_pattern(self) -> bool:
         """Detect if WAF is blocking based on recent signals"""
+        # BUG-WAF-2 FIX: Check consecutive blocks FIRST, before the minimum window
+        # guard. 4+ consecutive blocks at scan start (signals 1-4) is a clear block
+        # pattern; the 10-sample minimum should not prevent its detection.
+        if self.consecutive_blocks >= 4:
+            return True
+
         if len(self.recent_signals) < 10:
-            return False  # Not enough data
-        
+            return False  # Not enough data for rate-based patterns
+
         # Calculate failure rate
         blocks = sum(1 for s in self.recent_signals if s.is_blocked)
         failure_rate = blocks / len(self.recent_signals)
-        
+
         # Pattern 1: High overall failure rate
         if failure_rate > self.threshold:
             return True
-        
-        # Pattern 2: Consecutive blocks (4+ in a row)
-        if self.consecutive_blocks >= 4:
-            return True
-        
+
         # Pattern 3: Sudden spike (50%+ failures in last 5 requests)
         recent_5 = list(self.recent_signals)[-5:]
         recent_blocks = sum(1 for s in recent_5 if s.is_blocked)
         if recent_blocks >= 3:  # 60%+ failure in last 5
             return True
-        
+
         return False
     
     def _identify_pattern_type(self) -> WAFBlockPattern:
@@ -19675,6 +19680,12 @@ class WAFBlockDetector:
         """Reset detection state (after successful recovery)"""
         self.recent_signals.clear()
         self.consecutive_blocks = 0
+        # BUG-WAF-1 FIX: also clear per-pattern block counters so post-recovery
+        # pattern identification uses fresh data, not stale pre-recovery counts.
+        if hasattr(self, 'blocks_by_pattern'):
+            self.blocks_by_pattern.clear()
+        if hasattr(self, 'total_blocks'):
+            self.total_blocks = 0
 
 # ============================================================================
 # PHASE 2: Automatic Re-Mutation
@@ -20037,33 +20048,36 @@ class RecoveryEngine:
     
     async def _strategy_clear_cookies(self) -> RecoveryResult:
         """Strategy 7 (BONUS): Clear cookies to reset session"""
-        print("[i] [Recovery] Clearing cookies to reset WAF session state...")
-        
-        # This would need to be integrated with session management
-        # For now, just signal that cookies should be cleared
-        
+        # BUG-RECOVERY-1 FIX: RecoveryEngine has no session reference, so cookie
+        # clearing cannot be performed here. Return success=False so _select_strategy
+        # does not record this as a working strategy and re-use it on subsequent blocks.
+        LOG.warning("[Recovery] CLEAR_COOKIES strategy not implemented at this level "
+                    "(no session reference); returning failure to avoid no-op recovery loop")
         return RecoveryResult(
-            success=True,
+            success=False,
             strategy=RecoveryStrategy.CLEAR_COOKIES,
-            message="Cookies cleared (session reset)"
+            message="CLEAR_COOKIES not implemented: RecoveryEngine has no session reference"
         )
-    
+
     async def _strategy_rotate_user_agent(self) -> RecoveryResult:
         """Strategy 8 (BONUS): Rotate user agent to appear as different client"""
-        print("[i] [Recovery] Rotating User-Agent header...")
-        
-        # This would need to be integrated with request sending
-        # For now, just signal that UA should be rotated
-        
+        # BUG-RECOVERY-1 FIX: RecoveryEngine has no request-sending reference, so
+        # UA rotation cannot be performed here. Return success=False so _select_strategy
+        # does not record this as a working strategy and re-use it on subsequent blocks.
+        LOG.warning("[Recovery] ROTATE_USER_AGENT strategy not implemented at this level "
+                    "(no session reference); returning failure to avoid no-op recovery loop")
         return RecoveryResult(
-            success=True,
+            success=False,
             strategy=RecoveryStrategy.ROTATE_USER_AGENT,
-            message="User-Agent rotated"
+            message="ROTATE_USER_AGENT not implemented: RecoveryEngine has no session reference"
         )
-    
+
     def record_success(self, strategy: RecoveryStrategy):
         """Record successful recovery"""
         self.last_successful_strategy = strategy
+        # BUG-RECOVERY-2 FIX: reset attempt counter for the successful strategy so
+        # it can be re-used when _select_strategy checks `strategy_attempts < 3`.
+        self.strategy_attempts[strategy] = 0
         print(f"[✓] [Recovery] Strategy '{strategy.value}' successful!")
 
 # ============================================================================
@@ -23669,12 +23683,14 @@ class AdaptiveExtractor:
                 #  Use retry wrapper
                 result = await extract_with_retry(extractor, query, max_retries=2)
                 
-                if result and not is_garbage_data(result):
-                    # Success - update success rate
+                if result is not None and not is_garbage_data(result):
+                    # BUG-EXTRACT-4 FIX: use `is not None` — empty string "" is a
+                    # valid result (genuinely empty DB field). `if result` treated ""
+                    # as failure, inflating request counts and corrupting success stats.
                     self.total_successes[idx] += 1
                     self.success_rates[idx] = self.total_successes[idx] / self.total_attempts[idx]
                     return result
-                
+
                 # Failed - success rate decreases
                 self.success_rates[idx] = self.total_successes[idx] / self.total_attempts[idx]
             
@@ -26182,7 +26198,10 @@ class ConditionalErrorExtractor:
             if 'ORACLE' in _dbms_up:
                 tpl = cls.TEMPLATES.get('Oracle', cls.TEMPLATES['MySQL'])
             elif 'SQLITE' in _dbms_up:
-                tpl = cls.TEMPLATES.get('SQLite', cls.TEMPLATES['MySQL'])
+                # BUG-EXTRACT-1 FIX: SQLite has no EXTRACTVALUE/UPDATEXML/XMLTYPE.
+                # Returning None signals the caller to skip error-based extraction
+                # and fall through to blind boolean or side-channel extraction.
+                return None
             elif 'POSTGRES' in _dbms_up or 'PG' == _dbms_up:
                 tpl = cls.TEMPLATES.get('PostgreSQL', cls.TEMPLATES['MySQL'])
             elif 'SQL' in _dbms_up and 'SERVER' in _dbms_up:
@@ -26314,6 +26333,10 @@ class ConditionalErrorExtractor:
             if _SCAN_STOPPED[0] and not _EXTRACTION_ACTIVE[0]:
                 break
             payload = cls.build_payload(dbms, sql_query, pos)
+            if payload is None:
+                # BUG-EXTRACT-1 FIX: build_payload returns None for unsupported DBMS
+                # (SQLite). Break early — error-based extraction is not available.
+                break
             ch = None
             # Try the working prefix first; if it fails try alternates (once)
             _prefixes_to_try = [_cee_working_prefix] if _cee_prefix_selected else _CEE_PREFIXES
@@ -26568,10 +26591,12 @@ class ParallelExtractor:
         # chains to run simultaneously and saturate CPU.
         # Fix: clamp max_concurrent to _EXTRACTION_SEM_LIMIT so parallel extraction
         # never spawns more concurrent tasks than the module-level semaphore allows.
-        _sem_limit = _EXTRACTION_SEM_LIMIT if isinstance(_EXTRACTION_SEM_LIMIT, int) else 2
-        max_concurrent = min(max_concurrent, max(_sem_limit, 1))
         """Run multiple extraction functions in parallel.
         extract_func(query, label) -> (label, value)"""
+        # BUG-EXTRACT-5 FIX: moved docstring to function start (was after executable
+        # statements, making it a dead string expression, not a real docstring).
+        _sem_limit = _EXTRACTION_SEM_LIMIT if isinstance(_EXTRACTION_SEM_LIMIT, int) else 2
+        max_concurrent = min(max_concurrent, max(_sem_limit, 1))
         sem = asyncio.Semaphore(max_concurrent)
         
         async def _limited(query, label):
@@ -98495,6 +98520,8 @@ class WAFBlockDiscriminator:
         fingerprint. 429 (rate-limit) is kept as a special case because we
         genuinely cannot read injection signal from a rate-limit page.
         """
+        if fp is None:
+            return False  # BUG-DISC-1 FIX: None guard before attribute access
         if fp and _validate_response(fp, allow_empty=True) and _get_safe_status_code(fp) == 429:
             return False  # rate-limit is NOT a WAF block — different root cause, different handler
         if not fp.body:
@@ -104246,8 +104273,30 @@ class TechniqueCascadeEngine:
         _mp_count_early = getattr(det, '_multi_probe_count', 0) if det else 0
         _mp_bool_early = getattr(det, '_multi_probe_bool', False) if det else False
 
-        # Early Shortcut A: pre-verified by FP-guards, RobustTimingOracle, or error multi-probe
-        if _already_pcv_verified_early and det is not None:
+        # BUG-PRECONF-EARLY FIX (CRITICAL): Early Wasserstein pre-confirmation check.
+        # Wasserstein dist >= 0.50 in det.notes is a strong distributional oracle signal
+        # accumulated across many probes — more robust than any single-probe PCV canary.
+        # Check this BEFORE the scan-stop gate so WAF-confirmed detections always escalate.
+        # Also honours det._fp_guards_preconfirmed set by the Wasserstein detection path.
+        _wassr_early_dist = 0.0
+        if det is not None:
+            try:
+                _early_notes = str(getattr(det, 'notes', '') or '')
+                if 'wasserstein_dist=' in _early_notes:
+                    import re as _re_we
+                    _we_m = _re_we.search(r'wasserstein_dist=(\d+\.\d+)', _early_notes)
+                    if _we_m:
+                        _wassr_early_dist = float(_we_m.group(1))
+            except Exception:
+                pass
+        _wassr_preconfirmed_early = (
+            _wassr_early_dist >= 0.50 or
+            bool(getattr(det, '_fp_guards_preconfirmed', False))
+        ) if det else False
+
+        # Early Shortcut A: pre-verified by FP-guards, RobustTimingOracle, error multi-probe,
+        # or detection-time Wasserstein distributional oracle (dist >= 0.50)
+        if (_already_pcv_verified_early or _wassr_preconfirmed_early) and det is not None:
             _early_tech = getattr(det, 'technique', tech) or tech
             _early_dbms = getattr(det, 'dbms', dbms) or dbms
             print(f"[!!] SQL INJECTION CONFIRMED [{_early_tech}] {_early_dbms} "
@@ -106542,6 +106591,14 @@ class TechniqueCascadeEngine:
                     _pcv_url = url
                 elif _pcv_is_post and not _pcv_has_qs:
                     # Non-baseline POST probe: add cache-bust as header, not URL param
+                    _pcv_url = url
+                elif _pcv_is_post:
+                    # BUG-PCV-CB-POST-QS FIX: POST/PUT/PATCH/DELETE with existing query
+                    # string must NEVER get URL cache-bust params appended. The previous
+                    # else branch fired for any POST URL that already had "?" — adding
+                    # &cb_nonce=N&cb_hash=H caused the server to return 400 for every
+                    # PCV probe, making Check A always fail (both canary pairs are 400
+                    # WAF-block pages) and Check E sim≈1.0 (two identical error pages).
                     _pcv_url = url
                 else:
                     _pcv_url = url + ("&" if _pcv_has_qs else "?") + _pcv_cb_suffix
@@ -127420,9 +127477,30 @@ class ScannerV14(ScannerV13):
                 # _pcv_check_guarded increments _PCV_IN_PROGRESS before calling
                 # _inline_pcv_check, so _SCAN_STOPPED[0]=True never silently discards
                 # confirmed hits from these surfaces.
-                _pcv_ok = await _pcv_c._pcv_check_guarded(
-                    _method, _url, _data, _data_fmt, r.param, "",
-                    {}, b"", r, r.technique, r.dbms)
+                # BUG-PCV-1 FIX: If the detection result is already pre-verified
+                # (Wasserstein, FP-guards, or multi-probe), skip _pcv_check_guarded
+                # entirely — avoids sending empty-prefix probes that always fail.
+                _r_preconf = (
+                    getattr(r, '_pcv_verified', False) or
+                    getattr(r, '_fp_guards_preconfirmed', False) or
+                    ('wasserstein_dist=' in str(getattr(r, 'notes', '') or '') and
+                     float(__import__('re').search(
+                         r'wasserstein_dist=(\d+\.\d+)',
+                         str(getattr(r, 'notes', '') or '')).group(1))
+                     >= 0.50 if __import__('re').search(
+                         r'wasserstein_dist=(\d+\.\d+)',
+                         str(getattr(r, 'notes', '') or '')) else False)
+                )
+                if _r_preconf:
+                    try:
+                        r._pcv_verified = True
+                    except Exception:
+                        pass
+                    _pcv_ok = True
+                else:
+                    _pcv_ok = await _pcv_c._pcv_check_guarded(
+                        _method, _url, _data, _data_fmt, r.param, "",
+                        {}, b"", r, r.technique, r.dbms)
                 if _pcv_ok:
                     print(f"[+] [SURFACE] {_label} PCV PASSED: {r.param} ", flush=True)
                     # Record only after PCV passes — prevents phantom vulns in session
@@ -134950,8 +135028,12 @@ class SideChannelExtractor:
                 # Fixed pivot in advisory-lock prefix binary search.
                 # Fix: use _randomized_mid(lo, hi) (TECHNIQUE-3).
                 mid = _randomized_mid(lo, hi)
-                test = prefix + chr(mid + 1)
-                cond = f"{expr}>=" + self._quote_val(test)
+                # BUG-EXTRACT-2 FIX: Use ordinal comparison (_char_ord_cond) instead
+                # of string comparison. String ">=" is ICU-locale-sensitive: on
+                # PostgreSQL 15+ with en_US.UTF-8 ICU, letters sort after punctuation
+                # so version()>='{' is TRUE for any letter-starting string, causing the
+                # binary search to converge on garbage high-plane codepoints.
+                cond = self._char_ord_cond(expr, pos, mid + 1)
 
                 # Request A: acquire lock IF condition true
                 _p_cond_lock = f"{self._prefix}SELECT pg_advisory_lock({self._lock_id}) WHERE {cond}{self._suffix}"
@@ -135266,8 +135348,9 @@ class SideChannelExtractor:
                 # Fixed pivot in eval_fn prefix binary search.
                 # Fix: use _randomized_mid(lo, hi) (TECHNIQUE-3).
                 mid = _randomized_mid(lo, hi)
-                test = prefix + chr(mid + 1)
-                cond = f"{expr}>=" + self._quote_val(test)
+                # BUG-EXTRACT-3 FIX: Use ordinal comparison (_char_ord_cond) instead
+                # of string comparison — same ICU collation bug as extract_lock_contention.
+                cond = self._char_ord_cond(expr, pos, mid + 1)
                 result = await eval_fn(cond)
                 if result is None:
                     await asyncio.sleep(2.0)
@@ -161774,8 +161857,11 @@ async def _run_fp_guards_boolean(
                 for _op in _oracle_err_pats:
                     _m = _re.search(_op, body_text)
                     if _m:
-                        _matched = _m.group(0).lower()
-                        if not any(_safe in _matched for _safe in _ORA_FP_SAFE):
+                        # BUG-FPG-1 FIX: check safe-list against full body_text, not
+                        # _m.group(0). The catch-all pattern r'ora-' only captures 4
+                        # chars; safe codes like "ora-01489" (9 chars) can never be a
+                        # substring of a 4-char match, so the guard was always False.
+                        if not any(_safe in body_text for _safe in _ORA_FP_SAFE):
                             return True
                 return False
             _ora_in_true  = _ora_match_safe(_tf_ora)
@@ -161941,7 +162027,9 @@ async def _run_fp_guards_boolean(
         # (clipped to 1.0 by min()), but also inflated mid-quality detections:
         # e.g. three guards each returning 0.7 gave 2.1/2.5 = 0.84 confidence
         # instead of the correct 0.7 — making borderline detections look stronger.
-        _confidence = min(1.0, (_fg_conf + _fv.get('confidence', 0.7)
+        # BUG-FPG-2 FIX: use 0.0 as default FPV confidence (absent = no signal,
+        # not a 70% signal). The old 0.7 default inflated borderline detections.
+        _confidence = min(1.0, (_fg_conf + _fv.get('confidence', 0.0)
                                 + (1.0 - _wc_pval)) / 3.0)
         return True, _confidence
 
