@@ -38407,7 +38407,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                                    extraction_prefix=metadata['prefix'],
                                                    extraction_suffix=metadata['suffix'],
                                                    extraction_encoding=metadata['encoding'],
-                                                   extraction_comment=metadata['comment_style'])
+                                                   extraction_comment=metadata['comment_style'],
+                                                   tamper_chain=list(tamper_chain) if tamper_chain else [])
                             try:
                                 _bdet_dbms.exact_sent_payload = DetectionResult.compute_exact_payload(
                                     original + true_sfx, tamper_chain)
@@ -38741,7 +38742,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                            extraction_prefix=metadata['prefix'],
                                            extraction_suffix=metadata['suffix'],
                                            extraction_encoding=metadata['encoding'],
-                                           extraction_comment=metadata['comment_style'])
+                                           extraction_comment=metadata['comment_style'],
+                                           tamper_chain=list(tamper_chain) if tamper_chain else [])
                     det.exact_sent_payload = DetectionResult.compute_exact_payload(original+true_sfx, tamper_chain)
                     # BUG-FIX-TRUE-STRING-PCV (Issue 12): true_string detection is self-validating —
                     # the differential (target string in true body AND absent in false body) already
@@ -38754,7 +38756,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     return det
                 if config.false_string and config.false_string not in tb and config.false_string in fb:
                     det = DetectionResult(param=param,technique="B",payload=true_sfx,dbms=_scan_dbms,
-                                           confidence=0.93,notes=f"false_string label={label}")
+                                           confidence=0.93,notes=f"false_string label={label}",
+                                           tamper_chain=list(tamper_chain) if tamper_chain else [])
                     det.exact_sent_payload = DetectionResult.compute_exact_payload(original+true_sfx, tamper_chain)
                     # BUG-FIX-FALSE-STRING-PCV (Issue 12): same reasoning as true_string — differential
                     # (absence in true body, presence in false body) is the proof; PCV canaries add only risk.
@@ -38763,7 +38766,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     return det
                 if config.true_code and _get_safe_status_code(true_fp) ==config.true_code and _get_safe_status_code(false_fp) !=config.true_code:
                     det = DetectionResult(param=param,technique="B",payload=true_sfx,dbms=_scan_dbms,
-                                           confidence=0.90,notes=f"true_code={config.true_code} label={label}")
+                                           confidence=0.90,notes=f"true_code={config.true_code} label={label}",
+                                           tamper_chain=list(tamper_chain) if tamper_chain else [])
                     det.exact_sent_payload = DetectionResult.compute_exact_payload(original+true_sfx, tamper_chain)
                     # BUG-FIX-TRUE-CODE-PCV (Issue 12): HTTP status-code differential is also
                     # self-validating. Body canary PCV would send SUBSTRING probes that don't change
@@ -38881,7 +38885,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                 LOG.debug(f'[detect_boolean] Wasserstein probe error (non-fatal): {_wass_err}')
                         det = DetectionResult(param=param,technique="B",payload=true_sfx,dbms=_scan_dbms,
                                                confidence=_b_det_conf,
-                                               notes=f"label={label} fp_guard=pass")
+                                               notes=f"label={label} fp_guard=pass",
+                                               tamper_chain=list(tamper_chain) if tamper_chain else [])
                         det.exact_sent_payload = DetectionResult.compute_exact_payload(original+true_sfx, tamper_chain)
                         # BUG-FIX-13 (Issue 12): Mark result as PCV-verified so scanner's
                         # outer _run_pcv_check sees the flag and accepts immediately without
@@ -38956,7 +38961,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                             param=param, technique="B", payload=_ue_true_sfx,
                                             dbms=_scan_dbms,
                                             confidence=min(1.0, max(0.6 + abs(_ue_delta), _ue_fpg_conf)),
-                                            notes=f"label={_ue_label} url_encoded")
+                                            notes=f"label={_ue_label} url_encoded",
+                                            tamper_chain=list(tamper_chain) if tamper_chain else [])
                                         det_ue.exact_sent_payload = DetectionResult.compute_exact_payload(
                                             original + _ue_true_sfx, tamper_chain)
                                         det_ue._pcv_verified = True
@@ -39031,7 +39037,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                 param=param, technique="B", payload=_rpg_true,
                                 dbms=_rpg_dbms,
                                 confidence=min(1.0, max(0.6 + abs(_rpg_delta), _rpg_fpg_conf)),
-                                notes=f"label={_rpg_lbl} random_pair")
+                                notes=f"label={_rpg_lbl} random_pair",
+                                tamper_chain=list(tamper_chain) if tamper_chain else [])
                             try:
                                 _rpg_det.exact_sent_payload = DetectionResult.compute_exact_payload(
                                     original + _rpg_true, tamper_chain)
@@ -39179,7 +39186,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                                    extraction_prefix=metadata['prefix'],
                                                    extraction_suffix=metadata['suffix'],
                                                    extraction_encoding=metadata['encoding'],
-                                                   extraction_comment=metadata['comment_style'])
+                                                   extraction_comment=metadata['comment_style'],
+                                                   tamper_chain=list(tamper_chain) if tamper_chain else [])
                             try:
                                 _bwdet.exact_sent_payload = DetectionResult.compute_exact_payload(
                                     original + _bwp_true, tamper_chain)
@@ -39260,7 +39268,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                         extraction_prefix=metadata['prefix'],
                                         extraction_suffix=metadata['suffix'],
                                         extraction_encoding=metadata['encoding'],
-                                        extraction_comment=metadata['comment_style'])
+                                        extraction_comment=metadata['comment_style'],
+                                        tamper_chain=list(tamper_chain) if tamper_chain else [])
                                     try:
                                         _bwfull_det.exact_sent_payload = DetectionResult.compute_exact_payload(
                                             original + _bwp_true, tamper_chain)
@@ -39427,7 +39436,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                 if _bxcat_condition:
                     _bxcat_det = DetectionResult(param=param, technique='B', payload=p_str,
                                            dbms='Generic', confidence=0.70,
-                                           notes='cross_cat_boolean_oracle_true_false_validated')
+                                           notes='cross_cat_boolean_oracle_true_false_validated',
+                                           tamper_chain=list(tamper_chain) if tamper_chain else [])
                     try:
                         _bxcat_det.exact_sent_payload = DetectionResult.compute_exact_payload(
                             original + p_str, tamper_chain)
@@ -39573,7 +39583,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                             if abs(_sim_t - _sim_f) > 0.25:
                                 _dna_det = DetectionResult(param=param, technique='B',
                                     payload=_dna_t, dbms=_dna_b_dbms, confidence=0.72,
-                                    notes=f'dna_shuffle:{_dna_lbl}')
+                                    notes=f'dna_shuffle:{_dna_lbl}',
+                                    tamper_chain=list(tamper_chain) if tamper_chain else [])
                                 try:
                                     _dna_det.exact_sent_payload = DetectionResult.compute_exact_payload(
                                         original + _dna_t, tamper_chain)
@@ -39932,7 +39943,8 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                               extraction_suffix=metadata['suffix'],
                                               extraction_encoding=metadata['encoding'],
                                               extraction_comment=metadata['comment_style'],
-                                              exact_sent_payload=_e_exact)
+                                              exact_sent_payload=_e_exact,
+                                              tamper_chain=list(tamper_chain) if tamper_chain else [])
                         # BUG-FIX-14 (Issue 12): Mark as pre-verified — 3-probe inline
                         # confirmation + clean probe already verified injection specificity.
                         # The scanner's outer E-PCV re-send can fail under rate limiting or
@@ -40496,7 +40508,8 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                             extraction_prefix=metadata['prefix'],
                             extraction_suffix=metadata['suffix'],
                             extraction_encoding=metadata['encoding'],
-                            extraction_comment=metadata['comment_style'])
+                            extraction_comment=metadata['comment_style'],
+                            tamper_chain=list(tamper_chain) if tamper_chain else [])
                         # BUG-R10-B FIX: Parse union_columns and injectable_col from
                         # detection payload immediately.  Without this, every extraction
                         # call re-scans all N columns (sending N HTTP requests) to find
@@ -41741,7 +41754,8 @@ async def detect_time(engine, config, method, url, data, data_fmt,
                                               extraction_suffix=metadata['suffix'],
                                               extraction_encoding=metadata['encoding'],
                                               extraction_comment=metadata['comment_style'],
-                                              exact_sent_payload=_t_exact)
+                                              exact_sent_payload=_t_exact,
+                                              tamper_chain=list(tamper_chain) if tamper_chain else [])
                         # BUG-REQ12-ESCALATION FIX: detect_time has already confirmed injection
                         # with RobustTimingOracle (3-round MAD-based escalating confirmation).
                         # Mark result so _inline_pcv_check's _post_confirm_verify_locked
@@ -42386,7 +42400,8 @@ async def detect_stacked(engine,config,method,url,data,data_fmt,
                         _sk_det = DetectionResult(param=param, technique="S", payload=_sk_payload,
                                                dbms=_sk_dbms, confidence=0.82,
                                                notes=f"stacked elapsed={fp.elapsed_ms:.0f}ms",
-                                               exact_sent_payload=_sk_exact)
+                                               exact_sent_payload=_sk_exact,
+                                               tamper_chain=list(tamper_chain) if tamper_chain else [])
                         # BUG-7-ORIGPAYLOAD FIX: Attach pre-mutation payload for Check B sleep extraction
                         try:
                             _sk_det._orig_timing_payload = _sk_orig_raw
@@ -53862,6 +53877,51 @@ class Scanner:
         _original_clean = _re.sub(r'\s*(?:--\s*-?|-#|#)\s*$', '', _payload_raw).rstrip()
 
         _dbms = getattr(enum.config, "forced_dbms", None) or getattr(enum.config, "dbms", None) or enum.dbms or "MySQL"
+
+        # BUG-EXTRACTION-TAMPER FIX: Override enum.tamper_chain with the confirmed
+        # detection bypass chain. Detection stores the confirmed bypass in two places:
+        #   1. det.tamper_chain (List[str]) — the primary source, set in DetectionResult
+        #   2. det.notes — may contain 'tamper:chain+parts' annotation (secondary)
+        # If extraction uses a different generic chain (e.g. semantic_eq+space2dash+
+        # randomcase), all extraction probes miss the WAF bypass → oracle sanity fails
+        # (both 1=1 and 1=2 return same WAF error page → WAF-LIMITED → no data extracted).
+        # Fix: prefer detection tamper_chain over generic extraction chain.
+        _bypass_chain_inf = None
+
+        # Primary: use DetectionResult.tamper_chain directly
+        _det_tc_attr = getattr(_det, 'tamper_chain', None)
+        if isinstance(_det_tc_attr, (list, tuple)) and _det_tc_attr:
+            _bypass_chain_inf = list(_det_tc_attr)
+            LOG.info("[Inference] Using detection tamper_chain: %s", _bypass_chain_inf)
+
+        # Secondary: parse from det.notes ('tamper:a+b+c' annotation)
+        if not _bypass_chain_inf:
+            _det_notes_inf = getattr(_det, 'notes', '') or ''
+            if 'tamper:' in _det_notes_inf:
+                _tm_inf = _re.search(r'tamper:(\S+)', _det_notes_inf)
+                if _tm_inf:
+                    _parsed = [t.strip() for t in _tm_inf.group(1).split('+') if t.strip()]
+                    if _parsed:
+                        _bypass_chain_inf = _parsed
+                        LOG.info("[Inference] Parsed tamper chain from det.notes: %s",
+                                 _bypass_chain_inf)
+
+        # Tertiary: infer from self.tamper_chain on the enum's scanner context
+        # (set by PCV at line 105052 from det.notes 'tamper:' annotation)
+        if not _bypass_chain_inf:
+            _sc_tc = getattr(enum, '_scanner_tamper_chain', None) or getattr(
+                getattr(enum, 'config', None), '_confirmed_tamper_chain', None)
+            if isinstance(_sc_tc, (list, tuple)) and _sc_tc:
+                _bypass_chain_inf = list(_sc_tc)
+                LOG.info("[Inference] Inferred tamper chain from scanner context: %s",
+                         _bypass_chain_inf)
+
+        if _bypass_chain_inf and _bypass_chain_inf != list(enum.tamper_chain):
+            _orig_chain_inf = list(enum.tamper_chain)
+            enum.tamper_chain = _bypass_chain_inf
+            LOG.info("[Inference] Override tamper_chain with detection bypass: %s → %s",
+                     _orig_chain_inf, _bypass_chain_inf)
+
         LOG.info("[Inference] Detection payload: %s", _payload_raw[:70])
         LOG.info("[Inference] DBMS: %s | Tamper chain: %s", _dbms, enum.tamper_chain)
 
@@ -54172,6 +54232,14 @@ class Scanner:
                     _timing_where_fixed = True
                     LOG.info("[Inference] Template (timing-boolean-replace): %s", _template[:80])
             if not _timing_where_fixed:
+                # BUG-COND-PAT-URLENCODE FIX: Bypass payloads use URL-encoded operators
+                # (e.g. %3d for =, %3e for >, %3c for <). The regex must match both
+                # plain and URL-encoded forms so boolean-replace works instead of
+                # falling through to the less precise boolean-append path.
+                _EQ  = r'(?:=|%3[dD])'   # = or %3d/%3D
+                _GT  = r'(?:>|%3[eE])'   # > or %3e/%3E
+                _LT  = r'(?:<|%3[cC])'   # < or %3c/%3C
+                _NEQ = r'(?:<>|!=|%3[cC]>|!%3[dD])'  # <> != variants
                 _cond_pat = _re.search(
                     # BUG FIX: order matters — true=true MUST come before TRUE in the
                     # alternation.  If TRUE is listed first, it matches only the first
@@ -54179,16 +54247,16 @@ class Scanner:
                     # With BETWEEN syntax that produces 'BETWEEN 65 AND 127=true' which
                     # PostgreSQL parses as 'BETWEEN 65 AND (127=true)' = 'BETWEEN 65 AND NULL'
                     # → always false → every bit returns 0 → garbage extraction.
-                    r'(\(\s*)?(true\s*=\s*true|false\s*=\s*false'
-                    r'|\d+\s*=\s*\d+|TRUE|FALSE|\d+\s*>\s*\d+|\d+\s*<\s*\d+'
-                    r'|\d+\s*<>\s*\d+|\d+\s*!=\s*\d+'
+                    rf'(\(\s*)?(?:true\s*{_EQ}\s*true|false\s*{_EQ}\s*false'
+                    rf'|\d+\s*{_EQ}\s*\d+|TRUE|FALSE|\d+\s*{_GT}\s*\d+|\d+\s*{_LT}\s*\d+'
+                    rf'|\d+\s*{_NEQ}\s*\d+'
                     # BUG-V42-2 FIX: Add single-quoted string-equality conditions
-                    r"|'[^']*'\s*=\s*'[^']*'|'[^']*'\s*<>\s*'[^']*'|'[^']*'\s*!=\s*'[^']*'"
+                    rf"|'[^']*'\s*{_EQ}\s*'[^']*'|'[^']*'\s*{_NEQ}\s*'[^']*'"
                     # BUG-INFER-DOLLAR-QUOTED FIX: Add PostgreSQL dollar-quoted string equality
                     # conditions (e.g. $$2021$$=$$2021-$$). ST payloads often use dollar-quoting
                     # as a WAF bypass for string literals — these were invisible to _cond_pat.
-                    r'|\$[^$]*\$\s*=\s*\$[^$]*\$|\$[^$]*\$\s*<>\s*\$[^$]*\$'
-                    r')(\s*\))?',
+                    rf'|\$[^$]*\$\s*{_EQ}\s*\$[^$]*\$|\$[^$]*\$\s*{_NEQ}\s*\$[^$]*\$'
+                    rf')(\s*\))?',
                     _body, _re.I)
                 if _cond_pat:
                     # Preserve surrounding parens if present
@@ -54244,6 +54312,23 @@ class Scanner:
         # blocks '>'. Use BETWEEN syntax natively for extraction comparisons
         # so the WAF allows them through.
         _waf_blocks_gt = "between" in set(enum.tamper_chain) or "greatest" in set(enum.tamper_chain)
+        # BUG-OPERATOR-URLENCODE-DETECT FIX: When the confirmed bypass payload uses
+        # URL-encoded comparison operators (%3e for >, %3c for <, %3d for =), the WAF
+        # is blocking these operators in plain form. Enable BETWEEN mode so extraction
+        # conditions use BETWEEN N AND M instead of > N, avoiding the blocked operators.
+        # Detection: check exact_sent_payload for %3e (>) or %3c (<) URL-encoded operators.
+        if not _waf_blocks_gt:
+            _bp_lower = (_payload_raw or '').lower()
+            if '%3e' in _bp_lower or '%3c' in _bp_lower or '%3d' in _bp_lower:
+                _waf_blocks_gt = True
+                LOG.info("[Inference] URL-encoded operators detected in bypass payload (%s) — "
+                         "enabling BETWEEN mode to avoid WAF-blocked comparison operators",
+                         [op for op in ['%3e', '%3c', '%3d'] if op in _bp_lower])
+            # Also enable for WB technique which confirmed bypass via operator encoding
+            elif getattr(_det, 'technique', '') in ('WB', 'NV') or 'WB' in str(getattr(_det, 'notes', '')):
+                _waf_blocks_gt = True
+                LOG.info("[Inference] WB/NV bypass technique detected — "
+                         "enabling BETWEEN mode for WAF operator bypass")
 
         if _waf_blocks_gt:
             # WAF blocks > operator  use BETWEEN {mid+1} AND <hi> instead
@@ -105578,10 +105663,55 @@ class TechniqueCascadeEngine:
                             try: _gate_fpg.kill()
                             except Exception: pass
                     else:
-                        print(f"[!] PCV FP-Guards PRIMARY REJECTED [{tech}→{_effective_tech}] {dbms} "
-                              "(L1-L6+Welch+FPV) — dynamic page or statistical noise, "
-                              "NOT confirming injection", flush=True)
-                        _pcv_ok = False
+                        # BUG-FPGUARD-WASSR FIX: Statistical FP guards (L1-L6+Welch+FPV) reject
+                        # detections when WAF blocks all fresh probes → probes return uniform noise
+                        # that looks symmetric. Override rejection when the Wasserstein distance
+                        # between DETECTION-TIME true/false fingerprints (which DID bypass the WAF)
+                        # is strong enough (≥ max(2× auto-calibrated threshold, 0.15)). This
+                        # distinguishes real injection (body-diff gap ≥ 0.50) from page noise
+                        # (gap < 0.012) without requiring new bypass probes to be sent.
+                        _wassr_override = False
+                        try:
+                            _wassr_gl = _GLOBAL_WASSERSTEIN
+                            if _wassr_gl is not None and _fp_true and _fp_false:
+                                _wt_body = _fp_true.body if hasattr(_fp_true, 'body') else b""
+                                _wf_body = _fp_false.body if hasattr(_fp_false, 'body') else b""
+                                _wassr_dist = _wassr_gl.wasserstein1(_wt_body, _wf_body)
+                                _wassr_thresh = getattr(_wassr_gl, 'threshold', 0.012)
+                                _wassr_min = max(_wassr_thresh * 2.0, 0.15)
+                                if _wassr_dist >= _wassr_min:
+                                    _wassr_override = True
+                                    print(f"[+] PCV FP-Guards WASSR OVERRIDE "
+                                          f"[{tech}→{_effective_tech}] {dbms} "
+                                          f"dist={_wassr_dist:.4f} ≥ {_wassr_min:.4f} "
+                                          f"(2×threshold={_wassr_thresh:.4f}) — "
+                                          "detection-time body-distribution gap confirms injection "
+                                          "despite WAF-blocked FP probes", flush=True)
+                                else:
+                                    LOG.debug("[PCV] Wasserstein dist=%.4f below override min=%.4f — "
+                                              "not overriding FP guard rejection", _wassr_dist, _wassr_min)
+                        except Exception as _wassr_ovr_err:
+                            LOG.debug("[PCV] Wasserstein override check error: %s", _wassr_ovr_err)
+                        if _wassr_override:
+                            _pcv_ok = True
+                            try:
+                                self.config._oracle_set_by_instability = False
+                            except Exception:
+                                pass
+                            _SCAN_STOPPED[0] = True
+                            _cev_wov = (getattr(self, '_confirmed_event', None) or
+                                        getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                            if _cev_wov and not _cev_wov.is_set():
+                                _cev_wov.set()
+                            _gate_wov = getattr(self, '_gate', None)
+                            if _gate_wov and not getattr(_gate_wov, 'killed', True):
+                                try: _gate_wov.kill()
+                                except Exception: pass
+                        else:
+                            print(f"[!] PCV FP-Guards PRIMARY REJECTED [{tech}→{_effective_tech}] {dbms} "
+                                  "(L1-L6+Welch+FPV) — dynamic page or statistical noise, "
+                                  "NOT confirming injection", flush=True)
+                            _pcv_ok = False
                 except Exception as _fpg_primary_err:
                     LOG.debug(f"[PCV] FP-Guards primary error for [{tech}]: {_fpg_primary_err}")
                     # Default to False on error (safe: don't confirm unverified injection)
