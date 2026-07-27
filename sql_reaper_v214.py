@@ -41386,6 +41386,8 @@ async def detect_time(engine, config, method, url, data, data_fmt,
     _tpb_cache_key = f"{url}::{method}"
     if not hasattr(detect_time, '_tpb_cache'):
         detect_time._tpb_cache = {}
+    if not hasattr(detect_time, '_tpb_ema_cache'):
+        detect_time._tpb_ema_cache = {}
     # BUG-R9-TPB-CACHE-SIZE FIX (Req 9): Add max-size cap to prevent unbounded growth.
     # On scans with hundreds of parameters across multiple URLs, the cache grows without
     # limit, consuming memory and slowing dict lookups. Cap at 200 entries; evict oldest
@@ -41396,6 +41398,10 @@ async def detect_time(engine, config, method, url, data, data_fmt,
         _evict_keys = list(detect_time._tpb_cache.keys())[:50]
         for _ek in _evict_keys:
             detect_time._tpb_cache.pop(_ek, None)
+    if len(detect_time._tpb_ema_cache) >= _TPB_CACHE_MAX:
+        _evict_ema = list(detect_time._tpb_ema_cache.keys())[:50]
+        for _ek in _evict_ema:
+            detect_time._tpb_ema_cache.pop(_ek, None)
     _tpb_rec = detect_time._tpb_cache.get(_tpb_cache_key)
     if _tpb_rec is None:
         try:
@@ -41427,11 +41433,11 @@ async def detect_time(engine, config, method, url, data, data_fmt,
     # for the same injection — non-deterministic results across parameter sweeps.
     # Fix: store a smoothed per-URL threshold (EMA α=0.4) that converges steadily.
     # Each new calibration moves it 40% toward the new value, providing stability.
-    _tpb_url_key = f"{url}::{method}::_ema"
-    _prev_ema = detect_time._tpb_cache.get(_tpb_url_key, float(t))
+    _tpb_url_key = f"{url}::{method}"
+    _prev_ema = detect_time._tpb_ema_cache.get(_tpb_url_key, float(t))
     _ema_alpha = 0.4  # smoothing factor: 0.4 = responsive but not jumpy
     _smoothed_rec = _ema_alpha * float(_tpb_rec) + (1.0 - _ema_alpha) * _prev_ema
-    detect_time._tpb_cache[_tpb_url_key] = _smoothed_rec
+    detect_time._tpb_ema_cache[_tpb_url_key] = _smoothed_rec
     _effective_sleep = max(float(t), _smoothed_rec)
     if _effective_sleep > float(t):
         LOG.debug("[detect_time] TimingPrecisionBooster raised sleep threshold: "
@@ -43552,7 +43558,8 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 _calib_thresh_ei = 0.75  # default (more tolerant than previous 0.80)
                 try:
                     _cb_t = _BOOL_CALIBRATOR_MODULE.threshold
-                    if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                    if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3 \
+                            and len(_BOOL_CALIBRATOR_MODULE.false_sims) >= 2:
                         # Use calibrator's midpoint — this is the same value used by PCV.
                         # Cap to [0.60, 0.85] to prevent degenerate thresholds.
                         _calib_thresh_ei = max(0.60, min(0.85, _cb_t))
@@ -45186,7 +45193,8 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
         _char_thresh = 0.75  # default — slightly more tolerant than old hardcoded 0.80
         try:
             _cb_t = _BOOL_CALIBRATOR_MODULE.threshold
-            if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+            if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3 \
+                    and len(_BOOL_CALIBRATOR_MODULE.false_sims) >= 2:
                 # Cap to [0.60, 0.85] to guard against degenerate calibration values
                 _char_thresh = max(0.60, min(0.85, _cb_t))
         except Exception:
@@ -104146,9 +104154,12 @@ class TechniqueCascadeEngine:
                                 # Default to 'POSTGRESQL' when dbms is not fingerprinted yet,
                                 # so Check B finds the threshold under the correct map key.
                                 _pcvg_det_dbms_gs = (getattr(_det_obj, 'dbms', '') or 'PostgreSQL').upper()
-                                # Fixed 2000ms for GENERATE_SERIES: row-count N is NOT seconds.
-                                # Do NOT multiply N by 1000 — that gives impossible thresholds.
-                                _gs_thresh = 2000.0
+                                # Scale threshold with config.time_sec (the sleep/delay target):
+                                # detection already confirmed delay >= time_sec*0.75, so use
+                                # time_sec*0.65*1000 as the PCV floor — consistent with V18 cascade.
+                                # For large N (5B rows) 2000ms was too low; for N calibrated to
+                                # time_sec seconds, config.time_sec*650 is always in range.
+                                _gs_thresh = max(1500.0, getattr(_cfg_thresh, 'time_sec', 5) * 1000 * 0.65)
                                 _ts_map_pcvg_gs = getattr(_cfg_thresh, '_pcv_timing_threshold_map', None) or {}
                                 _ex_gs_thresh = _ts_map_pcvg_gs.get(_pcvg_det_dbms_gs, 0) or 0
                                 # PATCH-ISSUE3E: unconditionally update (not just when 0)
@@ -109304,7 +109315,7 @@ class TechniqueCascadeEngine:
                 # For payloads without ROWNUM (true cross-joins with no bound), fall back
                 # to the fake '3' proxy and mark _is_compute=True so relative timing is used.
                 _hq_m = _re.search(
-                    r'COUNT\(\*\)\s+FROM\s+(?:sys\.)?\S+\s+[Aa],\s*(?:sys\.)?\S+\s+[Bb]', _det_payload)
+                    r'COUNT\(\*\)\s+FROM\s+(?:sys\.)?\S+\s+\w+,\s*(?:sys\.)?\S+\s+\w+', _det_payload)
                 if _hq_m:
                     # Try to extract actual ROWNUM limit first
                     # BUG-ROWNUM-SYS-ALLOBJ-FIX (Req 3): Search entire payload for ROWNUM,
@@ -149252,6 +149263,10 @@ class BlindBoolCalibrator:
         if mean_t > mean_f:
             self.threshold = (mean_t + mean_f) / 2
         else:
+            LOG.debug(
+                "[BlindBoolCalibrator] Distributions overlap (mean_t=%.3f <= mean_f=%.3f); "
+                "using fallback threshold 0.65 — boolean oracle may be unreliable",
+                mean_t, mean_f)
             self.threshold = 0.65  # fallback if distributions overlap
 
     def reset(self):
@@ -157421,7 +157436,7 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
                 scores[t] *= 0.40   # heavy penalty
 
         # Boost Boolean for time-based targets (to confirm first)
-        if dbms_hint in ("MySQL", "MariaDB", "PostgreSQL"):
+        if dbms_hint in ("MySQL", "MariaDB", "PostgreSQL", "TiDB"):
             scores["B"] = scores.get("B", 0.5) * 1.15
             scores["E"] = scores.get("E", 0.5) * 1.10
 
@@ -157505,7 +157520,7 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
 
         mean_t = baseline.get("mean_timing", 100)
         std_t  = max(baseline.get("std_timing", 50), 50)
-        threshold = mean_t + max(config.time_sec * 1000 * 0.50, std_t * 3.0)
+        threshold = mean_t + max(config.time_sec * 1000 * 0.65, std_t * 3.0)
         norm_base = ResponseNormaliser.normalise(
             (getattr(baseline.get("samples", [None])[0], "body", b"") if baseline.get("samples") else b""))
         # FIX-PROBE-BOOL-THRESH: hardcoded 0.20 ignored --no-stability flag and
@@ -157557,7 +157572,7 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
         t         = self.config.time_sec
         mean_t    = baseline.get("mean_timing", 100)
         std_t     = max(baseline.get("std_timing", 50), 50)
-        threshold = mean_t + max(t * 1000 * 0.50, std_t * 3.0)
+        threshold = mean_t + max(t * 1000 * 0.65, std_t * 3.0)
 
         _pdisplay = 'path-injection' if param in ('__path__', '__path_seg__') else param
 
@@ -164584,6 +164599,8 @@ class ConfidenceCalibrator:
         for i, s in enumerate(scores):
             if s <= raw_score:
                 lo_idx = i
+        if raw_score < scores[0]:
+            return cal[0]
         if lo_idx >= len(cal) - 1:
             return cal[-1]
         # Linear interpolation
@@ -167854,16 +167871,6 @@ class ScannerVFinal(ScannerV15):
                               _n_params_ste, _n_techs_ste)
         except Exception as _ste_init_err:
             LOG.debug("[ScanTimeEstimator] Init error (non-fatal): %s", _ste_init_err)
-        _EXTRACTION_STARTED[1] = ""
-        _EXTRACTION_TASK[0] = None
-        _EXTRACTION_ACTIVE[0] = False   # FIX-7A: reset extraction mode flag
-        _EXTRACTION_DONE[0] = False     # FIX-REQ5: reset so next scan can extract again
-        _PCV_IN_PROGRESS[0] = 0     # BUG-PCV-REFCOUNT FIX: reset counter at scan start
-        # BUG-10-FIX: Clear _PCV_XCAT_DRAINED at scan start (id() reuse between scans).
-        try:
-            _PCV_XCAT_DRAINED.clear()
-        except Exception:
-            pass
         # BUG-FIX-REQ3-THRESH-RESET (Req 3): Reset PCV timing thresholds at scan start.
         # Thresholds calibrated on a previous target contaminate Check B for the new one:
         # e.g. PostgreSQL pg_sleep(0.1) sets global threshold=65ms; MSSQL WAITFOR on
