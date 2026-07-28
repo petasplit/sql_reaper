@@ -54545,9 +54545,23 @@ class Scanner:
                     _template = _st_prefix + _bool_stacked + (_suffix or "-- -")
                     LOG.info("[Inference] Template (stacked-boolean-fresh): %s", _template[:80])
                 else:
-                    # No static condition found and not stacked — append AND as last resort
-                    _template = _body + " AND [INFERENCE]"
-                    LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
+                    # BUG-CASE-WHEN-BOOL-TEMPLATE FIX: Non-timing CASE WHEN detection payloads
+                    # (ST/NV/WB/EX/HY/B with exotic conditions like ARRAY_LOWER(...)!~~LN())
+                    # are invisible to _cond_pat and are not stacked. Boolean-append produces
+                    # syntactically broken SQL (AND appended after ELSE with no END closure).
+                    # Fix: detect CASE WHEN ... THEN and replace only the WHEN condition.
+                    _cwb_m = _re.search(
+                        r'CASE\s+WHEN\s+(.+?)\s+THEN\b',
+                        _body, _re.I | _re.DOTALL)
+                    if _cwb_m:
+                        _cw_bs = _cwb_m.start(1)
+                        _cw_be = _cwb_m.end(1)
+                        _template = _body[:_cw_bs] + "[INFERENCE]" + _body[_cw_be:]
+                        LOG.info("[Inference] Template (boolean-CASE-WHEN-replace): %s", _template[:80])
+                    else:
+                        # No static condition found and not stacked — append AND as last resort
+                        _template = _body + " AND [INFERENCE]"
+                        LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
 
         # FIX: Strip WAF-blocked '>0' suffix from generate_series/count(*) subqueries.
         # HQ detection payloads end with '))>0' — the WAF blocks the '>' operator at the
