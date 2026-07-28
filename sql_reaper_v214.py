@@ -109619,16 +109619,32 @@ class TechniqueCascadeEngine:
         # may still be real. The existing `if _d_pass and _a_pass` path at line ~108440
         # AND-gates Check D with Check A — making confirmation impossible on WAF targets.
         # Fix: when _check_a_all_waf_blocked=True AND content-length genuinely differs
-        # (Check D passes), accept that as standalone confirmation. Content-length diff on
-        # a WAF target is meaningful because: (a) both true/false conditions were sent
-        # without WAF blocks (non-4xx status on the detection payload), (b) CDN returns
-        # the same cached header for random noise, (c) SQL-conditional changes to the
-        # response body directly change content-length deterministically.
-        # Exclude timing/stacked techniques (body unchanged), error pages (status varies
-        # independently), and require at least 1 header diff (_d_count >= 1).
+        # (Check D passes), accept that as standalone confirmation ONLY when the Check D
+        # probes themselves were NOT WAF-blocked (non-4xx). When Check D probes are also
+        # WAF-blocked, the content-length diff is between WAF challenge pages for different
+        # SQL patterns — WAF servers routinely vary challenge page size by payload structure,
+        # so this is NOT SQL-execution evidence and produces false positives.
+        # Guard: compute actual status of Check D true/false probes; require at least one
+        # is non-4xx so the diff reflects SQL-conditional branching, not WAF page variation.
+        _d_true_status = 0
+        _d_false_status = 0
+        try:
+            _d_true_fp = _d_fps.get("true") if isinstance(_d_fps, dict) else None
+            _d_false_fp = _d_fps.get("false") if isinstance(_d_fps, dict) else None
+            if _d_true_fp is not None:
+                _d_true_status = _get_safe_status_code(_d_true_fp)
+            if _d_false_fp is not None:
+                _d_false_status = _get_safe_status_code(_d_false_fp)
+        except Exception:
+            pass
+        _d_probes_both_waf_blocked = (
+            _d_true_status in (400, 403, 406, 429, 503) and
+            _d_false_status in (400, 403, 406, 429, 503)
+        )
         if (_d_pass
                 and not _a_pass
                 and _check_a_all_waf_blocked
+                and not _d_probes_both_waf_blocked
                 and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
                 and not _is_error_page):
             print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count}) standalone "
@@ -109637,6 +109653,13 @@ class TechniqueCascadeEngine:
             _INJECTION_CONFIRMED[0] = True
             _SCAN_STOPPED[0] = True
             return True, 1, _details
+        elif (_d_pass and not _a_pass and _check_a_all_waf_blocked
+              and _d_probes_both_waf_blocked and not _is_error_page
+              and tech not in ("S", "HQ", "T", "BT", "TH", "DS")):
+            print(f"[*]   [PCV] Check D standalone BLOCKED: both Check D probes returned "
+                  f"4xx (true={_d_true_status} false={_d_false_status}) — header diffs "
+                  "are WAF challenge page variation, not SQL-execution evidence; "
+                  "not confirming to avoid false positive", flush=True)
 
         # Check E + borderline A  SQL logic confirmed (not for stacked queries)
         if _e_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS"):
@@ -114022,32 +114045,22 @@ class TechniqueCascadeEngine:
         """
         Compute aggregate confidence from multiple technique votes.
         Uses weighted harmonic mean: agreement across techniques boosts confidence.
+        Returns the raw vote confidence for a single technique, or average+bonus
+        for multi-technique agreement, without artificial floors or boosts.
         """
         votes = self._technique_votes.get(param, {})
         if not votes:
             return 0.0
         confs = list(votes.values())
         if len(confs) == 1:
-            # BUG-SINGLE-VOTE-CONF-FIX: Single-technique confirmed injection arriving
-            # here already passed PCV (boolean multi-probe / timing multi-probe / UNION
-            # sentinel).  Returning the raw detection confidence (e.g. 0.72 from a
-            # 4/6 boolean pair) under-represents the true certainty — PCV confirmation
-            # is an independent strong signal.  Apply a post-PCV floor so the displayed
-            # confidence reflects the combined evidence: raw detection score ≥ 0.70
-            # gets boosted to at least 0.92 (very high); lower raw scores get a
-            # proportional lift.  This keeps the MultiVote output consistent with the
-            # "[!!] SQL INJECTION CONFIRMED" message that fired just above it.
-            raw = confs[0]
-            if raw >= 0.70:
-                return min(1.0, max(raw, 0.92))
-            return min(1.0, raw + 0.15)
+            # Return raw detection confidence without artificial boost.
+            # The display shows exactly what the technique measured.
+            return confs[0]
         # Two-technique agreement bonus: if both B and T agree  +0.08
         techs = set(votes.keys())
         bonus = 0.08 if len(techs & {"B", "T", "E"}) >= 2 else 0.0
         avg   = sum(confs) / len(confs)
-        # BUG-MULTI-VOTE-FLOOR-FIX: multi-technique agreement also deserves a floor —
-        # confirmed injection from multiple techniques is at least 0.94 reliable.
-        return min(1.0, max(avg + bonus, 0.94 if len(confs) >= 2 else 0.0))
+        return min(1.0, avg + bonus)
 
     async def _send_and_check(
         self, tech: str, payload: str, dbms: str,
@@ -120701,7 +120714,8 @@ class UniversalScanOrchestrator:
             print(f"    DBMS      : {_confirmed_dbms}")
             print(f"    Bypass    : {result.bypass_used}")
             print(f"    Confidence: {result.detection.confidence:.0%}")
-            print(f"    Payload   : {result.detection.payload[:80]!r}")
+            _display_payload = getattr(result.detection, 'exact_sent_payload', None) or result.detection.payload
+            print(f"    Payload   : {_display_payload[:80]!r}")
             print(f"    Requests  : {result.total_requests}")
             print("")
             self._all_results.append(result)
