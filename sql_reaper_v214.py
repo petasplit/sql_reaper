@@ -38831,8 +38831,6 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                 # (WAF blocks TRUE=400 but passes FALSE=200) IS a genuine detection signal.
                 if WAFBlockDiscriminator.both_waf_blocked(true_fp, false_fp):
                     _waf_block_count += 1; continue
-                if WAFBlockDiscriminator.is_waf_block(true_fp) or WAFBlockDiscriminator.is_waf_block(false_fp):
-                    _waf_block_count += 1; continue
                 _waf_block_count = 0
                 ts=_sim_to_baseline(true_fp,baseline); fs=_sim_to_baseline(false_fp,baseline); delta=ts-fs
                 # PCV-FIX-4: Use BlindBoolCalibrator's dynamic threshold instead of
@@ -54782,7 +54780,7 @@ class Scanner:
                 if _cond_pat:
                     # Preserve surrounding parens if present
                     _pre_p = _cond_pat.group(1) or ""
-                    _post_p = _cond_pat.group(3) or ""
+                    _post_p = _cond_pat.group(2) or ""
                     _template = (_body[:_cond_pat.start()] + _pre_p +
                                  "[INFERENCE]" + _post_p +
                                  _body[_cond_pat.end():])
@@ -83984,7 +83982,7 @@ class BitwiseExtractor:
                 _pc_probe = apply_heavy_variation(_pc_probe, self._probe_count, data_fmt=self.data_fmt)
                 # BUG-BWE-003 FIX: also apply the other two evasion layers
                 try:
-                    _pc_probe = _obfuscate_extraction_cond(_pc_probe, self.data_fmt)
+                    _pc_probe = _obfuscate_extraction_cond(_pc_probe, self._probe_count)
                 except Exception:
                     pass
                 try:
@@ -109966,7 +109964,7 @@ class TechniqueCascadeEngine:
                     # block expects, returning total seconds.
                     class _WaitforMatch:
                         def __init__(self, sec): self._sec = sec
-                        def group(self, n): return str(self._sec)
+                        def group(self, n): return str(int(self._sec)) if self._sec == int(self._sec) else str(self._sec)
                     _sleep_match = _WaitforMatch(_wf_total)
             if not _sleep_match:
                 _sleep_match = _re.search(r'pg_sleep\s*\(\s*([\d.]+)', _det_payload, _re.IGNORECASE)
@@ -130800,9 +130798,9 @@ class SafeModeVerifier:
                         warnings.append("Static block page  BLOCKED oracle (timing techniques only)")
                         recs.append("Provide session cookies (--cookie) or use --playwright for full scan")
                     else:
-                        oracle_mode = OracleMode.TIMING_ONLY
+                        oracle_mode = OracleMode.BLOCKED
                         can_scan    = True
-                        warnings.append("No boolean/timing differentiation  TIMING_ONLY oracle")
+                        warnings.append("No oracle signal — WAF blocks all probe types; BLOCKED mode")
         elif not stable:
             # Reachable + clean 200 but unstable (A/B testing, session drift).
             # BUG-ORACLE-UNSTABLE-IGNORES-BOOL FIX: The previous code unconditionally
