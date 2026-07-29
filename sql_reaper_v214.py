@@ -105498,7 +105498,8 @@ class TechniqueCascadeEngine:
                 (_wassr_early_dist >= 0.50 and not _wassr_probe_both_blocked
                  and bool(getattr(det, '_fp_guards_preconfirmed', False)))
             ) or
-            bool(getattr(det, '_fp_guards_preconfirmed', False))
+            (bool(getattr(det, '_fp_guards_preconfirmed', False))
+             and getattr(det, '_fp_guards_confidence', 0.0) >= 0.85)
         ) if det else False
 
         # Early Shortcut A: pre-verified by FP-guards, RobustTimingOracle, error multi-probe,
@@ -112576,7 +112577,7 @@ class TechniqueCascadeEngine:
             # Fix: cap _dynamic_wass at 0.350 (well below real injection signals at dist ≈ 0.50+
             # while well above page-level noise at dist ≈ 0.02-0.05).  This keeps the Wasserstein
             # threshold in its own scale regardless of the SimHash calibration result.
-            self._dynamic_wass = min(0.350, self._dynamic_gap)
+            self._dynamic_wass = min(0.350, max(0.30, self._dynamic_gap))
             # (Wasserstein per-param failure counter removed — boolean payloads run
             #  to completion regardless of PCV failure history.)
             print(f"[+] [DynGap] max_clean={_max_clean_gap:.3f} "
@@ -115405,8 +115406,8 @@ class TechniqueCascadeEngine:
                                 # as an additional safety net beyond the skip-entirely gate above.
                                 _wass_instability = getattr(getattr(self, "config", None),
                                                              "_oracle_set_by_instability", False)
-                                _wass_min = (0.80 if _wass_instability
-                                             else getattr(self, "_dynamic_wass", 0.45))
+                                _wass_min = max(0.30, (0.80 if _wass_instability
+                                                        else getattr(self, "_dynamic_wass", 0.45)))
                                 # (Wasserstein PCV-failure counter and boolean skip-set
                                 #  population removed. Boolean payloads run to completion
                                 #  regardless of how many Wasserstein→PCV cycles have failed.)
@@ -115516,6 +115517,21 @@ class TechniqueCascadeEngine:
                                     and _wass_noise_floor > 0.50
                                     and abs(_wass_dist - _wass_noise_floor) < 0.06
                                 )
+                                # Stable-page outlier guard: when the probe window shows a
+                                # stable-zero baseline (most readings < 0.15) and the current
+                                # dist is the ONLY reading above threshold, this is almost
+                                # certainly a CDN/cache-miss outlier rather than SQL injection.
+                                # Require >= 2 above-threshold readings in the 5-probe window
+                                # before accepting any Wasserstein confirmation on stable pages.
+                                _wdh_p_above_min = sum(1 for d in _wdh_p if d > _wass_min)
+                                _wdh_p_below_stable = sum(1 for d in _wdh_p if d < 0.15)
+                                _wass_stable_page_outlier = (
+                                    not _wass_param_confirmed
+                                    and len(_wdh_p) >= 3
+                                    and _wdh_p_below_stable >= len(_wdh_p) - 1
+                                    and _wdh_p_above_min < 2
+                                    and _wass_dist > _wass_min
+                                )
                                 # _wass_noise_range suppression also gated on no prior confirmation
                                 # BUG-WASS-SUPPRESS-DEADLOCK FIX: The previous suppression
                                 # fired unconditionally on _wass_noise_range=True (3+ consistent
@@ -115537,6 +115553,7 @@ class TechniqueCascadeEngine:
                                 _wass_suppressed = (
                                     (_wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90)
                                     or _wass_near_noise_floor
+                                    or _wass_stable_page_outlier
                                 )
                                 if _wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90:
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} CONSISTENT "
@@ -115558,6 +115575,11 @@ class TechniqueCascadeEngine:
                                               "(diff=%.4f < 0.06) — suppressed",
                                               _wass_dist, _wass_noise_floor,
                                               abs(_wass_dist - _wass_noise_floor))
+                                elif _wass_stable_page_outlier:
+                                    print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} STABLE-PAGE OUTLIER "
+                                          f"({_wdh_p_below_stable}/{len(_wdh_p)} probes below 0.15, "
+                                          f"only {_wdh_p_above_min} above threshold={_wass_min:.2f}) "
+                                          f"-- CDN/cache miss, NOT injection", flush=True)
                                 elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min:
                                     print("[+]   [Wasserstein] secondary oracle confirmed "
                                              f"(dist={_wass_dist:.4f}, threshold={_wass_min:.2f}) "
@@ -115629,11 +115651,12 @@ class TechniqueCascadeEngine:
                     # when Wasserstein's multi-sample view clearly shows injection. The Wasserstein
                     # detection path never set this flag → PCV always rejected BH/boolean detections
                     # on CDN targets → injection found but never confirmed → extraction never runs.
-                    # Fix: when Wasserstein dist >= 0.55 (strong distributional signal), pre-set
-                    # _fp_guards_preconfirmed=True on the DetectionResult. This enables the existing
-                    # bypass path at lines 109780-109794 without any PCV logic change. The bypass
-                    # threshold there is _fpg_conf >= 0.60 — with dist=0.6659, conf=0.718 > 0.60.
-                    if _wass_dist >= 0.55:
+                    # Fix: when Wasserstein dist >= 0.70 (strong distributional signal), pre-set
+                    # _fp_guards_preconfirmed=True on the DetectionResult. Threshold raised from
+                    # 0.55 to 0.70: single-probe outliers at 0.55-0.69 are CDN/cache-miss noise,
+                    # not SQL injection. The bypass threshold in PCV is _fpg_conf >= 0.60, but
+                    # also gated by Shortcut A requiring _fp_guards_confidence >= 0.85 (standalone).
+                    if _wass_dist >= 0.70:
                         try:
                             _det_b._fp_guards_preconfirmed = True
                             _det_b._fp_guards_confidence = _wass_conf_val
