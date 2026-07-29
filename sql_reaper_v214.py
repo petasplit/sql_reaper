@@ -43614,6 +43614,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 # Otherwise fall back to 0.75 (slightly more tolerant than 0.80) to
                 # reduce false negatives while still catching clear boolean differences.
                 _calib_thresh_ei = 0.75  # default (more tolerant than previous 0.80)
+                _calib_polarity_inv = False
                 try:
                     _cb_t = _BOOL_CALIBRATOR_MODULE.threshold
                     if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3 \
@@ -43621,9 +43622,27 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                         # Use calibrator's midpoint — this is the same value used by PCV.
                         # Cap to [0.60, 0.85] to prevent degenerate thresholds.
                         _calib_thresh_ei = max(0.60, min(0.85, _cb_t))
+                    # BUG-EXTRACT-POLARITY FIX: When the calibrator detects inverted polarity
+                    # (true condition makes page LESS similar to baseline than false condition —
+                    # happens when the application shows data on false condition and hides it
+                    # on true condition), the comparison direction must flip. The old code
+                    # always used `sim > threshold` which sends binary search in the WRONG
+                    # direction for inverted-polarity targets → extraction returns 0 or ~255
+                    # regardless of the real value. Fix: use `is_true()` which handles polarity.
+                    _calib_polarity_inv = getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False)
                 except Exception:
                     pass
-                if sim > _calib_thresh_ei:
+                # Use calibrator's is_true() when calibrator has enough samples and polarity
+                # may be inverted. Otherwise fall back to direct threshold comparison.
+                _ei_is_true = False
+                try:
+                    if _calib_polarity_inv and _BOOL_CALIBRATOR_MODULE is not None:
+                        _ei_is_true = _BOOL_CALIBRATOR_MODULE.is_true(sim)
+                    else:
+                        _ei_is_true = sim > _calib_thresh_ei
+                except Exception:
+                    _ei_is_true = sim > _calib_thresh_ei
+                if _ei_is_true:
                     lo = mid + 1
                 else:
                     hi = mid
@@ -45268,12 +45287,16 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
         # Falls back to 0.75 (same default as _extract_int) when calibrator has < 3
         # samples (i.e. early in a scan before enough boolean probes have been seen).
         _char_thresh = 0.75  # default — slightly more tolerant than old hardcoded 0.80
+        _char_thresh_polarity_inv = False
         try:
             _cb_t = _BOOL_CALIBRATOR_MODULE.threshold
             if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3 \
                     and len(_BOOL_CALIBRATOR_MODULE.false_sims) >= 2:
                 # Cap to [0.60, 0.85] to guard against degenerate calibration values
                 _char_thresh = max(0.60, min(0.85, _cb_t))
+            # BUG-EXTRACT-POLARITY: Track polarity inversion from calibrator so pivot
+            # and binary search use the correct comparison direction.
+            _char_thresh_polarity_inv = getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False)
         except Exception:
             pass
 
@@ -45510,7 +45533,12 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                 # instead of hardcoded 0.80. On dynamic pages CDN tokens can shift body
                 # similarity by 10-15%, placing genuine TRUE responses below 0.80 and
                 # causing the pivot to never fire — forcing an exhaustive binary search.
-                if _sim_to_baseline(fp,baseline)>_char_thresh: 
+                # BUG-EXTRACT-POLARITY: When polarity is inverted (true response is LESS
+                # similar to baseline than false response), comparison direction must flip.
+                _pivot_sim = _sim_to_baseline(fp, baseline)
+                _pivot_is_true = (_pivot_sim < _char_thresh if _char_thresh_polarity_inv
+                                  else _pivot_sim > _char_thresh)
+                if _pivot_is_true:
                     lo=pivot
                     break
             except Exception as e:
@@ -45784,9 +45812,14 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                 # BUG-BLIND-CHAR-THRESH FIX: use adaptive _char_thresh (from calibrator)
                 # instead of hardcoded 0.80. Both branches must use the same threshold
                 # as the pivot so the oracle is consistent throughout the full char search.
-                if _sim_to_baseline(fp,baseline)>_char_thresh: 
+                # BUG-EXTRACT-POLARITY: When polarity is inverted, flip the comparison
+                # direction so the binary search converges in the correct direction.
+                _bsearch_sim = _sim_to_baseline(fp, baseline)
+                _bsearch_is_true = (_bsearch_sim < _char_thresh if _char_thresh_polarity_inv
+                                    else _bsearch_sim > _char_thresh)
+                if _bsearch_is_true:
                     lo=mid+1
-                else: 
+                else:
                     hi=mid
             except Exception as e:
                 LOG.debug(f"[Extraction] Similarity error: {e}")
@@ -52541,8 +52574,9 @@ class Scanner:
                             # FIX-REQ3+12-V1-OOB-PCV: OOB detection is a SQL injection —
                             # gate on PCV before recording.  OOBDetector has its own DNS
                             # callback verification but _post_confirm_verify (Checks A-E)
-                            # is never run.  Apply _run_pcv_check when available (fail-open).
-                            _v1_oob_pcv_ok = True
+                            # is never run.  Apply _run_pcv_check when available (fail-closed).
+                            # DNS ping alone is not proof of SQLi — require PCV to confirm.
+                            _v1_oob_pcv_ok = False
                             if hasattr(self,'_run_pcv_check'):
                                 try:
                                     _v1_oob_pcv_ok = await self._run_pcv_check(
@@ -105452,8 +105486,18 @@ class TechniqueCascadeEngine:
         # with zero SQL injection. Guard: when det._both_probes_waf_blocked=True the
         # Wasserstein signal is unreliable — require explicit _fp_guards_preconfirmed instead.
         _wassr_probe_both_blocked = bool(getattr(det, '_both_probes_waf_blocked', False)) if det else False
+        # FP-WASSR-SHORTCUT-STRENGTHEN: Wasserstein alone at 0.50 is insufficient —
+        # WAF noise / CDN variation can produce 0.50-0.65 dist without any injection.
+        # Require FP-guards confirmation for the intermediate range (0.50-0.70).
+        # Very strong dist (>= 0.70) can pre-confirm alone (with WAF-block guard).
+        # FP guards alone (_fp_guards_preconfirmed) remain a separate independent path.
         _wassr_preconfirmed_early = (
-            (_wassr_early_dist >= 0.50 and not _wassr_probe_both_blocked) or
+            (
+                (_wassr_early_dist >= 0.70 and not _wassr_probe_both_blocked)
+                or
+                (_wassr_early_dist >= 0.50 and not _wassr_probe_both_blocked
+                 and bool(getattr(det, '_fp_guards_preconfirmed', False)))
+            ) or
             bool(getattr(det, '_fp_guards_preconfirmed', False))
         ) if det else False
 
@@ -111885,9 +111929,13 @@ class TechniqueCascadeEngine:
         # set but the check silently failed, causing "hit found but never escalated to SQLi"
         # for borderline-confidence boolean injections. Fix: align threshold to 0.60 (the
         # lowest confidence that _run_fp_guards_boolean will pass + set the flag).
+        # FP-STRENGTHEN: Require FP guard confidence >= 0.65 (raised from 0.60).
+        # At 0.60 the FP guard barely exceeds random noise for fluctuating pages.
+        # 0.65 retains borderline detections that pass all 3 statistical layers
+        # with modest margin while blocking the 0.60-0.64 noise range.
         _fp_preconfirmed = (det is not None and
                             getattr(det, '_fp_guards_preconfirmed', False) and
-                            getattr(det, '_fp_guards_confidence', 0.0) >= 0.60)
+                            getattr(det, '_fp_guards_confidence', 0.0) >= 0.65)
         _is_boolean_tech = tech in ("B", "BH", "IN", "NV", "WB", "ST", "EX", "HY")
         if _a_pass and _fp_preconfirmed and _is_boolean_tech:
             _fpg_conf = getattr(det, '_fp_guards_confidence', 0.70) if det else 0.70
@@ -111914,15 +111962,15 @@ class TechniqueCascadeEngine:
         # false positives on apps where dynamic content noise randomly scores 0.65-0.71.
         if _fp_preconfirmed and _is_boolean_tech and not _a_pass:
             _fpg_conf = getattr(det, '_fp_guards_confidence', 0.0) if det else 0.0
-            if _fpg_conf >= 0.60:  # FIX-12C-THRESHOLD: aligned to match the _fp_guards_preconfirmed gate (>= 0.60).
-                # BUG-12C-FIX: The previous threshold was 0.65, but _run_fp_guards_boolean sets
-                # _fp_guards_preconfirmed=True when confidence >= 0.60 (see FP-GUARDS-CONF-GATE).
-                # Detections with confidence 0.60-0.64 had the flag set (preconfirmed) but this
-                # path required >= 0.65, silently rejecting every borderline boolean injection
-                # confirmed by all 3 statistical layers. Root cause of "hit found, never escalated".
+            # FP-STRENGTHEN: When Check A canary fails, FP guards alone must show >= 0.72
+            # (restored from 0.80 → 0.72; lowering to 0.60 allows dynamic-page noise at 0.60-0.71
+            # to confirm without canary evidence). 0.72 is the value described as "deliberately
+            # conservative" in the comment above — enough to cover CDN/WAF targets where the
+            # canary can't probe, while blocking 0.60-0.71 false positives from fluctuating pages.
+            if _fpg_conf >= 0.72:
                 print("[*]   [PCV] Result: CONFIRMED  boolean FP guards pre-passed at HIGH confidence "
-                      f"({_fpg_conf:.3f}) — Check A canary skipped (synthetic canary may not trigger "
-                      "application logic; 3-layer statistical proof is sufficient at this confidence level)",
+                      f"({_fpg_conf:.3f} >= 0.72) — Check A canary skipped (3-layer statistical "
+                      "proof at high confidence; synthetic canary may not trigger application logic)",
                       flush=True)
                 _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                 _SCAN_STOPPED[0] = True
@@ -112395,6 +112443,22 @@ class TechniqueCascadeEngine:
                 if _voted_conf > 0.0:
                     print(f"[*] [MultiVote] Param {param!r} voted confidence: {_voted_conf:.0%} "
                           f"(votes: {dict(self._technique_votes.get(param, {}))})", flush=True)
+                    # BUG-V55-CONF-PROPAGATE-FIX: voted confidence was printed but NEVER
+                    # written back to the detection result. result.detection.confidence stayed
+                    # at the raw capped detection value (e.g. 0.72 from Wasserstein), causing
+                    # the "SQL injection confirmed!" banner and LOG.info to display 72% even
+                    # though vote aggregation already confirmed 100%. Fix: propagate here.
+                    try:
+                        if result is not None:
+                            _det_node = getattr(result, 'detection', None)
+                            if _det_node is not None and hasattr(_det_node, 'confidence'):
+                                if _voted_conf > _det_node.confidence:
+                                    _det_node.confidence = _voted_conf
+                            elif hasattr(result, 'confidence'):
+                                if _voted_conf > getattr(result, 'confidence', 0.0):
+                                    result.confidence = _voted_conf
+                    except Exception:
+                        pass
             except Exception:
                 pass
             return result
@@ -128432,7 +128496,28 @@ class ScannerV14(ScannerV13):
                     if hasattr(self, '_dbms_eliminator'):
                         self._dbms_eliminator.record_result(
                             result.dbms or "Generic", True, result.technique)
-                    bypass = orch_result[0].bypass_used if orch_result else "direct"
+                    # BUG-BYPASS-DIRECT-FIX: When BG scan confirms first, orch_result is
+                    # None (primary task cancelled), so bypass always evaluates to "direct"
+                    # regardless of the actual bypass used. Extract from result.notes when
+                    # orch_result is None so the log shows the real bypass value.
+                    if orch_result:
+                        bypass = orch_result[0].bypass_used
+                    else:
+                        _bypass_extracted = None
+                        try:
+                            _bypass_notes_str = getattr(result, 'notes', '') or ''
+                            import re as _re_bypass_fix
+                            _bp_match = _re_bypass_fix.search(r'bypass=(\S+)', _bypass_notes_str)
+                            if _bp_match:
+                                _bypass_extracted = _bp_match.group(1)
+                        except Exception:
+                            pass
+                        if not _bypass_extracted:
+                            try:
+                                _bypass_extracted = getattr(result, 'bypass_used', None)
+                            except Exception:
+                                pass
+                        bypass = _bypass_extracted or "waf_bypass_unknown"
                     LOG.info(f" {param.replace('path-injection','path-injection').replace('__path__','path-injection')!r}: {result.technique} [{inj_context}] "
                              f"bypass={bypass} conf={result.confidence:.0%}")
                     # Record in session for summary count
