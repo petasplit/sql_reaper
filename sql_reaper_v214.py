@@ -105491,15 +105491,26 @@ class TechniqueCascadeEngine:
         # Require FP-guards confirmation for the intermediate range (0.50-0.70).
         # Very strong dist (>= 0.70) can pre-confirm alone (with WAF-block guard).
         # FP guards alone (_fp_guards_preconfirmed) remain a separate independent path.
+        # RC-FINDING2-FP: Raised Wasserstein-alone Shortcut A from >= 0.70 → > 0.75.
+        # The >= 0.70 boundary was inclusive; a page with noise fluctuating 0.68-0.72
+        # occasionally triggers this PCV-bypassing path. Requiring > 0.75 (exclusive)
+        # provides a clear margin above the boundary for CDN / A-B noise variation.
+        # Combined-signal path unchanged: dist >= 0.50 + _fp_guards_preconfirmed still
+        # confirms (two independent mechanisms agreeing is sufficient).
+        # RC-FINDING3-FP: FP-guards-alone Shortcut A (confidence >= 0.85) now requires
+        # a minimum Wasserstein distance as a second independent signal.  A single
+        # statistical pipeline (FP guards → preconfirmed flag → Shortcut A) with no
+        # independent corroboration fires on high-jitter dynamic pages.
         _wassr_preconfirmed_early = (
             (
-                (_wassr_early_dist >= 0.70 and not _wassr_probe_both_blocked)
+                (_wassr_early_dist > 0.75 and not _wassr_probe_both_blocked)
                 or
                 (_wassr_early_dist >= 0.50 and not _wassr_probe_both_blocked
                  and bool(getattr(det, '_fp_guards_preconfirmed', False)))
             ) or
             (bool(getattr(det, '_fp_guards_preconfirmed', False))
-             and getattr(det, '_fp_guards_confidence', 0.0) >= 0.85)
+             and getattr(det, '_fp_guards_confidence', 0.0) >= 0.85
+             and _wassr_early_dist >= 0.40)  # RC-FINDING3-FP: require independent Wasserstein signal
         ) if det else False
 
         # Early Shortcut A: pre-verified by FP-guards, RobustTimingOracle, error multi-probe,
@@ -106778,14 +106789,15 @@ class TechniqueCascadeEngine:
                 _det_conf_gate = float(getattr(det, 'confidence', 0.0) or 0.0) if det else 0.0
                 _fp_preconf_gate = (det is not None and
                                     getattr(det, '_fp_guards_preconfirmed', False) and
-                                    # FIX-REQ12-PRECONF-GATE: Lowered from 0.80 to 0.60.
-                                    # _run_fp_guards_boolean uses 0.60 as its pass threshold
-                                    # (line ~67745). Requiring 0.80 here meant every genuine
-                                    # pre-confirmed detection with confidence in [0.60, 0.80)
-                                    # fell through to Check A (SUBSTRING canary), which always
-                                    # fails on CDN/cached targets → hit "printed but never
-                                    # escalated". Aligned with the FP-guard pass threshold.
-                                    getattr(det, '_fp_guards_confidence', 0.0) >= 0.60)
+                                    # RC-FINDING4-FP: Raised from 0.60 → 0.72 for this gate-killed
+                                    # bypass path. FP guards pass at 0.60 minimum, but when the
+                                    # WAF correlation gate is killed AND the live FP guard rejected,
+                                    # the risk of a FP is highest (WAF-blocked probes look symmetric).
+                                    # Requiring 0.72 ensures Wasserstein-sourced preconfirmations
+                                    # (max conf = 0.72 at dist=0.70) reach this path only at their
+                                    # strongest level. Detections in [0.60, 0.72) fall through to
+                                    # Check A/C/D/E probing where the WAF-bypass payload is still used.
+                                    getattr(det, '_fp_guards_confidence', 0.0) >= 0.72)
                 if _fp_preconf_gate or _det_conf_gate >= 0.90:
                     print(f"  [RDF-CORR] Gate killed but detection confidence={_det_conf_gate:.3f} "
                           f"fp_preconfirmed={_fp_preconf_gate} is very high — "
@@ -106966,15 +106978,24 @@ class TechniqueCascadeEngine:
                         # → should override. Adding this direct preconfirmed check as a
                         # FIRST-PRIORITY bypass eliminates both unreliable live re-probes AND
                         # regex fragility in a single defensive layer.
+                        # RC-FINDING1-FP: raised threshold from >= 0.55 → >= 0.72 to match
+                        # the minimum legitimate confidence source (Wasserstein-sourced max
+                        # is 0.72 at dist=0.70). 0.55 allowed borderline FP-guard passes
+                        # in [0.55, 0.72) to override a LIVE FP-guard rejection.
+                        # Added WAF-block guard: when both detection-time probes were WAF-
+                        # blocked, the preconfirmation was based on WAF-page token noise,
+                        # not SQL-conditional body differences — do not override a live
+                        # rejection in that case.
                         _preconf_direct = (det is not None and
                                            getattr(det, '_fp_guards_preconfirmed', False) and
-                                           getattr(det, '_fp_guards_confidence', 0.0) >= 0.55)
+                                           getattr(det, '_fp_guards_confidence', 0.0) >= 0.72 and
+                                           not getattr(det, '_both_probes_waf_blocked', False))
                         if _preconf_direct:
                             _wassr_override = True
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (preconfirmed-direct) "
                                   f"[{tech}→{_effective_tech}] {dbms} "
-                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 0.55 — "
+                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 0.72 — "
                                   "detection-time statistical FP guards confirmed injection; "
                                   "live re-probe skipped (WAF blocks bypass-less canary probes)",
                                   flush=True)
@@ -108402,7 +108423,20 @@ class TechniqueCascadeEngine:
                     if _fam0 != _fam1:
                         _best = max(_passing_pairs, key=lambda x: x[0])
                         _any_strong = any(s for _, _, s in _passing_pairs)
-                        return True, _best[0], f"{_passing_pairs[-2][1]}+{_passing_pairs[-1][1]}", _any_strong
+                        # RC2-FP: structural-fallback-only pairs (generic SQL probes not
+                        # derived from the actual payload) require gap > 0.60 for early-exit.
+                        # When all passing pairs are structural, the body diff may come from
+                        # dynamic page content rather than SQL-conditional execution.
+                        # Continue accumulating until a derived (non-structural) pair passes
+                        # OR the gap is clearly strong enough on its own.
+                        _both_structural = (
+                            "structural fallback" in _passing_pairs[-2][1] and
+                            "structural fallback" in _passing_pairs[-1][1]
+                        )
+                        if _both_structural and _best[0] <= 0.60:
+                            pass  # RC2-FP: keep accumulating — require non-structural or gap>0.60
+                        else:
+                            return True, _best[0], f"{_passing_pairs[-2][1]}+{_passing_pairs[-1][1]}", _any_strong
                     # Same family — keep accumulating, don't confirm yet
 
             # Always require 2 independent pairs from different families.
@@ -108425,6 +108459,17 @@ class TechniqueCascadeEngine:
                 if len(_unique_fams) >= 2:
                     _best = max(_passing_pairs, key=lambda x: x[0])
                     _any_strong = any(s for _, _, s in _passing_pairs)
+                    # RC2-FP: when ALL passing pairs are structural fallbacks (generic probes
+                    # not derived from the actual detection payload), require gap > 0.60.
+                    # A structural-only Check A with gap ≤ 0.60 is indistinguishable from
+                    # dynamic page content variation (CDN, timestamps, CSRF tokens) and
+                    # produces false positives when combined with content-length diffs (Check D).
+                    _all_structural = all("structural fallback" in p[1] for p in _passing_pairs)
+                    if _all_structural and _best[0] <= 0.60:
+                        return False, _best[0], (
+                            f"{_passing_pairs[0][1]}(structural-only-insufficient,"
+                            f"gap={_best[0]:.3f},need>0.60)"
+                        ), False
                     return True, _best[0], "+".join([p[1] for p in _passing_pairs[:2]]), _any_strong
                 # All pairs from same family — still insufficient
                 return False, _passing_pairs[0][0], f"{_passing_pairs[0][1]}(same-family-insufficient)", False
@@ -109151,8 +109196,13 @@ class TechniqueCascadeEngine:
                     # at ~L107897 already gates Check D confirmation on _d_pass AND _a_pass
                     # together — a content-length diff alone never confirms without a
                     # corroborating body-canary pass.
+                    # RC3-FP: content-length changes on ANY dynamic page (CDN, CSRF,
+                    # timestamps, gzip variance) without SQL injection. Require >= 2
+                    # dynamic diffs (e.g. content-length + etag together) so that
+                    # content-length alone cannot satisfy Check D and combine with a
+                    # structural-fallback Check A pass to produce a false positive.
                     _d_pass = (len(_security_diffs) >= 1 or
-                               len(_dynamic_diffs) >= 1)
+                               len(_dynamic_diffs) >= 2)  # RC3-FP
                     # FIX-BUG-CHECKD-INDENT: moved _details["D"] and print inside the
                     # try block so they only execute when _d_pass/_d_count/_d_headers have
                     # been computed.  Previously they sat at 9-space indent — outside both
@@ -109573,14 +109623,27 @@ class TechniqueCascadeEngine:
                     _a_gap >= 0.80             # very strong gap, not borderline
                 )
                 if _has_size_asymmetry:
-                    print(f"[*]   [PCV] Result: CONFIRMED  {tech} body canary with "
-                          f"SIZE ASYMMETRY ({_a_method}, gap={_a_gap:.3f})  "
-                          "size asymmetry cannot be produced by uniform WAF blocking  "
-                          "SQL condition evaluation proven", flush=True)
-                    # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
-                    _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
-                    _SCAN_STOPPED[0] = True
-                    return True, 2, _details
+                    # RC-FINDING9-FP: Size asymmetry alone is not sufficient for stacked
+                    # techniques. A/B testing or session-dependent rendering can produce
+                    # different response sizes for true/false canary payloads even without
+                    # SQL injection. Require at least one independent signal: Check C
+                    # (DBMS error pattern) OR Check E (DBMS SQL consistency). Together,
+                    # size asymmetry + DBMS-specific evidence strongly proves injection.
+                    _size_has_corroboration = _c_pass or _e_pass
+                    if _size_has_corroboration:
+                        print(f"[*]   [PCV] Result: CONFIRMED  {tech} body canary with "
+                              f"SIZE ASYMMETRY ({_a_method}, gap={_a_gap:.3f}) + "
+                              f"{'DBMS error (' + _c_method + ')' if _c_pass else 'DBMS SQL consistency (Check E)'} "
+                              "dual independent evidence proves SQL execution", flush=True)
+                        # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
+                        _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
+                        _SCAN_STOPPED[0] = True
+                        return True, 2, _details
+                    else:
+                        print(f"[*]   [PCV] {tech} body SIZE ASYMMETRY ({_a_method}, "
+                              f"gap={_a_gap:.3f}) without Check C/E corroboration — "
+                              "A/B test or session-dependent rendering cannot be excluded; "
+                              "need timing proof or DBMS-specific signal", flush=True)
                 # BUG-FIX-REQ3-REQ10-STACKED-CONFIRM (Req 3/10):
                 # Stacked injection that produces a VERY strong body canary gap
                 # (>= 0.95) AND has independent DBMS evidence (Check C error pattern
@@ -109678,20 +109741,49 @@ class TechniqueCascadeEngine:
                 # Fix: for E/EH, allow Check C confirmation even when _is_error_page=True.
                 # The baseline subtraction inside Check C already ensures the error pattern
                 # is injection-specific (not a pre-existing server error).
+                # RC-FINDING7-FP: Require body signal alongside Check C for E/EH on
+                # error-page targets. Application debug pages (Django, Rails, Laravel)
+                # include DBMS error text in generic 500 responses — Check C matches
+                # their output even without injection. Baseline subtraction helps but
+                # is not perfect when the error text changes between requests.
+                # Require at least one of: (a) Check A body canary passed, showing
+                # injection-conditional body diff; OR (b) Check A gap > 0.30 (partial
+                # signal, even if below the two-pair confirmation threshold).
                 if tech in ("E", "EH") and _c_method:
-                    print(f"[*]   [PCV] Error fingerprint on error-page baseline ({_bl_status}): "
-                          f"E/EH technique — error is injection-specific (baseline subtracted) CONFIRMED",
-                          flush=True)
-                    _INJECTION_CONFIRMED[0] = True
-                    _SCAN_STOPPED[0] = True
-                    return True, 2 if _a_pass else 1, _details
+                    _e_has_body_signal = _a_pass or _a_gap > 0.30
+                    if _e_has_body_signal:
+                        print(f"[*]   [PCV] Error fingerprint on error-page baseline ({_bl_status}): "
+                              f"E/EH + body signal ({_a_method}, gap={_a_gap:.3f}) CONFIRMED",
+                              flush=True)
+                        _INJECTION_CONFIRMED[0] = True
+                        _SCAN_STOPPED[0] = True
+                        return True, 2 if _a_pass else 1, _details
+                    else:
+                        print(f"[*]   [PCV] E/EH error fingerprint on error page ({_bl_status}) "
+                              f"WITHOUT body signal (gap={_a_gap:.3f} ≤ 0.30) — "
+                              "requires Check A corroboration to prevent FP on debug pages",
+                              flush=True)
                 print(f"[*]   [PCV] Error fingerprint on error page ({_bl_status})  unreliable, need timing proof...", flush=True)
             else:
-                print(f"[*]   [PCV] Result: CONFIRMED  DBMS error fingerprint ({_c_method}){_c_note}", flush=True)
-                # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
-                _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
-                _SCAN_STOPPED[0] = True
-                return True, 2 if _a_pass else 1, _details
+                # RC-FINDING8-FP: For error-based techniques (E/EH), Check C is the
+                # primary detection mechanism — allow Check C standalone. For other
+                # techniques (B/BH/IN/NV/WB), a DBMS error pattern in the response
+                # likely reflects an application debug page, not injection. In those
+                # cases require at least one independent signal: Check A body diff
+                # or Check D header diff. This prevents FPs from Django/Rails/Laravel
+                # debug pages that include SQL error text in generic server errors.
+                _c_needs_corroboration = tech not in ("E", "EH")
+                _c_has_corroboration = _a_pass or _d_count >= 1
+                if _c_needs_corroboration and not _c_has_corroboration:
+                    print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
+                          f"tech={tech} — no Check A body signal and no header diff; "
+                          "may be application debug page output, not injection", flush=True)
+                else:
+                    print(f"[*]   [PCV] Result: CONFIRMED  DBMS error fingerprint ({_c_method}){_c_note}", flush=True)
+                    # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
+                    _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
+                    _SCAN_STOPPED[0] = True
+                    return True, 2 if _a_pass else 1, _details
 
         if _d_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS"):
             if _is_error_page:
@@ -109728,11 +109820,31 @@ class TechniqueCascadeEngine:
                     return True, 2, _details
                 print(f"[*]   [PCV] Header diff + body canary on error page ({_bl_status})  unreliable, need timing or stronger gap (have {_a_gap:.3f}, need {_strong_gap_min_d:.2f})", flush=True)
             else:
-                print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count}) + body canary ({_a_method})", flush=True)
-                # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
-                _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
-                _SCAN_STOPPED[0] = True
-                return True, 2, _details
+                # RC4-FP: structural-fallback body canary + weak header diff is
+                # not sufficient to confirm injection — both signals can arise from
+                # dynamic page content without SQL injection occurring.
+                # Require at least Check C or Check E corroboration when Check A is
+                # structural-fallback-only AND Check D is purely dynamic headers.
+                _a_all_structural_d = (
+                    "structural fallback" in _a_method and
+                    _a_method.count("structural fallback") >= 2
+                )
+                _d_only_dynamic_headers = (
+                    _d_count >= 1 and
+                    all(h in ("content-length", "etag", "last-modified", "set-cookie")
+                        for h in _d_headers)
+                )
+                if _a_all_structural_d and _d_only_dynamic_headers and not (_c_pass or _e_pass):
+                    print(f"[*]   [PCV] A+D REJECTED (RC4-FP): structural-only body canary "
+                          f"({_a_method}) + dynamic-header-only diff ({_d_headers}) "
+                          "without Check C/E — indistinguishable from dynamic page noise; "
+                          "not confirming to prevent false positive", flush=True)
+                else:
+                    print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count}) + body canary ({_a_method})", flush=True)
+                    # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
+                    _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
+                    _SCAN_STOPPED[0] = True
+                    return True, 2, _details
 
         # BUG-CHECKD-STANDALONE-WAF FIX: When WAF blocks ALL Check A canaries,
         # Check A always fails (gap=0 on identical WAF-blocked bodies), yet SQL injection
@@ -111969,13 +112081,25 @@ class TechniqueCascadeEngine:
             # conservative" in the comment above — enough to cover CDN/WAF targets where the
             # canary can't probe, while blocking 0.60-0.71 false positives from fluctuating pages.
             if _fpg_conf >= 0.72:
-                print("[*]   [PCV] Result: CONFIRMED  boolean FP guards pre-passed at HIGH confidence "
-                      f"({_fpg_conf:.3f} >= 0.72) — Check A canary skipped (3-layer statistical "
-                      "proof at high confidence; synthetic canary may not trigger application logic)",
-                      flush=True)
-                _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
-                _SCAN_STOPPED[0] = True
-                return True, 1, _details
+                # RC-FINDING5-FP: FP guards are a single statistical pipeline — a
+                # high-jitter CDN page can score conf >= 0.72 within the sampling window
+                # without any SQL injection present. Require _wassr_early_dist >= 0.50 as
+                # an independently computed second signal so that at least two distinct
+                # measurement methods agree before we confirm without a Check A canary.
+                if _wassr_early_dist >= 0.50:
+                    print("[*]   [PCV] Result: CONFIRMED  boolean FP guards pre-passed at HIGH confidence "
+                          f"({_fpg_conf:.3f} >= 0.72) + Wasserstein ({_wassr_early_dist:.3f} >= 0.50) "
+                          "— Check A canary skipped (3-layer statistical + Wasserstein dual-signal "
+                          "at high confidence; RC-FINDING5-FP guard passed)",
+                          flush=True)
+                    _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
+                    _SCAN_STOPPED[0] = True
+                    return True, 1, _details
+                else:
+                    print(f"[*]   [PCV] FP guards HIGH conf ({_fpg_conf:.3f} >= 0.72) but Wasserstein "
+                          f"({_wassr_early_dist:.3f} < 0.50) insufficient — RC-FINDING5-FP: "
+                          "single-pipeline signal without independent corroboration; "
+                          "Check A canary required for confirmation", flush=True)
         # BUG-CHECKE-CHECKD-DUAL FIX: When Check E passes (detection + DBMS-SQL
         # responses are consistent) AND Check D shows at least 1 header diff,
         # the combination is sufficient evidence for non-timing boolean techniques.
@@ -118872,7 +118996,14 @@ class TechniqueCascadeEngine:
                     # (was: getattr(self.config, "_oracle_set_by_instability", False))
                     # — that variable is never True in FULL oracle mode so the old guard
                     # `_high_jitter_page and _strong_gap` never fired.  See fix below.
-                    _strong_gap = abs(delta) >= bool_thresh * 2.0  # FIX: use abs() for reversed-polarity
+                    # RC1-FP: require strictly greater than 2× threshold AND minimum
+                    # absolute gap of 0.60 to skip multi-probe.  A gap exactly equal to
+                    # 2× threshold (e.g. 0.500 when thresh=0.250) is borderline — a single
+                    # SimHash bit-flip on dynamic page content can produce it on noise alone.
+                    # Evidence: log showed gap=0.000, 0.000, 0.500 (exactly 2×) accepted as
+                    # "strong", skipping multi-probe that would have caught the false positive.
+                    # Requiring > 2× AND >= 0.60 ensures only genuinely large gaps skip.
+                    _strong_gap = abs(delta) > bool_thresh * 2.0 and abs(delta) >= 0.60  # RC1-FP
 
                     if _strong_gap:
                         # BUG-MULTIPROBE-HIGHJTTER-WRONG-FLAG FIX: The previous condition
@@ -118903,12 +119034,12 @@ class TechniqueCascadeEngine:
                         #     Random page noise cannot produce sim_t=1.000, sim_f=0.500
                         #     consistently from the same payload pair.
                         # Skip multi-probe and accept the detection directly.
-                        LOG.info("[CTX-bool] %s: strong gap=%.3f (≥ %.3f = 2× threshold) — "
-                                 "skipping multi-probe (2× Wasserstein-confirmed gap is "
-                                 "self-sufficient; multi-probe fails from page noise not FP)",
+                        LOG.info("[CTX-bool] %s: strong gap=%.3f (> %.3f = 2× threshold "
+                                 "AND >= 0.60) — skipping multi-probe (gap magnitude "
+                                 "unambiguously large; not borderline noise)",
                                  ctx_name, delta, bool_thresh * 2.0)
                         print(f"    [CTX-bool] multi-probe skipped — strong gap={delta:.3f} "
-                              f"(≥ {bool_thresh*2:.3f} = 2× threshold, Wasserstein already confirmed)")
+                              f"(> {bool_thresh*2:.3f} = 2× threshold AND >= 0.60; RC1-FP guard passed)")
                         _ctx_bconf = 3  # mark as passed so we fall through to DetectionResult
                     else:
                         # Stable page or marginal gap: require 3/6 consecutive confirmations.
