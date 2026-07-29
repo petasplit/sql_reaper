@@ -107035,20 +107035,64 @@ class TechniqueCascadeEngine:
                                     _wn_m = _re_wn.search(r'wasserstein_dist=(\d+\.\d+)', _det_notes_str)
                                     if _wn_m:
                                         _det_wass_dist = float(_wn_m.group(1))
-                                        # BUG-WASS-OVERRIDE-THRESHOLD FIX: was _GLOBAL_WASSERSTEIN.threshold*2.0
-                                        # which on dynamic pages can reach 0.80+ (2× the calibrated page noise
-                                        # floor), far above the 0.350-capped detection threshold. A dist=0.666
-                                        # that fired detection would then fail the override (0.666 < 0.80).
-                                        # Fix: use self._dynamic_wass (capped at 0.350) — the same threshold
-                                        # that gated the original detection, so override fires whenever detection fired.
                                         _wn_min = max(getattr(self, '_dynamic_wass', 0.35), 0.15)
-                                        if _det_wass_dist >= _wn_min:
+                                        # FIX-WASSR-DET-NOTES-FP (ROOT CAUSE of log.txt false positive):
+                                        # The det-notes fallback used _wn_min (~0.25) as its only gate.
+                                        # On a dynamic page (CDN, A/B test, Cloudflare WAF challenge tokens)
+                                        # detection-time Wasserstein dist can reach 0.50-0.75 due to natural
+                                        # body variation, NOT boolean SQL injection. When:
+                                        #   - PCV Check A passes (gap=0.50, not "strong" — no DBMS evidence)
+                                        #   - Check C/D/E all fail
+                                        #   - CTX-bool multi-probe fails (1/3, inconsistent polarity)
+                                        #   - FP guard (L1-L6+Welch+FPV) rejects
+                                        # ...the low-threshold det-notes override (dist=0.6841 >= 0.25)
+                                        # incorrectly fires, confirming a false positive that then proceeds
+                                        # to extraction and produces garbage characters.
+                                        #
+                                        # Fix: require the det-notes override to meet a STRONG bar — either:
+                                        # (a) dist > 0.75 (matching Early Shortcut A Wasserstein-alone
+                                        #     threshold) AND probes not both WAF-blocked (real body-gap signal)
+                                        # (b) FP-guards preconfirmation with confidence >= 0.72 (same as the
+                                        #     preconfirmed-direct path above) AND probes not both WAF-blocked
+                                        #
+                                        # The preconfirmed-direct path (above) already handles case (b) when
+                                        # both_probes_waf_blocked=False; reaching here with preconf+conf>=0.72
+                                        # means both_waf_blocked=True, so we still require dist > 0.75 as an
+                                        # independent signal (WAF-noise dist is unreliable even when strong).
+                                        # Combined: only very strong, unambiguous evidence can override a live
+                                        # FP guard rejection — a moderate dist (0.25-0.75) alone is insufficient.
+                                        _wn_fp_preconf = bool(getattr(det, '_fp_guards_preconfirmed', False)) if det else False
+                                        _wn_fp_conf = float(getattr(det, '_fp_guards_confidence', 0.0) or 0.0) if det else 0.0
+                                        _wn_both_blocked = bool(getattr(det, '_both_probes_waf_blocked', False)) if det else False
+                                        # Very strong Wasserstein signal alone (> 0.75, unblocked): override
+                                        _wn_strong_alone = _det_wass_dist > 0.75 and not _wn_both_blocked
+                                        # FP-guards preconfirmed with adequate confidence (unblocked): override
+                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 0.72 and not _wn_both_blocked
+                                        if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok):
                                             _wassr_override = True
+                                            _wn_reason = "strong-dist>0.75" if _wn_strong_alone else "fp-preconf-conf>=0.72"
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
+                                                  f"({_wn_reason}) "
                                                   "— stored detection-time Wasserstein gap confirms "
                                                   "injection (PCV canary probes WAF-blocked)", flush=True)
+                                        elif _det_wass_dist >= _wn_min:
+                                            # Moderate dist (0.25-0.75), no preconfirmation — reject override.
+                                            # This prevents dynamic-page body variation from confirming
+                                            # injection when the live FP guard correctly rejected it.
+                                            LOG.debug(
+                                                "[PCV] det-notes Wasserstein=%.4f >= min=%.4f but below "
+                                                "strong threshold (>0.75) and no FP-preconf "
+                                                "(preconf=%s conf=%.3f) — rejecting override; "
+                                                "moderate dist alone does not override live FP-guard rejection",
+                                                _det_wass_dist, _wn_min, _wn_fp_preconf, _wn_fp_conf)
+                                            print(f"[!] PCV det-notes WASSR OVERRIDE REJECTED "
+                                                  f"[{tech}→{_effective_tech}] {dbms} "
+                                                  f"dist={_det_wass_dist:.4f} below strong threshold >0.75 "
+                                                  f"and fp-guards-conf={_wn_fp_conf:.3f} < 0.72 — "
+                                                  "moderate dist may be dynamic-page noise, "
+                                                  "not overriding live FP-guard rejection", flush=True)
                                         else:
                                             LOG.debug("[PCV] det-notes Wasserstein=%.4f below min=%.4f",
                                                       _det_wass_dist, _wn_min)
