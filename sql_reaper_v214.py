@@ -97060,28 +97060,33 @@ class ScannerV11(ScannerV10):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            # BUG-V214-E FIX: When injection was already confirmed by the
-                            # inline PCV during detection (_INJECTION_CONFIRMED[0]=True),
-                            # the secondary Final Gate PCV is a re-check, not an
-                            # authoritative rejection. The inline PCV already passed the
-                            # full check suite; this secondary run can fail due to
-                            # transient WAF rate-limiting, CDN cache changes, or the
-                            # error-page heuristic (BUG-V214-C) incorrectly rejecting
-                            # valid body canaries. Discarding an already-confirmed result
-                            # silently stops extraction with "no data extracted".
-                            # Fix: if injection was confirmed inline, log a warning but
-                            # keep the result. Only discard when inline PCV never confirmed.
+                            # Secondary PCV returned a proper result tuple — it ran all
+                            # checks (A-E) and evaluated them. This is an authoritative
+                            # rejection regardless of inline PCV confirmation.
+                            # Transient failures (network errors, CancelledError) are
+                            # caught by the except block below and handled there.
+                            # FP-FIX-V214-E: The old BUG-V214-E FIX incorrectly kept
+                            # results when _INJECTION_CONFIRMED[0]=True from inline PCV,
+                            # even when secondary PCV properly ran and rejected (e.g.
+                            # WB: Check A pass, Checks B-E fail → "body canary borderline").
+                            # Inline PCV is less rigorous (Wasserstein shortcut, no full
+                            # A-E evaluation). Secondary PCV is the authoritative gate.
+                            # When secondary PCV returns (False, 0, details), trust it.
                             if _INJECTION_CONFIRMED[0]:
-                                print(f"[!] Secondary PCV FAILED for [{_pcv_tech}] but injection "
-                                      "already confirmed by inline PCV — keeping result (secondary "
-                                      "failure may be CDN/WAF transient or error-page FP guard)",
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
+                                      "A-E evaluation — discarding (secondary PCV is "
+                                      "authoritative; inline PCV confirmation overridden "
+                                      "to prevent false positive)",
                                       flush=True)
                             else:
                                 print(f"[!] PCV FAILED for [{_pcv_tech}]  "
                                       "discarding detection", flush=True)
-                                result = None
+                            result = None
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
+                        # Exception path: secondary PCV had a transient failure (network
+                        # error, CancelledError-derived, unexpected exception). In this
+                        # case, inline PCV confirmation (if set) is used as fallback.
                         if not _INJECTION_CONFIRMED[0]:
                             result = None  # BUG FIX: PCV exception must reject detection, not pass it through
 
@@ -101778,28 +101783,29 @@ class ScannerV12(ScannerV11):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            # BUG-V214-E FIX: When injection was already confirmed by the
-                            # inline PCV during detection (_INJECTION_CONFIRMED[0]=True),
-                            # the secondary Final Gate PCV is a re-check, not an
-                            # authoritative rejection. The inline PCV already passed the
-                            # full check suite; this secondary run can fail due to
-                            # transient WAF rate-limiting, CDN cache changes, or the
-                            # error-page heuristic (BUG-V214-C) incorrectly rejecting
-                            # valid body canaries. Discarding an already-confirmed result
-                            # silently stops extraction with "no data extracted".
-                            # Fix: if injection was confirmed inline, log a warning but
-                            # keep the result. Only discard when inline PCV never confirmed.
+                            # Secondary PCV returned a proper result tuple — it ran all
+                            # checks (A-E) and evaluated them. This is an authoritative
+                            # rejection regardless of inline PCV confirmation.
+                            # Transient failures (network errors) are caught by except below.
+                            # FP-FIX-V214-E: The old BUG-V214-E FIX kept results when
+                            # _INJECTION_CONFIRMED[0]=True from inline PCV, even when
+                            # secondary PCV properly ran and rejected (WB: Check A pass,
+                            # Checks B-E fail). Inline PCV uses weaker shortcuts
+                            # (Wasserstein, FP-guards) without full A-E evaluation.
+                            # Secondary PCV is the authoritative final gate.
                             if _INJECTION_CONFIRMED[0]:
-                                print(f"[!] Secondary PCV FAILED for [{_pcv_tech}] but injection "
-                                      "already confirmed by inline PCV — keeping result (secondary "
-                                      "failure may be CDN/WAF transient or error-page FP guard)",
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
+                                      "A-E evaluation — discarding (secondary PCV is "
+                                      "authoritative; inline PCV confirmation overridden "
+                                      "to prevent false positive)",
                                       flush=True)
                             else:
                                 print(f"[!] PCV FAILED for [{_pcv_tech}]  "
                                       "discarding detection", flush=True)
-                                result = None
+                            result = None
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
+                        # Exception path: transient failure. Inline PCV confirmation used as fallback.
                         if not _INJECTION_CONFIRMED[0]:
                             result = None  # BUG FIX: PCV exception must reject detection, not pass it through
 
@@ -128618,28 +128624,29 @@ class ScannerV14(ScannerV13):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            # BUG-V214-E FIX: When injection was already confirmed by the
-                            # inline PCV during detection (_INJECTION_CONFIRMED[0]=True),
-                            # the secondary Final Gate PCV is a re-check, not an
-                            # authoritative rejection. The inline PCV already passed the
-                            # full check suite; this secondary run can fail due to
-                            # transient WAF rate-limiting, CDN cache changes, or the
-                            # error-page heuristic (BUG-V214-C) incorrectly rejecting
-                            # valid body canaries. Discarding an already-confirmed result
-                            # silently stops extraction with "no data extracted".
-                            # Fix: if injection was confirmed inline, log a warning but
-                            # keep the result. Only discard when inline PCV never confirmed.
+                            # Secondary PCV returned a proper result tuple — it ran all
+                            # checks (A-E) and evaluated them. This is an authoritative
+                            # rejection regardless of inline PCV confirmation.
+                            # Transient failures (network errors) are caught by except below.
+                            # FP-FIX-V214-E: The old BUG-V214-E FIX kept results when
+                            # _INJECTION_CONFIRMED[0]=True from inline PCV, even when
+                            # secondary PCV properly ran and rejected (WB: Check A pass,
+                            # Checks B-E fail). Inline PCV uses weaker shortcuts
+                            # (Wasserstein, FP-guards) without full A-E evaluation.
+                            # Secondary PCV is the authoritative final gate.
                             if _INJECTION_CONFIRMED[0]:
-                                print(f"[!] Secondary PCV FAILED for [{_pcv_tech}] but injection "
-                                      "already confirmed by inline PCV — keeping result (secondary "
-                                      "failure may be CDN/WAF transient or error-page FP guard)",
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
+                                      "A-E evaluation — discarding (secondary PCV is "
+                                      "authoritative; inline PCV confirmation overridden "
+                                      "to prevent false positive)",
                                       flush=True)
                             else:
                                 print(f"[!] PCV FAILED for [{_pcv_tech}]  "
                                       "discarding detection", flush=True)
-                                result = None
+                            result = None
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
+                        # Exception path: transient failure. Inline PCV confirmation used as fallback.
                         if not _INJECTION_CONFIRMED[0]:
                             result = None  # BUG FIX: PCV exception must reject detection, not pass it through
 
