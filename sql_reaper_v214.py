@@ -108512,18 +108512,21 @@ class TechniqueCascadeEngine:
                     if _fam0 != _fam1:
                         _best = max(_passing_pairs, key=lambda x: x[0])
                         _any_strong = any(s for _, _, s in _passing_pairs)
-                        # RC2-FP: structural-fallback-only pairs (generic SQL probes not
-                        # derived from the actual payload) require gap > 0.60 for early-exit.
-                        # When all passing pairs are structural, the body diff may come from
-                        # dynamic page content rather than SQL-conditional execution.
-                        # Continue accumulating until a derived (non-structural) pair passes
-                        # OR the gap is clearly strong enough on its own.
-                        _both_structural = (
-                            "structural fallback" in _passing_pairs[-2][1] and
-                            "structural fallback" in _passing_pairs[-1][1]
+                        # RC2-FP: non-derived pairs (generic probes not tailored to the payload)
+                        # require gap > 0.60 for early-exit. When all passing pairs are non-derived
+                        # (standard SUBSTRING/LENGTH/tautology/ASCII names, never containing "(derived)"),
+                        # the body diff may come from dynamic page content rather than SQL execution.
+                        # Continue accumulating until a derived pair passes OR gap is clearly strong.
+                        # BUG-RC2-FP-DEAD-CODE FIX: old check used "structural fallback" in name,
+                        # which is dead code — standard SUBSTRING/LENGTH names NEVER contain
+                        # "structural fallback" (only _derive_pcv_payloads fallback path uses that text).
+                        # Fix: mirror RC3-FP — use "(derived)" as the marker for payload-specific pairs.
+                        _both_non_derived = (
+                            "(derived)" not in _passing_pairs[-2][1] and
+                            "(derived)" not in _passing_pairs[-1][1]
                         )
-                        if _both_structural and _best[0] <= 0.60:
-                            pass  # RC2-FP: keep accumulating — require non-structural or gap>0.60
+                        if _both_non_derived and _best[0] <= 0.60:
+                            pass  # RC2-FP: keep accumulating — require derived pair or gap>0.60
                         else:
                             return True, _best[0], f"{_passing_pairs[-2][1]}+{_passing_pairs[-1][1]}", _any_strong
                     # Same family — keep accumulating, don't confirm yet
@@ -108535,9 +108538,12 @@ class TechniqueCascadeEngine:
             # the body difference is dramatic but only one canary family fires.
             if len(_passing_pairs) == 1:
                 _g, _n, _s = _passing_pairs[0]
-                if _g > 0.60:
-                    # FIX-REQ3-SINGLESTRONG: Very strong single pair → accept
-                    return True, _g, f"{_n}(single-pair-strong-gap={_g:.3f})", True
+                if _g > 0.80:
+                    # FIX-REQ3-SINGLESTRONG: Very strong single pair → accept, but not standalone-strong.
+                    # Raising threshold from 0.60→0.80: dynamic pages (CDN A/B, personalization) can
+                    # produce gap>0.60 by chance. _a_strong=False forces corroboration (C/D/E) instead
+                    # of allowing standalone B/BH/IN confirmation on a single generic canary pair.
+                    return True, _g, f"{_n}(single-pair-strong-gap={_g:.3f})", False
                 return False, _g, f"{_n}(single-pair-insufficient)", False
             if len(_passing_pairs) >= 2:
                 # Check if any two entries have different family prefixes
@@ -108553,11 +108559,17 @@ class TechniqueCascadeEngine:
                     # A structural-only Check A with gap ≤ 0.60 is indistinguishable from
                     # dynamic page content variation (CDN, timestamps, CSRF tokens) and
                     # produces false positives when combined with content-length diffs (Check D).
-                    _all_structural = all("structural fallback" in p[1] for p in _passing_pairs)
-                    if _all_structural and _best[0] <= 0.60:
+                    # RC3-FP: pairs without "(derived)" are generic canaries (SUBSTRING, LENGTH,
+                    # tautology, structural fallbacks) not tailored to the detection payload.
+                    # When ALL passing pairs lack "(derived)" AND the gap is weak (≤0.60),
+                    # the body diff is indistinguishable from CDN/session content variation.
+                    # Previously only checked for "structural fallback" in name — dead code since
+                    # standard SUBSTRING/LENGTH names never contain that text.
+                    _all_non_derived = all("(derived)" not in p[1] for p in _passing_pairs)
+                    if _all_non_derived and _best[0] <= 0.60:
                         return False, _best[0], (
-                            f"{_passing_pairs[0][1]}(structural-only-insufficient,"
-                            f"gap={_best[0]:.3f},need>0.60)"
+                            f"{_passing_pairs[0][1]}(non-derived-insufficient,"
+                            f"gap={_best[0]:.3f},need>0.60-or-derived-pair)"
                         ), False
                     return True, _best[0], "+".join([p[1] for p in _passing_pairs[:2]]), _any_strong
                 # All pairs from same family — still insufficient
@@ -109242,7 +109254,11 @@ class TechniqueCascadeEngine:
                     # (server-timing + content-length) which co-vary on every Cloudflare CDN
                     # request regardless of SQL injection. Exclude it entirely so only
                     # content-length + etag / content-length + last-modified fire _d_pass.
-                    _dynamic_headers = ["content-length", "etag", "last-modified", "set-cookie"]
+                    # set-cookie removed: CSRF tokens/session IDs change on every request to
+                    # session-aware apps regardless of SQL injection. Including set-cookie caused
+                    # content-length+set-cookie=2 dynamic diffs → _d_pass=True on ALL session-aware
+                    # apps, making Check D a false-positive factory when paired with any Check A pass.
+                    _dynamic_headers = ["content-length", "etag", "last-modified"]
                     _security_diffs = []
                     _dynamic_diffs = []
                     for hdr in _backend_headers:
@@ -109941,17 +109957,21 @@ class TechniqueCascadeEngine:
                 # dynamic page content without SQL injection occurring.
                 # Require at least Check C or Check E corroboration when Check A is
                 # structural-fallback-only AND Check D is purely dynamic headers.
-                _a_all_structural_d = (
-                    "structural fallback" in _a_method and
-                    _a_method.count("structural fallback") >= 2
-                )
+                # RC4-FP: generic (non-derived) body canary + purely dynamic header diff is
+                # insufficient — both signals arise independently of SQL injection on dynamic apps.
+                # "(derived)" appears only when _derive_pcv_payloads matched the detection payload's
+                # boolean condition and produced payload-specific canaries. Standard SUBSTRING/LENGTH/
+                # tautology names never contain "(derived)", making the old check for
+                # "structural fallback" dead code for all normal canary operation.
+                _a_has_payload_derived = "(derived)" in _a_method
+                _a_all_structural_d = not _a_has_payload_derived
                 _d_only_dynamic_headers = (
                     _d_count >= 1 and
-                    all(h in ("content-length", "etag", "last-modified", "set-cookie")
+                    all(h in ("content-length", "etag", "last-modified")
                         for h in _d_headers)
                 )
                 if _a_all_structural_d and _d_only_dynamic_headers and not (_c_pass or _e_pass):
-                    print(f"[*]   [PCV] A+D REJECTED (RC4-FP): structural-only body canary "
+                    print(f"[*]   [PCV] A+D REJECTED (RC4-FP): non-derived body canary "
                           f"({_a_method}) + dynamic-header-only diff ({_d_headers}) "
                           "without Check C/E — indistinguishable from dynamic page noise; "
                           "not confirming to prevent false positive", flush=True)
@@ -128420,8 +128440,18 @@ class ScannerV14(ScannerV13):
                         # FIX: Use the actual HTTP method from the BGD scan, not ep.method (primary).
                         # _v14_bg_method() stores the actual method on detection.method.
                         # Without this fix, extraction sends POST requests to GET/PUT/PATCH injection points.
+                        # BUG-BG-METHOD-PRECEDENCE FIX: Without explicit parentheses around the ternary,
+                        # Python parses the expression as:
+                        #   (A or B) if C else (None or D)
+                        # When C=False (_bg_conf["method"] is "expanded", which it ALWAYS is at line 128408),
+                        # this returns ep.method and IGNORES getattr(_bg_det,'method',None) which was
+                        # explicitly set by _v14_bg_method() at line 128262 (_cr.detection.method = _m).
+                        # Fix: parenthesise the ternary so the method lookup priority is:
+                        #   1. _bg_det.method (set by _v14_bg_method, most authoritative)
+                        #   2. _bg_conf["method"] if it's a real HTTP method (not None/"expanded")
+                        #   3. ep.method (fallback — the primary surface method)
                         _bg_actual_method = (getattr(_bg_det, 'method', None)
-                                             or _bg_conf.get("method") if _bg_conf.get("method") not in (None, "expanded") else None
+                                             or (_bg_conf.get("method") if _bg_conf.get("method") not in (None, "expanded") else None)
                                              or ep.method)
                         all_confirmed.append({
                             "param": _bg_param, "original": _bg_orig,
