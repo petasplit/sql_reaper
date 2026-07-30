@@ -90425,9 +90425,10 @@ class ScannerV10(ScannerV9):
                                     'union_columns', 'injectable_col', 'union_reflects',
                                     'exact_sent_payload', 'tamper_chain', 'injection_type',
                                     '_pcv_verified', '_fp_guards_preconfirmed',
+                                    '_fp_guards_confidence', '_both_probes_waf_blocked',
                                     '_multi_probe_confirmed', '_multi_probe_count',
                                     '_multi_probe_bool', '_orig_timing_payload',
-                                    '_cross_cat_pcv_incremented'):
+                                    '_cross_cat_pcv_incremented', '_false_payload_orig'):
                             try: setattr(_p5, _a5, getattr(_det_for_pcv, _a5, None))
                             except Exception: pass
                         _p5.payload = _fallback_pay
@@ -105547,14 +105548,14 @@ class TechniqueCascadeEngine:
         # independent corroboration fires on high-jitter dynamic pages.
         _wassr_preconfirmed_early = (
             (
-                (_wassr_early_dist > 0.75 and not _wassr_probe_both_blocked)
+                (_wassr_early_dist >= 0.80 and not _wassr_probe_both_blocked)
                 or
                 (_wassr_early_dist >= 0.50 and not _wassr_probe_both_blocked
                  and bool(getattr(det, '_fp_guards_preconfirmed', False)))
             ) or
             (bool(getattr(det, '_fp_guards_preconfirmed', False))
              and getattr(det, '_fp_guards_confidence', 0.0) >= 0.85
-             and _wassr_early_dist >= 0.40)  # RC-FINDING3-FP: require independent Wasserstein signal
+             and _wassr_early_dist >= 0.55)  # RC-FINDING3-FP: require independent Wasserstein signal
         ) if det else False
 
         # Early Shortcut A: pre-verified by FP-guards, RobustTimingOracle, error multi-probe,
@@ -107050,7 +107051,7 @@ class TechniqueCascadeEngine:
                                 _wf_body = _fp_false.body if hasattr(_fp_false, 'body') else b""
                                 _wassr_dist = _wassr_gl.wasserstein1(_wt_body, _wf_body)
                                 _wassr_thresh = getattr(_wassr_gl, 'threshold', 0.012)
-                                _wassr_min = max(_wassr_thresh * 2.0, 0.15)
+                                _wassr_min = max(_wassr_thresh * 2.0, 0.25)
                                 if _wassr_dist >= _wassr_min:
                                     _wassr_override = True
                                     print(f"[+] PCV FP-Guards WASSR OVERRIDE "
@@ -107108,13 +107109,13 @@ class TechniqueCascadeEngine:
                                         _wn_fp_preconf = bool(getattr(det, '_fp_guards_preconfirmed', False)) if det else False
                                         _wn_fp_conf = float(getattr(det, '_fp_guards_confidence', 0.0) or 0.0) if det else 0.0
                                         _wn_both_blocked = bool(getattr(det, '_both_probes_waf_blocked', False)) if det else False
-                                        # Very strong Wasserstein signal alone (> 0.75, unblocked): override
-                                        _wn_strong_alone = _det_wass_dist > 0.75 and not _wn_both_blocked
+                                        # Very strong Wasserstein signal alone (>= 0.80, unblocked): override
+                                        _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
                                         # FP-guards preconfirmed with adequate confidence (unblocked): override
                                         _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 0.72 and not _wn_both_blocked
                                         if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok):
                                             _wassr_override = True
-                                            _wn_reason = "strong-dist>0.75" if _wn_strong_alone else "fp-preconf-conf>=0.72"
+                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=0.72"
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
@@ -107133,7 +107134,7 @@ class TechniqueCascadeEngine:
                                                 _det_wass_dist, _wn_min, _wn_fp_preconf, _wn_fp_conf)
                                             print(f"[!] PCV det-notes WASSR OVERRIDE REJECTED "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
-                                                  f"dist={_det_wass_dist:.4f} below strong threshold >0.75 "
+                                                  f"dist={_det_wass_dist:.4f} below strong threshold >=0.80 "
                                                   f"and fp-guards-conf={_wn_fp_conf:.3f} < 0.72 — "
                                                   "moderate dist may be dynamic-page noise, "
                                                   "not overriding live FP-guard rejection", flush=True)
@@ -109783,11 +109784,38 @@ class TechniqueCascadeEngine:
                         print(f"[*]   [PCV] UNION body-size BLOCKED: sentinel '{_sentinel_val}'"
                               " not reflected — CDN cache noise, not real injection", flush=True)
                     else:
-                        print(f"[*]   [PCV] Result: CONFIRMED  strong body canary ({_a_method}, gap={_a_gap:.3f})", flush=True)
-                        # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
-                        _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
-                        _SCAN_STOPPED[0] = True
-                        return True, 1, _details
+                        # RC-FINDING-WAFBYPASS-FP: For WAF-bypass techniques (NV/WB/EX/HY/ST),
+                        # a strong body-gap canary alone is insufficient — WAF challenge pages
+                        # can have varying sizes/bodies for different bypass payload structures,
+                        # producing a genuine-looking gap without SQL execution. Require either:
+                        # (a) FP-guards preconfirmation at detection time (conf >= 0.65), OR
+                        # (b) Check C (DBMS error fingerprint) or Check E (SQL consistency).
+                        _wafbypass_techs_pcv = {"NV", "WB", "EX", "HY", "ST"}
+                        if tech in _wafbypass_techs_pcv:
+                            _wab_preconf = (
+                                (det is not None
+                                 and getattr(det, '_fp_guards_preconfirmed', False)
+                                 and getattr(det, '_fp_guards_confidence', 0.0) >= 0.65)
+                                or _c_pass or _e_pass
+                            )
+                            if not _wab_preconf:
+                                print(f"[*]   [PCV] WAF-bypass tech {tech}: strong body canary "
+                                      f"BLOCKED (gap={_a_gap:.3f}) — requires FP-guard "
+                                      "preconfirmation (conf>=0.65) or Check C/E corroboration "
+                                      "to prevent WAF-challenge-page variation FP", flush=True)
+                            else:
+                                print(f"[*]   [PCV] Result: CONFIRMED  strong body canary "
+                                      f"({_a_method}, gap={_a_gap:.3f}) + WAF-bypass corroboration",
+                                      flush=True)
+                                _INJECTION_CONFIRMED[0] = True
+                                _SCAN_STOPPED[0] = True
+                                return True, 1, _details
+                        else:
+                            print(f"[*]   [PCV] Result: CONFIRMED  strong body canary ({_a_method}, gap={_a_gap:.3f})", flush=True)
+                            # BUG-R3-CRITICAL-B FIX: set _SCAN_STOPPED on every True path
+                            _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
+                            _SCAN_STOPPED[0] = True
+                            return True, 1, _details
 
         if _c_pass:
             if tech in ("T", "BT", "TH"):
@@ -162801,12 +162829,15 @@ class FalsePositiveGuardV18:
             except Exception:
                 pass
         # BUG-R3-C FIX: Scale REPEAT_MIN to actual probes sent (excluding 429/503/dead).
-        # _l1_probes_sent=0 → all probes rate-limited → L1 inconclusive → treat as pass.
+        # _l1_probes_sent=0 → all probes rate-limited → L1 has no evidence → REJECT (FP risk).
+        # Auto-passing when all probes are rate-limited creates false positives: a dynamic
+        # page that rate-limits all L1 probes would trivially pass L1 even without injection.
         # _l1_probes_sent<REPEAT_MIN → some probes rate-limited → scale requirement down.
-        _l1_effective_min = (
-            0 if _l1_probes_sent == 0   # all rate-limited: inconclusive → L1 pass
-            else max(1, min(self.REPEAT_MIN, _l1_probes_sent))
-        )
+        if _l1_probes_sent == 0:
+            LOG.debug(f"FPGuard L1: {param!r} ALL {self.REPEAT_N} probes rate-limited or dead "
+                      "(429/503/0B) — no L1 evidence; rejecting to prevent FP on rate-limiting pages")
+            return False, 0.0
+        _l1_effective_min = max(1, min(self.REPEAT_MIN, _l1_probes_sent))
         if pos_count < _l1_effective_min:
             LOG.debug(f"FPGuard L1: {param!r} repetition test failed "
                       f"({pos_count}/{self.REPEAT_N} sent={_l1_probes_sent} "
@@ -165185,6 +165216,28 @@ async def _run_fp_guards_boolean(
                 return False, 0.0
             # No conversion error pattern seen — fall through to normal boolean guards
             # (the payload may be a tautology type like SUBSTRING(...) = SUBSTRING(...))
+
+        # RC-FINDING-WAF-BLOCKED-FPG: Early exit when BOTH fingerprint probes (true_fp and
+        # false_fp) were WAF-blocked (HTTP 400/403/406). The L1 repetition loop sends
+        # `original + true_payload` fresh — the same payload the WAF blocked at detection
+        # time — so those probes WILL also be blocked, returning _l1_probes_sent=0, which
+        # now correctly returns (False, 0.0). Bail out early to avoid sending the probes
+        # at all and to log a clear reason for rejection.
+        _WAF_BLOCK_STS = {400, 403, 406}
+        _fpg_t_status = int(getattr(true_fp, 'status_code', 0) or 0) if true_fp else 0
+        _fpg_f_status = int(getattr(false_fp, 'status_code', 0) or 0) if false_fp else 0
+        if _fpg_t_status in _WAF_BLOCK_STS and _fpg_f_status in _WAF_BLOCK_STS:
+            _fpg_t_body = getattr(true_fp, 'body', b'') or b''
+            _fpg_f_body = getattr(false_fp, 'body', b'') or b''
+            _fpg_waf_sim = SimHasher.body_similarity(
+                ResponseNormaliser.normalise(_fpg_t_body),
+                ResponseNormaliser.normalise(_fpg_f_body))
+            if _fpg_waf_sim >= 0.85:
+                LOG.debug('[FP-Guards] Both true_fp (%d) and false_fp (%d) WAF-blocked with '
+                          'similar bodies (sim=%.3f) — L1 probes will also be blocked; '
+                          'rejecting to prevent WAF-noise FP',
+                          _fpg_t_status, _fpg_f_status, _fpg_waf_sim)
+                return False, 0.0
 
         # ── Layer 1: FalsePositiveGuardV18  6 independent checks ──────────────
         # L1=repetition(3×), L2=negation, L3=Fisher-exact p-value,
