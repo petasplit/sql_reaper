@@ -115724,7 +115724,11 @@ class TechniqueCascadeEngine:
                                 # as an additional safety net beyond the skip-entirely gate above.
                                 _wass_instability = getattr(getattr(self, "config", None),
                                                              "_oracle_set_by_instability", False)
-                                _wass_min = max(0.30, (0.80 if _wass_instability
+                                _wass_oracle_blocked = (
+                                    getattr(getattr(self, "config", None), "_oracle_mode", None)
+                                    == OracleMode.BLOCKED
+                                )
+                                _wass_min = max(0.30, (0.80 if (_wass_instability or _wass_oracle_blocked)
                                                         else getattr(self, "_dynamic_wass", 0.45)))
                                 # (Wasserstein PCV-failure counter and boolean skip-set
                                 #  population removed. Boolean payloads run to completion
@@ -115868,10 +115872,26 @@ class TechniqueCascadeEngine:
                                 # only treat consistent signals as "page noise" when dist is clearly
                                 # below the detection threshold (< 90% of _wass_min).  Signals at
                                 # dist >= _wass_min*0.90 are potential injection even when consistent.
+                                # FIX-WASS-ASYMMETRIC-WAF: When oracle=BLOCKED and the true probe
+                                # received a 2xx response (bypass succeeded) while the false probe
+                                # received a 4xx WAF block, the Wasserstein distance measures the
+                                # difference between a real page body and a WAF error page body —
+                                # NOT a SQL-conditional body difference.  This structural response-type
+                                # asymmetry produces dist≈0.60-0.70 consistently regardless of SQL
+                                # injection, and must be suppressed even when dist > _wass_min.
+                                _wass_asym_statuses = {400, 403, 406, 429}
+                                _wass_true_st = getattr(fp, 'status_code', 0) or 0
+                                _wass_false_st = getattr(_fp_f2, 'status_code', 0) or 0
+                                _wass_asymmetric_waf = (
+                                    _wass_oracle_blocked
+                                    and 200 <= _wass_true_st < 300
+                                    and _wass_false_st in _wass_asym_statuses
+                                )
                                 _wass_suppressed = (
                                     (_wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90)
                                     or _wass_near_noise_floor
                                     or _wass_stable_page_outlier
+                                    or _wass_asymmetric_waf
                                 )
                                 if _wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90:
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} CONSISTENT "
@@ -115898,6 +115918,11 @@ class TechniqueCascadeEngine:
                                           f"({_wdh_p_below_stable}/{len(_wdh_p)} probes below 0.15, "
                                           f"only {_wdh_p_above_min} above threshold={_wass_min:.2f}) "
                                           f"-- CDN/cache miss, NOT injection", flush=True)
+                                elif _wass_asymmetric_waf:
+                                    LOG.debug("[Wasserstein] dist=%.4f ASYMMETRIC WAF suppressed "
+                                              "(oracle=BLOCKED, true=%d 2xx, false=%d WAF-block) "
+                                              "— response-type asymmetry, NOT SQL boolean difference",
+                                              _wass_dist, _wass_true_st, _wass_false_st)
                                 elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min:
                                     print("[+]   [Wasserstein] secondary oracle confirmed "
                                              f"(dist={_wass_dist:.4f}, threshold={_wass_min:.2f}) "
@@ -115983,10 +116008,17 @@ class TechniqueCascadeEngine:
                             # probes were WAF-blocked (400/403/406/429), the Wasserstein distance
                             # reflects WAF page token variance, not SQL-controlled differences.
                             # Flag this so Shortcut A can detect and reject this false positive.
+                            # FIX-WASS-ASYMMETRIC-BLOCKED: Also flag when oracle=BLOCKED and
+                            # true=2xx while false=4xx (asymmetric WAF response) — this produces
+                            # dist≈0.60-0.70 from response-type difference, not SQL injection.
                             _waf_block_statuses = {400, 403, 406, 429}
                             _true_status  = getattr(fp,     'status_code', 0) or 0
                             _false_status = getattr(_fp_f2, 'status_code', 0) or 0
                             if _true_status in _waf_block_statuses and _false_status in _waf_block_statuses:
+                                _det_b._both_probes_waf_blocked = True
+                            elif (_wass_oracle_blocked and
+                                  200 <= _true_status < 300 and
+                                  _false_status in _waf_block_statuses):
                                 _det_b._both_probes_waf_blocked = True
                         except Exception:
                             pass
@@ -170320,7 +170352,7 @@ class TimingOracleCalibrator:
         # failed.  Jitter profiler corrects the final time_sec, but this warning
         # explains what happened during TimingCal.
         if _p95 < 50:  # all samples < 50ms → CDN is caching baseline requests
-            print(f"[!] [TimingCal] CDN-cached baseline (P95={_p95:.1f}ms < 5ms) — "
+            print(f"[!] [TimingCal] CDN-cached baseline (P95={_p95:.1f}ms < 50ms) — "
                   "baseline probes served from edge cache.  Injection payloads bypass "
                   "CDN cache and hit backend directly.  Jitter profiler will refine "
                   "sleep estimate against real backend latency.", flush=True)
