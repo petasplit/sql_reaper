@@ -64325,6 +64325,34 @@ class Scanner:
                         print("[+] [V25-Extract] Pre-wired oracle preserved across probe_all() MSE wire"
                               f" (is_timing={_old_bo_is_timing})",
                               flush=True)
+                    # BUG-MSE-BOOL-ORACLE-WIRE-FIX (CRITICAL, all DBMSes, B/BH/IN/NV/E/EH/T/TH/HQ):
+                    # When MSE probe_all() confirms a body-diff or simhash oracle, prefer it as
+                    # _boolean_oracle so _extract_str (Enumerator path) uses the MSE-confirmed
+                    # signal rather than the V25 inline SimHash oracle (which compares against a
+                    # detection-time baseline that may have shifted, or was b"" if the baseline
+                    # capture failed). The body-diff oracle uses calibrated TRUE/FALSE body SIZES
+                    # (gap=237416B on production target) — far more reliable than SimHash.
+                    # This also handles the case where V25 wiring did not fire (CEO calibrated,
+                    # so V25 skipped the inline-oracle block) — leaving _boolean_oracle=None.
+                    if not _old_bo_is_timing:
+                        for _probe_bo_name in ('bool_body_diff', 'bool_simhash'):
+                            if _probe_bo_name in _mse._oracle_fns:
+                                _mse._boolean_oracle = _mse._oracle_fns[_probe_bo_name]
+                                print(f"[+] [MSE] _boolean_oracle upgraded to {_probe_bo_name} "
+                                      "(MSE-confirmed; reliable for Enumerator _extract_str path)",
+                                      flush=True)
+                                break
+                    # Cooldown: give WAF rate-limit windows time to recover before extraction.
+                    # Body-diff probe_all() sends several fast probes — if WAF rate-limits them,
+                    # the validation probes return None (accepted by None+None guard) but
+                    # extraction probes immediately after also get rate-limited → all return None
+                    # → length=0 → returns "".  A 10s pause lets the rate-limit counter reset.
+                    # (sleep_arith timing oracle has its own cooldown inside probe_all().)
+                    if (any(n in _mse._oracle_fns for n in ('bool_body_diff', 'bool_simhash'))
+                            and 'sleep_arith' not in _mse._oracles):
+                        print("[MSE] Cooling down 10s before extraction "
+                              "(body oracle: WAF rate-limit recovery)...", flush=True)
+                        await asyncio.sleep(10)
             except Exception as _mse_e:
                 import traceback; traceback.print_exc()
 
