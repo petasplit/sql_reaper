@@ -48186,6 +48186,24 @@ class Enumerator:
                             LOG.info("[_extract_str] WAF blocked both sanity probes "
                                      "(true-cond→None, false-cond→None); accepting "
                                      "pre-wired oracle (validated at detection time)")
+                        elif (_bool_oracle
+                              and _san_true is not None
+                              and _san_false is not None
+                              and _san_true == _san_false):
+                            # BUG-EXTRACT-SANITY-UNIFORM-FIX (HIGH, all DBMSes, all WAF types):
+                            # When WAF blocks exotic sanity conditions (ARRAY_LOWER/ISNULL/NVL)
+                            # with a non-fingerprinted body, _eval_bool_body_diff returns a
+                            # body-size comparison: e.g. 3000B < 118757B = False for both
+                            # true and false sanity conditions → _san_true=False, _san_false=False.
+                            # The None+None check above does not fire; falls to "discarding".
+                            # This is the same uniform-WAF-blocking situation as MSE validation.
+                            # The oracle was pre-validated at detection time; accept it.
+                            _eval_fn = _bool_oracle
+                            _oracle_name = "mse_boolean_waf_uniform_sanity"
+                            LOG.info("[_extract_str] WAF uniform-blocking sanity probes "
+                                     "(true-cond→%r, false-cond→%r = same value); accepting "
+                                     "pre-wired oracle (validated at detection time)",
+                                     _san_true, _san_false)
                         else:
                             LOG.warning("[_extract_str] mse_boolean oracle failed sanity after "
                                         "3 attempts (true-cond→%r, false-cond→%r); discarding",
@@ -99694,7 +99712,6 @@ class WAFBlockDiscriminator:
         r"illegal\s+character",
         r"sqli.*detected",
         r"sql\s+injection\s+detected",
-        r"invalid\s+request",
         r"request.*rejected",
         r"incapsula",
         r"imperva",
@@ -99702,6 +99719,47 @@ class WAFBlockDiscriminator:
         r"barracuda",
         r"sucuri",
         r"wordfence",
+        # BUG-WAF-PATTERNS-INCOMPLETE-FIX (MEDIUM, all DBMSes):
+        # Many commercial and open-source WAFs produce block pages whose bodies
+        # contain distinctive text that was absent from the original pattern list.
+        # Missing patterns caused is_waf_block() to return False for these WAFs,
+        # leading _eval_bool_body_diff to compare body sizes against the calibrated
+        # threshold instead of returning None, producing garbage extraction results.
+        r"ddos\s+protection",          # Generic DDoS protection page
+        r"challenge.*cloudflare",       # Cloudflare JS challenge page
+        r"akamai\s+ghost",             # Akamai CDN/WAF
+        r"akamai.*error",              # Akamai error page
+        r"aws\s+waf",                  # AWS WAF block page
+        r"blocked\s+by",               # "Blocked by [firewall/policy/...]"
+        r"your\s+ip.*has\s+been",      # IP ban messages
+        # BUG-WAF-FP-PATTERN-FIX: "invalid\s+request" removed — too generic;
+        # legitimate REST APIs return 400 "Invalid request body/parameters" in
+        # normal operation, causing is_waf_block()=True for ALL probes on those
+        # targets → boolean pairs universally skipped → injection never detected.
+        # "request.*rejected" (above, already present) covers WAF rejection phrasing.
+        # BUG-WAF-FP-PATTERN-FIX: "nginx.*403" removed — wrong pattern order.
+        # Nginx default 403 page says "403 Forbidden" followed by "nginx" in a
+        # separate footer line, so the body never contains "nginx.*403" in that
+        # order. Also a raw Nginx 403 (directory permission, auth module) is not
+        # a WAF block and should not be treated as one; it IS a valid injection
+        # signal (asymmetric 403/200 is used in boolean detection).
+        # BUG-WAF-FP-PATTERN-FIX: "x-amzn.*requestid" removed — this is an HTTP
+        # header name, not a body pattern; appears in response body only when the
+        # app explicitly echoes headers, which is extremely rare in practice.
+        r"automated\s+request",        # Bot detection block (always a block, not info)
+        r"bot\s+protection",           # Bot protection block
+        r"security\s+check",           # WAF challenge pages (Cloudflare, Akamai, Imperva)
+        r"please\s+enable.*javascript", # JavaScript challenge (Cloudflare, Akamai)
+        r"captcha",                    # CAPTCHA challenge page
+        r"recaptcha",                  # reCAPTCHA challenge
+        r"malicious\s+request",        # Generic block
+        r"reblaze",                    # Reblaze WAF
+        r"fortiweb",                   # FortiWeb WAF
+        r"naxsi",                      # Nginx ModSecurity NAXSI
+        r"radware",                    # Radware WAF
+        r"citrix\s+adc",               # Citrix ADC/NetScaler WAF
+        r"myra\s+security",            # Myra Security WAF
+        r"cloudfront.*error",          # CloudFront distribution error
     ]
 
     @classmethod
@@ -134509,7 +134567,9 @@ class MultiStrategyExtractor:
 
                     async def _eval_bool_body_diff(cond,
                                                    _thresh=_bbd_threshold,
-                                                   _true_larger=_bbd_true_larger):
+                                                   _true_larger=_bbd_true_larger,
+                                                   _cal_true=_bbd_body_t,
+                                                   _cal_false=_bbd_body_f):
                         """Boolean body-diff eval: TRUE condition → larger/smaller body."""
                         # BUG-EVAL-BOOL-DEAD-PROBE FIX (MEDIUM, all 5 DBMSes):
                         # The original code sent TWO probes: AND 1=1 (used for decision)
@@ -134543,6 +134603,36 @@ class MultiStrategyExtractor:
                         _bt2 = len(getattr(_fp_t2, 'body', b'') or b'')
                         if _bt2 == 0:
                             return None  # WAF-blocked probe -- skip
+                        # BUG-EBBD-WAF-STATUSCODE-FIX (HIGH, all DBMSes/WAF types):
+                        # WAFs that don't have a recognizable fingerprint in their body
+                        # (no "cloudflare", "blocked", "access denied" text) are not
+                        # detected by is_waf_block() above.  These WAFs return a 4xx
+                        # status with a generic body whose size falls outside the range
+                        # calibrated from the probe phase.  For example:
+                        #   - Probe: true=237465B, false=49B, threshold=118757B
+                        #   - WAF block: 400 + 3000B generic page
+                        #   - 3000 > 118757 = False → oracle says "false condition"
+                        #   - But WAF blocked the probe; we don't know the SQL truth value
+                        # Fix: when the status code is in WAF_BLOCK_CODES AND the body
+                        # size is NOT close to either calibrated probe size (within 30% of
+                        # the smaller calibrated value), treat as indeterminate (None).
+                        # This correctly handles WAFs that return a consistent block page
+                        # for all probes without leaking the SQL truth value.
+                        # Safety: this check is ONLY triggered when status ∈ WAF_BLOCK_CODES
+                        # (400/403/406/412/503) so legitimate oracle signals at 200/302 are
+                        # unaffected. During extraction, oracle conditions use SUBSTR/ASCII
+                        # syntax that is less likely to be WAF-blocked than the exotic
+                        # ARRAY_LOWER/LN validation conditions — the status check here
+                        # provides a safety net for any WAF-blocked extraction probe.
+                        _sc2 = _get_safe_status_code(_fp_t2)
+                        if _sc2 in WAFBlockDiscriminator.WAF_BLOCK_CODES:
+                            _cal_min = min(_cal_true, _cal_false)
+                            _cal_max = max(_cal_true, _cal_false)
+                            _tol = max(_cal_min * 0.30, 20)  # 30% of smaller calibrated size
+                            _near_true  = abs(_bt2 - _cal_true)  <= _tol
+                            _near_false = abs(_bt2 - _cal_false) <= _tol
+                            if not _near_true and not _near_false:
+                                return None  # WAF-blocked: body outside calibrated range
                         if _true_larger:
                             return _bt2 > _thresh
                         else:
@@ -134688,6 +134778,29 @@ class MultiStrategyExtractor:
                     _validated.append(name)
                     continue
                 if not (r1 and not r2):
+                    # BUG-MSE-VAL-UNIFORM-FIX (HIGH, all DBMSes, all WAF types):
+                    # When both r1 and r2 return the SAME non-None value (both False or
+                    # both True), the WAF is returning a uniform response for all exotic
+                    # validation conditions — the body-size comparison returns the same
+                    # result regardless of SQL truth value.  This happens when a WAF
+                    # that does NOT match fingerprint patterns (no "cloudflare", "blocked"
+                    # etc. text) returns a consistent block page (e.g. 3000B at HTTP 400)
+                    # for both the true and false validation conditions.
+                    # Previously: None+None was accepted (line above); both-same non-None
+                    # fell to "validation FAILED" — oracle discarded even though probe
+                    # phase confirmed it works (gap=237416B).
+                    # Fix: treat uniform non-None result (r1==r2) as WAF-indeterminate,
+                    # same as None+None.  The oracle's functionality is proven by the
+                    # probe-phase gap, not the exotic validation conditions.  Accept it
+                    # rather than discarding a working oracle because WAF blocked the
+                    # ARRAY_LOWER/ISNULL/NVL validation syntax but not the actual
+                    # SUBSTR/ASCII extraction payloads.
+                    if r1 is not None and r2 is not None and r1 == r2:
+                        print(f"[MSE]  {name} validation indeterminate (WAF uniform: "
+                              f"true→{r1}, false→{r2}) — accepting oracle (confirmed at probe time)",
+                              flush=True)
+                        _validated.append(name)
+                        continue
                     # FIX-BUG4: Detect WAF-corruption: when the WAF returns the same 4xx
                     # response for every probe (true and false), both r1 and r2 may be True.
                     # In that case, also probe a third clearly-false condition (2=3) to
