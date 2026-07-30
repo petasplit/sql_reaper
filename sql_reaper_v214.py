@@ -48176,6 +48176,16 @@ class Enumerator:
                             LOG.info("[_extract_str] oracle mode=TIMING_ONLY: accepting oracle despite "
                                      "boolean sanity failure (CDN caches 1=1/1=2 → both False; "
                                      "timing oracle bypasses CDN cache via sleep signal)")
+                        elif _bool_oracle and _san_true is None and _san_false is None:
+                            # WAF/CDN blocked both sanity probes — result is indeterminate,
+                            # not a confirmed oracle failure.  The oracle was pre-validated
+                            # during detection; accept it rather than discarding a working
+                            # oracle because WAF filtered the exotic sanity conditions.
+                            _eval_fn = _bool_oracle
+                            _oracle_name = "mse_boolean_waf_blocked_sanity"
+                            LOG.info("[_extract_str] WAF blocked both sanity probes "
+                                     "(true-cond→None, false-cond→None); accepting "
+                                     "pre-wired oracle (validated at detection time)")
                         else:
                             LOG.warning("[_extract_str] mse_boolean oracle failed sanity after "
                                         "3 attempts (true-cond→%r, false-cond→%r); discarding",
@@ -64285,13 +64295,17 @@ class Scanner:
                     _old_bo = getattr(_old_mse, '_boolean_oracle', None)
                     _old_bo_is_timing = getattr(_old_mse, '_boolean_oracle_is_timing', False)
                     enum._mse_instance = _mse  # Wire MSE into Enumerator
-                    if _old_bo is not None and _old_bo_is_timing:
-                        # Restore the V25 timing oracle onto the new real MSE so that
-                        # _extract_str sees _boolean_oracle_is_timing=True and skips the
-                        # boolean sanity check that timing oracles cannot pass on CDN targets.
+                    if _old_bo is not None:
+                        # Preserve any pre-wired oracle (timing OR boolean inline) onto
+                        # the new MSE so _extract_str can use it as a fallback via
+                        # _mse_instance._boolean_oracle when MSE's own oracle list is
+                        # exhausted.  Previously only timing oracles were preserved here,
+                        # losing the inline boolean oracle for B/BH/IN/NV techniques when
+                        # MSE probe_all() found viable oracles and overwrote the instance.
                         _mse._boolean_oracle = _old_bo
-                        _mse._boolean_oracle_is_timing = True
-                        print("[+] [V25-Extract] Timing oracle preserved across probe_all() MSE wire",
+                        _mse._boolean_oracle_is_timing = _old_bo_is_timing
+                        print("[+] [V25-Extract] Pre-wired oracle preserved across probe_all() MSE wire"
+                              f" (is_timing={_old_bo_is_timing})",
                               flush=True)
             except Exception as _mse_e:
                 import traceback; traceback.print_exc()
@@ -68364,6 +68378,30 @@ class ScannerV4(Scanner):
 
             enum = Enumerator(engine, cfg, result, dbms, scan_meth, scan_url,
                               scan_data, data_fmt, original, tamper_chain, baseline)
+            # Wire ConditionalErrorOracle so _extract_str has a working oracle for
+            # error-based and union techniques.  Without this the Enumerator is bare
+            # and all extraction calls fall through to "No oracle available".
+            try:
+                _ceo_pc = ConditionalErrorOracle(
+                    engine, cfg, scan_meth, scan_url, scan_data, data_fmt,
+                    param, original, dbms, tamper_chain)
+                if await asyncio.wait_for(_ceo_pc.calibrate(), timeout=20):
+                    enum._error_oracle = _ceo_pc
+                    LOG.info("[_process_confirmed] ConditionalErrorOracle calibrated for %r", param)
+                else:
+                    enum._error_oracle = None
+            except Exception as _ceo_pc_err:
+                LOG.debug("[_process_confirmed] Oracle calibration failed: %s", _ceo_pc_err)
+                enum._error_oracle = None
+            # For timing techniques, flag the MSE instance so _extract_str skips
+            # the boolean sanity check (which timing oracles cannot pass on CDN targets).
+            if result.technique in ('T', 'TH', 'HQ', 'BT'):
+                if not hasattr(enum, '_mse_instance') or not enum._mse_instance:
+                    class _FakeMSEPC:
+                        _boolean_oracle = None
+                        _oracles = []
+                    enum._mse_instance = _FakeMSEPC()
+                enum._mse_instance._boolean_oracle_is_timing = True
             # BUG-FIX-REQ5: Wrap _run_enumeration in the module-level extraction lock
             # so only ONE extraction can ever run at a time across ALL scanner paths.
             # Previously this call was unguarded — a concurrent header surface or V1Scanner
@@ -108425,7 +108463,7 @@ class TechniqueCascadeEngine:
                 _gap = abs(_ct_sim - _cf_sim)
                 _passed = False
                 if _gap > _gap_threshold * 1.0:
-                    _passing_pairs.append((_gap, _name, _gap > _gap_threshold * 2.0))
+                    _passing_pairs.append((_gap, _name, _gap >= _gap_threshold * 2.0))
                     _passed = True
                 # Enhancement: Content-Length delta (immune to dynamic content noise)
                 # BUG-V41-3 FIX: `_fptime` is NOT defined in _run_check_a()'s scope.
@@ -115825,12 +115863,13 @@ class TechniqueCascadeEngine:
                     # when Wasserstein's multi-sample view clearly shows injection. The Wasserstein
                     # detection path never set this flag → PCV always rejected BH/boolean detections
                     # on CDN targets → injection found but never confirmed → extraction never runs.
-                    # Fix: when Wasserstein dist >= 0.70 (strong distributional signal), pre-set
-                    # _fp_guards_preconfirmed=True on the DetectionResult. Threshold raised from
-                    # 0.55 to 0.70: single-probe outliers at 0.55-0.69 are CDN/cache-miss noise,
-                    # not SQL injection. The bypass threshold in PCV is _fpg_conf >= 0.60, but
-                    # also gated by Shortcut A requiring _fp_guards_confidence >= 0.85 (standalone).
-                    if _wass_dist >= 0.70:
+                    # Fix: when Wasserstein dist >= 0.63 (strong distributional signal), pre-set
+                    # _fp_guards_preconfirmed=True on the DetectionResult. Threshold lowered from
+                    # 0.70 to 0.63 to cover genuine boolean injections in the 0.63-0.69 range
+                    # that were observed on WAF-protected targets with Cloudflare.  WASSR OVERRIDE
+                    # still requires _fp_guards_confidence >= 0.72, so CDN-noise detections with
+                    # conf=0.000 remain rejected even with _fp_guards_preconfirmed=True.
+                    if _wass_dist >= 0.63:
                         try:
                             _det_b._fp_guards_preconfirmed = True
                             _det_b._fp_guards_confidence = _wass_conf_val
@@ -134582,6 +134621,14 @@ class MultiStrategyExtractor:
                 r1 = await asyncio.wait_for(_fn(_mse_val_true), timeout=20)
                 await asyncio.sleep(0.2)
                 r2 = await asyncio.wait_for(_fn(_mse_val_false), timeout=20)
+                if r1 is None and r2 is None:
+                    # WAF/CDN blocked both validation probes — result is indeterminate.
+                    # The oracle was confirmed during calibration; accept it rather than
+                    # discarding because the exotic validation conditions were blocked.
+                    LOG.info("[MSE]  %s validation indeterminate (WAF blocked both probes) — "
+                             "accepting oracle (calibrated at probe time)", name)
+                    _validated.append(name)
+                    continue
                 if not (r1 and not r2):
                     # FIX-BUG4: Detect WAF-corruption: when the WAF returns the same 4xx
                     # response for every probe (true and false), both r1 and r2 may be True.
