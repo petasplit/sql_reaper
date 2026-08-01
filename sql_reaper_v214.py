@@ -56064,7 +56064,27 @@ class Scanner:
                          "content-length",
                          "content-type","server","connection",
                          "cache-control","strict-transport-security","transfer-encoding",
-                         "vary","pragma","accept-ranges","alt-svc","via"}
+                         "vary","pragma","accept-ranges","alt-svc","via",
+                         # BUG-HDR-ORACLE-CF-CACHE-STATUS FIX: Cloudflare cf-cache-status header
+                         # (HIT/MISS/BYPASS/REVALIDATED/UPDATING/STALE/EXPIRED/DYNAMIC) changes
+                         # per-request based on CDN cache state — completely independent of SQL
+                         # injection outcome. Missing from skip set → header oracle false positive
+                         # on any Cloudflare-protected target where one probe hits CDN cache and
+                         # the other misses. Both sets must exclude it identically.
+                         "cf-cache-status",
+                         # x-cache-status: Nginx, Varnish, and CDN-agnostic cache status header
+                         # (HIT/MISS/EXPIRED/BYPASS/STALE) — distinct from x-cache, changes per
+                         # CDN edge state, not per SQL condition.
+                         "x-cache-status",
+                         # x-timer: Fastly per-request timing header (value is unique monotonic
+                         # timestamp, always differs between any two consecutive requests).
+                         "x-timer",
+                         # cf-request-id: deprecated Cloudflare per-request unique identifier.
+                         "cf-request-id",
+                         # x-cache-hits: Varnish/CDN integer hit counter, increments per CDN hit.
+                         "x-cache-hits",
+                         # x-ttl: CDN time-to-live countdown, decrements or resets per request.
+                         "x-ttl"}
             _ht = {k.lower(): v for k, v in (getattr(fp_true, "headers", {}) or {}).items()}
             _hf = {k.lower(): v for k, v in (getattr(fp_false, "headers", {}) or {}).items()}
             for _hk in sorted(set(list(_ht.keys()) + list(_hf.keys()))):
@@ -57886,6 +57906,21 @@ class Scanner:
             # Check 3: fewer than 3 unique characters in a string of 5+
             if len(text) >= 5 and len(_counts) < 3:
                 return True
+            # Check 4: frequency-ordered oracle noise.
+            # A biased-True equality oracle iterates _FREQ_CHARS (etaoinshrd...) and
+            # commits the first char whose neighbor evaluates False. When the oracle is
+            # noisy rather than fully biased (random 50% True), the confirmation step
+            # still commits characters heavily weighted toward the front of _FREQ_CHARS.
+            # The resulting string contains ONLY the 10 most common English letters
+            # (etaoinshrd) with no digits, uppercase, or non-alpha separators.
+            # Real DB values of 7+ chars almost always have at least one char outside
+            # this set (e.g. 'postgres' has 'p', 'g'; 'wordpress' has 'w','p';
+            # 'information' has 'f'). Reject all-lowercase-top-10-only strings of ≥7.
+            _TOP10_FREQ = frozenset('etaoinshrd')
+            if (len(text) >= 7
+                    and all(c.islower() for c in text)
+                    and all(c in _TOP10_FREQ for c in text)):
+                return True
             return False
 
         async def _extract_string_bitwise(query, label="", max_len=128):
@@ -59198,7 +59233,21 @@ class Scanner:
                           "x-nf-request-id","x-vercel-id","fly-request-id",
                           # content-length is per-request dynamic noise on large pages;
                           # body-size boolean oracle (with % gating) is the correct channel.
-                          "content-length"}
+                          "content-length",
+                          # BUG-HDR-ORACLE-CF-CACHE-STATUS FIX (second set): same CDN/dynamic
+                          # headers as _HDR_SKIP — must be kept in sync. Per-request CDN state
+                          # (cache HIT/MISS/BYPASS, TTL countdown, request IDs) is completely
+                          # independent of SQL injection outcome and will produce FP header oracles
+                          # on Cloudflare, Fastly, Varnish, Nginx-cache, and CDN-agnostic targets.
+                          "cf-cache-status","x-cache-status","x-timer",
+                          "cf-request-id","x-cache-hits","x-ttl",
+                          # Structural / capability headers: same value for every response from
+                          # a given origin regardless of SQL condition. Including them opens FP
+                          # paths when HTTP/2 vs HTTP/1.1 content-type params or connection
+                          # upgrades differ across two probes due to keep-alive / pool churn.
+                          "content-type","server","connection",
+                          "cache-control","strict-transport-security","transfer-encoding",
+                          "vary","pragma","accept-ranges","alt-svc","via"}
             _h1 = {(k or "").lower():v for k,v in (getattr(fp_true,"headers",{}) or {}).items()}
             _h2 = {(k or "").lower():v for k,v in (getattr(fp_false,"headers",{}) or {}).items()}
             for hdr in set(list(_h1.keys()) + list(_h2.keys())):
@@ -60174,25 +60223,34 @@ class Scanner:
                         # sanity passes — _oracle_fragile stays False
                     elif ((_san_t is True and _san_f is True) or
                           (_san_t is False and _san_f is False)):
-                        # BUG-DEFERRED-SANITY-WAF-SATURATED FIX (HIGH, all 5 DBMSes, all
-                        # surfaces, boolean/WB/ST/HY/NV techniques): When the WAF-aware eval
-                        # oracle cannot distinguish 1=1 from 1=2 (both return the same
-                        # boolean value), it means the oracle is saturated by WAF blocking
-                        # — the WAF intercepts both raw conditions so the pre-wired oracle
-                        # always returns the same side. This is NOT the same as an inverted
-                        # or broken oracle; it's WAF saturation on trivial SQL conditions.
-                        # The detection payload bypassed the WAF via WB/NV/EX mutations
-                        # that PME extraction also applies. Marking oracle fragile here
-                        # permanently aborts extraction even though PME-mutated extraction
-                        # probes would pass the WAF. Do NOT mark fragile; let extraction
-                        # attempt with PME bypass.
+                        # BUG-DEFERRED-SANITY-SAME-VALUE-ORACLE-BROKEN (CRITICAL): Both DBMS-
+                        # specific sanity conditions (known-True and known-False) returned the
+                        # SAME concrete boolean from _waf_aware_eval. This is NOT WAF blocking
+                        # (which returns None) — it is the underlying oracle (body-size, SimHash,
+                        # or header) failing to distinguish True from False conditions.
+                        #
+                        # Root cause: body-size page-noise, CDN-cached identical pages, or
+                        # a broken header oracle. PME mutation cannot fix a broken oracle because
+                        # the oracle's signal channel is saturated by noise, not WAF blocking.
+                        # If _waf_aware_eval uses the pre-wired detection oracle and STILL
+                        # returns the same side for both DBMS-specific conditions, any extraction
+                        # built on this oracle will produce garbage (all bits True → chr(0x1FFFFF),
+                        # frequency-ordered noise strings, etc.).
+                        #
+                        # Contrast with both-None (WAF blocks both raw conditions): that path
+                        # CORRECTLY trusts the oracle because the pre-wired bypass oracle may
+                        # distinguish True/False when PME-mutated probes bypass the WAF.
+                        # Here, the pre-wired oracle IS being used and still cannot distinguish —
+                        # there is no fallback. Mark fragile and abort to error-based extraction.
+                        _oracle_fragile = True
                         LOG.info(
-                            "[Inference] Deferred oracle sanity: both probes returned %s "
-                            "(WAF-saturated on trivial conditions 1=1/1=2) — trusting oracle "
-                            "since detection used bypass; PME extraction probes bypass WAF",
+                            "[Inference] Deferred oracle sanity FAILED: both DBMS-specific "
+                            "conditions returned %s (oracle cannot distinguish True from False — "
+                            "body-size page-noise, CDN-identical pages, or broken header oracle; "
+                            "PME mutation cannot fix a non-WAF oracle failure) — aborting; "
+                            "falling back to error-based extraction",
                             _san_t
                         )
-                        # sanity passes — _oracle_fragile stays False
                     else:
                         _oracle_fragile = True
                         LOG.info(
@@ -60249,9 +60307,30 @@ class Scanner:
                     # No version extracted at all — check user/db instead
                     _u = d.get("user", "") or d.get("current_user", "")
                     _db = d.get("database", "") or d.get("current_db", "")
-                    return bool(_u and len(_u) >= 2 and
-                                all(32 <= ord(c) <= 126 for c in _u) and
-                                any(c.isalnum() for c in _u))
+                    # Use user if available, else database; check both for noise patterns
+                    _chk = _u or _db
+                    if not _chk:
+                        return False
+                    if len(_chk) < 3:
+                        # Minimum 3 chars: rejects 2-char noise ("ea","io","et")
+                        # while accepting the shortest real names ("sa" is rare on
+                        # non-MSSQL targets; MSSQL uses other extraction paths first)
+                        return False
+                    if not all(32 <= ord(c) <= 126 for c in _chk):
+                        return False
+                    if not any(c.isalnum() for c in _chk):
+                        return False
+                    # Frequency-ordered noise check: same rule as _is_garbage Check 4.
+                    # A string of ≥7 chars that is exclusively the 10 most-common
+                    # English letters (etaoinshrd), all lowercase, is oracle noise.
+                    # Real user/db names of that length have at least one char outside
+                    # this set ('p' in "postgres", 'w' in "wordpress", etc.).
+                    _TOP10 = frozenset('etaoinshrd')
+                    if (len(_chk) >= 7
+                            and all(c.islower() for c in _chk)
+                            and all(c in _TOP10 for c in _chk)):
+                        return False
+                    return True
                 if len(_v) < 3:
                     return False
                 if not all(32 <= ord(c) <= 126 for c in _v):
@@ -131815,7 +131894,21 @@ class SafeModeVerifier:
                                 _blocked_votes += 1
                         both_identical = _blocked_votes >= 3
                     except Exception:
-                        both_identical = True  # safe default: assume BLOCKED on error
+                        # BUG-SAFEMODEVERIFIER-BLOCKED-ON-EXCEPTION FIX (HIGH): The previous
+                        # "safe default" of both_identical=True on any exception forces
+                        # OracleMode.BLOCKED, which tells callers there is NO usable oracle and
+                        # disables all boolean and timing techniques.  This is catastrophically
+                        # wrong for transient errors (network blip, timeout, DNS hiccup) — the
+                        # entire scan is aborted before any probe is attempted.
+                        # BLOCKED is the MOST restrictive mode (less restrictive: TIMING_ONLY <
+                        # DIFFERENTIAL < FULL).  On exception we cannot determine whether the
+                        # injected probe actually matches the clean probe — the safest mode is
+                        # TIMING_ONLY, which still allows timing-based detection while not
+                        # assuming the WAF fully blocks all signals (the BLOCKED interpretation).
+                        # TIMING_ONLY is the correct fallback: if the target truly is BLOCKED,
+                        # timing probes will all fail and the scan will report no findings
+                        # naturally, without aborting all techniques prematurely.
+                        both_identical = False  # TIMING_ONLY on exception, not BLOCKED
 
                     if both_identical:
                         oracle_mode = OracleMode.BLOCKED
