@@ -56033,9 +56033,12 @@ class Scanner:
                          "x-fd-int-roxy-purgeid","x-edge-ip","x-edge-location",
                          "report-to","nel","permissions-policy","timing-allow-origin",
                          "x-nf-request-id","x-vercel-id","fly-request-id",
-                         # FIX-HDR-SKIP-CONTENT-LENGTH: content-length removed from skip set.
-                         # A difference in content-length between true/false condition responses
-                         # IS a valid boolean detection signal (body size changed by SQL injection).
+                         # content-length MUST be in skip set: dynamic pages show ±N-byte
+                         # variation per-request (timestamps, tokens, session data) that is
+                         # indistinguishable from SQL injection signal. The body-length oracle
+                         # (which has proper percentage-gating) is the correct channel for
+                         # body-size-based boolean detection, not the header oracle.
+                         "content-length",
                          "content-type","server","connection",
                          "cache-control","strict-transport-security","transfer-encoding",
                          "vary","pragma","accept-ranges","alt-svc","via"}
@@ -58562,15 +58565,20 @@ class Scanner:
                         return True
                     if _bool_hdr_false is not None and _hv == _bool_hdr_false:
                         return False
-                    # BUG-7-NUMERIC-HDR-THRESHOLD FIX: For numeric headers (e.g. content-length),
-                    # dynamic page content causes ±N byte variation so exact equality fails.
-                    # Use midpoint threshold: closer to true_val → True, closer to false_val → False.
+                    # Numeric header midpoint comparison: only valid when calibration gap is large
+                    # relative to expected per-request variation. A gap < max(100, true*2%) means
+                    # natural page variation can flip the midpoint comparison on every probe.
                     try:
                         _hv_n = int(_hv)
                         _ht_n = int(_bool_hdr_true or "0")
                         _hf_n = int(_bool_hdr_false or "0")
-                        if _ht_n != _hf_n:
+                        _hdr_cal_gap = abs(_ht_n - _hf_n)
+                        _hdr_min_gap = max(100, int(max(_ht_n, _hf_n) * 0.02))
+                        if _ht_n != _hf_n and _hdr_cal_gap >= _hdr_min_gap:
                             return abs(_hv_n - _ht_n) < abs(_hv_n - _hf_n)
+                        elif _ht_n != _hf_n:
+                            # Gap too small to be reliable — treat as ambiguous
+                            return None
                     except (ValueError, TypeError):
                         pass
                     return _hv == _bool_hdr_true
@@ -59032,14 +59040,20 @@ class Scanner:
                         return True
                     if _bool_hdr_false is not None and _hv == _bool_hdr_false:
                         return False
-                    # BUG-7-NUMERIC-HDR-THRESHOLD FIX: numeric headers (e.g. content-length)
-                    # vary by ±N bytes; use midpoint threshold comparison to handle variation.
+                    # Numeric header midpoint comparison: only valid when calibration gap is large
+                    # relative to expected per-request variation. A gap < max(100, true*2%) means
+                    # natural page variation can flip the midpoint comparison on every probe.
                     try:
                         _hv_n = int(_hv)
                         _ht_n = int(_bool_hdr_true or "0")
                         _hf_n = int(_bool_hdr_false or "0")
-                        if _ht_n != _hf_n:
+                        _hdr_cal_gap = abs(_ht_n - _hf_n)
+                        _hdr_min_gap = max(100, int(max(_ht_n, _hf_n) * 0.02))
+                        if _ht_n != _hf_n and _hdr_cal_gap >= _hdr_min_gap:
                             return abs(_hv_n - _ht_n) < abs(_hv_n - _hf_n)
+                        elif _ht_n != _hf_n:
+                            # Gap too small to be reliable — treat as ambiguous
+                            return None
                     except (ValueError, TypeError):
                         pass
                     return _hv == _bool_hdr_true
@@ -59158,7 +59172,10 @@ class Scanner:
                           "x-azure-ref","x-msedge-ref","x-fd-int-roxy-purgeid",
                           "x-edge-ip","x-edge-location","x-edge-connect-origin-mex-latency",
                           "report-to","nel","permissions-policy","timing-allow-origin",
-                          "x-nf-request-id","x-vercel-id","fly-request-id"}
+                          "x-nf-request-id","x-vercel-id","fly-request-id",
+                          # content-length is per-request dynamic noise on large pages;
+                          # body-size boolean oracle (with % gating) is the correct channel.
+                          "content-length"}
             _h1 = {(k or "").lower():v for k,v in (getattr(fp_true,"headers",{}) or {}).items()}
             _h2 = {(k or "").lower():v for k,v in (getattr(fp_false,"headers",{}) or {}).items()}
             for hdr in set(list(_h1.keys()) + list(_h2.keys())):
@@ -62674,16 +62691,23 @@ class Scanner:
         _use_bool_body_oracle = False
 
         if _margin < 80:
-            if _body_gap >= 50:
+            # Require body gap to be meaningful relative to page size.
+            # 50B absolute was far too low: dynamic pages show ±200-500B variation per-request
+            # (timestamps, session tokens, counters). Require ≥1% of page size AND ≥200B
+            # absolute so noise on large pages cannot activate the body-size oracle.
+            _page_size = max(_body_calib_t, _body_calib_f, 1)
+            _min_gap = max(200, int(_page_size * 0.01))
+            if _body_gap >= _min_gap:
                 _use_bool_body_oracle = True
                 _bool_threshold = (_body_calib_t + _body_calib_f) / 2
                 _bool_true_larger = _body_calib_t > _body_calib_f
                 LOG.info(
                     "[Direct] Timing margin too low (%dms) — boolean body-diff oracle viable: "
-                    "gap=%dB (true=%dB false=%dB thresh=%.0fB) — switching to body-size extraction",
-                    _margin, _body_gap, _body_calib_t, _body_calib_f, _bool_threshold)
+                    "gap=%dB (true=%dB false=%dB thresh=%.0fB min_required=%dB) — switching to body-size extraction",
+                    _margin, _body_gap, _body_calib_t, _body_calib_f, _bool_threshold, _min_gap)
             else:
-                LOG.info("[Direct] Margin too low  skipping")
+                LOG.info("[Direct] Margin too low and body gap too small (%dB < min %dB on %dB page) — skipping",
+                         _body_gap, _min_gap, _page_size)
                 return False
 
         if not _use_bool_body_oracle:
@@ -117047,8 +117071,18 @@ class TechniqueCascadeEngine:
                             # median=698ms >> 2×320ms=640ms), the delay is CDN overhead, not sleep.
                             # Seen as: insurance_sector probes 698→1407ms when expected ~300ms.
                             _mp_cv_noisy    = _mp_cv > 0.40
-                            _mp_median_high = (_mp_median > time_threshold * 2.0 and
-                                               _mp_median > 0)
+                            # CDN-cold upper bound: for small sleeps, CDN-cold origin responses
+                            # (400-600ms) can marginally exceed the detection threshold and trigger
+                            # 5/5 multi-probe confirmation even with zero injection signal.
+                            # A real pg_sleep(N) probe lands near baseline + N*1000ms; probes
+                            # significantly above that are CDN-cold network overhead, not injection.
+                            # Reject if median > threshold + 0.5 × (threshold − baseline): this
+                            # tightens the bound for small sleeps while leaving large-sleep
+                            # detection (median ≈ threshold) unaffected.
+                            _mp_cdncold_limit = time_threshold + max(0.0, time_threshold - _mean_t) * 0.5
+                            _mp_median_high = (_mp_median > 0 and (
+                                _mp_median > time_threshold * 2.0 or
+                                _mp_median > _mp_cdncold_limit))
                             _mp_too_noisy   = _mp_cv_noisy or _mp_median_high
                             if _mp_cv_noisy:
                                 print(f"    [T-multi] HIGH VARIANCE (CV={_mp_cv:.0%}, "
@@ -117056,8 +117090,9 @@ class TechniqueCascadeEngine:
                                       "CDN latency spikes, not injection  rejected", flush=True)
                             elif _mp_median_high:
                                 print(f"    [T-multi] PROBE TIMES TOO HIGH "
-                                      f"(median={_mp_median:.0f}ms > "
-                                      f"2×threshold={time_threshold*2.0:.0f}ms) — "
+                                      f"(median={_mp_median:.0f}ms > CDN-cold limit "
+                                      f"{_mp_cdncold_limit:.0f}ms "
+                                      f"[thresh={time_threshold:.0f}ms base={_mean_t:.0f}ms]) — "
                                       "CDN overhead, not injection  rejected", flush=True)
                             if _sleep_count >= _sleep_needed and not _mp_too_noisy:
                                 _t_conf = (0.90 if (_conf_abs or _conf_diff) else 0.78)
