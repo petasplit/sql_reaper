@@ -55875,14 +55875,37 @@ class Scanner:
                 # Require different status codes for body-based oracle when both are error codes.
                 _same_error_status = (_ts_safe == _fs_safe and _ts_safe in {400, 403, 406, 412, 429, 430, 500, 503})
                 if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and (not _both_waf_blocked or _bl_pct >= 0.20) and not _same_error_status:
-                    _boolean_oracle = True
-                    _bool_true_len = len(_true_body)
-                    _bool_false_len = len(_false_body)
-                    if fp_true and fp_false:
-                        _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
-                        _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
-                    LOG.info("[Inference]  BOOLEAN ORACLE detected! body %dB vs %dB (%.1f%%, attempt %d)", 
-                             len(_true_body), len(_false_body), _bl_pct*100, _bool_oracle_attempts)
+                    # BUG-BOOL-BODY-STABILITY FIX: The MD5 branch sends a stability probe before
+                    # accepting the hash as an oracle (line ~55901). The body-length branch had no
+                    # equivalent check — a single calibration pair observation was enough to set
+                    # _boolean_oracle = True. On dynamic pages where body length fluctuates between
+                    # requests (A/B-test widgets, session-specific content, timestamps), the initial
+                    # pair could show a 10%+ size difference purely by chance (e.g. ad rotator
+                    # serving different content on consecutive requests), causing every subsequent
+                    # extraction probe to be evaluated against a random noise baseline.
+                    # Fix: send one additional pair and require the same-direction size difference
+                    # at ≥5% magnitude. If the stability pair disagrees, fall through to retry.
+                    _bl_stab_fp_t, _ = await _send_payload(_cal_true_cond)
+                    await asyncio.sleep(_delay * 0.2)
+                    _bl_stab_fp_f, _ = await _send_payload(_cal_false_cond)
+                    _bl_stab_true_b = _safe_decode_body(_bl_stab_fp_t, encoding="utf-8", errors="replace", func_name="extraction") if (_bl_stab_fp_t and _bl_stab_fp_t.body) else ""
+                    _bl_stab_false_b = _safe_decode_body(_bl_stab_fp_f, encoding="utf-8", errors="replace", func_name="extraction") if (_bl_stab_fp_f and _bl_stab_fp_f.body) else ""
+                    _bl_stab_diff = abs(len(_bl_stab_true_b) - len(_bl_stab_false_b))
+                    _bl_stab_max = max(len(_bl_stab_true_b), len(_bl_stab_false_b), 1)
+                    _bl_stab_pct = _bl_stab_diff / _bl_stab_max
+                    _bl_stab_same_dir = (len(_bl_stab_true_b) > len(_bl_stab_false_b)) == (len(_true_body) > len(_false_body))
+                    if _bl_stab_pct >= 0.05 and _bl_stab_same_dir:
+                        _boolean_oracle = True
+                        _bool_true_len = len(_true_body)
+                        _bool_false_len = len(_false_body)
+                        if fp_true and fp_false:
+                            _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
+                            _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
+                        LOG.info("[Inference]  BOOLEAN ORACLE detected! body %dB vs %dB (%.1f%%, stable=%.1f%%, attempt %d)",
+                                 len(_true_body), len(_false_body), _bl_pct*100, _bl_stab_pct*100, _bool_oracle_attempts)
+                    else:
+                        LOG.info("[Inference] Body length oracle UNSTABLE (%.1f%% then %.1f%%, same_dir=%s) — dynamic page noise",
+                                 _bl_pct*100, _bl_stab_pct*100, _bl_stab_same_dir)
                 else:
                     LOG.info("[Inference] Body length differs but too small (%dB = %.1f%% on %dB page) "
                              " dynamic noise, not oracle",
@@ -100097,18 +100120,27 @@ class WAFBlockDiscriminator:
     @classmethod
     def both_waf_blocked(cls, fp_a: "ResponseFingerprint",
                          fp_b: "ResponseFingerprint") -> bool:
-        """Return True when BOTH probes carry the same WAF-block status code.
+        """Return True when BOTH probes are WAF-blocked.
 
         Used in pairwise checks (detect_boolean) where we want to skip only
         when BOTH sides are uniformly blocked — NOT when only one side is
         blocked, because asymmetric blocking (WAF blocks TRUE payload but
         passes FALSE payload) is a genuine injection signal.
+
+        BUG-BWAF-SAMECODE FIX: The original `sc_a == sc_b` requirement caused
+        WAF blocks with different status codes (e.g. TRUE→403, FALSE→406) to
+        return False even though BOTH probes were WAF block pages. This allowed
+        the SimHash delta between two different WAF error pages to trigger a
+        false-positive boolean detection. The asymmetric-blocking concern is
+        already handled by the prerequisite that BOTH codes must be in
+        WAF_BLOCK_CODES — if one probe returns 200 (not in WAF_BLOCK_CODES),
+        both_waf_blocked correctly returns False, preserving the injection signal.
         """
         if fp_a is None or fp_b is None:
             return False
         sc_a = _get_safe_status_code(fp_a)
         sc_b = _get_safe_status_code(fp_b)
-        return sc_a in cls.WAF_BLOCK_CODES and sc_b in cls.WAF_BLOCK_CODES and sc_a == sc_b
+        return sc_a in cls.WAF_BLOCK_CODES and sc_b in cls.WAF_BLOCK_CODES
 
     @classmethod
     def single_waf_blocked(cls, fp: "ResponseFingerprint") -> bool:
