@@ -55843,6 +55843,11 @@ class Scanner:
             _fs_safe = _get_safe_status_code(fp_false)
             _both_waf_blocked = (_ts_safe in _infer_waf_4xx and _fs_safe in _infer_waf_4xx)
 
+            # BUG-SAME-ERROR-STATUS-NAMEERROR FIX: initialize before if-elif-else chain;
+            # _same_error_status is set in the elif branch but used in the else branch,
+            # causing NameError on first iteration when status codes and body lengths match.
+            _same_error_status = False
+
             # FIX-INFER-STATUS-BOTH-WAF: skip status oracle when BOTH probes return
             # a WAF status code (e.g. true=400 and false=403) — different WAF codes
             # don't prove SQL discrimination; they just mean the WAF responded twice.
@@ -139977,7 +139982,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             _ebf_mode[0]           = True
             _ebf_payload_fn_ref[0] = _make_cached_ebf_payload()
             _ebf_tc_ref[0]         = _ebf_tc_cached
-            _ebf_nofunc_ref        = [_ebf_nofunc_cached]
+            _ebf_nofunc_ref[0]     = _ebf_nofunc_cached  # BUG-NOFUNC-REF-REASSIGN FIX: use index-assign to match siblings; full reassignment breaks any existing reference to the list object
             LOG.info(f"[TBExtract] EBF restored: wrapper={_ebf_wrapper_cached!r} tag={_ebf_tag_cached!r} nofunc={_ebf_nofunc_cached}")
     if not _skip_calibration:
         # Full calibration block 
@@ -146270,7 +146275,8 @@ class ExtractionOrchestrator:
         # blocked.  For timing techniques (and exotic techniques with timing payloads,
         # per BUG-R7-A FIX above), skip ALL custom engines (MSE, Bitwise, ZKBoolean)
         # and use only the detection template.
-        _timing_techniques = ("T", "TH", "HQ")
+        # BUG-TIMING-TECH-DUPLICATE FIX: removed dead duplicate _timing_techniques assignment
+        # (_timing_techniques already defined at line 145572 and is not referenced after this point).
         _use_detection_template_only = _effective_timing_technique  # BUG-R7-A FIX: covers NV/WB/EX/HY too
         if _use_detection_template_only:
             LOG.info("[Orchestrator] Technique %s: using detection template only "
