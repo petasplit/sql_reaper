@@ -116185,21 +116185,39 @@ class TechniqueCascadeEngine:
                 if _use_reflection_norm
                 else ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b"")
             sim = SimHasher.body_similarity(norm_base, norm_probe)
-            anom = 1.0 - self.anomaly.score(fp)
-            # Adaptive combined: when anomaly detector is uncalibrated (WAF pages),
-            # anom score is uninformative (near 0) and drags combined below any
-            # useful threshold. Use sim directly when anom is unreliable.
-            if anom < 0.10:
-                combined = sim  # anomaly detector broken, use raw similarity
+            anom_raw = self.anomaly.score(fp) if self.anomaly is not None else 0.0
+            anom = 1.0 - anom_raw
+            # FIX-BOOL-DIFFMODE: When norm_base is empty (differential / stub baseline),
+            # SimHasher.body_similarity(b"", anything) ≈ 0.500 always (fingerprint(b"")=0
+            # produces a degenerate similarity midpoint).  In this mode sim is meaningless
+            # as a baseline comparison — the real comparison is Wasserstein true-vs-false
+            # which runs below.  Force combined=0.70 (below threshold) so the boolean
+            # oracle correctly defers to Wasserstein, but mark the mode clearly.
+            _norm_base_empty = (norm_base == b"")
+            # FIX-ANOM-UNCALIB: When anomaly scorer is uncalibrated, score()=0.0 always,
+            # so anom=1.0 (max anomaly) regardless of the actual response content.
+            # The original guard (if anom < 0.10) only catches CALIBRATED detectors that
+            # found the response very normal; it does NOT catch the uncalibrated case where
+            # anom=1.0 is garbage.  Fix: treat anom as unreliable when the raw score is
+            # exactly 0.0 (uncalibrated returns 0 for everything) OR when anom > 0.90
+            # (score near 0 — either uncalibrated or genuinely highly anomalous, which is
+            # meaningless without calibration context).
+            _anom_unreliable = (anom_raw == 0.0 or anom < 0.10)
+            if _norm_base_empty:
+                # Differential mode: sim=0.500 is meaningless; Wasserstein handles comparison
+                combined = 0.70  # constant below-threshold value; Wasserstein decides
+            elif _anom_unreliable:
+                combined = sim  # anomaly detector unreliable, use raw similarity only
             else:
                 combined = (sim * 0.6 + anom * 0.4)
             _b_pass = combined > (1.0 - bool_thresh)
             # BUG-DUPLICATE-BPRINT FIX: snapshot counter so concurrent
             # asyncio tasks read their own value, not the shared cell.
             _b_req_snap = self._total_reqs
+            _mode_tag = "(diff)" if _norm_base_empty else ""
             print(f"    [B-bool] [{dbms}] {param!r} req#{_b_req_snap} "
                   f"sim={sim:.3f} combined={combined:.3f} thresh={1.0-bool_thresh:.3f} "
-                  f"{' DIFF' if not _b_pass else ' same'}")
+                  f"{_mode_tag}{' DIFF' if not _b_pass else ' same'}")
             # Cross-header correlation: record diff signature
             if not _b_pass:
                 _gate_ref = getattr(self, '_gate', None)
@@ -116369,14 +116387,35 @@ class TechniqueCascadeEngine:
                                     # dist ≈ 0.666 are above 0.315 → floor NOT established.
                                     if _wass_dist < _wass_min * 0.90:
                                         # Clearly below threshold — genuine page noise, store floor
-                                        # Store/update noise floor as window mean (high-dist noise)
                                         _wdh[_wass_noise_floor_key] = sum(_wdh_p) / len(_wdh_p)
                                     else:
-                                        LOG.debug(
-                                            "[Wasserstein] dist=%.4f is within 10%% of threshold %.3f "
-                                            "(dist ≥ _wass_min*0.90=%.3f) — NOT establishing noise "
-                                            "floor (may be injection signal with miscalibrated threshold)",
-                                            _wass_dist, _wass_min, _wass_min * 0.90)
+                                        # dist >= _wass_min*0.90 — may be injection signal.
+                                        # FIX-CDN-UNIFORM-HIGH: When ALL readings are above threshold
+                                        # AND none are near-zero (CDN uniform-high-variance pattern),
+                                        # the high consistent dist is page noise, not injection.
+                                        # Establish the noise floor here early (before 5-probe window
+                                        # fills for _wass_all_high_consistent) and set persistent CDN
+                                        # block flag so subsequent probes are suppressed even when
+                                        # the window range temporarily expands above 0.02.
+                                        _fl_above = sum(1 for d in _wdh_p if d > _wass_min)
+                                        _fl_below = sum(1 for d in _wdh_p if d < 0.15)
+                                        if (_fl_below == 0 and _fl_above == len(_wdh_p)
+                                                and len(_wdh_p) >= 3):
+                                            # All consistent high readings, no near-zero — CDN pattern
+                                            _wdh[_wass_noise_floor_key] = sum(_wdh_p) / len(_wdh_p)
+                                            _wdh[f"_cdnblock_{param}"] = True
+                                            LOG.debug(
+                                                "[Wasserstein] CDN uniform-high pattern: dist=%.4f, "
+                                                "all %d window readings above %.3f, none below 0.15 "
+                                                "— establishing high-variance floor=%.4f, CDN-block set",
+                                                _wass_dist, len(_wdh_p), _wass_min,
+                                                sum(_wdh_p) / len(_wdh_p))
+                                        else:
+                                            LOG.debug(
+                                                "[Wasserstein] dist=%.4f is within 10%% of threshold %.3f "
+                                                "(dist ≥ _wass_min*0.90=%.3f) — NOT establishing noise "
+                                                "floor (may be injection signal with miscalibrated threshold)",
+                                                _wass_dist, _wass_min, _wass_min * 0.90)
                                     try: self._wass_dist_hist = _wdh
                                     except Exception: pass
                                 try: self._wass_dist_hist = _wdh
@@ -116422,30 +116461,37 @@ class TechniqueCascadeEngine:
                                     and _wdh_p_above_min < len(_wdh_p) - 1
                                     and _wass_dist > _wass_min
                                 )
-                                # FIX-WASS-ALL-HIGH-CONSISTENT: When ALL probes in the 5-probe
-                                # window are above the detection threshold AND consistent (range<0.02)
-                                # AND no readings are below 0.15, AND injection was never previously
-                                # confirmed for this param — the page is consistently producing high
-                                # Wasserstein distances regardless of SQL condition.  This is the
-                                # canonical CDN-reflected-header pattern seen in the log: every probe
-                                # pair with a different X-Forwarded-For value produces dist≈0.67
-                                # because the dynamic backend returns a different page body for each
-                                # distinct header value, not because SQL controls the content.
+                                # FIX-WASS-ALL-HIGH-CONSISTENT v2: When ALL probes in the 5-probe
+                                # window are above the detection threshold AND no readings are
+                                # near-zero (below 0.15) AND even the minimum reading is >= 75%
+                                # of _wass_min, AND injection was never previously confirmed for
+                                # this param — the page is uniformly producing high Wasserstein
+                                # distances regardless of SQL condition.  This is the canonical
+                                # CDN-reflected-header pattern: every probe pair with a different
+                                # X-Forwarded-For value produces dist≈0.67 because the dynamic
+                                # backend returns a different page body for each distinct header
+                                # value, not because SQL controls the content.
                                 #
-                                # The existing guards missed this case because:
-                                #   - stable_page_outlier requires _wdh_p_below_stable >= len-1 (fails
-                                #     when there are NO below-stable readings at all)
-                                #   - bimodal_outlier requires at least 1 below-stable reading
-                                #   - noise_range suppression requires dist < _wass_min*0.90 (fails
-                                #     because high-dist consistent window exceeds threshold)
-                                # This guard closes the gap: require ALL readings above threshold,
-                                # NONE below 0.15, to identify uniformly-high-variance page noise.
+                                # ROOT CAUSE of prior false positives: the original guard required
+                                # _wass_noise_range (range < 0.02, i.e. all readings consistent).
+                                # After a window of [0.6663, 0.6727, 0.6716, 0.6758] (range=0.0095
+                                # < 0.02 → CONSISTENT → guard fires), the NEXT probe at dist=0.6952
+                                # breaks the range to 0.0289 > 0.02 → _wass_noise_range=False →
+                                # _wass_all_high_consistent=False → false positive fires.
+                                # Fix: remove the _wass_noise_range requirement.  If ALL 5 probes
+                                # are above threshold and none below 0.15, the page is high-variance
+                                # regardless of whether the probes are tightly grouped or spread.
+                                # A genuine SQL injection on a high-variance page would require the
+                                # SQL condition to push dist significantly higher than the existing
+                                # high baseline — which does NOT happen for CDN reflected headers.
+                                # Require full 5-probe window to reduce false suppression on early
+                                # probes (first 1-4 probes are handled by stable_page_outlier).
                                 _wass_all_high_consistent = (
                                     not _wass_param_confirmed
-                                    and len(_wdh_p) >= 3
-                                    and _wass_noise_range
+                                    and len(_wdh_p) >= 5
                                     and _wdh_p_below_stable == 0
                                     and _wdh_p_above_min == len(_wdh_p)
+                                    and min(_wdh_p) > _wass_min * 0.75
                                     and _wass_dist > _wass_min
                                 )
                                 # _wass_noise_range suppression also gated on no prior confirmation
@@ -116481,8 +116527,20 @@ class TechniqueCascadeEngine:
                                     and 200 <= _wass_true_st < 300
                                     and _wass_false_st in _wass_asym_statuses
                                 )
+                                # FIX-CDN-UNIFORM-HIGH: persistent CDN-block flag set when
+                                # _wass_all_high_consistent fires or when CDN uniform-high
+                                # pattern detected in noise floor section (3+ consistent high
+                                # readings before full 5-probe window fills).
+                                # This flag persists across window range fluctuations so CDN
+                                # targets don't produce false positives when window temporarily
+                                # breaks the all-high-consistent pattern.
+                                _wass_cdnblock = (
+                                    not _wass_param_confirmed
+                                    and _wdh.get(f"_cdnblock_{param}", False)
+                                )
                                 _wass_suppressed = (
-                                    (_wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90)
+                                    _wass_cdnblock
+                                    or (_wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90)
                                     or _wass_near_noise_floor
                                     or _wass_stable_page_outlier
                                     or _wass_bimodal_outlier
@@ -116490,10 +116548,26 @@ class TechniqueCascadeEngine:
                                     or _wass_all_high_consistent
                                 )
                                 if _wass_all_high_consistent:
+                                    # FIX-WASS-ALL-HIGH-CONSISTENT v2: store persistent CDN-block
+                                    # flag so future probes are suppressed even after window range
+                                    # expands (which was the root cause of the prior false positives).
+                                    try:
+                                        _wdh[f"_cdnblock_{param}"] = True
+                                        self._wass_dist_hist = _wdh
+                                    except Exception:
+                                        pass
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} ALL-HIGH-CONSISTENT "
                                           f"({_wdh_p_above_min}/{len(_wdh_p)} probes above threshold={_wass_min:.2f}, "
-                                          f"range={max(_wdh_p)-min(_wdh_p):.4f} < 0.02, none below 0.15) "
-                                          f"-- uniformly-high page variance, NOT injection", flush=True)
+                                          f"min={min(_wdh_p):.4f} > {_wass_min*0.75:.3f}, none below 0.15) "
+                                          f"-- uniformly-high page variance (CDN/dynamic), NOT injection",
+                                          flush=True)
+                                elif _wass_cdnblock:
+                                    # Persistent CDN-block flag was set by a prior probe's
+                                    # all-high-consistent detection. Suppress even though the
+                                    # current window range may have temporarily expanded.
+                                    LOG.debug("[Wasserstein] dist=%.4f CDN-BLOCK persistent flag "
+                                              "(set by prior all-high-consistent window) — suppressed",
+                                              _wass_dist)
                                 elif _wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90:
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} CONSISTENT "
                                           f"(range={max(_wdh_p)-min(_wdh_p):.4f} < 0.02 over "
