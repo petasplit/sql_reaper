@@ -51164,7 +51164,7 @@ class _HTTPHeaderInjectorV1:
                         #   on CDN-cached baseline targets where the true payload diverges from cache
                         #   but the false payload serves the cached high-sim response). Mirrors the
                         #   reversed-polarity oracle in _send_and_check (line 119658) which BH lacked.
-                        _bh_rev = (fs > 1.0 and (-delta) > 0.30)
+                        _bh_rev = (fs > 0.72 and (-delta) > 0.30)
                         _bh_signal = (ts > 0.75 and delta > 0.30) or _bh_rev
                         print(f"    [BH-bool] [{_hb_scan_dbms}] header={header_name!r} "
                               f"ts={ts:.3f} fs={fs:.3f} delta={delta:.3f} "
@@ -52884,13 +52884,6 @@ class Scanner:
                                                        url=scan_url, method=scan_method)
                                 continue
                             _v1_extraction_done = True
-                            # BUG5-FIX: Set _EXTRACTION_DONE FIRST (claims the slot
-                            # atomically inside the lock) BEFORE setting _EXTRACTION_STARTED.
-                            # The V25 path uses the same ordering. Any coroutine that acquires
-                            # the lock between these two writes sees DONE=True and exits early.
-                            # Old order (STARTED before DONE) left a window where a second
-                            # coroutine saw STARTED=True but DONE=False and bypassed the guard.
-                            _EXTRACTION_DONE[0] = True       # BUG5-FIX: claim slot FIRST
                             _EXTRACTION_STARTED[0] = True
                             _EXTRACTION_STARTED[1] = f"{param}@{dbms}@V1Scanner"
                         LOG.info(f"[V1Scanner] Starting extraction for {param!r} [{dbms}] "
@@ -52924,10 +52917,10 @@ class Scanner:
                         # blocked by the scan-stop gate in _send_injected → calibrate() receives dead
                         # 0ms/empty-body responses → oracle calibration silently fails → enum._error_oracle=None
                         # → all subsequent extraction queries return "" → tables/columns are never enumerated.
-                        # Fix: use _start_extraction_safely() before calibration so the gate allows probes
-                        # through. BUG-R5-CALIBRATION FIX: Use atomic guard to prevent parallel extraction.
-                        if not _EXTRACTION_ACTIVE[0]:
-                            await _start_extraction_safely()
+                        # We already claimed the extraction slot (STARTED=True under lock above).
+                        # Set ACTIVE directly so the scan-stop gate allows extraction probes through.
+                        with _EXTRACTION_LOCK_GUARD:
+                            _EXTRACTION_ACTIVE[0] = True
                         _v1_ceo_oracle_set = False
                         try:
                             _v1_ceo = ConditionalErrorOracle(
@@ -63694,7 +63687,6 @@ class Scanner:
                     return
                 _EXTRACTION_STARTED[0] = True
                 _EXTRACTION_STARTED[1] = ext_key
-                _EXTRACTION_DONE[0] = True  # mark claimed immediately (before actual run)
                 # CRITICAL BUG FIX: Set _EXTRACTION_ACTIVE=True BEFORE calling _run_enumeration
                 _EXTRACTION_ACTIVE[0] = True
                 print(f"[*] Global extraction lock acquired for {ext_key!r} — "
@@ -63707,6 +63699,7 @@ class Scanner:
                         self._extracting_params.discard(ext_key)
                     # CRITICAL BUG FIX: Reset flag in finally
                     _EXTRACTION_ACTIVE[0] = False
+                    _EXTRACTION_DONE[0] = True
                     print(f"[*] Extraction completed for {ext_key!r} — lock released.",
                           flush=True)
         except asyncio.CancelledError:
@@ -68819,13 +68812,13 @@ class ScannerV4(Scanner):
                 else:
                     _EXTRACTION_STARTED[0] = True
                     _EXTRACTION_STARTED[1] = f"{param}@{dbms}@ScannerV4"
-                    _EXTRACTION_DONE[0] = True
                     # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
                     _EXTRACTION_ACTIVE[0] = True
                     try:
                         await self._run_enumeration(enum)
                     finally:
                         _EXTRACTION_ACTIVE[0] = False
+                        _EXTRACTION_DONE[0] = True
 
             if cfg.repl:
                 # BUG-5-REPL FIX (Issue 5): REPL could re-enter extraction without the lock.
@@ -71195,13 +71188,13 @@ class ScannerV5(ScannerV4):
                     _param_a = getattr(getattr(enum, "result", None), "param", "?")
                     _EXTRACTION_STARTED[0] = True
                     _EXTRACTION_STARTED[1] = f"{_param_a}@enumVN_A"
-                    _EXTRACTION_DONE[0] = True
                     # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
                     _EXTRACTION_ACTIVE[0] = True
                     try:
                         await self._run_enumeration(enum)
                     finally:
                         _EXTRACTION_ACTIVE[0] = False
+                        _EXTRACTION_DONE[0] = True
                 else:
                     _owner_a = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else "other"
                     LOG.info(f"[ScannerVN-A] Additional injection — extraction claimed by {_owner_a!r}, no parallel extraction")
@@ -83573,13 +83566,13 @@ class ScannerV8(ScannerV7):
                     _param_c4 = getattr(getattr(enum, 'result', None), 'param', '?')
                     _EXTRACTION_STARTED[0] = True
                     _EXTRACTION_STARTED[1] = f"{_param_c4}@enumC4"
-                    _EXTRACTION_DONE[0] = True
                     # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
                     _EXTRACTION_ACTIVE[0] = True
                     try:
                         await self._run_enumeration(enum)
                     finally:
                         _EXTRACTION_ACTIVE[0] = False
+                        _EXTRACTION_DONE[0] = True
                 else:
                     _owner_c4 = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else 'other'
                     LOG.info(f'[ScannerVN-C4] Extraction claimed by {_owner_c4!r}, no parallel extraction')
@@ -86280,13 +86273,13 @@ class ScannerV9(ScannerV8):
                     _param_c3 = getattr(getattr(enum, 'result', None), 'param', '?')
                     _EXTRACTION_STARTED[0] = True
                     _EXTRACTION_STARTED[1] = f"{_param_c3}@enumC3"
-                    _EXTRACTION_DONE[0] = True
                     # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
                     _EXTRACTION_ACTIVE[0] = True
                     try:
                         await self._run_enumeration(enum)
                     finally:
                         _EXTRACTION_ACTIVE[0] = False
+                        _EXTRACTION_DONE[0] = True
                 else:
                     _owner_c3 = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else 'other'
                     LOG.info(f'[ScannerVN-C3] Extraction claimed by {_owner_c3!r}, no parallel extraction')
@@ -92104,13 +92097,13 @@ class ScannerV10(ScannerV9):
                     _param_c2 = getattr(getattr(enum, 'result', None), 'param', '?')
                     _EXTRACTION_STARTED[0] = True
                     _EXTRACTION_STARTED[1] = f"{_param_c2}@enumC2"
-                    _EXTRACTION_DONE[0] = True
                     # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
                     _EXTRACTION_ACTIVE[0] = True
                     try:
                         await self._run_enumeration(enum)
                     finally:
                         _EXTRACTION_ACTIVE[0] = False
+                        _EXTRACTION_DONE[0] = True
                 else:
                     _owner_c2 = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else 'other'
                     LOG.info(f'[ScannerVN-C2] Extraction claimed by {_owner_c2!r}, no parallel extraction')
@@ -98302,13 +98295,13 @@ class ScannerV11(ScannerV10):
                     _param_c1 = getattr(getattr(enum, 'result', None), 'param', '?')
                     _EXTRACTION_STARTED[0] = True
                     _EXTRACTION_STARTED[1] = f"{_param_c1}@enumC1"
-                    _EXTRACTION_DONE[0] = True
                     # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
                     _EXTRACTION_ACTIVE[0] = True
                     try:
                         await self._run_enumeration(enum)
                     finally:
                         _EXTRACTION_ACTIVE[0] = False
+                        _EXTRACTION_DONE[0] = True
                 else:
                     _owner_c1 = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else 'other'
                     LOG.info(f'[ScannerVN-C1] Extraction claimed by {_owner_c1!r}, no parallel extraction')
@@ -98801,7 +98794,7 @@ class HTTPHeaderInjector:
                 # (X-Forwarded-For → "Your IP: VALUE", etc.) produce consistent body deltas
                 # when payload LENGTH or CONTENT differs between true and false, regardless
                 # of SQL execution. Fix: require 2/3 pairs all showing delta > 0.20.
-                if sim_t > 1.0 and delta > 0.20:
+                if sim_t > 0.72 and delta > 0.20:
                     _hdr_bool_confirmed = 1
                     for _hb_ci in range(2):
                         try:
@@ -98811,7 +98804,7 @@ class HTTPHeaderInjector:
                             _nf2 = ResponseNormaliser.normalise(_extract_body_safe(fp_f2)) if _validate_response(fp_f2, allow_empty=True) else b""
                             _st2 = SimHasher.body_similarity(norm_base, self._strip_payload(_nt2, true_sfx))
                             _sf2 = SimHasher.body_similarity(norm_base, self._strip_payload(_nf2, false_sfx))
-                            if abs(_st2 - _sf2) > 0.20 and _st2 > 1.0:
+                            if abs(_st2 - _sf2) > 0.20 and _st2 > 0.72:
                                 _hdr_bool_confirmed += 1
                         except Exception:
                             pass
@@ -99387,14 +99380,14 @@ class URLPathInjector:
                         # delta > 0.18. Path segments used as search terms or filters
                         # naturally produce different responses for different values
                         # without SQL injection. Fix: require 2/3 pairs to confirm.
-                        if sim_t > 1.0 and abs(sim_t - sim_f) > 0.18:
+                        if sim_t > 0.72 and abs(sim_t - sim_f) > 0.18:
                             _path_bool_ok = 1
                             try:
                                 fp_t2 = await self.engine.send(method, url_t, headers=headers)
                                 fp_f2 = await self.engine.send(method, url_f, headers=headers)
                                 _nt2 = ResponseNormaliser.normalise(_extract_body_safe(fp_t2)) if _validate_response(fp_t2, allow_empty=True) else b""
                                 _nf2 = ResponseNormaliser.normalise(_extract_body_safe(fp_f2)) if _validate_response(fp_f2, allow_empty=True) else b""
-                                if SimHasher.body_similarity(norm_b, _nt2) > 1.0 and abs(SimHasher.body_similarity(norm_b, _nt2) - SimHasher.body_similarity(norm_b, _nf2)) > 0.18:
+                                if SimHasher.body_similarity(norm_b, _nt2) > 0.72 and abs(SimHasher.body_similarity(norm_b, _nt2) - SimHasher.body_similarity(norm_b, _nf2)) > 0.18:
                                     _path_bool_ok += 1
                             except Exception:
                                 pass
@@ -120121,8 +120114,8 @@ class TechniqueCascadeEngine:
                 # BUG-CTXBOOL-REVERSED-POLARITY FIX: CDN-cached baseline causes
                 # reversed-polarity: TRUE bypasses WAF (real body, sim_t≈0.5),
                 # FALSE is WAF-blocked (empty, sim_f≈1.0). gap=-0.5 is missed.
-                _std_polarity = (sim_t > 1.0 and delta > bool_thresh)
-                _rev_polarity = (sim_f > 1.0 and (-delta) > bool_thresh)
+                _std_polarity = (sim_t > 0.72 and delta > bool_thresh)
+                _rev_polarity = (sim_f > 0.72 and (-delta) > bool_thresh)
                 _ctx_confirmed = _std_polarity or _rev_polarity
                 _rev_label = "  [reversed-polarity]" if (_rev_polarity and not _std_polarity) else ""
                 print(f"    [CTX-bool] {ctx_name}: sim_t={sim_t:.3f} sim_f={sim_f:.3f} "
@@ -122367,7 +122360,6 @@ class UniversalScanOrchestrator:
                         return result   # still record the confirmed finding, just skip extraction
                     _EXTRACTION_STARTED[0] = True
                     _EXTRACTION_STARTED[1] = f"{param}@{_confirmed_dbms}(standalone)"
-                    _EXTRACTION_DONE[0] = True  # claim ownership atomically
                 _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                 _SCAN_STOPPED[0] = True  # stop all remaining probe loops (after releasing lock)
                 print("[*] Injection confirmed  starting inline extraction...")
@@ -122375,15 +122367,9 @@ class UniversalScanOrchestrator:
                 # calibration. After _SCAN_STOPPED[0]=True above, all _send_injected
                 # probes are blocked. ConditionalErrorOracle.calibrate() needs HTTP probes
                 # → gets dead 0ms/empty responses → calibration fails → extraction degraded.
-                # BUG-R5-TCE-FIX (Req 5): Use _start_extraction_safely() for atomic claim.
-                # The lock is already held above for _EXTRACTION_STARTED, so use direct set
-                # here (we are the confirmed winner, the lock was just released above).
-                # BUG-REQ5-DONE-FIX: Also check _EXTRACTION_DONE[0] to prevent second
-                # extraction starting after the first extraction completes.
-                if not _EXTRACTION_ACTIVE[0] and not _EXTRACTION_DONE[0]:
-                    with _EXTRACTION_LOCK_GUARD:
-                        if not _EXTRACTION_ACTIVE[0] and not _EXTRACTION_DONE[0]:
-                            _EXTRACTION_ACTIVE[0] = True
+                # We already won the extraction lock above, so set ACTIVE directly.
+                with _EXTRACTION_LOCK_GUARD:
+                    _EXTRACTION_ACTIVE[0] = True
                 try:
                     _e_baseline = await asyncio.wait_for(build_baseline(
                         self.engine, self.config, method, url, data, data_fmt,
@@ -122692,7 +122678,6 @@ class UniversalScanOrchestrator:
                         # kills extraction before it starts.  Leave _EXTRACTION_ACTIVE as-is.
                         # _i_am_extraction_owner remains False → _extraction_first() returns immediately.
                     else:
-                        _EXTRACTION_DONE[0] = True
                         # BUG-CANCEL-DRAIN-FIX (v48): The primary scan task is often
                         # cancelled by _v14_cascade the moment the BG header scan fires
                         # _injection_confirmed.  The CancelledError is injected AT the
@@ -125183,19 +125168,11 @@ class ScannerV13(ScannerV12):
                             else:
                                 _EXTRACTION_STARTED[0] = True
                                 _EXTRACTION_STARTED[1] = f"{param}@{det.dbms or 'Generic'}@V13Scanner"
-                                _EXTRACTION_DONE[0] = True
                     if _v13_can_extract:
                         print(f"[*] Starting extraction for param={param!r}...", flush=True)
-                        # BUG-REQ5-V13-EXTRACTION-GUARD FIX (Req 5): Use _start_extraction_safely()
-                        # to atomically claim extraction. The lock was released above after setting
-                        # _EXTRACTION_STARTED; _start_extraction_safely() re-acquires it for
-                        # _EXTRACTION_ACTIVE with the same double-checked-locking guarantee.
-                        if not _EXTRACTION_ACTIVE[0]:
-                            await _start_extraction_safely()
-                        else:
-                            print("[!] [REQ5] Extraction already active — skipping "
-                                  f"parallel extraction for {param!r}", flush=True)
-                            continue
+                        # Set ACTIVE directly — we already claimed the slot (STARTED=True under lock).
+                        with _EXTRACTION_LOCK_GUARD:
+                            _EXTRACTION_ACTIVE[0] = True
                         try:
                             _imm_data = entry.get("data", data)
                             await asyncio.wait_for(
@@ -129999,7 +129976,7 @@ class ScannerV14(ScannerV13):
                         # FIX-REQ5 (V14 path): Block second extraction if V25 path already
                         # started extraction on another surface (or vice versa).  Only one
                         # extraction must ever run — never parallel extractions.
-                        if _EXTRACTION_DONE[0]:
+                        if _EXTRACTION_DONE[0] or _EXTRACTION_ACTIVE[0]:
                             print(f"[!] [REQ5/V14] Extraction SKIPPED for {_ext_param!r} — "
                                   "another surface already started extraction. "
                                   "Injection confirmed but suppressing parallel extraction.",
@@ -130007,7 +129984,6 @@ class ScannerV14(ScannerV13):
                             self._extracting_params.discard(_ext_key_v14)
                             _ext_guard_blocked = True
                             continue
-                        _EXTRACTION_DONE[0] = True
                         # BUG-R5-A FIX: Second extraction start site (V14 path) was missing
                         # the _SCAN_STOPPED flag and background-task cancellation that the
                         # first site (V25 path, line ~56352) correctly implements.  Without
@@ -142572,24 +142548,39 @@ class ScannerV15(ScannerV14):
                           "UNION false positive confirmed")
                 return
 
+            # BUG-FIX-CALLER-ACTIVE: When a caller (V13/V14/V25/_extraction_first) already
+            # holds the extraction lock and has set _EXTRACTION_ACTIVE[0]=True, attempting to
+            # re-acquire the same asyncio.Lock here causes an asyncio deadlock (asyncio.Lock is
+            # not reentrant). Bypass lock acquisition and the STARTED/DONE guard when the caller
+            # pre-set ACTIVE — the caller already owns the slot and is passing through
+            # _process_v11 specifically to run enumeration.
             # BUG-FIX-REQ5: module-level extraction lock (no parallel extraction).
-            _req5_lock_c0 = _get_extraction_lock()
-            async with _req5_lock_c0:
-                if not (_EXTRACTION_STARTED[0] or _EXTRACTION_DONE[0]):
-                    _param_c0 = getattr(getattr(enum, 'result', None), 'param', '?')
-                    _EXTRACTION_STARTED[0] = True
-                    _EXTRACTION_STARTED[1] = f"{_param_c0}@enumC0"
+            _c0_caller_owns_active = _EXTRACTION_ACTIVE[0]
+            if _c0_caller_owns_active:
+                # Caller holds the lock and owns the slot — run enumeration directly.
+                # Do NOT reset _EXTRACTION_ACTIVE here; the caller's finally block does that.
+                try:
+                    await self._run_enumeration(enum)
+                finally:
                     _EXTRACTION_DONE[0] = True
-                    # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
-                    _EXTRACTION_ACTIVE[0] = True
-                    try:
-                        await self._run_enumeration(enum)
-                    finally:
-                        _EXTRACTION_ACTIVE[0] = False
-                else:
-                    _owner_c0 = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else 'other'
-                    LOG.info(f'[ScannerVN-C0] Extraction claimed by {_owner_c0!r}, no parallel extraction')
-                    print(f'[*] Injection found — extraction running ({_owner_c0}). Finding recorded.', flush=True)
+            else:
+                _req5_lock_c0 = _get_extraction_lock()
+                async with _req5_lock_c0:
+                    if not (_EXTRACTION_STARTED[0] or _EXTRACTION_DONE[0]):
+                        _param_c0 = getattr(getattr(enum, 'result', None), 'param', '?')
+                        _EXTRACTION_STARTED[0] = True
+                        _EXTRACTION_STARTED[1] = f"{_param_c0}@enumC0"
+                        # CRITICAL FIX (v36): Set _EXTRACTION_ACTIVE=True BEFORE _run_enumeration
+                        _EXTRACTION_ACTIVE[0] = True
+                        try:
+                            await self._run_enumeration(enum)
+                        finally:
+                            _EXTRACTION_ACTIVE[0] = False
+                            _EXTRACTION_DONE[0] = True
+                    else:
+                        _owner_c0 = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else 'other'
+                        LOG.info(f'[ScannerVN-C0] Extraction claimed by {_owner_c0!r}, no parallel extraction')
+                        print(f'[*] Injection found — extraction running ({_owner_c0}). Finding recorded.', flush=True)
 
             # v15: UNION dump with prioritised columns + data classification
             if cfg.dump and result.technique == "U" and result.union_columns > 0:
@@ -146906,10 +146897,23 @@ class ExtractionOrchestrator:
             # attempt via the sleep-calibration path.
             LOG.info("[Orchestrator] Falling back to _time_based_extract for %s", technique)
             try:
-                _tbe_result = await _time_based_extract(
-                    self.engine, self.config, self.result, sql_query,
-                    self.method, self.url, self.data, self.data_fmt,
-                    self.original, self.tamper_chain, dbms, self.baseline)
+                # BUG-TBE-ACTIVE-SKIP FIX: _time_based_extract() early-returns "" when
+                # _EXTRACTION_ACTIVE[0] is True, treating it as "another surface active".
+                # But the orchestrator set ACTIVE=True itself (it owns the slot) before
+                # calling _run_best_engine — so the early-return kills the fallback path.
+                # Fix: when ACTIVE is already True (we own it), call _time_based_extract_inner
+                # directly, bypassing the outer lock wrapper entirely (the lock is either
+                # already held by V25's _extraction_first, or owned implicitly by V13/V14).
+                if _EXTRACTION_ACTIVE[0]:
+                    _tbe_result = await _time_based_extract_inner(
+                        self.engine, self.config, self.result, sql_query,
+                        self.method, self.url, self.data, self.data_fmt,
+                        self.original, self.tamper_chain, dbms, self.baseline)
+                else:
+                    _tbe_result = await _time_based_extract(
+                        self.engine, self.config, self.result, sql_query,
+                        self.method, self.url, self.data, self.data_fmt,
+                        self.original, self.tamper_chain, dbms, self.baseline)
                 if _tbe_result:
                     LOG.info("[Orchestrator] _time_based_extract fallback succeeded: %s",
                              _tbe_result[:40])
