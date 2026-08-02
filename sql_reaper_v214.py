@@ -51006,9 +51006,11 @@ class _HTTPHeaderInjectorV1:
             # delta ≈ 0 (WAF treats true and false identically).
             # When _hb_waf_consec ≥ 60, break the payload loop for this DBMS.
             _hb_waf_consec = 0
+            _hb_nodiff_consec = 0
             for _hb_scan_dbms in _hb_list:
                 if _SCAN_STOPPED[0]: break  # BUG-R4a FIX: stop DBMS loop when injection confirmed
                 _hb_waf_consec = 0  # reset per-DBMS (WAF behaviour may differ by DBMS payload syntax)
+                _hb_nodiff_consec = 0
                 # BUG-R2-HDR FIX: was get_dbms_payloads(dbms,"Boolean",...) — only Boolean
                 # category, violating Req 2 (all 10 categories must be tested for every
                 # technique surface). Replace with _get_cascade_payloads('BH') which merges
@@ -51116,9 +51118,18 @@ class _HTTPHeaderInjectorV1:
                         _ff_st = getattr(ff, 'status_code', 0) if ff else 0
                         _bh_waf = (_tf_st in (400, 403, 429) and _ff_st in (400, 403, 429)
                                    and ts < 0.50 and abs(delta) < 0.10)
+                        # BUG-BH-REVERSED-POLARITY FIX + BUG-BH-NODIFF-INFINITE-RUN FIX (1/2):
+                        # Compute reversed-polarity flag before printing/routing.
+                        # Standard polarity: ts > 0.75 and delta > 0.30 (injection inflates similarity)
+                        # Reversed polarity: fs > 0.72 and (-delta) > 0.30 (injection deflates similarity
+                        #   on CDN-cached baseline targets where the true payload diverges from cache
+                        #   but the false payload serves the cached high-sim response). Mirrors the
+                        #   reversed-polarity oracle in _send_and_check (line 119658) which BH lacked.
+                        _bh_rev = (fs > 0.72 and (-delta) > 0.30)
+                        _bh_signal = (ts > 0.75 and delta > 0.30) or _bh_rev
                         print(f"    [BH-bool] [{_hb_scan_dbms}] header={header_name!r} "
                               f"ts={ts:.3f} fs={fs:.3f} delta={delta:.3f} "
-                              f"{'WAF-blocked' if _bh_waf else ('DIFF' if ts > 0.75 and delta > 0.30 else 'no signal')}",
+                              f"{'WAF-blocked' if _bh_waf else ('DIFF-REV' if _bh_rev else ('DIFF' if ts > 0.75 and delta > 0.30 else 'no signal'))}",
                               flush=True)
                         # BUG-BH-NO-TECHNIQUE22 FIX: rotate when WAF blocks both arms
                         # consistently — mirrors TECHNIQUE-22 used by IN/BT/T.
@@ -51139,7 +51150,7 @@ class _HTTPHeaderInjectorV1:
                         # Dynamic pages and CDN-cached pages can easily produce delta > 0.22
                         # on any two consecutive requests — without these guards every search
                         # page or template-driven page is a false positive.
-                        if ts > 0.75 and delta > 0.30:
+                        if _bh_signal:
                             _hdr_fp_ok = True
                             # --- Repetition: send _hb_true again, require same signal ---
                             try:
@@ -51175,6 +51186,20 @@ class _HTTPHeaderInjectorV1:
                                     notes=f"http_header_bool header={header_name!r} dbms={_hb_scan_dbms} fpg=pass")
                                 results.append(r)
                                 LOG.info(f"Header SQLi (boolean) FPG-PASS: {header_name!r} delta={delta:.3f}")
+                        # BUG-BH-NODIFF-INFINITE-RUN FIX (2/2):
+                        # Count consecutive no-diff non-WAF 200-OK responses. At 100
+                        # consecutive no-diff probes, rotate to next DBMS — mirrors
+                        # _CLASS_NODIFF_STREAK in _try_technique (lines 114517-114554).
+                        # Previously absent from the BH-specific loop; changelog at line
+                        # 303-317 claimed it was fixed but only _try_technique received it.
+                        if not _bh_waf and not _bh_signal:
+                            _hb_nodiff_consec += 1
+                            if _hb_nodiff_consec >= 100:
+                                LOG.info("[BH-NODIFF] %d consecutive no-diff on %s — rotating",
+                                         _hb_nodiff_consec, _hb_scan_dbms)
+                                print(f"[*] [BH-NODIFF] {_hb_scan_dbms}: {_hb_nodiff_consec} "
+                                      "consecutive no-diff — rotating to next DBMS", flush=True)
+                                break
                         # BUG-REQ11-HDR-ENCODE-PROBE: If encoding variants were prepared above
                         # and no hit was found with the plain payload, try the URL-encoded form.
                         # Some targets URL-decode header values server-side before SQL parsing.
