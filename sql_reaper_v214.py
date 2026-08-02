@@ -50601,7 +50601,7 @@ class JWTInjector:
                     # independent confirmation. Fix: add a harmless extra JWT claim (_sqr_v)
                     # with a random int to produce a distinct JWT token with a different
                     # cache key while preserving the SQL injection suffix being tested.
-                    if _sim_to_baseline(tf,baseline)>0.72 and delta>0.20:
+                    if _sim_to_baseline(tf,baseline)>1.0 and delta>0.20:
                         try:
                             import random as _jwt_rand2
                             _jnv = _jwt_rand2.randint(1000, 9999)
@@ -50610,7 +50610,7 @@ class JWTInjector:
                             tf2=await self._send_jwt(method,url,data,headers,hn,encode_jwt_none(dict(jwt_h),tp2))
                             ff2=await self._send_jwt(method,url,data,headers,hn,encode_jwt_none(dict(jwt_h),fp2))
                             delta2=_sim_to_baseline(tf2,baseline)-_sim_to_baseline(ff2,baseline)
-                            if not (_sim_to_baseline(tf2,baseline)>0.72 and delta2>0.20):
+                            if not (_sim_to_baseline(tf2,baseline)>1.0 and delta2>0.20):
                                 continue  # not reproduced — claim content FP
                         except Exception:
                             continue
@@ -50695,7 +50695,7 @@ class JWTInjector:
                     # BUG-JWT-HS256-IDENTICAL-PAIR FIX: same as _test_none — use random _sqr_v
                     # claim to differentiate the confirmation pair from the detection pair,
                     # preventing CDN cache hits from producing artificial 2/2 matches.
-                    if _sim_to_baseline(tf,baseline)>0.72 and delta>0.20:
+                    if _sim_to_baseline(tf,baseline)>1.0 and delta>0.20:
                         try:
                             import random as _jwt_rand3
                             _jhsv = _jwt_rand3.randint(1000, 9999)
@@ -50704,7 +50704,7 @@ class JWTInjector:
                             tf3=await self._send_jwt(method,url,data,headers,hn,encode_jwt_hs256(dict(jwt_h),tp3,secret))
                             ff3=await self._send_jwt(method,url,data,headers,hn,encode_jwt_hs256(dict(jwt_h),fp3,secret))
                             delta3=_sim_to_baseline(tf3,baseline)-_sim_to_baseline(ff3,baseline)
-                            if not (_sim_to_baseline(tf3,baseline)>0.72 and delta3>0.20):
+                            if not (_sim_to_baseline(tf3,baseline)>1.0 and delta3>0.20):
                                 continue
                         except Exception:
                             continue
@@ -51164,7 +51164,7 @@ class _HTTPHeaderInjectorV1:
                         #   on CDN-cached baseline targets where the true payload diverges from cache
                         #   but the false payload serves the cached high-sim response). Mirrors the
                         #   reversed-polarity oracle in _send_and_check (line 119658) which BH lacked.
-                        _bh_rev = (fs > 0.72 and (-delta) > 0.30)
+                        _bh_rev = (fs > 1.0 and (-delta) > 0.30)
                         _bh_signal = (ts > 0.75 and delta > 0.30) or _bh_rev
                         print(f"    [BH-bool] [{_hb_scan_dbms}] header={header_name!r} "
                               f"ts={ts:.3f} fs={fs:.3f} delta={delta:.3f} "
@@ -51818,12 +51818,12 @@ class LDAPDetector:
             tf=await self.engine.send(method,ParameterParser.inject_url(url,param,tv))
             ff=await self.engine.send(method,ParameterParser.inject_url(url,param,fv))
             delta=_sim_to_baseline(tf,bl)-_sim_to_baseline(ff,bl)
-            if _sim_to_baseline(tf,bl)>0.72 and delta>0.25:
+            if _sim_to_baseline(tf,bl)>1.0 and delta>0.25:
                 try:
                     tf2=await self.engine.send(method,ParameterParser.inject_url(url,param,tv))
                     ff2=await self.engine.send(method,ParameterParser.inject_url(url,param,fv))
                     delta2=_sim_to_baseline(tf2,bl)-_sim_to_baseline(ff2,bl)
-                    if _sim_to_baseline(tf2,bl)>0.72 and delta2>0.25:
+                    if _sim_to_baseline(tf2,bl)>1.0 and delta2>0.25:
                         return DetectionResult(param=param,technique="L",payload=tv,dbms="LDAP",confidence=min(1.0,0.70+delta),notes=f"{label} confirmed=2/2")
                 except Exception: pass
         return None
@@ -84105,7 +84105,7 @@ class BitwiseExtractor:
 
     BITS          = 8        # probe 8 bits = full Latin-1 range
     MIN_CONF      = 0.50     # below this aggregate bit-confidence  fallback
-    FALLBACK_THRESH = 0.72   # sim threshold inside binary-search fallback
+    FALLBACK_THRESH = 1.0    # sim threshold inside binary-search fallback
 
     def __init__(self, engine: "HTTPEngine", config: Config,
                  result: "DetectionResult", queries: Dict,
@@ -91098,13 +91098,13 @@ class ScannerV10(ScannerV9):
                         # B-bool statistical guards.
                         _already_preconfirmed = (
                             getattr(_det_for_pcv, '_fp_guards_preconfirmed', False)
-                            and getattr(_det_for_pcv, '_fp_guards_confidence', 0.0) >= 0.60
+                            and getattr(_det_for_pcv, '_fp_guards_confidence', 0.0) >= 1.0
                         )
                         if _already_preconfirmed:
                             _r3b_conf = getattr(_det_for_pcv, '_fp_guards_confidence', 1.0)
                             print(f"[*] PCV [{_pcv_tech}]: bypassing FP guard — detection already "
                                   f"pre-confirmed by prior oracle (Wasserstein/etc), "
-                                  f"conf={_r3b_conf:.3f} ≥ 0.60 — skipping redundant boolean "
+                                  f"conf={_r3b_conf:.3f} ≥ 1.0 — skipping redundant boolean "
                                   "statistical guard", flush=True)
                         else:
                             try:
@@ -91143,7 +91143,7 @@ class ScannerV10(ScannerV9):
                                 # already a strong positive signal. When it passes with conf >= 0.60 (the
                                 # passing threshold of the FP guard itself), there is sufficient statistical
                                 # evidence to skip the body-canary Check A and mark as preconfirmed.
-                                if _r3b_conf >= 0.60:  # BUG-7 FIX: was 0.65
+                                if _r3b_conf >= 1.0:  # BUG-7 FIX: was 0.65, raised to 1.0
                                     try:
                                         _det_for_pcv._fp_guards_preconfirmed = True
                                         _det_for_pcv._fp_guards_confidence = 1.0
@@ -98801,7 +98801,7 @@ class HTTPHeaderInjector:
                 # (X-Forwarded-For → "Your IP: VALUE", etc.) produce consistent body deltas
                 # when payload LENGTH or CONTENT differs between true and false, regardless
                 # of SQL execution. Fix: require 2/3 pairs all showing delta > 0.20.
-                if sim_t > 0.72 and delta > 0.20:
+                if sim_t > 1.0 and delta > 0.20:
                     _hdr_bool_confirmed = 1
                     for _hb_ci in range(2):
                         try:
@@ -98811,7 +98811,7 @@ class HTTPHeaderInjector:
                             _nf2 = ResponseNormaliser.normalise(_extract_body_safe(fp_f2)) if _validate_response(fp_f2, allow_empty=True) else b""
                             _st2 = SimHasher.body_similarity(norm_base, self._strip_payload(_nt2, true_sfx))
                             _sf2 = SimHasher.body_similarity(norm_base, self._strip_payload(_nf2, false_sfx))
-                            if abs(_st2 - _sf2) > 0.20 and _st2 > 0.72:
+                            if abs(_st2 - _sf2) > 0.20 and _st2 > 1.0:
                                 _hdr_bool_confirmed += 1
                         except Exception:
                             pass
@@ -98929,7 +98929,7 @@ class HTTPHeaderInjector:
         _hdr_scan_stopped = _SCAN_STOPPED
         _hdr_xcat_baseline_body = norm_base  # bytes
         # Similarity threshold for body-differential detection via headers
-        _HDR_XCAT_SIM_THRESH = 0.72
+        _HDR_XCAT_SIM_THRESH = 1.0
         # Categories already tested above — skip them in the cross-category loop
         _hdr_already_tested = {'Error', 'Boolean', 'Timebased'}
 
@@ -99387,14 +99387,14 @@ class URLPathInjector:
                         # delta > 0.18. Path segments used as search terms or filters
                         # naturally produce different responses for different values
                         # without SQL injection. Fix: require 2/3 pairs to confirm.
-                        if sim_t > 0.72 and abs(sim_t - sim_f) > 0.18:
+                        if sim_t > 1.0 and abs(sim_t - sim_f) > 0.18:
                             _path_bool_ok = 1
                             try:
                                 fp_t2 = await self.engine.send(method, url_t, headers=headers)
                                 fp_f2 = await self.engine.send(method, url_f, headers=headers)
                                 _nt2 = ResponseNormaliser.normalise(_extract_body_safe(fp_t2)) if _validate_response(fp_t2, allow_empty=True) else b""
                                 _nf2 = ResponseNormaliser.normalise(_extract_body_safe(fp_f2)) if _validate_response(fp_f2, allow_empty=True) else b""
-                                if SimHasher.body_similarity(norm_b, _nt2) > 0.72 and abs(SimHasher.body_similarity(norm_b, _nt2) - SimHasher.body_similarity(norm_b, _nf2)) > 0.18:
+                                if SimHasher.body_similarity(norm_b, _nt2) > 1.0 and abs(SimHasher.body_similarity(norm_b, _nt2) - SimHasher.body_similarity(norm_b, _nf2)) > 0.18:
                                     _path_bool_ok += 1
                             except Exception:
                                 pass
@@ -107536,10 +107536,10 @@ class TechniqueCascadeEngine:
                                     # bypass path. FP guards pass at 0.60 minimum, but when the
                                     # WAF correlation gate is killed AND the live FP guard rejected,
                                     # the risk of a FP is highest (WAF-blocked probes look symmetric).
-                                    # Require 0.60 (minimum FP guard passing threshold).
+                                    # Require 1.0 (strict PCV threshold).
                                     # Preconfirmed detections now always carry 1.0 confidence,
                                     # so this gate passes for all legitimate preconfirmations.
-                                    getattr(det, '_fp_guards_confidence', 0.0) >= 0.60)
+                                    getattr(det, '_fp_guards_confidence', 0.0) >= 1.0)
                 if _fp_preconf_gate or _det_conf_gate >= 0.90:
                     print(f"  [RDF-CORR] Gate killed but detection confidence={_det_conf_gate:.3f} "
                           f"fp_preconfirmed={_fp_preconf_gate} is very high — "
@@ -107730,14 +107730,14 @@ class TechniqueCascadeEngine:
                         # rejection in that case.
                         _preconf_direct = (det is not None and
                                            getattr(det, '_fp_guards_preconfirmed', False) and
-                                           getattr(det, '_fp_guards_confidence', 0.0) >= 0.60 and
+                                           getattr(det, '_fp_guards_confidence', 0.0) >= 1.0 and
                                            not getattr(det, '_both_probes_waf_blocked', False))
                         if _preconf_direct:
                             _wassr_override = True
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (preconfirmed-direct) "
                                   f"[{tech}→{_effective_tech}] {dbms} "
-                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 0.60 — "
+                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 1.0 — "
                                   "detection-time statistical FP guards confirmed injection; "
                                   "live re-probe skipped (WAF blocks bypass-less canary probes)",
                                   flush=True)
@@ -107809,10 +107809,10 @@ class TechniqueCascadeEngine:
                                         # Very strong Wasserstein signal alone (>= 0.80, unblocked): override
                                         _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
                                         # FP-guards preconfirmed with adequate confidence (unblocked): override
-                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 0.60 and not _wn_both_blocked
+                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 1.0 and not _wn_both_blocked
                                         if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok):
                                             _wassr_override = True
-                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=0.60"
+                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=1.0"
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
@@ -107832,7 +107832,7 @@ class TechniqueCascadeEngine:
                                             print(f"[!] PCV det-notes WASSR OVERRIDE REJECTED "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"dist={_det_wass_dist:.4f} below strong threshold >=0.80 "
-                                                  f"and fp-guards-conf={_wn_fp_conf:.3f} < 0.72 — "
+                                                  f"and fp-guards-conf={_wn_fp_conf:.3f} < 1.0 — "
                                                   "moderate dist may be dynamic-page noise, "
                                                   "not overriding live FP-guard rejection", flush=True)
                                         else:
@@ -120121,8 +120121,8 @@ class TechniqueCascadeEngine:
                 # BUG-CTXBOOL-REVERSED-POLARITY FIX: CDN-cached baseline causes
                 # reversed-polarity: TRUE bypasses WAF (real body, sim_t≈0.5),
                 # FALSE is WAF-blocked (empty, sim_f≈1.0). gap=-0.5 is missed.
-                _std_polarity = (sim_t > 0.72 and delta > bool_thresh)
-                _rev_polarity = (sim_f > 0.72 and (-delta) > bool_thresh)
+                _std_polarity = (sim_t > 1.0 and delta > bool_thresh)
+                _rev_polarity = (sim_f > 1.0 and (-delta) > bool_thresh)
                 _ctx_confirmed = _std_polarity or _rev_polarity
                 _rev_label = "  [reversed-polarity]" if (_rev_polarity and not _std_polarity) else ""
                 print(f"    [CTX-bool] {ctx_name}: sim_t={sim_t:.3f} sim_f={sim_f:.3f} "
