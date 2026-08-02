@@ -51164,7 +51164,7 @@ class _HTTPHeaderInjectorV1:
                         #   on CDN-cached baseline targets where the true payload diverges from cache
                         #   but the false payload serves the cached high-sim response). Mirrors the
                         #   reversed-polarity oracle in _send_and_check (line 119658) which BH lacked.
-                        _bh_rev = (fs > 0.72 and (-delta) > 0.30)
+                        _bh_rev = (fs >= 1.0 and (-delta) > 0.30)
                         _bh_signal = (ts > 0.75 and delta > 0.30) or _bh_rev
                         print(f"    [BH-bool] [{_hb_scan_dbms}] header={header_name!r} "
                               f"ts={ts:.3f} fs={fs:.3f} delta={delta:.3f} "
@@ -98794,7 +98794,7 @@ class HTTPHeaderInjector:
                 # (X-Forwarded-For → "Your IP: VALUE", etc.) produce consistent body deltas
                 # when payload LENGTH or CONTENT differs between true and false, regardless
                 # of SQL execution. Fix: require 2/3 pairs all showing delta > 0.20.
-                if sim_t > 0.72 and delta > 0.20:
+                if sim_t >= 1.0 and delta > 0.20:
                     _hdr_bool_confirmed = 1
                     for _hb_ci in range(2):
                         try:
@@ -98804,7 +98804,7 @@ class HTTPHeaderInjector:
                             _nf2 = ResponseNormaliser.normalise(_extract_body_safe(fp_f2)) if _validate_response(fp_f2, allow_empty=True) else b""
                             _st2 = SimHasher.body_similarity(norm_base, self._strip_payload(_nt2, true_sfx))
                             _sf2 = SimHasher.body_similarity(norm_base, self._strip_payload(_nf2, false_sfx))
-                            if abs(_st2 - _sf2) > 0.20 and _st2 > 0.72:
+                            if abs(_st2 - _sf2) > 0.20 and _st2 >= 1.0:
                                 _hdr_bool_confirmed += 1
                         except Exception:
                             pass
@@ -99380,14 +99380,14 @@ class URLPathInjector:
                         # delta > 0.18. Path segments used as search terms or filters
                         # naturally produce different responses for different values
                         # without SQL injection. Fix: require 2/3 pairs to confirm.
-                        if sim_t > 0.72 and abs(sim_t - sim_f) > 0.18:
+                        if sim_t >= 1.0 and abs(sim_t - sim_f) > 0.18:
                             _path_bool_ok = 1
                             try:
                                 fp_t2 = await self.engine.send(method, url_t, headers=headers)
                                 fp_f2 = await self.engine.send(method, url_f, headers=headers)
                                 _nt2 = ResponseNormaliser.normalise(_extract_body_safe(fp_t2)) if _validate_response(fp_t2, allow_empty=True) else b""
                                 _nf2 = ResponseNormaliser.normalise(_extract_body_safe(fp_f2)) if _validate_response(fp_f2, allow_empty=True) else b""
-                                if SimHasher.body_similarity(norm_b, _nt2) > 0.72 and abs(SimHasher.body_similarity(norm_b, _nt2) - SimHasher.body_similarity(norm_b, _nf2)) > 0.18:
+                                if SimHasher.body_similarity(norm_b, _nt2) >= 1.0 and abs(SimHasher.body_similarity(norm_b, _nt2) - SimHasher.body_similarity(norm_b, _nf2)) > 0.18:
                                     _path_bool_ok += 1
                             except Exception:
                                 pass
@@ -120114,8 +120114,8 @@ class TechniqueCascadeEngine:
                 # BUG-CTXBOOL-REVERSED-POLARITY FIX: CDN-cached baseline causes
                 # reversed-polarity: TRUE bypasses WAF (real body, sim_t≈0.5),
                 # FALSE is WAF-blocked (empty, sim_f≈1.0). gap=-0.5 is missed.
-                _std_polarity = (sim_t > 0.72 and delta > bool_thresh)
-                _rev_polarity = (sim_f > 0.72 and (-delta) > bool_thresh)
+                _std_polarity = (sim_t >= 1.0 and delta > bool_thresh)
+                _rev_polarity = (sim_f >= 1.0 and (-delta) > bool_thresh)
                 _ctx_confirmed = _std_polarity or _rev_polarity
                 _rev_label = "  [reversed-polarity]" if (_rev_polarity and not _std_polarity) else ""
                 print(f"    [CTX-bool] {ctx_name}: sim_t={sim_t:.3f} sim_f={sim_f:.3f} "
@@ -168241,24 +168241,25 @@ class WAFMLBypassGenerator:
 
         FIX-WAFML-DATA: uses caller-supplied data/data_fmt so JSON POST
         endpoints are tested correctly.
+        FIX-WAFML-DISCRIMINATOR: replaced ad-hoc body pattern matching with
+        WAFBlockDiscriminator.is_waf_block() so this method uses the same
+        full WAF signature set (30+ regex patterns, status-code awareness)
+        as the rest of the scanner.  The old simplified check missed many
+        commercial WAF block pages that do not contain the exact strings
+        "blocked", "forbidden", etc., causing SPSA to accept WAF-blocked
+        variants as successful bypasses and generate incorrect payloads.
         """
         try:
             fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                       param, original + payload, tamper)
-            # BUG-WAFML-IS-BLOCKED-STATUS FIX: 400 and 412 are in WAF_BLOCK_CODES
-            # but were missing from this local check; WAF returning 400 Bad Request
-            # on injected SQL was not detected as blocked → accepted as bypass.
-            if fp and _validate_response(fp, allow_empty=True) and _get_safe_status_code(fp) in (400, 403, 406, 412, 429, 503):
+            if fp is None:
+                return True  # network failure — treat as blocked
+            sc = _get_safe_status_code(fp)
+            if sc in WAFBlockDiscriminator.WAF_BLOCK_CODES:
                 return True
-            body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
-            # BUG-WAF-3 propagation FIX: "security" was removed from WAFBlockDetector
-            # (too broad — matches login/password security pages) but was NOT removed here.
-            # Remove it to match WAFBlockDetector behaviour.
-            return any(pat in body for pat in
-                       ("blocked", "forbidden", "access denied",
-                        "rate limit", "cloudflare", "captcha"))
+            return WAFBlockDiscriminator.is_waf_block(fp)
         except Exception:
-            return False  # network error  blocked
+            return False  # network error — blocked
 
     def _apply_weighted_subs(self, payload: str,
                               weights: List[float]) -> str:
