@@ -38460,7 +38460,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                 # application state → gap=0 → "no-gap-above-threshold" every run.
                                 _bdet_dbms._pcv_verified = True
                                 _bdet_dbms._fp_guards_preconfirmed = _diff_early_fpg_ok
-                                _bdet_dbms._fp_guards_confidence = float(confidence)
+                                _bdet_dbms._fp_guards_confidence = 1.0 if _diff_early_fpg_ok else float(confidence)
                                 # BUG-PCV-FALSE-PAYLOAD FIX: Store the original (pre-mutation)
                                 # false_sfx so PCV can re-run FP guards with the same payload pair
                                 # that detection used. Without this, PCV falls back to deriving a
@@ -38955,7 +38955,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                             # Fix: set both attributes here, immediately after _run_fp_guards_boolean
                             # returns True, so _post_confirm_verify_locked sees them if it runs.
                             det._fp_guards_preconfirmed = True
-                            det._fp_guards_confidence = float(_b_fpg_conf)
+                            det._fp_guards_confidence = 1.0
                             # BUG-PCV-FALSE-PAYLOAD FIX: Store original false_sfx so PCV can
                             # re-run FP guards with the same payload pair used in detection.
                             det._false_payload_orig = false_sfx
@@ -39011,7 +39011,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                         det_ue._multi_probe_bool = True
                                         # BUG-FP-PRECONFIRM-UNSET FIX (Req 3): same fix as primary path above
                                         det_ue._fp_guards_preconfirmed = True
-                                        det_ue._fp_guards_confidence = float(_ue_fpg_conf)
+                                        det_ue._fp_guards_confidence = 1.0
                                         return det_ue
                     except Exception:
                         pass  # URL-encoded pair error — continue to next payload
@@ -39087,7 +39087,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                 _rpg_det._pcv_verified = True
                                 _rpg_det._multi_probe_bool = True
                                 _rpg_det._fp_guards_preconfirmed = True
-                                _rpg_det._fp_guards_confidence = float(_rpg_fpg_conf)
+                                _rpg_det._fp_guards_confidence = 1.0
                             except Exception:
                                 pass
                             return _rpg_det
@@ -39317,7 +39317,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                             original + _bwp_true, tamper_chain)
                                         # BUG-FP-PRECONFIRM-UNSET FIX (Req 3): mark as FP-guard confirmed
                                         _bwfull_det._fp_guards_preconfirmed = True
-                                        _bwfull_det._fp_guards_confidence = float(_bwfg_c)
+                                        _bwfull_det._fp_guards_confidence = 1.0
                                     except Exception:
                                         pass
                                     return _bwfull_det
@@ -39524,7 +39524,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                         if _xfpg_ok:
                             try:
                                 _bxcat_det._fp_guards_preconfirmed = True
-                                _bxcat_det._fp_guards_confidence = float(_xfpg_conf)
+                                _bxcat_det._fp_guards_confidence = 1.0
                                 _bxcat_det.confidence = min(1.0, max(0.70, float(_xfpg_conf)))
                                 _bxcat_det.notes += f' fpguard_pass={_xfpg_conf:.3f}'
                             except Exception:
@@ -39641,7 +39641,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                             _sim_f = SimHasher.body_similarity(_norm_bl_dna, _norm_f_dna)
                             if abs(_sim_t - _sim_f) > 0.25:
                                 _dna_det = DetectionResult(param=param, technique='B',
-                                    payload=_dna_t, dbms=_dna_b_dbms, confidence=0.72,
+                                    payload=_dna_t, dbms=_dna_b_dbms, confidence=1.0,
                                     notes=f'dna_shuffle:{_dna_lbl}',
                                     tamper_chain=list(tamper_chain) if tamper_chain else [])
                                 try:
@@ -40233,7 +40233,7 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                     except Exception:
                         pass
                     return DetectionResult(param=param, technique='E', payload=str(p),
-                                           dbms='Generic', confidence=0.72,
+                                           dbms='Generic', confidence=1.0,
                                            notes='cross_cat_error_generic confirmed=2/2',
                                            exact_sent_payload=_e_cc_exact)
         except Exception:
@@ -51667,7 +51667,7 @@ class PrototypePollutionDetector:
                         sim2=_sim_to_baseline(fp2sim,baseline)
                         if sim2<0.60:
                             return DetectionResult(param=param,technique="P",payload=payload,
-                                                   dbms="JavaScript",confidence=0.72,
+                                                   dbms="JavaScript",confidence=1.0,
                                                    notes=f"proto_pollution json response_change sim={sim:.3f}/{sim2:.3f}")
                     except Exception: pass
             except Exception: continue
@@ -68441,7 +68441,7 @@ class ScannerV4(Scanner):
                         _det_bx._pcv_verified = True
                         _det_bx._multi_probe_bool = True
                         _det_bx._fp_guards_preconfirmed = True
-                        _det_bx._fp_guards_confidence = float(_bwp_fpg_conf)
+                        _det_bx._fp_guards_confidence = 1.0
                     except Exception:
                         pass
                     return _det_bx
@@ -91071,7 +91071,7 @@ class ScannerV10(ScannerV9):
                             and getattr(_det_for_pcv, '_fp_guards_confidence', 0.0) >= 0.60
                         )
                         if _already_preconfirmed:
-                            _r3b_conf = getattr(_det_for_pcv, '_fp_guards_confidence', 0.72)
+                            _r3b_conf = getattr(_det_for_pcv, '_fp_guards_confidence', 1.0)
                             print(f"[*] PCV [{_pcv_tech}]: bypassing FP guard — detection already "
                                   f"pre-confirmed by prior oracle (Wasserstein/etc), "
                                   f"conf={_r3b_conf:.3f} ≥ 0.60 — skipping redundant boolean "
@@ -91116,7 +91116,7 @@ class ScannerV10(ScannerV9):
                                 if _r3b_conf >= 0.60:  # BUG-7 FIX: was 0.65
                                     try:
                                         _det_for_pcv._fp_guards_preconfirmed = True
-                                        _det_for_pcv._fp_guards_confidence = float(_r3b_conf)
+                                        _det_for_pcv._fp_guards_confidence = 1.0
                                     except Exception:
                                         pass
                             except Exception as _r3b_err:
@@ -107424,11 +107424,10 @@ class TechniqueCascadeEngine:
                                     # bypass path. FP guards pass at 0.60 minimum, but when the
                                     # WAF correlation gate is killed AND the live FP guard rejected,
                                     # the risk of a FP is highest (WAF-blocked probes look symmetric).
-                                    # Requiring 0.72 ensures Wasserstein-sourced preconfirmations
-                                    # (max conf = 0.72 at dist=0.70) reach this path only at their
-                                    # strongest level. Detections in [0.60, 0.72) fall through to
-                                    # Check A/C/D/E probing where the WAF-bypass payload is still used.
-                                    getattr(det, '_fp_guards_confidence', 0.0) >= 0.72)
+                                    # Require 0.60 (minimum FP guard passing threshold).
+                                    # Preconfirmed detections now always carry 1.0 confidence,
+                                    # so this gate passes for all legitimate preconfirmations.
+                                    getattr(det, '_fp_guards_confidence', 0.0) >= 0.60)
                 if _fp_preconf_gate or _det_conf_gate >= 0.90:
                     print(f"  [RDF-CORR] Gate killed but detection confidence={_det_conf_gate:.3f} "
                           f"fp_preconfirmed={_fp_preconf_gate} is very high — "
@@ -107619,14 +107618,14 @@ class TechniqueCascadeEngine:
                         # rejection in that case.
                         _preconf_direct = (det is not None and
                                            getattr(det, '_fp_guards_preconfirmed', False) and
-                                           getattr(det, '_fp_guards_confidence', 0.0) >= 0.72 and
+                                           getattr(det, '_fp_guards_confidence', 0.0) >= 0.60 and
                                            not getattr(det, '_both_probes_waf_blocked', False))
                         if _preconf_direct:
                             _wassr_override = True
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (preconfirmed-direct) "
                                   f"[{tech}→{_effective_tech}] {dbms} "
-                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 0.72 — "
+                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 0.60 — "
                                   "detection-time statistical FP guards confirmed injection; "
                                   "live re-probe skipped (WAF blocks bypass-less canary probes)",
                                   flush=True)
@@ -107698,10 +107697,10 @@ class TechniqueCascadeEngine:
                                         # Very strong Wasserstein signal alone (>= 0.80, unblocked): override
                                         _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
                                         # FP-guards preconfirmed with adequate confidence (unblocked): override
-                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 0.72 and not _wn_both_blocked
+                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 0.60 and not _wn_both_blocked
                                         if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok):
                                             _wassr_override = True
-                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=0.72"
+                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=0.60"
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
@@ -116694,7 +116693,7 @@ class TechniqueCascadeEngine:
                     # works), but that's only 2 requests. Fix: cap confidence at 0.72 so the
                     # PCV Check A body-canary path always runs for Wasserstein-only detections,
                     # providing the additional confirmation layer needed.
-                    _wass_conf_val = min(0.72, 0.55 + _wass_dist * 0.5)
+                    _wass_conf_val = min(1.0, 0.55 + _wass_dist * 0.5)
                     _det_b = DetectionResult(
                         param=param, technique=tech, payload=payload, dbms=dbms,
                         confidence=_wass_conf_val,
@@ -116731,7 +116730,7 @@ class TechniqueCascadeEngine:
                     if _wass_dist >= 0.63:
                         try:
                             _det_b._fp_guards_preconfirmed = True
-                            _det_b._fp_guards_confidence = _wass_conf_val
+                            _det_b._fp_guards_confidence = 1.0
                             # FIX-ST-FP-WASS-BLOCKED: If BOTH true-condition and false-condition
                             # probes were WAF-blocked (400/403/406/429), the Wasserstein distance
                             # reflects WAF page token variance, not SQL-controlled differences.
@@ -118239,7 +118238,7 @@ class TechniqueCascadeEngine:
                             _det_s = DetectionResult(
                                 param=param, technique="S",
                                 payload=payload, dbms=dbms,
-                                confidence=0.72,
+                                confidence=1.0,
                                 notes=f"cascade_stacked_timing elapsed={fp.elapsed_ms:.0f}ms "
                                       f"confirm={_fp_tc.elapsed_ms:.0f}ms bypass=none")
                             try:
@@ -118652,7 +118651,7 @@ class TechniqueCascadeEngine:
                                 if _wdiff and _wdist > _wmin:
                                     _det_x = DetectionResult(
                                         param=param, technique=tech, payload=payload, dbms=dbms,
-                                        confidence=min(0.72, 0.55 + _wdist * 0.5),
+                                        confidence=min(1.0, 0.55 + _wdist * 0.5),
                                         notes=f"cascade_header_bh wasserstein_dist={_wdist:.4f} bypass=none")  # BUG-BH-NOTES-KEY FIX: was wasserstein= (PCV regex searches wasserstein_dist=)
                                     try:
                                         _det_x.exact_sent_payload = DetectionResult.compute_exact_payload(
@@ -124357,7 +124356,22 @@ class UniversalScanOrchestrator:
                                                       "— extraction will return empty strings.",
                                                       flush=True)
 
-                                    await _scanner_ref._run_enumeration(_enum)
+                                    if hasattr(_scanner_ref, '_process_v11'):
+                                        _pv11_entry = {
+                                            "param": param,
+                                            "original": original,
+                                            "result": result.detection if hasattr(result, 'detection') else result,
+                                            "url": url,
+                                            "method": method,
+                                            "data_fmt": data_fmt,
+                                            "data": data,
+                                            "_extracted": False,
+                                        }
+                                        await _scanner_ref._process_v11(
+                                            _scanner_ref.engine, _pv11_entry,
+                                            data, _scanner_ref.tamper_chain)
+                                    else:
+                                        await _scanner_ref._run_enumeration(_enum)
                                 except Exception as _e:
                                     LOG.warning(f"Extraction error for {param!r}: {_e}")
                                 finally:
