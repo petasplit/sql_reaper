@@ -116403,6 +116403,25 @@ class TechniqueCascadeEngine:
                                     and _wdh_p_above_min < 2
                                     and _wass_dist > _wass_min
                                 )
+                                # Bimodal outlier guard: detects CDN/cache transition artifacts.
+                                # When the 5-probe window contains BOTH near-zero readings
+                                # (cache hits return identical bodies → dist≈0) AND above-threshold
+                                # readings (cache misses with reflected payload content → dist≈0.67),
+                                # the bimodal distribution indicates CDN caching artifact, NOT a
+                                # stable SQL boolean injection signal.  The stable-page outlier guard
+                                # requires _wdh_p_below_stable >= len(_wdh_p)-1 (all-but-one below
+                                # 0.15), which fails once two consecutive cache misses accumulate in
+                                # the window (e.g. [0,0,0,0.67,0.67] → 3 < 4 → guard bypassed).
+                                # This guard closes that gap by requiring the above-threshold count
+                                # to be a strict minority (< len-1) rather than just < 2.
+                                _wass_bimodal_outlier = (
+                                    not _wass_param_confirmed
+                                    and len(_wdh_p) >= 3
+                                    and _wdh_p_below_stable >= 1
+                                    and _wdh_p_above_min >= 1
+                                    and _wdh_p_above_min < len(_wdh_p) - 1
+                                    and _wass_dist > _wass_min
+                                )
                                 # _wass_noise_range suppression also gated on no prior confirmation
                                 # BUG-WASS-SUPPRESS-DEADLOCK FIX: The previous suppression
                                 # fired unconditionally on _wass_noise_range=True (3+ consistent
@@ -116440,6 +116459,7 @@ class TechniqueCascadeEngine:
                                     (_wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90)
                                     or _wass_near_noise_floor
                                     or _wass_stable_page_outlier
+                                    or _wass_bimodal_outlier
                                     or _wass_asymmetric_waf
                                 )
                                 if _wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90:
@@ -116467,6 +116487,11 @@ class TechniqueCascadeEngine:
                                           f"({_wdh_p_below_stable}/{len(_wdh_p)} probes below 0.15, "
                                           f"only {_wdh_p_above_min} above threshold={_wass_min:.2f}) "
                                           f"-- CDN/cache miss, NOT injection", flush=True)
+                                elif _wass_bimodal_outlier:
+                                    print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} BIMODAL OUTLIER "
+                                          f"({_wdh_p_below_stable} near-zero + {_wdh_p_above_min} above-threshold "
+                                          f"in {len(_wdh_p)}-probe window) "
+                                          f"-- CDN cache transition artifact, NOT injection", flush=True)
                                 elif _wass_asymmetric_waf:
                                     LOG.debug("[Wasserstein] dist=%.4f ASYMMETRIC WAF suppressed "
                                               "(oracle=BLOCKED, true=%d 2xx, false=%d WAF-block) "
