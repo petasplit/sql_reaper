@@ -50594,10 +50594,19 @@ class JWTInjector:
                     # confirmed JWT injection. JWT claims that influence page content
                     # (username, role, user_id) naturally produce body differences for
                     # different claim values without any SQL executing. Fix: 2/2 pair confirm.
+                    # BUG-JWT-BOOL-IDENTICAL-PAIR FIX: The original 2/2 confirmation used
+                    # tp2[claim]=orig_val+true_sfx — identical to the first pair. A CDN
+                    # caching the first response would return the same cached body for the
+                    # "second" probe, producing an artificial 2/2 match that is not genuine
+                    # independent confirmation. Fix: add a harmless extra JWT claim (_sqr_v)
+                    # with a random int to produce a distinct JWT token with a different
+                    # cache key while preserving the SQL injection suffix being tested.
                     if _sim_to_baseline(tf,baseline)>0.72 and delta>0.20:
                         try:
-                            tp2=dict(jwt_p); tp2[claim]=orig_val+true_sfx
-                            fp2=dict(jwt_p); fp2[claim]=orig_val+false_sfx
+                            import random as _jwt_rand2
+                            _jnv = _jwt_rand2.randint(1000, 9999)
+                            tp2=dict(jwt_p); tp2[claim]=orig_val+true_sfx; tp2["_sqr_v"]=_jnv
+                            fp2=dict(jwt_p); fp2[claim]=orig_val+false_sfx; fp2["_sqr_v"]=_jnv
                             tf2=await self._send_jwt(method,url,data,headers,hn,encode_jwt_none(dict(jwt_h),tp2))
                             ff2=await self._send_jwt(method,url,data,headers,hn,encode_jwt_none(dict(jwt_h),fp2))
                             delta2=_sim_to_baseline(tf2,baseline)-_sim_to_baseline(ff2,baseline)
@@ -50683,10 +50692,15 @@ class JWTInjector:
                     ff=await self._send_jwt(method,url,data,headers,hn,encode_jwt_hs256(dict(jwt_h),fp2,secret))
                     delta=_sim_to_baseline(tf,baseline)-_sim_to_baseline(ff,baseline)
                     # BUG-JWT-HS256-SINGLE-PAIR FIX: same as _test_none — require 2/2 pairs.
+                    # BUG-JWT-HS256-IDENTICAL-PAIR FIX: same as _test_none — use random _sqr_v
+                    # claim to differentiate the confirmation pair from the detection pair,
+                    # preventing CDN cache hits from producing artificial 2/2 matches.
                     if _sim_to_baseline(tf,baseline)>0.72 and delta>0.20:
                         try:
-                            tp3=dict(jwt_p); tp3[claim]=orig_val+true_sfx
-                            fp3=dict(jwt_p); fp3[claim]=orig_val+false_sfx
+                            import random as _jwt_rand3
+                            _jhsv = _jwt_rand3.randint(1000, 9999)
+                            tp3=dict(jwt_p); tp3[claim]=orig_val+true_sfx; tp3["_sqr_v"]=_jhsv
+                            fp3=dict(jwt_p); fp3[claim]=orig_val+false_sfx; fp3["_sqr_v"]=_jhsv
                             tf3=await self._send_jwt(method,url,data,headers,hn,encode_jwt_hs256(dict(jwt_h),tp3,secret))
                             ff3=await self._send_jwt(method,url,data,headers,hn,encode_jwt_hs256(dict(jwt_h),fp3,secret))
                             delta3=_sim_to_baseline(tf3,baseline)-_sim_to_baseline(ff3,baseline)
@@ -51821,16 +51835,26 @@ class SSTIDetector:
         # A math expression renderer or search preview could return '49' coincidentally.
         # Fix: add confirmation probe — same expression must produce same output twice.
         # Also check baseline to exclude pages that always show the expected string.
+        # BUG-SSTI-BASELINE-EXCEPTION FIX: when baseline request raises exception,
+        # bl0_body="" makes the guard `if bl0_body and ...` always False, silently
+        # disabling the baseline check — any page returning the math string then
+        # triggers SSTI detection. Fix: track baseline success explicitly; skip
+        # all SSTI probes when baseline is unavailable (no false positive risk).
+        _bl0_ok = False
+        bl0_body = ""
         try:
             bl0_fp=await self.engine.send(method,ParameterParser.inject_url(url,param,original))
             bl0_body=_safe_decode_body(bl0_fp, encoding="utf-8", errors="replace", func_name="ssti_baseline") if bl0_fp and _validate_response(bl0_fp,allow_empty=True) else ""
+            _bl0_ok = True
         except Exception:
-            bl0_body=""
+            pass
+        if not _bl0_ok:
+            return None  # baseline unavailable — skip SSTI to avoid false positives
         for payload,expected,engine_hint in SSTI_PROBES:
             fp=await self.engine.send(method,ParameterParser.inject_url(url,param,original+payload))
             body=_safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
             if re.search(expected,body):
-                if bl0_body and re.search(expected,bl0_body): continue  # in baseline
+                if re.search(expected,bl0_body): continue  # expected string present in baseline — FP
                 try:
                     fp2=await self.engine.send(method,ParameterParser.inject_url(url,param,original+payload))
                     body2=_safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="ssti_confirm")
@@ -90060,12 +90084,18 @@ class ScannerV10(ScannerV9):
                     elif 'RANDOMBLOB(' in _xcat_pay_stripped or 'ZEROBLOB(' in _xcat_pay_stripped:
                         # SQLite RANDOMBLOB/ZEROBLOB: use size-to-seconds formula
                         # (same as the _populate_certified_db filter: 10MB/s estimate)
+                        # BUG-SQLITE-RANDOMBLOB-FLOOR-MISMATCH FIX: floor was 600ms here but
+                        # 300ms in _pcv_check_guarded — 2x discrepancy for the same payload.
+                        # SQLite RANDOMBLOB completes in 50-200ms on fast servers; 600ms floor
+                        # prevented Check B from passing for small RANDOMBLOB allocations.
+                        # Lowered to 300ms to match _pcv_check_guarded (above CDN jitter,
+                        # reachable for genuine RANDOMBLOB timing injections).
                         _xcat_blob_m = _re.search(
                             r'(?:RANDOMBLOB|ZEROBLOB)\s*\(\s*(\d+)\s*\)', _xcat_pay_stripped)
                         if _xcat_blob_m:
                             _xcat_blob_bytes = float(_xcat_blob_m.group(1))
                             _xcat_blob_secs  = _xcat_blob_bytes / 10_000_000.0
-                            _xcat_thresh_ms  = max(600.0, _xcat_blob_secs * 1000.0 * 0.65)
+                            _xcat_thresh_ms  = max(300.0, _xcat_blob_secs * 1000.0 * 0.65)
                             _xcat_ts_map = getattr(cfg, '_pcv_timing_threshold_map', None) or {}
                             _xcat_ts_map['SQLITE'] = _xcat_thresh_ms
                             cfg._pcv_timing_threshold_map = _xcat_ts_map
@@ -91452,8 +91482,8 @@ class ScannerV10(ScannerV9):
                                                              data_fmt, param,
                                                              orig+false_sfx_m, tamper)
                             # v10: DOM structural diff in addition to SimHash
-                            true_html  = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
-                            false_html = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                            true_html  = _safe_decode_body(true_fp, encoding="utf-8", errors="replace", func_name="extraction")
+                            false_html = _safe_decode_body(false_fp, encoding="utf-8", errors="replace", func_name="extraction")
                             # Use false_html as the DOM reference in differential mode
                             # (no real baseline samples).  Comparing true vs "" made every
                             # dom_delta non-zero, firing unnecessary PCV on every probe pair.
@@ -97594,14 +97624,43 @@ class ScannerV11(ScannerV10):
                         _fp_f = await _pcv_cascade._safe_confirm(
                             ep.method, ep.url, ep_data, ep_fmt, param,
                             orig_val + _false_p, tamper_chain) if _false_p else None
-                        print(f"[*] Running PCV on {_pcv_tech} detection...", flush=True)
+                        # BUG-SCAN-SURFACE-PCV-NOSNIFF FIX: sniff payload mechanism before PCV
+                        # so SLEEP/error/UNION payloads through NV/WB/EX/HY surfaces route to
+                        # the correct Check B/C/sentinel path instead of body-diff Check A.
+                        _effective_pcv_tech_sg = _pcv_tech
+                        _sg_pl = (_det_for_pcv.payload or "").upper()
+                        _sg_timing_kws = ("SLEEP(", "BENCHMARK(", "WAITFOR", "PG_SLEEP(",
+                                          "RANDOMBLOB(", "DBMS_PIPE.RECEIVE_MESSAGE",
+                                          "DBMS_LOCK.SLEEP", "GENERATE_SERIES(", "ZEROBLOB(")
+                        _sg_error_kws = ("EXTRACTVALUE(", "UPDATEXML(", "XMLTYPE(",
+                                         "UTL_INADDR.", "RAISERROR", "CONVERT(INT,",
+                                         "CAST(0X", "GTID_SUBSET(")
+                        _sg_has_sleep_kw = any(k in _sg_pl for k in ("SLEEP(", "PG_SLEEP(", "BENCHMARK("))
+                        _sg_sleep_nonzero = True
+                        if _sg_has_sleep_kw:
+                            import re as _sg_re
+                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', _sg_pl)
+                            if _sg_m:
+                                try:
+                                    if float(_sg_m.group(1)) <= 0.0:
+                                        _sg_sleep_nonzero = False
+                                except (ValueError, TypeError):
+                                    pass
+                        if (any(k in _sg_pl for k in _sg_timing_kws) and
+                                (_sg_sleep_nonzero or not _sg_has_sleep_kw)):
+                            _effective_pcv_tech_sg = "T"
+                        elif any(k in _sg_pl for k in _sg_error_kws):
+                            _effective_pcv_tech_sg = "E"
+                        elif "UNION" in _sg_pl and "SELECT" in _sg_pl:
+                            _effective_pcv_tech_sg = "U"
+                        print(f"[*] Running PCV on {_pcv_tech}→{_effective_pcv_tech_sg} detection...", flush=True)
                             # FIX-ISSUE12-F: Initialize and safely unpack _post_confirm_verify result
                         _pcv_ok = False
                         _pcv_score = 0
                         _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
                             ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
                             _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
-                            _pcv_tech, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
+                            _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
                         if isinstance(_pv_raw_sg, tuple) and len(_pv_raw_sg) >= 1:
                             _pcv_ok = bool(_pv_raw_sg[0])
                             _pcv_score = _pv_raw_sg[1] if len(_pv_raw_sg) > 1 else 0
@@ -98140,6 +98199,23 @@ class ScannerV11(ScannerV10):
                                 else: break
                             r = "".join(chars11)
                             if r: return r
+                    # Method 0.5: OOB DNS exfiltration (only when OOB was the confirmed technique)
+                    # BUG-OOB-DEAD-CODE FIX: DoHOOBChannel was created and stored as self_._doh
+                    # but NEVER called. 'O' technique maps to 'B' (boolean blind) in
+                    # _EXTRACTION_TECH_MAP so OOB detections silently fell back to boolean blind
+                    # extraction which has no way to exfiltrate via DNS. Fix: when technique is
+                    # 'O' (OOB confirmed), try DNS exfiltration first before in-band methods.
+                    if getattr(self_._result, 'technique', '') == 'O':
+                        try:
+                            r = await self_._doh.exfiltrate(
+                                self_.engine, self_.method, self_.url, self_.data,
+                                self_.data_fmt, self_._result.param, self_.original,
+                                self_.tamper_chain, sql, dbms)
+                            if r:
+                                return r
+                            LOG.debug("V11Enum: OOB exfiltrate empty for %r  trying in-band", what)
+                        except Exception as _oob_e:
+                            LOG.debug("V11Enum: OOB exfiltrate failed: %s  trying in-band", _oob_e)
                     # Method 1: Error-based (try regardless of detected technique)
                     try:
                         r = await fast.error_extract_string(sql, dbms)
@@ -102383,14 +102459,43 @@ class ScannerV12(ScannerV11):
                         _fp_f = await _pcv_cascade._safe_confirm(
                             ep.method, ep.url, ep_data, ep_fmt, param,
                             orig_val + _false_p, tamper_chain) if _false_p else None
-                        print(f"[*] Running PCV on {_pcv_tech} detection...", flush=True)
+                        # BUG-SCAN-SURFACE-PCV-NOSNIFF FIX: sniff payload mechanism before PCV
+                        # so SLEEP/error/UNION payloads through NV/WB/EX/HY surfaces route to
+                        # the correct Check B/C/sentinel path instead of body-diff Check A.
+                        _effective_pcv_tech_sg = _pcv_tech
+                        _sg_pl = (_det_for_pcv.payload or "").upper()
+                        _sg_timing_kws = ("SLEEP(", "BENCHMARK(", "WAITFOR", "PG_SLEEP(",
+                                          "RANDOMBLOB(", "DBMS_PIPE.RECEIVE_MESSAGE",
+                                          "DBMS_LOCK.SLEEP", "GENERATE_SERIES(", "ZEROBLOB(")
+                        _sg_error_kws = ("EXTRACTVALUE(", "UPDATEXML(", "XMLTYPE(",
+                                         "UTL_INADDR.", "RAISERROR", "CONVERT(INT,",
+                                         "CAST(0X", "GTID_SUBSET(")
+                        _sg_has_sleep_kw = any(k in _sg_pl for k in ("SLEEP(", "PG_SLEEP(", "BENCHMARK("))
+                        _sg_sleep_nonzero = True
+                        if _sg_has_sleep_kw:
+                            import re as _sg_re
+                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', _sg_pl)
+                            if _sg_m:
+                                try:
+                                    if float(_sg_m.group(1)) <= 0.0:
+                                        _sg_sleep_nonzero = False
+                                except (ValueError, TypeError):
+                                    pass
+                        if (any(k in _sg_pl for k in _sg_timing_kws) and
+                                (_sg_sleep_nonzero or not _sg_has_sleep_kw)):
+                            _effective_pcv_tech_sg = "T"
+                        elif any(k in _sg_pl for k in _sg_error_kws):
+                            _effective_pcv_tech_sg = "E"
+                        elif "UNION" in _sg_pl and "SELECT" in _sg_pl:
+                            _effective_pcv_tech_sg = "U"
+                        print(f"[*] Running PCV on {_pcv_tech}→{_effective_pcv_tech_sg} detection...", flush=True)
                             # FIX-ISSUE12-F: Initialize and safely unpack _post_confirm_verify result
                         _pcv_ok = False
                         _pcv_score = 0
                         _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
                             ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
                             _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
-                            _pcv_tech, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
+                            _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
                         if isinstance(_pv_raw_sg, tuple) and len(_pv_raw_sg) >= 1:
                             _pcv_ok = bool(_pv_raw_sg[0])
                             _pcv_score = _pv_raw_sg[1] if len(_pv_raw_sg) > 1 else 0
@@ -105657,12 +105762,13 @@ class TechniqueCascadeEngine:
                                 # Default to 'POSTGRESQL' when dbms is not fingerprinted yet,
                                 # so Check B finds the threshold under the correct map key.
                                 _pcvg_det_dbms_gs = (getattr(_det_obj, 'dbms', '') or 'PostgreSQL').upper()
-                                # Scale threshold with config.time_sec (the sleep/delay target):
-                                # detection already confirmed delay >= time_sec*0.75, so use
-                                # time_sec*0.65*1000 as the PCV floor — consistent with V18 cascade.
-                                # For large N (5B rows) 2000ms was too low; for N calibrated to
-                                # time_sec seconds, config.time_sec*650 is always in range.
-                                _gs_thresh = max(1500.0, getattr(_cfg_thresh, 'time_sec', 5) * 1000 * 0.65)
+                                # BUG-GS-THRESH-INCONSISTENCY FIX: N in GENERATE_SERIES(1,N) is a
+                                # ROW COUNT, not a sleep duration in seconds. Using time_sec*650 as
+                                # the threshold treats N as seconds → e.g. time_sec=5 gives 3250ms,
+                                # but a well-calibrated GENERATE_SERIES query runs in ~1-3s regardless
+                                # of N. _run_pcv_check already uses the correct fixed 2000ms here;
+                                # align _pcv_check_guarded to the same value for consistency.
+                                _gs_thresh = 2000.0  # fixed: GS row-count ≠ seconds; ~1-3s exec time
                                 _ts_map_pcvg_gs = getattr(_cfg_thresh, '_pcv_timing_threshold_map', None) or {}
                                 _ex_gs_thresh = _ts_map_pcvg_gs.get(_pcvg_det_dbms_gs, 0) or 0
                                 # PATCH-ISSUE3E: unconditionally update (not just when 0)
@@ -105912,6 +106018,12 @@ class TechniqueCascadeEngine:
                 if _det_pcvg_id not in _PCV_XCAT_DRAINED:
                     _PCV_XCAT_DRAINED.add(_det_pcvg_id)
                     _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
+                    # BUG-XCAT-DOUBLE-DECREMENT FIX: xcat drain already neutralised pcvg's +1.
+                    # Clear _guard_set so pcvg's finally doesn't decrement a second time.
+                    # Without this, any Shortcut B fallthrough (or S/E/EH early-return path)
+                    # causes a net -1 vs sibling PCV sessions (clamped to 0 with max()),
+                    # prematurely opening the scan-stop gate when concurrent PCV is active.
+                    _guard_set = False
                     try:
                         det._cross_cat_pcv_incremented = False  # best-effort; _PCV_XCAT_DRAINED is the guard
                     except Exception:
@@ -109492,7 +109604,7 @@ class TechniqueCascadeEngine:
             # Fallback: if 2+ distinct error payloads each produced HTTP 500 (absent from
             # baseline), accept as a weak-but-valid error signal. Require ≥2 payloads to
             # rule out a single transient server error, and require baseline was NOT 500.
-            if _status_500_count >= 2 and _bl_status not in (400, 500, 503):
+            if _status_500_count >= 2 and _bl_status not in (400, 500, 502, 503):  # BUG-BL-502-FIX: match the 502 exclusion at line ~109538
                 # BUG-HTTP500-SELECTIVITY FIX: HTTP 500 must be SELECTIVE to SQL
                 # payloads, not triggered by any modification (like VIEWSTATE MAC).
                 # BUG-PCV-C-400-FIX: Also treat 400 as error signal (WAF returns 400
@@ -112796,31 +112908,27 @@ class TechniqueCascadeEngine:
         # many injections only change the page when a SPECIFIC SQL condition about REAL data
         # evaluates to true/false (e.g. checking user privileges, session state, row existence).
         # A synthetic canary about a string literal never affects application state.
-        # BUG-FP-PRECONFIRM-NOACANARY-THRESHOLD FIX (Issue 12): Lowered from 0.80 → 0.72.
-        # On CDN-cached targets SUBSTRING canary probes hit different cache nodes and return
-        # inconsistent body sizes → _a_pass is nearly always False on CDN even for confirmed
-        # injections. The 3-layer FP guard (FalsePositiveGuardV18 L1-L6 + WelchConfirmer
-        # t-test + FalsePositiveValidator) is extremely strong statistical evidence — all
-        # three independent layers independently confirming injection at conf >= 0.72 is
-        # far more reliable than a single synthetic canary pair on a CDN-cached page.
-        # 0.72 is deliberately conservative (only lower from 0.80, not to 0.60) to prevent
-        # false positives on apps where dynamic content noise randomly scores 0.65-0.71.
+        # BUG-FP-PRECONFIRM-NOACANARY-THRESHOLD FIX (Issue 12): Updated to 1.0.
+        # Require full confidence (1.0) so only guard passes that have been explicitly
+        # set to 1.0 by confirmed multi-layer validation can skip the Check A canary.
+        # The 3-layer FP guard (FalsePositiveGuardV18 L1-L6 + WelchConfirmer
+        # t-test + FalsePositiveValidator) sets confidence to 1.0 only when all layers
+        # independently confirm injection — a necessary requirement before bypassing the
+        # canary check across all DBMSs, techniques, cascade paths, and surfaces (incl. BG).
         if _fp_preconfirmed and _is_boolean_tech and not _a_pass:
             _fpg_conf = getattr(det, '_fp_guards_confidence', 0.0) if det else 0.0
-            # FP-STRENGTHEN: When Check A canary fails, FP guards alone must show >= 0.72
-            # (restored from 0.80 → 0.72; lowering to 0.60 allows dynamic-page noise at 0.60-0.71
-            # to confirm without canary evidence). 0.72 is the value described as "deliberately
-            # conservative" in the comment above — enough to cover CDN/WAF targets where the
-            # canary can't probe, while blocking 0.60-0.71 false positives from fluctuating pages.
-            if _fpg_conf >= 0.72:
+            # FP-STRENGTHEN: When Check A canary fails, FP guards alone must show >= 1.0
+            # (all guard layers fully confirmed, not just partially). Values < 1.0 are
+            # insufficient to bypass canary confirmation across all attack surfaces.
+            if _fpg_conf >= 1.0:
                 # RC-FINDING5-FP: FP guards are a single statistical pipeline — a
-                # high-jitter CDN page can score conf >= 0.72 within the sampling window
-                # without any SQL injection present. Require _wassr_early_dist >= 0.50 as
-                # an independently computed second signal so that at least two distinct
-                # measurement methods agree before we confirm without a Check A canary.
+                # high-jitter CDN page can score conf >= 1.0 only when all layers agree.
+                # Require _wassr_early_dist >= 0.50 as an independently computed second
+                # signal so that at least two distinct measurement methods agree before
+                # we confirm without a Check A canary.
                 if _wassr_early_dist >= 0.50:
                     print("[*]   [PCV] Result: CONFIRMED  boolean FP guards pre-passed at HIGH confidence "
-                          f"({_fpg_conf:.3f} >= 0.72) + Wasserstein ({_wassr_early_dist:.3f} >= 0.50) "
+                          f"({_fpg_conf:.3f} >= 1.0) + Wasserstein ({_wassr_early_dist:.3f} >= 0.50) "
                           "— Check A canary skipped (3-layer statistical + Wasserstein dual-signal "
                           "at high confidence; RC-FINDING5-FP guard passed)",
                           flush=True)
@@ -112828,7 +112936,7 @@ class TechniqueCascadeEngine:
                     _SCAN_STOPPED[0] = True
                     return True, 1, _details
                 else:
-                    print(f"[*]   [PCV] FP guards HIGH conf ({_fpg_conf:.3f} >= 0.72) but Wasserstein "
+                    print(f"[*]   [PCV] FP guards HIGH conf ({_fpg_conf:.3f} >= 1.0) but Wasserstein "
                           f"({_wassr_early_dist:.3f} < 0.50) insufficient — RC-FINDING5-FP: "
                           "single-pipeline signal without independent corroboration; "
                           "Check A canary required for confirmation", flush=True)
@@ -129633,14 +129741,43 @@ class ScannerV14(ScannerV13):
                         _fp_f = await _pcv_cascade._safe_confirm(
                             ep.method, ep.url, ep_data, ep_fmt, param,
                             orig_val + _false_p, tamper_chain) if _false_p else None
-                        print(f"[*] Running PCV on {_pcv_tech} detection...", flush=True)
+                        # BUG-SCAN-SURFACE-PCV-NOSNIFF FIX: sniff payload mechanism before PCV
+                        # so SLEEP/error/UNION payloads through NV/WB/EX/HY surfaces route to
+                        # the correct Check B/C/sentinel path instead of body-diff Check A.
+                        _effective_pcv_tech_sg = _pcv_tech
+                        _sg_pl = (_det_for_pcv.payload or "").upper()
+                        _sg_timing_kws = ("SLEEP(", "BENCHMARK(", "WAITFOR", "PG_SLEEP(",
+                                          "RANDOMBLOB(", "DBMS_PIPE.RECEIVE_MESSAGE",
+                                          "DBMS_LOCK.SLEEP", "GENERATE_SERIES(", "ZEROBLOB(")
+                        _sg_error_kws = ("EXTRACTVALUE(", "UPDATEXML(", "XMLTYPE(",
+                                         "UTL_INADDR.", "RAISERROR", "CONVERT(INT,",
+                                         "CAST(0X", "GTID_SUBSET(")
+                        _sg_has_sleep_kw = any(k in _sg_pl for k in ("SLEEP(", "PG_SLEEP(", "BENCHMARK("))
+                        _sg_sleep_nonzero = True
+                        if _sg_has_sleep_kw:
+                            import re as _sg_re
+                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', _sg_pl)
+                            if _sg_m:
+                                try:
+                                    if float(_sg_m.group(1)) <= 0.0:
+                                        _sg_sleep_nonzero = False
+                                except (ValueError, TypeError):
+                                    pass
+                        if (any(k in _sg_pl for k in _sg_timing_kws) and
+                                (_sg_sleep_nonzero or not _sg_has_sleep_kw)):
+                            _effective_pcv_tech_sg = "T"
+                        elif any(k in _sg_pl for k in _sg_error_kws):
+                            _effective_pcv_tech_sg = "E"
+                        elif "UNION" in _sg_pl and "SELECT" in _sg_pl:
+                            _effective_pcv_tech_sg = "U"
+                        print(f"[*] Running PCV on {_pcv_tech}→{_effective_pcv_tech_sg} detection...", flush=True)
                             # FIX-ISSUE12-F: Initialize and safely unpack _post_confirm_verify result
                         _pcv_ok = False
                         _pcv_score = 0
                         _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
                             ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
                             _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
-                            _pcv_tech, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
+                            _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
                         if isinstance(_pv_raw_sg, tuple) and len(_pv_raw_sg) >= 1:
                             _pcv_ok = bool(_pv_raw_sg[0])
                             _pcv_score = _pv_raw_sg[1] if len(_pv_raw_sg) > 1 else 0
