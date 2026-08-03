@@ -84099,7 +84099,7 @@ class BitwiseExtractor:
 
     BITS          = 8        # probe 8 bits = full Latin-1 range
     MIN_CONF      = 0.50     # below this aggregate bit-confidence  fallback
-    FALLBACK_THRESH = 1.0    # sim threshold inside binary-search fallback
+    FALLBACK_THRESH = 0.70   # sim threshold inside binary-search fallback
 
     def __init__(self, engine: "HTTPEngine", config: Config,
                  result: "DetectionResult", queries: Dict,
@@ -90344,7 +90344,7 @@ class ScannerV10(ScannerV9):
                 # BUG-NV-WB-EX-HY-ST-ERROR-PCV FIX: NV/WB/EX/HY/ST payloads with error
                 # expressions must also use _inline_pcv_check (E-path).
                 # Check A body-canary cannot reproduce error-based detections.
-                (_pcv_tech in ("NV", "WB", "EX", "HY", "ST", "B", "BH")
+                (_pcv_tech in ("IN", "NV", "WB", "EX", "HY", "ST", "B", "BH")
                  and _pcv_has_error_payload)
             )
             if _pcv_route_to_inline:
@@ -90934,6 +90934,8 @@ class ScannerV10(ScannerV9):
                     'WAITFOR' in _det_payload_upper or
                     'BENCHMARK(' in _det_payload_upper or
                     'RANDOMBLOB(' in _det_payload_upper or
+                    'ZEROBLOB(' in _det_payload_upper or
+                    'DBMS_UTILITY.GET_TIME' in _det_payload_upper or
                     'DBMS_PIPE.RECEIVE_MESSAGE' in _det_payload_upper or
                     'DBMS_LOCK.SLEEP' in _det_payload_upper or
                     'DBMS_SESSION.SLEEP' in _det_payload_upper or
@@ -109712,7 +109714,7 @@ class TechniqueCascadeEngine:
                 # BUG-PCV-C-400-FIX: Also treat 400 as error signal (WAF returns 400
                 # on injected SQL). _status_500_count now covers both 400 and 500.
                 # Send a clearly non-SQL garbage probe and reject if it also → 400/500.
-                _canary_p = original + " CANARY_SQLREAPER_RANDOM_9x7z"
+                _canary_p = " CANARY_SQLREAPER_RANDOM_9x7z"
                 try:
                     _can_fp, _, _can_status, _ = await _pcv_send(_canary_p)
                     if _can_status in (400, 500):
@@ -110063,9 +110065,6 @@ class TechniqueCascadeEngine:
                         "x-upstream", "x-backend", "x-datacenter", "x-pool",
                         # Content metadata
                         "content-disposition",
-                        # Structural content indicators — change when injection alters response type
-                        "content-type",   # JSON→HTML or XML→text flip on API injection is a reliable signal
-                        "vary",           # injection changing cache-key dimensions is a backend structural change
                         # NOTE: server-timing intentionally NOT here — see BUG-5 FIX.
                         # NOTE: x-request-id, x-trace-id, x-amz-request-id, x-runtime,
                         #        x-served-by intentionally NOT here — see BUG-NEW-B FIX.
@@ -110088,7 +110087,7 @@ class TechniqueCascadeEngine:
                     # session-aware apps regardless of SQL injection. Including set-cookie caused
                     # content-length+set-cookie=2 dynamic diffs → _d_pass=True on ALL session-aware
                     # apps, making Check D a false-positive factory when paired with any Check A pass.
-                    _dynamic_headers = ["content-length", "etag", "last-modified"]
+                    _dynamic_headers = ["content-length", "etag", "last-modified", "content-type", "vary"]
                     _security_diffs = []
                     _dynamic_diffs = []
                     for hdr in _backend_headers:
@@ -132558,7 +132557,7 @@ class SafeModeVerifier:
             _smv_bool_pg   = get_dbms_payloads('PostgreSQL', 'Boolean', 1)
             _smv_t0  = _smv_bool_pls[0]  if _smv_bool_pls  else " AND 1=1-- -"
             _smv_f0  = (_smv_bool_pls[1] if len(_smv_bool_pls) > 1
-                        else (_smv_bool_pg[0] if _smv_bool_pg else " AND 1=2-- -"))
+                        else " AND 1=2-- -")
             # Also use the cfg tamper chain if it's already been selected
             # (WAFMLBypassGenerator runs BEFORE SafeModeVerifier in _v14_init).
             _smv_tc = getattr(config, "tamper_chain", None) or getattr(config, "_tamper_fns", None) or []
