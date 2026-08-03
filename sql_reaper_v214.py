@@ -122108,10 +122108,15 @@ class UniversalScanOrchestrator:
             # timing deltas and union body-size comparisons are measured against
             # that error page — the results are meaningless.  Skip the surface.
             _bl_modal = baseline.get('modal_status', 200)
-            _bl_acceptable = {200, 201, 206, 301, 302, 304, 401, 403, 405, 410}
+            # 400/422 are included so PUT/PATCH surfaces whose synthesised body
+            # is still rejected by schema validation can proceed — injection
+            # payloads may still trigger distinguishable error/timing differences.
+            # 5xx (500-599) are excluded: server-error baselines produce meaningless
+            # boolean/timing deltas and are an anti-FP guard that must stay.
+            _bl_acceptable = {200, 201, 206, 301, 302, 304, 400, 401, 403, 405, 410, 422}
             if _bl_modal not in _bl_acceptable:
                 print(f"[!] Baseline status {_bl_modal} is not a valid comparison target "
-                      "(expected 2xx/3xx/401/403/405/410)  skipping surface "
+                      "(expected 2xx/3xx/400/401/403/405/410/422)  skipping surface "
                       f"'{method}:{param}' to avoid false positives", flush=True)
                 return None
             # Propagate calibrated gap
@@ -129453,9 +129458,29 @@ class ScannerV14(ScannerV13):
                                 return []
                             print(f"[*] [{_m}] Full cascade scan starting (all techniques  all DBMS)...", flush=True)
                             _d = ep_data if _m in ("POST","PUT","PATCH") else None
+                            _fmt = ep_fmt
+                            # FIX: When the primary endpoint is GET, ep_data is None.
+                            # PUT/PATCH with no body causes REST servers to return 400 (Bad Request)
+                            # which is not in _bl_acceptable, so _probe_one_param skips the surface
+                            # immediately and prints "Cascade complete  no injections found".
+                            # Solution: synthesise a request body from the URL query parameters so
+                            # the PUT/PATCH baseline returns a usable status code.
+                            if _m in ("PUT", "PATCH") and not _d:
+                                _parsed_bg = urlparse(ep.url)
+                                _qs_bg = parse_qs(_parsed_bg.query, keep_blank_values=True)
+                                if _qs_bg:
+                                    _flat_bg = {k: (v[0] if isinstance(v, list) and v else "")
+                                                for k, v in _qs_bg.items()}
+                                    if ep_fmt == "json":
+                                        import json as _json_bg
+                                        _d = _json_bg.dumps(_flat_bg)
+                                        _fmt = "json"
+                                    else:
+                                        _d = urlencode(_flat_bg)
+                                        _fmt = "form"
                             _r = await orch.scan_surface(
                                 f"{_m}:{urlparse(ep.url).path}", _m, ep.url,
-                                _d, ep_fmt, {param: orig_val}, stability,
+                                _d, _fmt, {param: orig_val}, stability,
                                 techniques_override=_tech_order)
                             if _r:
                                 for _cr in _r:
@@ -129815,8 +129840,25 @@ class ScannerV14(ScannerV13):
                         if _injection_confirmed.is_set():
                             return None
                         try:
-                            _alt_data = ep_data if _alt_m.upper() in ("POST",) else None
+                            _alt_data = ep_data if _alt_m.upper() in ("POST","PUT","PATCH") else None
                             _alt_fmt = ep_fmt if _alt_data else "form"
+                            # FIX: Same as _v14_bg_method — synthesise a body for PUT/PATCH
+                            # when ep_data is None (primary endpoint is GET) so REST servers
+                            # don't respond 400 to the baseline request and cause the surface
+                            # to be skipped before any injection payloads are sent.
+                            if _alt_m.upper() in ("PUT", "PATCH") and not _alt_data:
+                                _parsed_alt = urlparse(ep.url)
+                                _qs_alt = parse_qs(_parsed_alt.query, keep_blank_values=True)
+                                if _qs_alt:
+                                    _flat_alt = {k: (v[0] if isinstance(v, list) and v else "")
+                                                 for k, v in _qs_alt.items()}
+                                    if ep_fmt == "json":
+                                        import json as _json_alt
+                                        _alt_data = _json_alt.dumps(_flat_alt)
+                                        _alt_fmt = "json"
+                                    else:
+                                        _alt_data = urlencode(_flat_alt)
+                                        _alt_fmt = "form"
                             _alt_result = await orch.scan_surface(
                                 f"{_alt_m}:{urlparse(ep.url).path}",
                                 _alt_m, ep.url, _alt_data, _alt_fmt,
