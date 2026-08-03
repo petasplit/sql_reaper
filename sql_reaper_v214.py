@@ -107779,7 +107779,7 @@ class TechniqueCascadeEngine:
                         # rejection in that case.
                         _preconf_direct = (det is not None and
                                            getattr(det, '_fp_guards_preconfirmed', False) and
-                                           getattr(det, '_fp_guards_confidence', 0.0) >= 0.72 and
+                                           getattr(det, '_fp_guards_confidence', 0.0) >= 1.0 and
                                            not getattr(det, '_both_probes_waf_blocked', False) and
                                            not _saved_body_identical)
                         if _preconf_direct:
@@ -107787,7 +107787,7 @@ class TechniqueCascadeEngine:
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (preconfirmed-direct) "
                                   f"[{tech}→{_effective_tech}] {dbms} "
-                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 0.72 — "
+                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 1.0 — "
                                   "detection-time statistical FP guards confirmed injection; "
                                   "live re-probe skipped (WAF blocks bypass-less canary probes)",
                                   flush=True)
@@ -107827,7 +107827,7 @@ class TechniqueCascadeEngine:
                                     _wn_m = _re_wn.search(r'wasserstein_dist=(\d+\.\d+)', _det_notes_str)
                                     if _wn_m:
                                         _det_wass_dist = float(_wn_m.group(1))
-                                        _wn_min = 1.0
+                                        _wn_min = 0.5000
                                         # FIX-WASSR-DET-NOTES-FP (ROOT CAUSE of log.txt false positive):
                                         # The det-notes fallback used _wn_min (~0.25) as its only gate.
                                         # On a dynamic page (CDN, A/B test, Cloudflare WAF challenge tokens)
@@ -107858,11 +107858,11 @@ class TechniqueCascadeEngine:
                                         _wn_both_blocked = bool(getattr(det, '_both_probes_waf_blocked', False)) if det else False
                                         # Very strong Wasserstein signal alone (>= 0.80, unblocked): override
                                         _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
-                                        # FP-guards preconfirmed with adequate confidence (unblocked): override
-                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 0.72 and not _wn_both_blocked
+                                        # FP-guards preconfirmed with full confidence (unblocked): override
+                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 1.0 and not _wn_both_blocked
                                         if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok):
                                             _wassr_override = True
-                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=0.72"
+                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=1.0"
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
@@ -107882,7 +107882,7 @@ class TechniqueCascadeEngine:
                                             print(f"[!] PCV det-notes WASSR OVERRIDE REJECTED "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"dist={_det_wass_dist:.4f} below strong threshold >=0.80 "
-                                                  f"and fp-guards-conf={_wn_fp_conf:.3f} < 0.72 — "
+                                                  f"and fp-guards-conf={_wn_fp_conf:.3f} < 1.0 — "
                                                   "moderate dist may be dynamic-page noise, "
                                                   "not overriding live FP-guard rejection", flush=True)
                                         else:
@@ -114989,23 +114989,28 @@ class TechniqueCascadeEngine:
                                     if _cls._CLASS_NODIFF_STREAK_SCAN_ID != _nd_scan_id_now:
                                         _cls._CLASS_NODIFF_STREAK.clear()
                                         _cls._CLASS_NODIFF_STREAK_SCAN_ID = _nd_scan_id_now
-                                    _nd_key = f"{dbms}:{tech}"
+                                    # Key includes method so each HTTP method (GET/POST/PUT/PATCH)
+                                    # tracks its own no-diff streak independently. Without the
+                                    # method, 5 parallel surfaces share one counter and the
+                                    # 100-probe rotation fires after only 20 probes per surface,
+                                    # causing POST/PUT/PATCH cascades to rotate prematurely.
+                                    _nd_method = (method or 'GET').upper()
+                                    _nd_key = f"{_nd_method}:{dbms}:{tech}"
                                     _nd_blk = getattr(self, '_dbms_block_run', {}).get(dbms, 0)
                                     if _nd_blk == _pre_probe_block_run:
                                         # No WAF block → true no-diff (200, no detection signal)
                                         _nd_cur_stored = _cls._CLASS_NODIFF_STREAK.get(_nd_key, 0)
                                         if _nd_cur_stored < 0:
-                                            # Sibling surface already fired rotation → join it
+                                            # This method's counter already fired rotation → join it
                                             _t22_advance_dbms = True
                                             break
                                         _nd_cur = _nd_cur_stored + 1
                                         _cls._CLASS_NODIFF_STREAK[_nd_key] = _nd_cur
                                         if _nd_cur >= _NODIFF_ROTATE_AFTER:
-                                            print(f"[*] [TECH-NODIFF] {dbms}:{tech}: "
+                                            print(f"[*] [TECH-NODIFF] {_nd_method}:{dbms}:{tech}: "
                                                   f"{_nd_cur} consecutive no-diff responses "
                                                   f"— rotating to next tech", flush=True)
-                                            # Sentinel -1: other concurrent surfaces see it
-                                            # immediately and break without re-accumulating.
+                                            # Sentinel -1: same-method surfaces see it immediately.
                                             _cls._CLASS_NODIFF_STREAK[_nd_key] = -1
                                             _t22_advance_dbms = True
                                             break
@@ -115021,13 +115026,15 @@ class TechniqueCascadeEngine:
                             if hasattr(self, '_dbms_block_run'):
                                 self._dbms_block_run[dbms] = 0
                             try:
-                                type(self)._CLASS_NODIFF_STREAK[f"{dbms}:{tech}"] = 0
+                                _nd_method_reset = (method or 'GET').upper()
+                                type(self)._CLASS_NODIFF_STREAK[f"{_nd_method_reset}:{dbms}:{tech}"] = 0
                             except Exception:
                                 pass
                         if r:
                             # Detection confirmed — reset no-diff streak
                             try:
-                                type(self)._CLASS_NODIFF_STREAK[f"{dbms}:{tech}"] = 0
+                                _nd_method_reset = (method or 'GET').upper()
+                                type(self)._CLASS_NODIFF_STREAK[f"{_nd_method_reset}:{dbms}:{tech}"] = 0
                             except Exception:
                                 pass
                             # BUG-FIX-GATE-KILLED: _send_and_check returns GATE_KILLED
@@ -116571,8 +116578,8 @@ class TechniqueCascadeEngine:
                                     getattr(getattr(self, "config", None), "_oracle_mode", None)
                                     == OracleMode.BLOCKED
                                 )
-                                _wass_min = max(0.30, (0.80 if (_wass_instability or _wass_oracle_blocked)
-                                                        else getattr(self, "_dynamic_wass", 0.45)))
+                                _wass_min = max(0.50, (0.80 if (_wass_instability or _wass_oracle_blocked)
+                                                        else getattr(self, "_dynamic_wass", 0.55)))
                                 # (Wasserstein PCV-failure counter and boolean skip-set
                                 #  population removed. Boolean payloads run to completion
                                 #  regardless of how many Wasserstein→PCV cycles have failed.)
@@ -116978,13 +116985,12 @@ class TechniqueCascadeEngine:
                     # when Wasserstein's multi-sample view clearly shows injection. The Wasserstein
                     # detection path never set this flag → PCV always rejected BH/boolean detections
                     # on CDN targets → injection found but never confirmed → extraction never runs.
-                    # Fix: when Wasserstein dist >= 0.63 (strong distributional signal), pre-set
-                    # _fp_guards_preconfirmed=True on the DetectionResult. Threshold lowered from
-                    # 0.70 to 0.63 to cover genuine boolean injections in the 0.63-0.69 range
-                    # that were observed on WAF-protected targets with Cloudflare.  WASSR OVERRIDE
-                    # still requires _fp_guards_confidence >= 0.72, so CDN-noise detections with
-                    # conf=0.000 remain rejected even with _fp_guards_preconfirmed=True.
-                    if _wass_dist >= 0.63:
+                    # Fix: when Wasserstein dist >= 0.80 (very strong distributional signal), pre-set
+                    # _fp_guards_preconfirmed=True on the DetectionResult. Threshold raised from
+                    # 0.63 to 0.80 to exclude CDN/Cloudflare noise in the 0.63-0.79 range that
+                    # produces false positives. WASSR OVERRIDE requires _fp_guards_confidence >= 1.0
+                    # (preconfirmed-direct path) or dist >= 0.50 with full confidence (det-notes path).
+                    if _wass_dist >= 0.80:
                         try:
                             _det_b._fp_guards_preconfirmed = True
                             _det_b._fp_guards_confidence = 1.0
@@ -129460,8 +129466,11 @@ class ScannerV14(ScannerV13):
                                         # GET/PUT/PATCH-surface detections → extraction uses wrong method.
                                         _cr.detection.method = _m
                                         print(f"[+] [{_m}] INJECTION FOUND: {_cr.detection.param} [{_cr.detection.technique}] {_cr.detection.dbms}!", flush=True)
-                            # Only report "no injections" if scan completed naturally
+                            # Only report "no injections" if scan completed naturally.
+                            # Yield briefly so any in-flight PCV on a concurrent surface
+                            # can set _injection_confirmed / _SCAN_STOPPED before this check.
                             if _r is not None and not any(cr.detection for cr in (_r or [])):
+                                await asyncio.sleep(0.25)
                                 if not _injection_confirmed.is_set() and not _SCAN_STOPPED[0]:
                                     print(f"[*] [{_m}] Cascade complete  no injections found", flush=True)
                             return _r or []
