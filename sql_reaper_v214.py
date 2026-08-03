@@ -52978,6 +52978,7 @@ class Scanner:
                             await self._run_enumeration(enum)
                         finally:
                             _EXTRACTION_ACTIVE[0] = False
+                            _EXTRACTION_DONE[0] = True
                         # REPL
                         if cfg.repl:
                             await REPL(engine,cfg,self.session,result,scan_method,scan_url,
@@ -106539,6 +106540,10 @@ class TechniqueCascadeEngine:
                         _cev_u_explicit = (getattr(self, '_confirmed_event', None) or
                                            getattr(getattr(self, 'config', None), '_confirmed_event', None))
                         if _cev_u_explicit and not _cev_u_explicit.is_set():
+                            try:
+                                _cev_u_explicit._bg_result = det
+                            except Exception:
+                                pass
                             _cev_u_explicit.set()
                         _gate_u_explicit = getattr(self, '_gate', None)
                         if _gate_u_explicit and not _gate_u_explicit.killed:
@@ -106619,7 +106624,12 @@ class TechniqueCascadeEngine:
                 _SCAN_STOPPED[0] = True
                 _cev_smp = (getattr(self, '_confirmed_event', None) or
                             getattr(getattr(self, 'config', None), '_confirmed_event', None))
-                if _cev_smp and not _cev_smp.is_set(): _cev_smp.set()
+                if _cev_smp and not _cev_smp.is_set():
+                    try:
+                        _cev_smp._bg_result = det
+                    except Exception:
+                        pass
+                    _cev_smp.set()
                 _gate_smp = getattr(self, '_gate', None)
                 if _gate_smp and not getattr(_gate_smp, 'killed', True):
                     try: _gate_smp.kill()
@@ -106650,6 +106660,10 @@ class TechniqueCascadeEngine:
                             _cev_sb_a = (getattr(self, '_confirmed_event', None) or
                                          getattr(getattr(self, 'config', None), '_confirmed_event', None))
                             if _cev_sb_a and not _cev_sb_a.is_set():
+                                try:
+                                    _cev_sb_a._bg_result = det
+                                except Exception:
+                                    pass
                                 _cev_sb_a.set()
                             _gate_sb_a = getattr(self, '_gate', None)
                             if _gate_sb_a and not getattr(_gate_sb_a, 'killed', True):
@@ -106884,6 +106898,10 @@ class TechniqueCascadeEngine:
                         _cev_s = (getattr(self, '_confirmed_event', None) or
                                   getattr(getattr(self, 'config', None), '_confirmed_event', None))
                         if _cev_s and not _cev_s.is_set():
+                            try:
+                                _cev_s._bg_result = det
+                            except Exception:
+                                pass
                             _cev_s.set()
                         _gate_s = getattr(self, '_gate', None)
                         if _gate_s and not getattr(_gate_s, 'killed', True):
@@ -107076,6 +107094,10 @@ class TechniqueCascadeEngine:
                         _cev_e_explicit = (getattr(self, '_confirmed_event', None) or
                                            getattr(getattr(self, 'config', None), '_confirmed_event', None))
                         if _cev_e_explicit and not _cev_e_explicit.is_set():
+                            try:
+                                _cev_e_explicit._bg_result = det
+                            except Exception:
+                                pass
                             _cev_e_explicit.set()
                         _gate_e_explicit = getattr(self, '_gate', None)
                         if _gate_e_explicit and not _gate_e_explicit.killed:
@@ -107292,6 +107314,10 @@ class TechniqueCascadeEngine:
                                 _cev_sniff_e = (getattr(self, '_confirmed_event', None) or
                                                 getattr(getattr(self, 'config', None), '_confirmed_event', None))
                                 if _cev_sniff_e and not _cev_sniff_e.is_set():
+                                    try:
+                                        _cev_sniff_e._bg_result = det
+                                    except Exception:
+                                        pass
                                     _cev_sniff_e.set()
                                 _gate_se = getattr(self, '_gate', None)
                                 if _gate_se and not _gate_se.killed:
@@ -107324,6 +107350,10 @@ class TechniqueCascadeEngine:
                                 _cev_sniff_u = (getattr(self, '_confirmed_event', None) or
                                                 getattr(getattr(self, 'config', None), '_confirmed_event', None))
                                 if _cev_sniff_u and not _cev_sniff_u.is_set():
+                                    try:
+                                        _cev_sniff_u._bg_result = det
+                                    except Exception:
+                                        pass
                                     _cev_sniff_u.set()
                                 _gate_su = getattr(self, '_gate', None)
                                 if _gate_su and not _gate_su.killed:
@@ -107412,6 +107442,10 @@ class TechniqueCascadeEngine:
                 _cev_early = (getattr(self, '_confirmed_event', None) or
                               getattr(getattr(self, 'config', None), '_confirmed_event', None))
                 if _cev_early and not _cev_early.is_set():
+                    try:
+                        _cev_early._bg_result = det
+                    except Exception:
+                        pass
                     _cev_early.set()
                 _gate_early = getattr(self, '_gate', None)
                 if _gate_early and not getattr(_gate_early, 'killed', True):
@@ -107492,6 +107526,10 @@ class TechniqueCascadeEngine:
                 _cev_bmp = (getattr(self, '_confirmed_event', None) or
                             getattr(getattr(self, 'config', None), '_confirmed_event', None))
                 if _cev_bmp and not _cev_bmp.is_set():
+                    try:
+                        _cev_bmp._bg_result = det
+                    except Exception:
+                        pass
                     _cev_bmp.set()
                 _gate_bmp = getattr(self, '_gate', None)
                 if _gate_bmp and not getattr(_gate_bmp, 'killed', True):
@@ -107543,6 +107581,10 @@ class TechniqueCascadeEngine:
                     _cev_gk = (getattr(self, '_confirmed_event', None) or
                                getattr(getattr(self, 'config', None), '_confirmed_event', None))
                     if _cev_gk and not _cev_gk.is_set():
+                        try:
+                            _cev_gk._bg_result = det
+                        except Exception:
+                            pass
                         _cev_gk.set()
                     if det is not None:
                         try:
@@ -107648,6 +107690,12 @@ class TechniqueCascadeEngine:
             # This lets _fp_guard_already_ran correctly detect whether the primary block
             # was actually entered (post_confirm_verify returned False AND tech is boolean-like).
             _pcv_ok_before_primary = _pcv_ok
+            # BUG-PCVA-RACE-FIX: Capture _pcv_check_a_body_identical BEFORE the first await
+            # in the primary FP guard block (await _run_fp_guards_boolean). A concurrent
+            # _inline_pcv_check call can acquire _pcv_lock and reset this attribute to False
+            # at line ~108576 while we are suspended at the await, causing us to read a stale
+            # False when we check _preconf_direct at line ~107777. Use the local snapshot.
+            _saved_body_identical = getattr(self, '_pcv_check_a_body_identical', False)
             if (not _pcv_ok
                     and _effective_tech in _boolean_like_techs_primary
                     and _fp_true and _fp_false and _false_p):
@@ -107682,6 +107730,14 @@ class TechniqueCascadeEngine:
                         _cev_fpg = (getattr(self, '_confirmed_event', None) or
                                     getattr(getattr(self, 'config', None), '_confirmed_event', None))
                         if _cev_fpg and not _cev_fpg.is_set():
+                            # FIX-BG-RESULT-FPG: Store DetectionResult on the event BEFORE set()
+                            # so the BG failsafe in _v14_cascade can recover it even when the BG
+                            # task is cancelled between _cev_fpg.set() and _test_method's lines
+                            # _bg_confirmed_results.append / _injection_confirmed._bg_result = _cr.
+                            try:
+                                _cev_fpg._bg_result = det
+                            except Exception:
+                                pass
                             _cev_fpg.set()
                         _gate_fpg = getattr(self, '_gate', None)
                         if _gate_fpg and not getattr(_gate_fpg, 'killed', True):
@@ -107723,15 +107779,15 @@ class TechniqueCascadeEngine:
                         # rejection in that case.
                         _preconf_direct = (det is not None and
                                            getattr(det, '_fp_guards_preconfirmed', False) and
-                                           getattr(det, '_fp_guards_confidence', 0.0) >= 1.0 and
+                                           getattr(det, '_fp_guards_confidence', 0.0) >= 0.72 and
                                            not getattr(det, '_both_probes_waf_blocked', False) and
-                                           not getattr(self, '_pcv_check_a_body_identical', False))
+                                           not _saved_body_identical)
                         if _preconf_direct:
                             _wassr_override = True
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (preconfirmed-direct) "
                                   f"[{tech}→{_effective_tech}] {dbms} "
-                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 1.0 — "
+                                  f"fp-guards-conf={_preconf_conf_d:.4f} ≥ 0.72 — "
                                   "detection-time statistical FP guards confirmed injection; "
                                   "live re-probe skipped (WAF blocks bypass-less canary probes)",
                                   flush=True)
@@ -107803,10 +107859,10 @@ class TechniqueCascadeEngine:
                                         # Very strong Wasserstein signal alone (>= 0.80, unblocked): override
                                         _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
                                         # FP-guards preconfirmed with adequate confidence (unblocked): override
-                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 1.0 and not _wn_both_blocked
+                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 0.72 and not _wn_both_blocked
                                         if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok):
                                             _wassr_override = True
-                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=1.0"
+                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=0.72"
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
@@ -107826,7 +107882,7 @@ class TechniqueCascadeEngine:
                                             print(f"[!] PCV det-notes WASSR OVERRIDE REJECTED "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"dist={_det_wass_dist:.4f} below strong threshold >=0.80 "
-                                                  f"and fp-guards-conf={_wn_fp_conf:.3f} < 1.0 — "
+                                                  f"and fp-guards-conf={_wn_fp_conf:.3f} < 0.72 — "
                                                   "moderate dist may be dynamic-page noise, "
                                                   "not overriding live FP-guard rejection", flush=True)
                                         else:
@@ -107855,6 +107911,22 @@ class TechniqueCascadeEngine:
                             _cev_wov = (getattr(self, '_confirmed_event', None) or
                                         getattr(getattr(self, 'config', None), '_confirmed_event', None))
                             if _cev_wov and not _cev_wov.is_set():
+                                # FIX-BG-RESULT-WASSR: Store DetectionResult on the event BEFORE set().
+                                # Root cause of "extraction never runs after BG WASSR OVERRIDE":
+                                # WASSR OVERRIDE fires inside _inline_pcv_check (called from
+                                # _probe_one_param inside BG task). At the first await after
+                                # _cev_wov.set() (_get_extraction_lock in _probe_one_param),
+                                # the main task's _confirm_waiter wakes and cancels the BG task.
+                                # _test_method's lines 129142-129143 (_bg_confirmed_results.append
+                                # and _injection_confirmed._bg_result = _cr) are NEVER REACHED.
+                                # The failsafe at _v14_cascade line 129515 checks ._bg_result → None
+                                # → result stays None → all_confirmed is empty → no extraction.
+                                # Fix: set ._bg_result = det HERE, synchronously, before the event
+                                # fires — guaranteed to be visible before any task can be cancelled.
+                                try:
+                                    _cev_wov._bg_result = det
+                                except Exception:
+                                    pass
                                 _cev_wov.set()
                             _gate_wov = getattr(self, '_gate', None)
                             if _gate_wov and not getattr(_gate_wov, 'killed', True):
@@ -107921,6 +107993,7 @@ class TechniqueCascadeEngine:
             _fp_guard_already_ran = (
                 not _pcv_ok_before_primary          # primary block condition: post-verify failed
                 and _effective_tech in _boolean_like_techs_primary  # and tech is boolean-like
+                and bool(_fp_true) and bool(_fp_false) and bool(_false_p)  # BUG-FPG-NULLFP-FIX: guard only True when fingerprints were available (primary block's inner gate); prevents _fp_guard_already_ran=True when guard never actually executed
             )
             # BUG-FIX-12-SECONDARY-GUARD (Issue 12): Skip secondary boolean FP guard for
             # timing techniques (T/TH/HQ/BT). These are confirmed via Check B's proportional
@@ -107950,8 +108023,7 @@ class TechniqueCascadeEngine:
                     and _effective_tech in _boolean_like_techs
                     and _effective_tech not in _timing_techs_skip_fpg
                     and _fp_true and _fp_false and _false_p
-                    and not _fp_guard_already_ran
-                    and not _pcv_ok_before_primary):  # BUG-FIX-SECONDARY-OVERRIDE: only run when post-verify FAILED
+                    and not _fp_guard_already_ran):  # BUG-SECONDARY-DEAD-FIX: removed `and not _pcv_ok_before_primary` which combined with `not _fp_guard_already_ran` was a tautological contradiction (both could never be True simultaneously when _boolean_like_techs==_boolean_like_techs_primary), making this entire block dead code and allowing FPs to slip through when post-verify incorrectly confirmed a dynamic-page hit
                 try:
                     _fpg_ok, _fpg_conf = await _run_fp_guards_boolean(
                         self.engine, self.config, method, url, data, data_fmt,
@@ -108006,11 +108078,24 @@ class TechniqueCascadeEngine:
                 _cev2 = getattr(self, '_confirmed_event', None) or getattr(
                     getattr(self, 'config', None), '_confirmed_event', None)
                 if _cev2 and not _cev2.is_set():
+                    # FIX-BG-RESULT-PCV-FINAL: Store DetectionResult on the event BEFORE set()
+                    # so the BG failsafe (_v14_cascade line 129515) can recover it when the
+                    # BG task is cancelled before _test_method reaches _bg_confirmed_results.append
+                    # and _injection_confirmed._bg_result = _cr. Same pattern as Shortcut A
+                    # (line 106287) and WASSR OVERRIDE (above). Covers every confirmation path
+                    # including Check A/B/C/D/E passing inside _post_confirm_verify_locked.
+                    try:
+                        _cev2._bg_result = det
+                    except Exception:
+                        pass
                     _cev2.set()
                 # Kill the circuit-breaker gate so acquire() raises immediately.
                 _gate2 = getattr(self, '_gate', None)
-                if _gate2 and not _gate2.killed:
-                    _gate2.kill()
+                if _gate2 and not getattr(_gate2, 'killed', True):
+                    try:
+                        _gate2.kill()
+                    except Exception:
+                        pass
             else:
                 # BUG-R4-A FIX: PCV failed — restore _SCAN_STOPPED to its
                 # previous state ONLY if extraction has NOT already started.
@@ -108439,6 +108524,16 @@ class TechniqueCascadeEngine:
                 _cev_pcv_wrap = (getattr(self, '_confirmed_event', None) or
                                   getattr(getattr(self, 'config', None), '_confirmed_event', None))
                 if _cev_pcv_wrap and not _cev_pcv_wrap.is_set():
+                    # FIX-BG-RESULT-PCV-WRAP: Set ._bg_result BEFORE .set() so the BG
+                    # failsafe in _v14_cascade recovers the DetectionResult when the BG task
+                    # is cancelled at the next await after this wrapper fires the event.
+                    # This covers the Check A/B/C/D/E confirmation paths that don't fire the
+                    # event internally — without this, Fix-3 (_cev2 at line ~108032) is a
+                    # no-op because the event is already set by the time it runs.
+                    try:
+                        _cev_pcv_wrap._bg_result = det
+                    except Exception:
+                        pass
                     _cev_pcv_wrap.set()
                 _gate_pcv_wrap = getattr(self, '_gate', None)
                 if _gate_pcv_wrap and not getattr(_gate_pcv_wrap, 'killed', True):
@@ -108892,6 +108987,13 @@ class TechniqueCascadeEngine:
                             _cev_sent = (getattr(self, '_confirmed_event', None) or
                                          getattr(getattr(self, 'config', None), '_confirmed_event', None))
                             if _cev_sent and not _cev_sent.is_set():
+                                # FIX-BG-RESULT-SENTINEL: Set ._bg_result BEFORE .set() so the
+                                # BG failsafe in _v14_cascade recovers the DetectionResult even
+                                # when the BG task is cancelled at the next await after this fires.
+                                try:
+                                    _cev_sent._bg_result = det
+                                except Exception:
+                                    pass
                                 _cev_sent.set()
                             _gate_sent = getattr(self, '_gate', None)
                             if _gate_sent and not getattr(_gate_sent, 'killed', True):
@@ -109718,6 +109820,16 @@ class TechniqueCascadeEngine:
                         _cev_e_fast = (getattr(self, '_confirmed_event', None) or
                                        getattr(getattr(self, 'config', None), '_confirmed_event', None))
                         if _cev_e_fast and not _cev_e_fast.is_set():
+                            # FIX-BG-RESULT-E-FAST: Set ._bg_result BEFORE .set() so the BG
+                            # failsafe in _v14_cascade recovers the DetectionResult even when
+                            # the BG task is cancelled at the next await after this fires.
+                            # _inline_pcv_check's Fix-3 guard (not _cev2.is_set()) is a no-op
+                            # here because this fires inside _post_confirm_verify_locked, before
+                            # _inline_pcv_check's final path can run — so we must set it here.
+                            try:
+                                _cev_e_fast._bg_result = det
+                            except Exception:
+                                pass
                             _cev_e_fast.set()
                         _gate_e_fast = getattr(self, '_gate', None)
                         if _gate_e_fast and not getattr(_gate_e_fast, 'killed', True):
@@ -110507,7 +110619,7 @@ class TechniqueCascadeEngine:
                 if _bl_status >= 400 and not (_c_pass or _e_pass) and not _is_strong_body_gap_a:
                     print(f"[*]   [PCV] Body canary weak gap={_a_gap:.3f} (need ≥{_strong_gap_min_a:.2f}) on error page ({_bl_status}) with no SQL errors/logic  likely false positive", flush=True)
                     return False, 0, _details
-                elif _is_error_page and _a_gap < 0.85 and not _is_strong_body_gap_a:
+                elif _is_error_page and _a_gap < 0.85 and not _is_strong_body_gap_a and not (_c_pass or _e_pass):
                     print(f"[*]   [PCV] Body canary gap={_a_gap:.3f} on error page ({_bl_status}, {_bl_size}B)  too low (need ≥{_strong_gap_min_a:.2f})", flush=True)
                     return False, 0, _details
                 else:
@@ -110622,7 +110734,7 @@ class TechniqueCascadeEngine:
                 # or Check D header diff. This prevents FPs from Django/Rails/Laravel
                 # debug pages that include SQL error text in generic server errors.
                 _c_needs_corroboration = tech not in ("E", "EH")
-                _c_has_corroboration = _a_pass or _d_count >= 1
+                _c_has_corroboration = _a_pass or _d_pass
                 if _c_needs_corroboration and not _c_has_corroboration:
                     print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
                           f"tech={tech} — no Check A body signal and no header diff; "
@@ -110867,7 +110979,7 @@ class TechniqueCascadeEngine:
                       f"(det_status={_det_status}, det_sim={_det_sim:.3f} < {1.0 - max(_gap_threshold, 0.25):.3f}) "
                       f"— all {_check_a_waf_counts[1]} Check A canaries WAF-blocked but "
                       "exact detection payload still bypasses WAF and changes body; "
-                      "injection confirmed [tech={tech} dbms={dbms}]", flush=True)
+                      f"injection confirmed [tech={tech} dbms={dbms}]", flush=True)
                 _INJECTION_CONFIRMED[0] = True
                 _SCAN_STOPPED[0] = True
                 return True, 1, _details
@@ -124515,7 +124627,11 @@ class UniversalScanOrchestrator:
                             # surface immediately re-set _EXTRACTION_STARTED[0]=True and launch
                             # a parallel extraction — violating the single-extraction requirement.
                             _ext_owner = _EXTRACTION_STARTED[1] if len(_EXTRACTION_STARTED) > 1 else ""
-                            if _EXTRACTION_STARTED[0] and (_ext_owner == f"{param}@{_confirmed_dbms}" or _ext_owner == ""):
+                            if _EXTRACTION_STARTED[0] and (
+                                    _ext_owner == f"{param}@{_confirmed_dbms}" or
+                                    _ext_owner == f"{param}@{_confirmed_dbms}(standalone)" or
+                                    _ext_owner == f"{param}@{_confirmed_dbms}@{method}" or
+                                    _ext_owner == ""):
                                 _EXTRACTION_STARTED[0] = False
                                 _EXTRACTION_STARTED[1] = ""
                             # FIX-7A: Always deactivate extraction mode when extraction ends
@@ -125209,6 +125325,11 @@ class ScannerV13(ScannerV12):
                             print(f"[!] Extraction failed for param={param!r}: {type(_pe).__name__}: {_pe}", flush=True)
                             import traceback; traceback.print_exc()
                         finally:
+                            _v13_ext_owner = _EXTRACTION_STARTED[1] if len(_EXTRACTION_STARTED) > 1 else ""
+                            _v13_expected = f"{param}@{det.dbms or 'Generic'}@V13Scanner"
+                            if _EXTRACTION_STARTED[0] and (_v13_ext_owner == _v13_expected or _v13_ext_owner == ""):
+                                _EXTRACTION_STARTED[0] = False
+                                _EXTRACTION_STARTED[1] = ""
                             _EXTRACTION_ACTIVE[0] = False
                     elif _no_extract_val:
                         print(f"[*] Extraction skipped (no_extract=True) for param={param!r}", flush=True)
@@ -128771,11 +128892,19 @@ class ScannerV14(ScannerV13):
                 except Exception as _rdf_err:
                     print(f"[!] [RDF] Profiling error: {type(_rdf_err).__name__}: {_rdf_err}", flush=True)
 
+                # FIX-BG-CONFIRMED-SCOPE: _bg_confirmed_results must live in _probe_one_param's
+                # scope so both _v14_bg_headers (closure) and the BG-result collection loop at
+                # line ~129574 share the SAME list object. Previously it was defined INSIDE
+                # _v14_bg_headers, making it inaccessible to _probe_one_param — the NameError
+                # guard at line ~129535 always created a fresh empty list, discarding every BG
+                # header/cookie confirmation and causing extraction to never start after a BG scan.
+                _bg_confirmed_results = []
+
                 if not getattr(self, '_v14_surfaces_launched', False):
                     self._v14_surfaces_launched = True
                     _waf_label = f" (WAF: {waf_name})" if waf_name else ""
                     print(f"[+] Launching expanded surfaces in parallel{_waf_label}", flush=True)
-                    
+
                     async def _v14_bg_headers():
                         """Scan ALL injectable headers in PARALLEL through the FULL cascade engine."""
                         _hdrs = [
@@ -129049,8 +129178,8 @@ class ScannerV14(ScannerV13):
                                                     if _pcv_ok:
                                                         print(f"[+] [COOKIE:{_cname}:{_cm}] PCV PASSED   INJECTION CONFIRMED: [{_ccr.detection.technique}] {_ccr.detection.dbms}!", flush=True)
                                                         _bg_confirmed_results.append(_ccr)
-                                                        _injection_confirmed._bg_result = _ccr
                                                         if not _injection_confirmed.is_set():
+                                                            _injection_confirmed._bg_result = _ccr
                                                             _injection_confirmed.set()
                                                             _gate.kill()
                                                         return [_ccr]
@@ -129076,8 +129205,6 @@ class ScannerV14(ScannerV13):
                                              for c in _cookie_names]
                         else:
                             print("[*] [COOKIE] No Set-Cookie headers in response  skipping cookie injection", flush=True)
-                        
-                        _bg_confirmed_results = []  # shared: BG tasks store results here immediately
                         
                         async def _scan_one_header(_hname):
                             """Test one header across GET, POST, PUT methods in PARALLEL."""
@@ -129140,8 +129267,8 @@ class ScannerV14(ScannerV13):
                                                     if _pcv_ok:
                                                         print(f"[+] [HDR:{_hname}:{_hm}] PCV PASSED → confirmed injection", flush=True)
                                                         _bg_confirmed_results.append(_cr)
-                                                        _injection_confirmed._bg_result = _cr
                                                         if not _injection_confirmed.is_set():
+                                                            _injection_confirmed._bg_result = _cr
                                                             _injection_confirmed.set()
                                                             _gate.kill()
                                                         return [_cr]
@@ -130194,7 +130321,8 @@ class ScannerV14(ScannerV13):
                             # exception from releasing another surface's extraction lock.
                             if _EXTRACTION_STARTED[0] and (
                                     _EXTRACTION_STARTED[1] == _ext_param or
-                                    _EXTRACTION_STARTED[1] == f"{_ext_param}@{getattr(self, '_confirmed_dbms_v14', '')}"):
+                                    _EXTRACTION_STARTED[1] == f"{_ext_param}@{getattr(self, '_confirmed_dbms_v14', '')}" or
+                                    _EXTRACTION_STARTED[1] == f"{_ext_param}@{_dbms_v14}@{ep.method}"):
                                 _EXTRACTION_STARTED[0] = False
                                 _EXTRACTION_STARTED[1] = ""
                                 self._extracting_params.discard(_ext_key_v14)
