@@ -107827,7 +107827,7 @@ class TechniqueCascadeEngine:
                                     _wn_m = _re_wn.search(r'wasserstein_dist=(\d+\.\d+)', _det_notes_str)
                                     if _wn_m:
                                         _det_wass_dist = float(_wn_m.group(1))
-                                        _wn_min = max(getattr(self, '_dynamic_wass', 0.35), 0.15)
+                                        _wn_min = 1.0
                                         # FIX-WASSR-DET-NOTES-FP (ROOT CAUSE of log.txt false positive):
                                         # The det-notes fallback used _wn_min (~0.25) as its only gate.
                                         # On a dynamic page (CDN, A/B test, Cloudflare WAF challenge tokens)
@@ -116770,6 +116770,22 @@ class TechniqueCascadeEngine:
                                     and min(_wdh_p) > _wass_min * 0.75
                                     and _wass_dist > _wass_min
                                 )
+                                # FIX-WASS-EARLY-HIGH-WINDOW: Closes the gap between
+                                # _wass_bimodal_outlier (requires ≥1 near-zero probe) and
+                                # _wass_all_high_consistent (requires ≥5 probes).  When the
+                                # window transitions from bimodal to all-high with only 3-4
+                                # probes and range > 0.02, no existing guard fires even though
+                                # the pattern is unambiguously CDN uniform-high variance.
+                                # This guard mirrors _wass_all_high_consistent exactly except
+                                # it fires for the 3-4 probe window instead of 5+.
+                                _wass_early_high_window = (
+                                    not _wass_param_confirmed
+                                    and 3 <= len(_wdh_p) < 5
+                                    and _wdh_p_below_stable == 0
+                                    and _wdh_p_above_min == len(_wdh_p)
+                                    and min(_wdh_p) > _wass_min * 0.75
+                                    and _wass_dist > _wass_min
+                                )
                                 # _wass_noise_range suppression also gated on no prior confirmation
                                 # BUG-WASS-SUPPRESS-DEADLOCK FIX: The previous suppression
                                 # fired unconditionally on _wass_noise_range=True (3+ consistent
@@ -116822,6 +116838,7 @@ class TechniqueCascadeEngine:
                                     or _wass_bimodal_outlier
                                     or _wass_asymmetric_waf
                                     or _wass_all_high_consistent
+                                    or _wass_early_high_window
                                 )
                                 if _wass_all_high_consistent:
                                     # FIX-WASS-ALL-HIGH-CONSISTENT v2: store persistent CDN-block
@@ -116833,6 +116850,17 @@ class TechniqueCascadeEngine:
                                     except Exception:
                                         pass
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} ALL-HIGH-CONSISTENT "
+                                          f"({_wdh_p_above_min}/{len(_wdh_p)} probes above threshold={_wass_min:.2f}, "
+                                          f"min={min(_wdh_p):.4f} > {_wass_min*0.75:.3f}, none below 0.15) "
+                                          f"-- uniformly-high page variance (CDN/dynamic), NOT injection",
+                                          flush=True)
+                                elif _wass_early_high_window:
+                                    try:
+                                        _wdh[f"_cdnblock_{param}"] = True
+                                        self._wass_dist_hist = _wdh
+                                    except Exception:
+                                        pass
+                                    print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} EARLY-HIGH-WINDOW "
                                           f"({_wdh_p_above_min}/{len(_wdh_p)} probes above threshold={_wass_min:.2f}, "
                                           f"min={min(_wdh_p):.4f} > {_wass_min*0.75:.3f}, none below 0.15) "
                                           f"-- uniformly-high page variance (CDN/dynamic), NOT injection",
@@ -129434,7 +129462,7 @@ class ScannerV14(ScannerV13):
                                         print(f"[+] [{_m}] INJECTION FOUND: {_cr.detection.param} [{_cr.detection.technique}] {_cr.detection.dbms}!", flush=True)
                             # Only report "no injections" if scan completed naturally
                             if _r is not None and not any(cr.detection for cr in (_r or [])):
-                                if not _injection_confirmed.is_set():
+                                if not _injection_confirmed.is_set() and not _SCAN_STOPPED[0]:
                                     print(f"[*] [{_m}] Cascade complete  no injections found", flush=True)
                             return _r or []
                         except asyncio.CancelledError:
