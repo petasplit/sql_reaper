@@ -82290,7 +82290,7 @@ class FastExtractionEngine:
         Only works when OOB channel is confirmed available.
         """
         return await oob.exfiltrate(
-            self.method, self.url, self.data, self.data_fmt,
+            self.engine, self.method, self.url, self.data, self.data_fmt,
             self.result.param, self.original, self.tamper_chain,
             sql_query, dbms)
 
@@ -97238,20 +97238,28 @@ class ScannerV11(ScannerV10):
                 LOG.debug("Suppressed in _v11_inner: %s", _sqr_e)
 
         # WAF detection
-        waf_info = (self.session.waf_info or
-                    self.kb.lookup_waf(domain) or
+        _ses_waf = self.session.waf_info
+        _kb_waf  = self.kb.lookup_waf(domain) if not _ses_waf else None
+        waf_info = (_ses_waf or _kb_waf or
                     {"detected":False,"name":ml_waf if ml_waf_conf>0.6 else None,
                      "tampers":[]})
         first_ep = all_endpoints[0] if all_endpoints else None
-        if first_ep and first_ep.params and not waf_info.get("name"):
+        # BUG-MLWAF-GATES-DETECTOR FIX: run WAFDetector even when ML assigned a name so
+        # that signature-based detection can override an incorrect ML classification.
+        # Only skip if we already have an authoritative session or KB result.
+        if first_ep and first_ep.params and not (_ses_waf or _kb_waf):
             fp_ = next(iter(first_ep.params)); fv_ = first_ep.params[fp_]
-            waf_info = await WAFDetector(engine, cfg).detect(
+            sig_waf = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp_, fv_)
-            # BUG-WAF-RECONCILE-FIX: if WAFDetector finds nothing, fall back to ML name.
-            if not waf_info.get("name") and _ACTIVE_WAF_NAME:
-                waf_info = dict(waf_info)
-                waf_info["name"] = _ACTIVE_WAF_NAME
-                waf_info["detected"] = True
+            if sig_waf.get("name"):
+                # Signature match overrides ML classification.
+                waf_info = sig_waf
+            else:
+                # WAFDetector found nothing; keep ML-derived name if present, else fall back.
+                if not waf_info.get("name") and _ACTIVE_WAF_NAME:
+                    waf_info = dict(waf_info)
+                    waf_info["name"] = _ACTIVE_WAF_NAME
+                    waf_info["detected"] = True
             self.session.waf_info = waf_info
             self.kb.cache_waf(domain, waf_info)
         self._ui.set_meta(waf=waf_info.get("name") or "none")
@@ -111029,6 +111037,7 @@ class TechniqueCascadeEngine:
                 (_wf_pat, _wf_repl),
                 (r'(BENCHMARK\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                 (r'(RANDOMBLOB\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
+                (r'(ZEROBLOB\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                 (r'(RECEIVE_MESSAGE\s*\([^,]+,\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                 (r'(DBMS_SESSION\.SLEEP\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                 (r'(DBMS_LOCK\.SLEEP\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
