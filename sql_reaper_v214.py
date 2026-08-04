@@ -111615,8 +111615,14 @@ class TechniqueCascadeEngine:
                     # Detect BENCHMARK/RANDOMBLOB/heavy-compute payloads:
                     # these use iteration counts (millions), NOT seconds.
                     # Can't multiply by 1000  use relative timing instead.
+                    # BUG-ZEROBLOB-IS-COMPUTE FIX: ZEROBLOB(N) is SQLite's heavy-allocation
+                    # timing technique (used in SQLITE_TIMEBASED_PAYLOADS). It uses an iteration
+                    # count (bytes), NOT seconds. Without it, _eff_sleep_ms = 20000000 * 1000 =
+                    # 20,000,000,000ms (impossibly large) and all proportional thresholds fail,
+                    # wasting 3 HTTP probes before falling to canary pairs. Add ZEROBLOB to the
+                    # compute-pattern list so it skips the proportional block immediately.
                     _is_compute = bool(_re.search(
-                        r'BENCHMARK|RANDOMBLOB|HEX\(RANDOMBLOB|GENERATE_SERIES|MD5\(',
+                        r'BENCHMARK|RANDOMBLOB|HEX\(RANDOMBLOB|GENERATE_SERIES|MD5\(|ZEROBLOB\(',
                         _det_payload, _re.IGNORECASE))
                     
                     if _is_compute:
@@ -112902,8 +112908,14 @@ class TechniqueCascadeEngine:
                     and tech in ("T", "BT", "TH", "HQ")
                     and payload):
                 # BUG-INLINE-RE-IMPORT-FIX: use module-level _re
+                # BUG-ZEROBLOB-ABS-SLEEP FIX: ZEROBLOB(N) is SQLite's heavy-allocation
+                # timing function. Without it, the absolute multi-probe fallback was never
+                # reached for ZEROBLOB detection payloads — leaving SQLite timing injection
+                # with no last-resort absolute path when all canary pairs fail.
+                # Also add DBMS_PIPE.RECEIVE_MESSAGE and GENERATE_SERIES for completeness.
                 _abs_has_sleep = bool(_re.search(
-                    r'SLEEP\s*\(|WAITFOR|pg_sleep|BENCHMARK\(|RANDOMBLOB\(',
+                    r'SLEEP\s*\(|WAITFOR|pg_sleep|BENCHMARK\(|RANDOMBLOB\('
+                    r'|ZEROBLOB\(|GENERATE_SERIES|RECEIVE_MESSAGE',
                     payload, _re.IGNORECASE))
                 if _abs_has_sleep:
                     print("[*]     Check B (absolute multi-probe fallback): "
@@ -115064,7 +115076,7 @@ class TechniqueCascadeEngine:
                                     # 100-probe rotation fires after only 20 probes per surface,
                                     # causing POST/PUT/PATCH cascades to rotate prematurely.
                                     _nd_method = (method or 'GET').upper()
-                                    _nd_key = f"{_nd_method}:{dbms}:{tech}"
+                                    _nd_key = f"{_nd_method}:{data_fmt}:{param}:{dbms}:{tech}"
                                     _nd_blk = getattr(self, '_dbms_block_run', {}).get(dbms, 0)
                                     if _nd_blk == _pre_probe_block_run:
                                         # No WAF block → true no-diff (200, no detection signal)
@@ -115096,14 +115108,14 @@ class TechniqueCascadeEngine:
                                 self._dbms_block_run[dbms] = 0
                             try:
                                 _nd_method_reset = (method or 'GET').upper()
-                                type(self)._CLASS_NODIFF_STREAK[f"{_nd_method_reset}:{dbms}:{tech}"] = 0
+                                type(self)._CLASS_NODIFF_STREAK[f"{_nd_method_reset}:{data_fmt}:{param}:{dbms}:{tech}"] = 0
                             except Exception:
                                 pass
                         if r:
                             # Detection confirmed — reset no-diff streak
                             try:
                                 _nd_method_reset = (method or 'GET').upper()
-                                type(self)._CLASS_NODIFF_STREAK[f"{_nd_method_reset}:{dbms}:{tech}"] = 0
+                                type(self)._CLASS_NODIFF_STREAK[f"{_nd_method_reset}:{data_fmt}:{param}:{dbms}:{tech}"] = 0
                             except Exception:
                                 pass
                             # BUG-FIX-GATE-KILLED: _send_and_check returns GATE_KILLED
@@ -129801,6 +129813,7 @@ class ScannerV14(ScannerV13):
                     # BUG-DP-TIMING-CDN-JITTER FIX: track whether the probe fired on a non-timing
                     # payload (CDN jitter is DBMS-independent → stop outer loop on first fail).
                     _dp_jitter_break = False
+                    _dp_probe_fired = False
                     for _dp_ed in _dp_list:
                         if _SCAN_STOPPED[0]: break  # FIX-R4: stop outer DBMS loop
                         _dp_mutator = SQLMutationEngine(dbms=_dp_ed, surface="url")
@@ -129819,6 +129832,7 @@ class ScannerV14(ScannerV13):
                                 engine, cfg, ep.method, ep.url, ep_data, ep_fmt,
                                 param, orig_val, tamper_chain, sleep_p, cfg.time_sec)
                             if dp_ok and dp_conf > 0.70:
+                                _dp_probe_fired = True
                                 # BUG-DP-TIMING-XCAT FIX: classify probe result before PCV.
                                 # If the original (pre-mutation) payload has no timing keyword,
                                 # the probe fired on CDN/network jitter — not a timing injection.
@@ -129867,7 +129881,7 @@ class ScannerV14(ScannerV13):
                                 # BUG-DP-TIMING-XCAT FIX: when mutate_all obfuscated the timing
                                 # keyword (original had it, mutated form doesn't), mark the det
                                 # so _inline_pcv_check forces Check B instead of T→B boolean routing.
-                                if _dp_orig_has_tkw and not _dp_mut_has_tkw:
+                                if _dp_orig_has_tkw:
                                     try:
                                         _dp_det._dp_timing_oracle_confirmed = True
                                     except Exception:
@@ -129917,7 +129931,7 @@ class ScannerV14(ScannerV13):
                                 except Exception as _dpe:
                                     print(f"    [DP-timing] PCV error: {_dpe}  rejecting detection", flush=True)
                                     break  # network error = stop retrying
-                        if result or _dp_jitter_break or _dp_dbms:
+                        if result or _dp_jitter_break or _dp_dbms or _dp_probe_fired:
                             break  # FIX SYN-3: break outer for (_dp_ed) once payload confirmed
                             # BUG-2-FIX: also break when forced_dbms is set — PCV failure on the
                             # only valid DBMS means we should stop, not try other DBMSes
