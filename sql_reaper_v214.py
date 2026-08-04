@@ -107407,10 +107407,26 @@ class TechniqueCascadeEngine:
                     #   (L1-L6 Fisher/Welch statistical tests + FPV) runs as the primary
                     #   oracle.  Boolean cross-category hits via timing surfaces are now
                     #   correctly confirmed.
-                    _effective_tech = "B"
-                    print(f"[*] PCV [{tech}→B] {dbms}: timing oracle surface, payload has no "
-                          "timing/error/UNION keyword — cross-category Boolean hit, "
-                          "routing to boolean FP guards (L1-L6+Welch+FPV)", flush=True)
+                    #
+                    # BUG-DP-TIMING-OBFUSC-XCAT FIX: Exception — when the DP timing oracle
+                    # already confirmed a timing injection with high confidence AND marked
+                    # the detection as _dp_timing_oracle_confirmed, the T→B reclassification
+                    # is WRONG.  The payload's timing keyword was obfuscated by mutate_all()
+                    # (e.g. SLEEP→SL/**/EEP) so keyword analysis finds nothing — but the
+                    # server DID delay.  Keep timing mode so Check B (proportional timing)
+                    # runs instead of body-diff boolean guards which always fail on timing
+                    # injections (the body never changes for a correct timing payload).
+                    if getattr(det, '_dp_timing_oracle_confirmed', False):
+                        # dp_timing oracle proved it's a real timing injection.
+                        # _effective_tech already "T" — just log and skip reclassification.
+                        print(f"[*] PCV [{tech}→T] {dbms}: dp_timing oracle confirmed obfuscated "
+                              "timing injection — keeping timing PCV (Check B), "
+                              "not reclassifying to boolean", flush=True)
+                    else:
+                        _effective_tech = "B"
+                        print(f"[*] PCV [{tech}→B] {dbms}: timing oracle surface, payload has no "
+                              "timing/error/UNION keyword — cross-category Boolean hit, "
+                              "routing to boolean FP guards (L1-L6+Welch+FPV)", flush=True)
 
                 # WB: prepend the detected bypass encoding to the PCV tamper chain
                 if tech == "WB" and det.payload:
@@ -129770,17 +129786,25 @@ class ScannerV14(ScannerV13):
 
                 # v14: DP timing fallback  BUG-2 FIX (Req 1): CERTIFIED_PAYLOAD_DATABASE only
                 if not result and (cfg.techniques in ("ALL","all","*") or "T" in cfg.techniques):
-                    _dp_dbms = (getattr(cfg,'forced_dbms',None) or getattr(cfg,'_detected_dbms',None))
+                    _dp_dbms = (getattr(cfg,'forced_dbms',None) or getattr(cfg,'_detected_dbms',None)
+                                or getattr(cfg,'_candidate_dbms',None))
                     _dp_list = [_dp_dbms] if _dp_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
                     # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
                     # FIX-R6: mutate_all() applies all 20 mutation layers.
                     # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
+                    # BUG-DP-TIMING-CDN-JITTER FIX: track whether the probe fired on a non-timing
+                    # payload (CDN jitter is DBMS-independent → stop outer loop on first fail).
+                    _dp_jitter_break = False
                     for _dp_ed in _dp_list:
                         if _SCAN_STOPPED[0]: break  # FIX-R4: stop outer DBMS loop
                         _dp_mutator = SQLMutationEngine(dbms=_dp_ed, surface="url")
                         for sleep_p in _get_cascade_payloads(_dp_ed, 'T', cfg.level):
                             if _SCAN_STOPPED[0]: break  # FIX-R4
                             await asyncio.sleep(0.001)  # BUG-R9-A FIX: real 1ms yield
+                            # BUG-DP-TIMING-XCAT FIX: save pre-mutation payload so we can
+                            # distinguish obfuscated timing kw (real injection) from CDN jitter
+                            # (non-timing payload that dp_timing.probe fires on).
+                            _dp_orig_sleep_p = sleep_p
                             sleep_p = _dp_mutator.mutate_all(sleep_p, technique="T")  # FIX-R6: 20 layers, correct technique
                             # FIX SYN-3 (complete): All logic inside inner-for body at 28 spaces
                             if getattr(cfg,"safe_mode",False):
@@ -129789,6 +129813,26 @@ class ScannerV14(ScannerV13):
                                 engine, cfg, ep.method, ep.url, ep_data, ep_fmt,
                                 param, orig_val, tamper_chain, sleep_p, cfg.time_sec)
                             if dp_ok and dp_conf > 0.70:
+                                # BUG-DP-TIMING-XCAT FIX: classify probe result before PCV.
+                                # If the original (pre-mutation) payload has no timing keyword,
+                                # the probe fired on CDN/network jitter — not a timing injection.
+                                # CDN jitter is DBMS-independent: the same false fire will occur
+                                # for all 6 DBMSes, so stop the outer loop immediately.
+                                # If the original has timing kw but the mutated form does not,
+                                # mutate_all obfuscated SLEEP/WAITFOR/etc — it IS a real timing
+                                # injection; mark the detection so _inline_pcv_check uses
+                                # Check B (proportional timing) instead of T→B boolean routing.
+                                _dp_t_kws = ("SLEEP(", "BENCHMARK(", "WAITFOR", "PG_SLEEP(",
+                                             "RANDOMBLOB(", "GENERATE_SERIES(", "ZEROBLOB(")
+                                _dp_orig_has_tkw = any(k in _dp_orig_sleep_p.upper() for k in _dp_t_kws)
+                                _dp_mut_has_tkw  = any(k in sleep_p.upper() for k in _dp_t_kws)
+                                if not _dp_orig_has_tkw:
+                                    # Not a timing payload — CDN uniform latency false fire.
+                                    # All DBMSes will have the same result; stop now.
+                                    print("    [DP-timing] CDN-jitter FP: probe fired on non-timing "
+                                          f"payload for {_dp_ed} — stopping DBMS loop", flush=True)
+                                    _dp_jitter_break = True
+                                    break
                                 print(f"    [DP-timing] confirmed (conf={dp_conf:.2f}, eps={self.dp_timing.epsilon})")
                                 # BUG-DP-TIMING-EMPTY-DBMS FIX: use known_dbms from cascade
                                 # context instead of "" so PCV runs DBMS-specific checks.
@@ -129814,6 +129858,14 @@ class ScannerV14(ScannerV13):
                                     payload=sleep_p, dbms=_dp_known_dbms,
                                     confidence=dp_conf,
                                     notes=f"dp_timing epsilon={self.dp_timing.epsilon}")
+                                # BUG-DP-TIMING-XCAT FIX: when mutate_all obfuscated the timing
+                                # keyword (original had it, mutated form doesn't), mark the det
+                                # so _inline_pcv_check forces Check B instead of T→B boolean routing.
+                                if _dp_orig_has_tkw and not _dp_mut_has_tkw:
+                                    try:
+                                        _dp_det._dp_timing_oracle_confirmed = True
+                                    except Exception:
+                                        pass
                                 # Run PCV on DP timing detection
                                 try:
                                     # BUG-DP-TIMING-EMPTY-DBMS FIX (cascade side):
@@ -129859,7 +129911,7 @@ class ScannerV14(ScannerV13):
                                 except Exception as _dpe:
                                     print(f"    [DP-timing] PCV error: {_dpe}  rejecting detection", flush=True)
                                     break  # network error = stop retrying
-                        if result:
+                        if result or _dp_jitter_break:
                             break  # FIX SYN-3: break outer for (_dp_ed) once payload confirmed
 
                 # v25: Multi-method PARALLEL scan  try alternative HTTP methods
@@ -129886,7 +129938,14 @@ class ScannerV14(ScannerV13):
                     LOG.debug("[alt-method] Skipping alternate method scan: "
                              "oracle=TIMING_ONLY (instability), alt scan would produce same false-positive storm")
                 if _do_alt_methods:
-                    _alt_methods = [m for m in ("POST", "GET")
+                    # BUG-ALT-METHOD-PUT-PATCH FIX: old list only had ("POST", "GET").
+                    # PUT/PATCH were reachable in the body-synthesis block inside
+                    # _try_alt_method (line ~_alt_data check) but never actually queued
+                    # because they were absent from this list.  REST APIs commonly use
+                    # PUT /resource/:id and PATCH /resource/:id for update endpoints that
+                    # are just as injectable as POST.  Add both so the fallback method
+                    # scan covers all four standard write/read HTTP methods.
+                    _alt_methods = [m for m in ("POST", "GET", "PUT", "PATCH")
                                     if m.upper() != ep.method.upper()]
                     print(f"[*] Trying alternate HTTP methods sequentially: {_alt_methods}", flush=True)
                     
