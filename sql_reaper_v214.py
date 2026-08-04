@@ -108063,7 +108063,8 @@ class TechniqueCascadeEngine:
                     and _effective_tech in _boolean_like_techs
                     and _effective_tech not in _timing_techs_skip_fpg
                     and _fp_true and _fp_false and _false_p
-                    and not _fp_guard_already_ran):  # BUG-SECONDARY-DEAD-FIX: removed `and not _pcv_ok_before_primary` which combined with `not _fp_guard_already_ran` was a tautological contradiction (both could never be True simultaneously when _boolean_like_techs==_boolean_like_techs_primary), making this entire block dead code and allowing FPs to slip through when post-verify incorrectly confirmed a dynamic-page hit
+                    and not _fp_guard_already_ran
+                    and not (_pcv_ok_before_primary and _pcv_score >= 2)):  # BUG-4-FIX: when post-verify confirmed with multiple corroborating checks (score>=2), trust it — secondary FP guard running on a different set of fresh probes can reverse a genuine multi-evidence confirmation on dynamic pages
                 try:
                     _fpg_ok, _fpg_conf = await _run_fp_guards_boolean(
                         self.engine, self.config, method, url, data, data_fmt,
@@ -112004,11 +112005,14 @@ class TechniqueCascadeEngine:
             ],
         }
 
-        # BUG-CPU-4 FIX: Check _SCAN_STOPPED before building the large 
+        # BUG-CPU-4 FIX: Check _SCAN_STOPPED before building the large
         # _b_fallbacks_by_dbms dict (CPU-intensive string formatting of all canary pairs).
         # If injection was confirmed elsewhere while we were running proportional probes,
         # skip the canary construction entirely.
-        if _SCAN_STOPPED[0] and not _EXTRACTION_ACTIVE[0]:
+        # BUG-3-FIX: _SCAN_STOPPED is ALWAYS True during PCV (set by _inline_pcv_check before
+        # calling _post_confirm_verify), so the old guard prevented Check B canary loop from
+        # EVER running. Use _INJECTION_CONFIRMED instead — it is only True on permanent success.
+        if _INJECTION_CONFIRMED[0]:
             return False, 0, _details
 
         # BUG-ORACLE-HQ-ROWNUM-CHECKB FIX (Req 3/8): Compute dynamic Oracle ROWNUM
@@ -113984,7 +113988,8 @@ class TechniqueCascadeEngine:
         for dbms in dbms_order:
             # FIX FUN-5h (Issue 4): check _SCAN_STOPPED FIRST — faster than gate check
             # and works even when config._confirmed_event was never wired up.
-            if _SCAN_STOPPED[0]:
+            # BUG-1-FIX: allow PCV transient stop — only exit when PCV is NOT in progress
+            if _SCAN_STOPPED[0] and _PCV_IN_PROGRESS[0] == 0:
                 return None
             _gate_main = getattr(self, '_gate', None)
             _gate_glob = _ACTIVE_GATE[0] if _ACTIVE_GATE else None
@@ -114083,7 +114088,8 @@ class TechniqueCascadeEngine:
             _oracle_mode_main = getattr(self.config, "_oracle_mode", OracleMode.FULL)
             for tech in tech_order:
                 # FIX FUN-5h continued: check _SCAN_STOPPED before every technique
-                if _SCAN_STOPPED[0]:
+                # BUG-1-FIX: allow PCV transient stop — only exit when PCV is NOT in progress
+                if _SCAN_STOPPED[0] and _PCV_IN_PROGRESS[0] == 0:
                     return None
                 _gate_main = getattr(self, '_gate', None)
                 _gate_glob = _ACTIVE_GATE[0] if _ACTIVE_GATE else None
@@ -114576,7 +114582,8 @@ class TechniqueCascadeEngine:
             # unnecessary requests. Scan probe loops should ALWAYS stop when _SCAN_STOPPED=True,
             # regardless of extraction state. Extraction code paths go through Enumerator._extract_str
             # → _send_injected directly, not through _try_technique loops.
-            if _SCAN_STOPPED[0]:
+            # BUG-1-FIX: allow PCV transient stop — only exit when PCV is NOT in progress
+            if _SCAN_STOPPED[0] and _PCV_IN_PROGRESS[0] == 0:
                 return None
             # BUG-V192-001 FIX: propagate T22 early-exit through template loop.
             # If _t22_advance_dbms was set True by a previous template's payload
@@ -129429,9 +129436,11 @@ class ScannerV14(ScannerV13):
                             # BUG-CPU-3 FIX: Check _SCAN_STOPPED FIRST (set by _inline_pcv_check
                             # before _injection_confirmed fires) so header batches stop immediately
                             # when any surface confirms injection, without waiting for next batch.
-                            if _SCAN_STOPPED[0]:
-                                # BUG-HDR-CONFIRM-PREMATURE FIX: was "Injection confirmed"
-                                # but SCAN_STOPPED could be set when PCV is still running.
+                            if _SCAN_STOPPED[0] and _PCV_IN_PROGRESS[0] == 0:
+                                # BUG-CPU-3 FIX / BUG-1-FIX: only stop when PCV is NOT in progress.
+                                # _SCAN_STOPPED is set transiently while PCV runs; breaking here
+                                # would permanently skip remaining header batches even if PCV fails
+                                # and restores _SCAN_STOPPED to False.
                                 print("[*] [HDR] Scan stopped — halting header scan", flush=True)
                                 _hdrs_stopped_for_pcv = True
                                 break
@@ -129458,14 +129467,11 @@ class ScannerV14(ScannerV13):
                             # returns, before the sleep and before the next iteration's top check.
                             # Without this, one extra batch fires during the brief window between
                             # _SCAN_STOPPED being set and the next iteration's top-of-loop check.
-                            if _SCAN_STOPPED[0] or _injection_confirmed.is_set() or _gate.killed:
-                                # BUG-HDR-CONFIRM-PREMATURE FIX: The previous message said
-                                # "Injection confirmed mid-batch" but PCV hasn't run yet at this
-                                # point.  The stop flag (_SCAN_STOPPED / _injection_confirmed) is
-                                # set when a CANDIDATE is found and PCV is about to start —
-                                # not when injection has been verified.  Using "confirmed" here
-                                # was misleading and contradicted the subsequent PCV REJECTED
-                                # message when PCV later failed.
+                            if (_SCAN_STOPPED[0] and _PCV_IN_PROGRESS[0] == 0) or _injection_confirmed.is_set() or _gate.killed:
+                                # BUG-1-FIX (mid-batch): same as top-of-loop — only stop on
+                                # _SCAN_STOPPED when PCV is NOT in progress.
+                                # _injection_confirmed and _gate.killed are permanent signals —
+                                # those always stop (not transient like PCV's _SCAN_STOPPED).
                                 print("[*] [HDR] Candidate detected mid-batch — stopping header scan "
                                       "for PCV verification (FIX-R4-B)", flush=True)
                                 _hdrs_stopped_for_pcv = True
@@ -129911,8 +129917,10 @@ class ScannerV14(ScannerV13):
                                 except Exception as _dpe:
                                     print(f"    [DP-timing] PCV error: {_dpe}  rejecting detection", flush=True)
                                     break  # network error = stop retrying
-                        if result or _dp_jitter_break:
+                        if result or _dp_jitter_break or _dp_dbms:
                             break  # FIX SYN-3: break outer for (_dp_ed) once payload confirmed
+                            # BUG-2-FIX: also break when forced_dbms is set — PCV failure on the
+                            # only valid DBMS means we should stop, not try other DBMSes
 
                 # v25: Multi-method PARALLEL scan  try alternative HTTP methods
                 # Instead of sequential fallback, launch all methods simultaneously.
