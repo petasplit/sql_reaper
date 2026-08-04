@@ -129759,10 +129759,18 @@ class ScannerV14(ScannerV13):
                                 # always "") and cfg.dbms (wrong attr, always "").
                                 # DBMS is stored in cfg._detected_dbms (set by DBMS
                                 # detection phase) or cfg.forced_dbms (user-specified).
+                                # BUG-DP-TIMING-EMPTY-DBMS-LOOP FIX: when cascade failed
+                                # (result=None), cfg._detected_dbms is not yet set.
+                                # All four fallbacks evaluate to "" → dbms="" → PCV Check E
+                                # uses MySQL defaults for all DBMSes. Add _dp_ed (the loop
+                                # variable representing the current DBMS being tried) as
+                                # the last meaningful fallback so the correct DBMS-specific
+                                # SQL canary fires in Check E.
                                 _dp_known_dbms = (getattr(cfg, "forced_dbms", "") or
                                                   getattr(cfg, "_detected_dbms", "") or
                                                   getattr(self, "_known_dbms", "") or
-                                                  getattr(cfg, "dbms", "") or "")
+                                                  getattr(cfg, "dbms", "") or
+                                                  _dp_ed or "")
                                 _dp_det = DetectionResult(
                                     param=param, technique="T",
                                     payload=sleep_p, dbms=_dp_known_dbms,
@@ -129776,7 +129784,8 @@ class ScannerV14(ScannerV13):
                                     _dp_known_dbms2 = (getattr(cfg, "forced_dbms", "") or
                                                         getattr(cfg, "_detected_dbms", "") or
                                                         getattr(self, "_known_dbms", "") or
-                                                        getattr(cfg, "dbms", "") or "")
+                                                        getattr(cfg, "dbms", "") or
+                                                        _dp_ed or "")
                                     _dp_cascade = TechniqueCascadeEngineV18(
                                         engine=engine, config=cfg,
                                         waf_name=waf_name,
