@@ -30632,7 +30632,7 @@ def _build_rotating_tamper_chain(waf_name: str = "") -> list:
     if waf_name:
         _waf_lower = (waf_name or "").lower().strip()
         for _waf_key, _waf_tampers in _WAF_TAMPER_MAP.items():
-            if _waf_key != "generic" and _waf_key in _waf_lower:
+            if _waf_key in _waf_lower:
                 # Pick up to 2 WAF-specific tampers; avoid duplicates with existing chain.
                 _waf_available = [t for t in _waf_tampers if t not in chain]
                 if _waf_available:
@@ -90198,7 +90198,7 @@ class ScannerV10(ScannerV9):
                     if _rb_m_pcv:
                         _rb_bytes = float(_rb_m_pcv.group(1))
                         _rb_secs = _rb_bytes / 10_000_000.0
-                        _rb_thresh = max(600.0, _rb_secs * 1000.0 * 0.65)
+                        _rb_thresh = max(300.0, _rb_secs * 1000.0 * 0.65)
                         # BUG-RANDOMBLOB-KEY-FIX (Req 3): RANDOMBLOB/ZEROBLOB is SQLite-specific.
                         # Use 'SQLITE' as default when dbms is not yet fingerprinted,
                         # so Check B correctly finds the calibrated threshold by DBMS key.
@@ -112040,6 +112040,19 @@ class TechniqueCascadeEngine:
         except Exception:
             _ora_hq_rownum_b = 50000
 
+        # BUG-11 FIX: _hq_bench_canaries["Oracle"] was built before _ora_hq_rownum_b was
+        # computed, so its heavy-query entries used hardcoded ROWNUM<50000/ROWNUM<100000.
+        # Now that _ora_hq_rownum_b is available, patch the Oracle entries in-place so
+        # Check B uses the dynamically-calibrated ROWNUM cap on fast Oracle servers.
+        _hq_bench_canaries["Oracle"] = [
+            (t[0].replace("ROWNUM<50000", f"ROWNUM<{_ora_hq_rownum_b}")
+                  .replace("ROWNUM<100000", f"ROWNUM<{min(_ora_hq_rownum_b * 2, 500000)}"),
+             t[1].replace("ROWNUM<50000", f"ROWNUM<{_ora_hq_rownum_b}")
+                  .replace("ROWNUM<100000", f"ROWNUM<{min(_ora_hq_rownum_b * 2, 500000)}"),
+             t[2]) if len(t) >= 3 else t
+            for t in _hq_bench_canaries["Oracle"]
+        ]
+
         _b_fallbacks_by_dbms = {
             "MySQL": [
                 # ── String-context (string quote closes before AND) ───────────
@@ -112290,9 +112303,12 @@ class TechniqueCascadeEngine:
                             + _b_fallbacks_by_dbms[dbms])
         else:
             # Unknown DBMS — combine all DBMS canary lists (deduplicated by (true,false) pair)
+            # BUG-17 FIX: also include _hq_bench_canaries from all DBMSes so compute-timing
+            # techniques (BENCHMARK, GENERATE_SERIES, RANDOMBLOB, heavy cross-joins) are
+            # available for Check B even when the DBMS has not been fingerprinted.
             _seen_pairs: set = set()
             _combined_canaries: list = []
-            for _all_fallback_list in _b_fallbacks_by_dbms.values():
+            for _all_fallback_list in list(_hq_bench_canaries.values()) + list(_b_fallbacks_by_dbms.values()):
                 for _entry in _all_fallback_list:
                     _pair_key = (_entry[0], _entry[1])
                     if _pair_key not in _seen_pairs:
@@ -112714,7 +112730,7 @@ class TechniqueCascadeEngine:
                     # was 100% dead for ROWNUM<= payloads.
                     # Fix: use [<>]=? to match ROWNUM<N, ROWNUM<=N, ROWNUM>N, ROWNUM>=N,
                     # consistent with the patterns at lines ~79822 and ~84966.
-                    _rownum_m_trc = _re.search(r'ROWNUM\s*<=?\s*(\d+)', _trc_pay_up)
+                    _rownum_m_trc = _re.search(r'ROWNUM\s*[<>]=?\s*(\d+)', _trc_pay_up)
                     if _rownum_m_trc:
                         _trc_rownum_base = int(_rownum_m_trc.group(1))
                         _trc_full_pay  = _targeted_sleep_replace(payload, str(_trc_rownum_base), str(_trc_rownum_base * 2))
@@ -112855,24 +112871,6 @@ class TechniqueCascadeEngine:
             # preventing proportional verification). Now we fall through to let the absolute
             # fallback attempt confirmation first; only reject after ALL paths exhausted.
 
-            if _b_pass:
-                print(f"[*]   [PCV] Result: CONFIRMED  timing canary verified ({_b_method})", flush=True)
-                # Mark the detection result as PCV-verified so the Final Gate never
-                # re-runs _post_confirm_verify on this result and fails on Check A.
-                # Body canary (Check A) is unreliable on dynamic pages; timing is
-                # the definitive oracle for T/HQ/TH techniques.
-                if det is not None:
-                    try:
-                        det._pcv_verified = True
-                        if hasattr(det, 'detection') and det.detection is not None:
-                            det.detection._pcv_verified = True
-                    except Exception:
-                        pass
-                # BUG-R3-C FIX: set _SCAN_STOPPED on every True path (was missing here).
-                _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
-                _SCAN_STOPPED[0] = True
-                return True, 2 if _a_pass else 1, _details
-            
             # Only allow multi-probe confirmation if Check B didn't fail on proportionality
             if _mp_ok and _mp_cnt >= 4:
                 print("[*]   [PCV] Result: CONFIRMED  multi-probe timing evidence "
@@ -112953,7 +112951,7 @@ class TechniqueCascadeEngine:
                                       f"{'✓ fast' if _abs_false_fast else '✗ ALSO SLOW (server load FP)'}",
                                       flush=True)
                             except Exception:
-                                pass  # false probe failure = keep _abs_false_fast=True (optimistic)
+                                _abs_false_fast = False  # BUG-18 FIX: network error on false probe → conservatively reject
                         if _abs_false_fast:
                             print("[*]   [PCV] Check B (absolute multi-probe): PASS  "
                                   f"{_abs_slow_count}/5 probes slow "
@@ -113079,16 +113077,9 @@ class TechniqueCascadeEngine:
         # EX, HY). The FP guards already proved the body changes are injection-triggered, not noise.
         # Without this exception, ALL boolean injections confirmed by 3 statistical layers are still
         # rejected here because Check C/E/D never fire for boolean — leaving no path to confirmation.
-        # BUG-FP-THRESHOLD-MISMATCH FIX (Issue 12 - ROOT CAUSE "hit never escalated"):
-        # _run_pcv_check sets _fp_guards_preconfirmed=True when _r3b_conf >= 0.60 (line ~48596)
-        # but this check required >= 0.65. Detections with confidence 0.60-0.64 had the flag
-        # set but the check silently failed, causing "hit found but never escalated to SQLi"
-        # for borderline-confidence boolean injections. Fix: align threshold to 0.60 (the
-        # lowest confidence that _run_fp_guards_boolean will pass + set the flag).
-        # FP-STRENGTHEN: Require FP guard confidence >= 0.65 (raised from 0.60).
-        # At 0.60 the FP guard barely exceeds random noise for fluctuating pages.
-        # 0.65 retains borderline detections that pass all 3 statistical layers
-        # with modest margin while blocking the 0.60-0.64 noise range.
+        # FP guard preconfirm: require confidence >= 0.65.  At 0.65 the guard retains
+        # detections that pass all 3 statistical layers with a modest margin while
+        # blocking the 0.60-0.64 noise range that barely exceeds random fluctuation.
         _fp_preconfirmed = (det is not None and
                             getattr(det, '_fp_guards_preconfirmed', False) and
                             getattr(det, '_fp_guards_confidence', 0.0) >= 0.65)
@@ -116995,7 +116986,7 @@ class TechniqueCascadeEngine:
                                               "(oracle=BLOCKED, true=%d 2xx, false=%d WAF-block) "
                                               "— response-type asymmetry, NOT SQL boolean difference",
                                               _wass_dist, _wass_true_st, _wass_false_st)
-                                elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min:
+                                elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min and _wdh_p_above_min >= 2:
                                     print("[+]   [Wasserstein] secondary oracle confirmed "
                                              f"(dist={_wass_dist:.4f}, threshold={_wass_min:.2f}) "
                                              " accepting boolean detection", flush=True)
@@ -159662,7 +159653,7 @@ class AdaptiveFrequencyExtractorV18(AdaptiveFrequencyExtractor):
         "l": ["e","l","i","a","o","s"],
         "m": ["a","e","o","i","p","s"],
         "n": ["t","g","e","s","d","o","a"],
-        "o": ["n","r","u","","s","t","w"],
+        "o": ["n","r","u","s","t","w"],
         "p": ["r","e","a","h","l","o"],
         "q": ["u"],
         "r": ["e","i","a","o","s","n"],
@@ -166728,10 +166719,6 @@ async def _run_fp_guards_boolean(
                         _tp_for_recv, re.IGNORECASE)
                 if not _sm_fpg:
                     _sm_fpg = re.search(
-                        r"RECEIVE_MESSAGE\s*\((?:'[^']*'|NULL)(?:\s*(?:/\*[^*]*\*/|--[^\n]*))*\s*,\s*([\d.]+)",
-                        _tp_upper_fpg_norm, re.IGNORECASE)
-                if not _sm_fpg:
-                    _sm_fpg = re.search(
                         r"RECEIVE_MESSAGE\s*\([^,)]+,\s*([\d.]+)",
                         _tp_upper_fpg_norm, re.IGNORECASE)
                 # BUG-FPGUARD-MSSQL-WAITFOR FIX (Req 3): WAITFOR DELAY 'HH:MM:SS' not matched by SLEEP()
@@ -167123,9 +167110,7 @@ async def _run_fp_guards_boolean(
 
         # ── PCV-FIX-4: Update BlindBoolCalibrator with observed similarities ──
         try:
-            import math as _mth
             if true_fp and false_fp:
-                from functools import reduce as _red
                 # FIX CRITICAL BUG: baseline.get('samples',[{}])[0] may be a dict {}, not a response object
                 # Safe extraction: check if samples[0] has body attribute and is a response object
                 _bl_samples = baseline.get('samples', []) if baseline else []
@@ -172271,6 +172256,7 @@ class ScannerVFinal(ScannerV15):
         _SCAN_STOPPED[0] = False
         _INJECTION_CONFIRMED[0] = False  # BUG-4 FIX: must be reset or PCV gate skips all checks on re-use
         _EXTRACTION_STARTED[0] = False
+        self._timing_calibrated = False  # BUG-TIMING-CALIBRATED FIX: reset calibration flag between scan runs
         # BUG-EXTRACTIONSTOP-9 FIX (Req 5): ScannerVFinal.run() previously only reset
         # _SCAN_STOPPED, _INJECTION_CONFIRMED, and _EXTRACTION_STARTED, but NOT:
         #   _EXTRACTION_DONE   – marks extraction permanently claimed for this session
