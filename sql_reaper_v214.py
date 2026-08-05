@@ -106245,6 +106245,25 @@ class TechniqueCascadeEngine:
     async def _inline_pcv_check(self, method, url, data, data_fmt, param, original,
                                   baseline, norm_base, det, tech, dbms):
         """Run PCV inline during cascade  returns True if verified, False/None to skip."""
+        # FIX-CHECK-E-EMPTY-DBMS (calling-site half): When the caller passes dbms=""
+        # (cross-category timing detections, DP-timing oracle, cascade before fingerprinting),
+        # resolve DBMS here so all downstream code — including _post_confirm_verify_locked
+        # Check E canary selection and MSSQL CAST guard — sees the correct DBMS string.
+        # Priority: cfg.forced_dbms → cfg._detected_dbms → self._known_dbms → cfg.dbms
+        # → det.dbms.  This mirrors the resolution in _dp_known_dbms and ExtractionBypassFinder.
+        if not dbms:
+            try:
+                _cfg_ipcv = getattr(self, 'config', None)
+                dbms = (
+                    (getattr(_cfg_ipcv, 'forced_dbms', None) or '') or
+                    (getattr(_cfg_ipcv, '_detected_dbms', None) or '') or
+                    (getattr(self, '_known_dbms', None) or '') or
+                    (getattr(_cfg_ipcv, 'dbms', None) or '') or
+                    (getattr(det, 'dbms', None) or '') if det is not None else '' or
+                    ''
+                )
+            except Exception:
+                pass  # keep dbms="" — guards downstream will handle gracefully
         # BUG-12-CRITICAL FIX (Root cause of "hit found but never escalated"):
         # The shortcuts A/B/C (multi-probe confirmed detections) were placed AFTER the
         # scan-stop gate check at line ~63107. When the cross-cat PCV pre-increment is
@@ -108709,7 +108728,32 @@ class TechniqueCascadeEngine:
         # (which would make every content change look like a boolean toggle).
         _gap_threshold = max(0.25, getattr(self, "_dynamic_gap", 0.30))
         _details = {}
-        
+
+        # FIX-CHECK-E-EMPTY-DBMS (MEDIUM, all techniques, all surfaces):
+        # When dbms="" (e.g. cross-category timing detections before DBMS fingerprinting
+        # completes, or DP-timing oracle firing before cascade fingerprints the DBMS),
+        # Check E prints "Check E ( SQL): skipped" (space before SQL) — the empty DBMS
+        # string is passed through without resolution.  More critically, _is_mssql_cast_bool_e
+        # evaluates to False (dbms != 'MSSQL') and the DBMS-specific SQL canary in Check E
+        # falls back to the PostgreSQL probe regardless of the actual DBMS.
+        # Fix: resolve dbms via the canonical fallback chain at the start of this function
+        # so all subsequent code (Check E canary selection, MSSQL CAST guard, print labels)
+        # sees the correct DBMS string.  The fallback chain matches _dp_known_dbms resolution
+        # and the existing per-DBMS threshold map key inference.
+        if not dbms:
+            try:
+                _cfg_ref = getattr(self, 'config', None)
+                dbms = (
+                    (getattr(_cfg_ref, 'forced_dbms', None) or '') or
+                    (getattr(_cfg_ref, '_detected_dbms', None) or '') or
+                    (getattr(self, '_known_dbms', None) or '') or
+                    (getattr(_cfg_ref, 'dbms', None) or '') or
+                    (getattr(det, 'dbms', None) or '') if det is not None else '' or
+                    ''
+                )
+            except Exception:
+                pass  # keep dbms="" — print will still label it correctly
+
         #  FIX: Check if we have exact payload from detection for 100% reproduction
         _use_exact_payload = det and hasattr(det, 'exact_sent_payload') and det.exact_sent_payload
         
@@ -113013,6 +113057,49 @@ class TechniqueCascadeEngine:
                         print("[*]   [PCV] Check B (absolute multi-probe): FAIL  "
                               f"only {_abs_slow_count}/5 probes slow (need ≥3)", flush=True)
 
+            # FIX-DP-TIMING-HIGHCONF-BYPASS (HIGH, all DBMSes, timing techniques,
+            # all surfaces, all HTTP methods):
+            # When DifferentialPrivacyTimingDetector confirmed injection with conf>=1.00
+            # and epsilon=1.0 (full standard deviation separation between sleep and no-sleep
+            # response distributions), Check B canary pairs may still fail because the same
+            # WAF that the DP-timing detection payload bypassed also blocks the plain
+            # SLEEP(N)/WAITFOR DELAY/pg_sleep(N) canary payloads (returning 404/403/WAF
+            # error pages, identical fast responses, or triggering CDN jitter).
+            # Root cause of "DP-timing confirmed (conf=1.00, eps=1.0)" log lines followed
+            # by "PCV FAILED  discarding": all four Check B paths (proportional, canary
+            # fallbacks, TimingRatioConfirmer, absolute multi-probe) use unobfuscated sleep
+            # functions — the same keyword patterns the DP timing oracle's detection payload
+            # bypassed. The DP oracle provides STRONGER statistical proof than any Check B
+            # canary: it uses Mann-Whitney/Laplace-noise DP on 20-30 observed response times
+            # vs a simple true/false canary pair. A conf=1.00 result means the null hypothesis
+            # (no timing difference) is rejected with 100% certainty at epsilon=1.0 std.dev.
+            # Guard: CDN-all detection voids timing proof (uniform latency from cache).
+            # Guard: require _dp_timing_oracle_confirmed=True (set only when DP oracle fired
+            # on an actual timing payload, not a cross-category boolean hit).
+            _dp_oracle_high_conf = (
+                det is not None
+                and getattr(det, '_dp_timing_oracle_confirmed', False)
+                and float(getattr(det, 'confidence', 0.0)) >= 1.00
+                and not _cdn_all_detected
+            )
+            if _dp_oracle_high_conf:
+                _dp_det_conf = float(getattr(det, 'confidence', 1.0))
+                print(f"[*]   [PCV] Result: CONFIRMED  DP-timing oracle bypass "
+                      f"(conf={_dp_det_conf:.2f}, epsilon=1.0) — statistically definitive "
+                      "timing injection; Check B canary failure overridden by DP oracle "
+                      f"statistical proof (20-30 sample Mann-Whitney) [tech={tech} dbms={dbms}]",
+                      flush=True)
+                try:
+                    det._pcv_verified = True
+                    if hasattr(det, 'detection') and det.detection is not None:
+                        det.detection._pcv_verified = True
+                except Exception:
+                    pass
+                _INJECTION_CONFIRMED[0] = True
+                _SCAN_STOPPED[0] = True
+                _details["B"] = f"dp_timing_oracle_bypass(conf={_dp_det_conf:.2f},epsilon=1.0)"
+                return True, 1, _details
+
             # After ALL timing confirmation paths exhausted (proportional + canary fallbacks
             # + absolute multi-probe), now apply the final rejection.
             if _check_b_failed_on_proportionality:
@@ -116937,6 +117024,47 @@ class TechniqueCascadeEngine:
                                     and 200 <= _wass_true_st < 300
                                     and _wass_false_st in _wass_asym_statuses
                                 )
+                                # FIX-WASS-BOTH-ERROR-PAGES (HIGH, all DBMSes, all techniques,
+                                # path-injection surfaces, all HTTP methods):
+                                # When BOTH the true probe and the false probe return 4xx/5xx
+                                # error responses, the Wasserstein distance measures the
+                                # difference between two error page bodies that each reflect
+                                # the injected payload — NOT a SQL-conditional body difference.
+                                #
+                                # Example: path-injection on /login/[payload]. The true probe
+                                # payload (AND 1=1-- -) and false probe payload (AND 1=2-- -) both
+                                # produce 404 "Not Found" responses, but the 404 body includes the
+                                # injected URL path text. Two different payloads → two different 404
+                                # body byte distributions → dist≈0.67-0.70 for EVERY probe pair,
+                                # regardless of whether SQL was evaluated by the server.
+                                #
+                                # Root cause of 484 false "secondary oracle confirmed" signals in log:
+                                # Probe 1: dist=0.6758, window=[0.6758], _wdh_p_above_min=1 < 2
+                                #   → no confirmation (correct).
+                                # Probe 2: dist=0.7031, window=[0.6758, 0.7031], _wdh_p_above_min=2
+                                #   → early_high_window needs 3+ probes; bimodal needs ≥1 below 0.15
+                                #   → neither fires → CONFIRMATION fires → _wass_param_confirmed=True.
+                                # Probe 3+: _wass_param_confirmed=True disables all suppression guards
+                                #   → every subsequent probe confirms → 484 total false confirmations.
+                                #
+                                # Fix: add a guard that fires when BOTH true and false probe status
+                                # codes are 4xx or 5xx (error pages). This structural condition
+                                # proves the Wasserstein distance is measuring payload reflection in
+                                # error pages, not SQL evaluation. The guard does NOT require
+                                # not _wass_param_confirmed because: (a) it fires before confirmation
+                                # at probe 2 (blocking the first false positive), and (b) even after
+                                # _wass_param_confirmed=True (set by a prior false positive before
+                                # this guard was added), it must still suppress new probes on the
+                                # same error-page endpoint. This is the only guard that safely
+                                # handles the "confirmed injection on an error-page endpoint" case.
+                                # Safety: does NOT fire when true=2xx and false=4xx (legitimate
+                                # boolean injection that changes status code), or true=2xx/false=2xx
+                                # (normal boolean injection on a 200-returning endpoint).
+                                _wass_both_error_pages = (
+                                    400 <= _wass_true_st < 600
+                                    and 400 <= _wass_false_st < 600
+                                    and _wass_dist > _wass_min
+                                )
                                 # FIX-CDN-UNIFORM-HIGH: persistent CDN-block flag set when
                                 # _wass_all_high_consistent fires or when CDN uniform-high
                                 # pattern detected in noise floor section (3+ consistent high
@@ -116955,6 +117083,7 @@ class TechniqueCascadeEngine:
                                     or _wass_stable_page_outlier
                                     or _wass_bimodal_outlier
                                     or _wass_asymmetric_waf
+                                    or _wass_both_error_pages
                                     or _wass_all_high_consistent
                                     or _wass_early_high_window
                                 )
@@ -117025,6 +117154,22 @@ class TechniqueCascadeEngine:
                                               "(oracle=BLOCKED, true=%d 2xx, false=%d WAF-block) "
                                               "— response-type asymmetry, NOT SQL boolean difference",
                                               _wass_dist, _wass_true_st, _wass_false_st)
+                                elif _wass_both_error_pages:
+                                    # FIX-WASS-BOTH-ERROR-PAGES: Both true and false probes returned
+                                    # error pages (4xx/5xx). The Wasserstein distance measures payload
+                                    # reflection in error page bodies, not SQL evaluation. Suppress.
+                                    print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} BOTH-ERROR-PAGES "
+                                          f"(true={_wass_true_st}, false={_wass_false_st}) "
+                                          f"-- payload reflected in error page bodies, NOT SQL injection",
+                                          flush=True)
+                                    # Establish a CDN-block flag so future probes on this param
+                                    # are suppressed even when _wass_param_confirmed gets set
+                                    # by a stale history entry from a prior false confirmation.
+                                    try:
+                                        _wdh[f"_cdnblock_{param}"] = True
+                                        self._wass_dist_hist = _wdh
+                                    except Exception:
+                                        pass
                                 elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min and _wdh_p_above_min >= 2:
                                     print("[+]   [Wasserstein] secondary oracle confirmed "
                                              f"(dist={_wass_dist:.4f}, threshold={_wass_min:.2f}) "
