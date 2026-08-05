@@ -108859,9 +108859,40 @@ class TechniqueCascadeEngine:
                                         _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
                                         # FP-guards preconfirmed with full confidence (unblocked): override
                                         _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 1.0 and not _wn_both_blocked
-                                        if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok):
+                                        # BUG-WASSR-STATUS-ORACLE FIX: Status-oracle detection in the
+                                        # DETECTION fingerprints (fp_true/fp_false passed to _inline_pcv_check).
+                                        # When the TRUE detection probe returned a different status than the
+                                        # FALSE probe, AND one matches the baseline, this is SQL-conditional
+                                        # routing evidence recorded at detection time. Status-oracle + any
+                                        # Wasserstein dist >= 0.50 (already above secondary oracle threshold)
+                                        # is sufficient to override an FP-guard rejection that was caused by
+                                        # CDN-inconsistent L1 repetition failures.
+                                        _wn_fp_t_sts = int(getattr(_fp_true, 'status_code', 0) or 0) if _fp_true else 0
+                                        _wn_fp_f_sts = int(getattr(_fp_false, 'status_code', 0) or 0) if _fp_false else 0
+                                        _wn_bl_modal = int(baseline.get("modal_status", 0) if isinstance(baseline, dict) else 0)
+                                        _wn_status_oracle = (
+                                            _wn_fp_t_sts > 0 and _wn_fp_f_sts > 0 and
+                                            _wn_fp_t_sts != _wn_fp_f_sts and
+                                            not _wn_both_blocked and
+                                            _wn_fp_t_sts not in (400, 403, 406, 429) and
+                                            _wn_fp_f_sts not in (400, 403, 406, 429) and
+                                            _wn_bl_modal > 0 and (
+                                                (_wn_fp_f_sts == _wn_bl_modal and _wn_fp_t_sts != _wn_bl_modal) or
+                                                (_wn_fp_t_sts == _wn_bl_modal and _wn_fp_f_sts != _wn_bl_modal)
+                                            )
+                                        )
+                                        # Status-oracle at dist >= secondary threshold: reliable override
+                                        _wn_status_oracle_ok = (_wn_status_oracle and _det_wass_dist >= _wn_min)
+                                        if _det_wass_dist >= _wn_min and (_wn_strong_alone or _wn_preconf_ok or _wn_status_oracle_ok):
                                             _wassr_override = True
-                                            _wn_reason = "strong-dist>=0.80" if _wn_strong_alone else "fp-preconf-conf>=1.0"
+                                            if _wn_strong_alone:
+                                                _wn_reason = "strong-dist>=0.80"
+                                            elif _wn_preconf_ok:
+                                                _wn_reason = "fp-preconf-conf>=1.0"
+                                            else:
+                                                _wn_reason = (f"status-oracle+dist>={_wn_min:.2f}"
+                                                              f"(true={_wn_fp_t_sts},false={_wn_fp_f_sts}"
+                                                              f",bl={_wn_bl_modal})")
                                             print(f"[+] PCV FP-Guards WASSR OVERRIDE (det-notes) "
                                                   f"[{tech}→{_effective_tech}] {dbms} "
                                                   f"det-time-dist={_det_wass_dist:.4f} ≥ {_wn_min:.4f} "
@@ -111040,12 +111071,17 @@ class TechniqueCascadeEngine:
         _details["A"] = f"{_a_method}: gap={_a_gap:.3f}" if _a_pass else "failed"
         _details["C"] = f"{_c_method}: {_c_match}{_c_note}" if _c_pass else "failed"
 
-        #  Check D: Header Diff 
+        #  Check D: Header Diff
         # BUG-3 FIX: if Check A fps are missing (network errors), run
         # an independent boolean-canary probe pair for Check D.
         _d_pass = False
         _d_count = 0
         _d_headers = []
+        # BUG-CHECKD-PATH-INJECTION-STATUS-ORACLE: Initialize status-oracle flags.
+        # Set inside the Check D try block when probes show status-code divergence
+        # that mirrors the baseline (path-injection reversed-polarity pattern).
+        _d_status_oracle = False           # true-probe ≠ baseline, false-probe = baseline
+        _d_status_oracle_reversed = False  # true-probe = baseline, false-probe ≠ baseline
         # BUG-R3-A FIX: Skip Check D entirely for timing techniques (T, TH, HQ, BT).
         # SLEEP/pg_sleep/WAITFOR/RANDOMBLOB never changes HTTP response headers between
         # a true-condition and a false-condition probe — the DB executes the sleep and
@@ -111093,6 +111129,12 @@ class TechniqueCascadeEngine:
                     elif _d_fp_t_str and _d_fp_f_str:
                         _d_fps["true"]  = _d_fp_t_str
                         _d_fps["false"] = _d_fp_f_str
+            # BUG-CHECKD-SCOPE-FIX: Initialize status codes and oracle flags before the try
+            # block so they are accessible in the confirmation decision at the end of this
+            # function. Variables defined inside the try block are not visible outside it
+            # when an exception is caught.
+            _d_st_t = 0
+            _d_st_f = 0
             if _d_fps.get("true") and _d_fps.get("false"):
                 try:
                     _fp_t = _d_fps["true"]
@@ -111122,6 +111164,47 @@ class TechniqueCascadeEngine:
                         (_d_st_t in _WAF_4XX_CODES and _d_st_f not in _WAF_4XX_CODES) or
                         (_d_st_f in _WAF_4XX_CODES and _d_st_t not in _WAF_4XX_CODES)
                     )
+                    # BUG-CHECKD-PATH-INJECTION-STATUS-ORACLE FIX (CRITICAL):
+                    # For path-injection reversed-polarity (baseline=404, true-canary=200,
+                    # false-canary=404), the SUBSTRING canary probes produce different HTTP
+                    # status codes because the SQL condition changes routing. This is the
+                    # STRONGEST possible boolean injection signal — yet the existing code
+                    # only counts header diffs, completely missing the status divergence.
+                    # When content-type was removed from _dynamic_headers (RC3-FP fix),
+                    # content-length alone (1 dynamic diff) no longer satisfies >= 2 threshold,
+                    # making Check D structurally dead for path-injection scenarios.
+                    #
+                    # Fix: detect when:
+                    #   (a) probes return different status codes
+                    #   (b) one probe matches the baseline status (false = baseline = no injection)
+                    #   (c) other probe differs (true = different routing = SQL condition executed)
+                    #   (d) status codes are not WAF 4xx (already handled by _d_status_driven)
+                    # This is SQL-conditional routing evidence — more definitive than header diffs.
+                    _d_bl_sts = _bl_status  # baseline status captured earlier in this function
+                    _d_status_oracle = (
+                        _d_st_t > 0 and _d_st_f > 0 and
+                        _d_st_t != _d_st_f and
+                        _d_st_f == _d_bl_sts and
+                        _d_st_t != _d_bl_sts and
+                        _d_st_t not in _WAF_4XX_CODES and  # not WAF block (separate path)
+                        _d_st_f not in _WAF_4XX_CODES
+                    )
+                    # Also detect reversed: false-canary ≠ baseline, true-canary = baseline
+                    # (SQL true condition forces a different routing than the False condition)
+                    _d_status_oracle_reversed = (
+                        _d_st_t > 0 and _d_st_f > 0 and
+                        _d_st_t != _d_st_f and
+                        _d_st_t == _d_bl_sts and
+                        _d_st_f != _d_bl_sts and
+                        _d_st_f not in _WAF_4XX_CODES and
+                        _d_st_t not in _WAF_4XX_CODES
+                    )
+                    if _d_status_oracle:
+                        _d_pass = True
+                        _d_headers.append(f"status-oracle(true={_d_st_t},false={_d_st_f},bl={_d_bl_sts})")
+                    elif _d_status_oracle_reversed:
+                        _d_pass = True
+                        _d_headers.append(f"status-oracle-rev(true={_d_st_t},false={_d_st_f},bl={_d_bl_sts})")
                     # BUG-D2 FIX: Exclude dynamic-only headers from security-diff count.
                     # content-length/etag vary on dynamic pages without injection (CSRF tokens,
                     # timestamps) → false positives.  Require 2+ SECURITY-relevant diffs
@@ -111270,7 +111353,12 @@ class TechniqueCascadeEngine:
                     # dynamic diffs (e.g. content-length + etag together) so that
                     # content-length alone cannot satisfy Check D and combine with a
                     # structural-fallback Check A pass to produce a false positive.
-                    _d_pass = (len(_security_diffs) >= 1 or
+                    # BUG-CHECKD-PATH-INJECTION-STATUS-ORACLE FIX: Preserve status-oracle
+                    # result set above. The OR ensures status-oracle detection (which already
+                    # appended to _d_headers and set _d_pass=True) is not overwritten by
+                    # the header-diff-only formula below.
+                    _d_pass = (_d_status_oracle or _d_status_oracle_reversed or
+                               len(_security_diffs) >= 1 or
                                len(_dynamic_diffs) >= 2)  # RC3-FP
                     # FIX-BUG-CHECKD-INDENT: moved _details["D"] and print inside the
                     # try block so they only execute when _d_pass/_d_count/_d_headers have
@@ -114321,6 +114409,43 @@ class TechniqueCascadeEngine:
         # the injection is reported.  Only when ALL body checks fail does the error-page
         # rejection fire — consistent with how timing techniques handle this (they also
         # only reject after all timing paths are exhausted, not before the first check).
+
+        # BUG-CHECKD-PATH-INJECTION-STATUS-ORACLE-CONFIRM FIX (CRITICAL):
+        # For path-injection reversed-polarity (baseline=404, TRUE-canary=200, FALSE-canary=404),
+        # Check D detects status-code divergence (true-probe ≠ baseline, false-probe = baseline).
+        # This is the STRONGEST possible boolean injection evidence — SQL condition literally
+        # changes HTTP routing — yet the existing error-page rejection fires unconditionally
+        # before this evidence can be used for confirmation.
+        #
+        # Root cause: the Check D standalone path at line ~111995 requires `not _is_error_page`,
+        # which blocks ALL path-injection confirmations (baseline=404 → _is_error_page=True).
+        # No other confirmation path in the decision tree handles error-page + status-oracle.
+        #
+        # Fix: before the error-page rejection, check for status-oracle divergence from Check D.
+        # Status-oracle means Check D probes returned different HTTP status codes matching the
+        # baseline pattern — this cannot happen due to CDN noise (CDN servers return consistent
+        # status codes for the same path) and is direct evidence of SQL-conditional routing.
+        # Safety: requires non-timing technique to prevent timing-induced status code changes
+        # from being misclassified (SLEEP can cause 504 on some servers).
+        if (_d_pass and (_d_status_oracle or _d_status_oracle_reversed)
+                and not _timing_only_tech
+                and tech not in ("S", "HQ", "T", "BT", "TH", "DS")):
+            _so_type = "status-oracle" if _d_status_oracle else "status-oracle-reversed"
+            _so_detail = _d_headers[0] if _d_headers else f"true={_d_st_t},false={_d_st_f}"
+            print(f"[*]   [PCV] Result: CONFIRMED  Check D {_so_type} — SQL-conditional "
+                  f"routing change ({_so_detail}) proves boolean injection "
+                  f"[tech={tech} dbms={dbms} baseline={_bl_status}]", flush=True)
+            if det is not None:
+                try:
+                    det._pcv_verified = True
+                    if hasattr(det, 'detection') and det.detection is not None:
+                        det.detection._pcv_verified = True
+                except Exception:
+                    pass
+            _INJECTION_CONFIRMED[0] = True
+            _SCAN_STOPPED[0] = True
+            return True, 2, _details
+
         if _is_error_page:
             print(f"[*]   [PCV] Result: REJECTED  error page ({_bl_status}, {_bl_size}B) "
                   "requires timing proof or strong body evidence, all checks failed",
