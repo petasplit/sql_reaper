@@ -118884,7 +118884,7 @@ class TechniqueCascadeEngine:
                                         self._wass_dist_hist = _wdh
                                     except Exception:
                                         pass
-                                elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min and _wdh_p_above_min >= 2:
+                                elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min and _wdh_p_above_min >= 3:
                                     print("[+]   [Wasserstein] secondary oracle confirmed "
                                              f"(dist={_wass_dist:.4f}, threshold={_wass_min:.2f}) "
                                              " accepting boolean detection", flush=True)
