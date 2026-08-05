@@ -60244,7 +60244,7 @@ class Scanner:
             any extraction function — all bisection always ran full-range despite
             having computed a narrower range. This parameter wiring is the fix.
             """
-            nonlocal _thresh, _bitwise_oracle_sane
+            nonlocal _thresh
 
             # Get length first
             # BUG-V62-LENGTH-ZERO-BITWISE FIX (CRITICAL, Req 7/16):
