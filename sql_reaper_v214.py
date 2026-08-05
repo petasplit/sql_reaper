@@ -111215,7 +111215,10 @@ class TechniqueCascadeEngine:
 
         _check_e_skip_techs = (
             "T", "S", "HQ", "TH", "BT",          # timing / stacked — body never changes with SLEEP
-            "B", "BH", "IN",                       # boolean — Check A already handles this (same mechanism)
+            # FIX-CHECKE-BOOL-SKIP: "B", "BH", "IN" removed from static skip list.
+            # Boolean techniques are now only skipped at runtime when _a_pass=True
+            # (see _skip_check_e below). When Check A fails (_a_pass=False), Check E
+            # runs as an independent verification oracle instead of being dead-code.
             "E", "EH",                             # error-based: detection=error page, canary=normal page →
                                                    # _e_direct_sim always < 0.80 (condition 3 always fails);
                                                    # Check E is structurally incompatible with error responses
@@ -111293,7 +111296,8 @@ class TechniqueCascadeEngine:
         _skip_check_e = (tech in _check_e_skip_techs
                          or _is_mssql_cast_bool_e
                          or _checke_payload_is_timing
-                         or _checke_payload_is_error)
+                         or _checke_payload_is_error
+                         or (tech in ("B", "BH", "IN") and _a_pass))  # FIX-CHECKE-BOOL-SKIP: skip boolean only when Check A already confirmed; run when _a_pass=False for independent verification
 
         # FIX-REPLAY-BYPASS-PRECOMPUTE: Pre-compute detection replay BEFORE the Check E block
         # so it is available for the WAF-bypass confirmation path even when Check E is skipped
@@ -113636,7 +113640,12 @@ class TechniqueCascadeEngine:
                     _micro_send_fn,  # BUG-V72-MICROTIMING-SENDFN FIX: was lambda _p: _pcv_send(_p)
                     cond=_micro_cond,
                     dbms=dbms,
-                    delay_sec=0.03,
+                    # FIX-MICROTIMING-DELAY: 0.03s (30ms) was below network jitter on most
+                    # targets — all 20 Mann-Whitney samples returned identical timing, making
+                    # the test 100% inconclusive for high-latency endpoints. Scale to 10% of
+                    # the detection sleep time so the micro-delay is always detectable above
+                    # network noise, clamped to [0.10s, 0.50s] to avoid excessive delays.
+                    delay_sec=max(0.10, min(_sleep_sec * 0.10, 0.50)),
                     samples=20,
                     sleep_fn_delay=0.2)
                 if _micro_confirmed:
@@ -118034,8 +118043,14 @@ class TechniqueCascadeEngine:
                                     # Establish a CDN-block flag so future probes on this param
                                     # are suppressed even when _wass_param_confirmed gets set
                                     # by a stale history entry from a prior false confirmation.
+                                    # FIX-WASS-STALE-CONFIRM: Also clear any stale prior confirmation
+                                    # from the history dict — without this, a previous false positive
+                                    # that set _wass_confirmed_key=True would bypass _wass_cdnblock
+                                    # on the next probe cycle and allow re-confirmation from the
+                                    # same error-page surface.
                                     try:
                                         _wdh[f"_cdnblock_{param}"] = True
+                                        _wdh[_wass_confirmed_key] = False  # FIX-WASS-STALE-CONFIRM: clear stale confirmation
                                         self._wass_dist_hist = _wdh
                                     except Exception:
                                         pass
