@@ -58727,6 +58727,18 @@ class Scanner:
                         and _bool_calibration_true_status is not None
                         and _bool_calibration_true_status not in _waf_4xx_statuses):
                     return None  # WAF block — ambiguous, skip this probe
+                # BROAD-4XX-AMBIGUITY-GUARD (CRITICAL): When calibration-TRUE status is 4xx
+                # AND the probe status is also 4xx, ALL body-based oracle signals are
+                # unreliable — the WAF block page body may closely resemble the app's 4xx
+                # error body, causing SimHash/body-hash/body-length to return True for
+                # every WAF-blocked probe (producing garbage codepoints like chr(0x88888)).
+                # The existing guard above only fires when cal_true is NOT 4xx. This guard
+                # covers the inverse case: return None immediately, before any body oracle fires.
+                _WAF_4XX_BROAD_EVAL = (400, 403, 406, 429, 430, 503)
+                if (_bool_true_status is not None and _s is not None
+                        and _s in _WAF_4XX_BROAD_EVAL
+                        and _bool_true_status in _WAF_4XX_BROAD_EVAL):
+                    return None
                 _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
                 _bl = len(_body)
                 # Body hash comparison — only useful when true/false hashes genuinely differ
@@ -58803,10 +58815,21 @@ class Scanner:
                         return _sim_gap > 0
                     # SimHash gap < 0.05 — ambiguous; fall through to body-length oracle below
                 # Status code comparison
-                if _bool_true_status is not None and _s is not None:
+                # STATUS-4XX-AMBIGUITY-GUARD (CRITICAL): When both calibration-TRUE status
+                # and probe status are WAF error codes (4xx), we cannot distinguish a genuine
+                # SQL-true response from a WAF-blocked probe — both return the same 4xx code.
+                # SimHash already failed (gap < 0.05) or we would not reach this point.
+                # Treating WAF-blocked probes as True produced garbage codepoints (chr(0x88888))
+                # because every WAF-blocked bit probe was counted as a set bit.
+                # Fix: skip status oracle when both sides are 4xx; fall through to body-length.
+                _STATUS_4XX_AMBIG_EVAL = (400, 403, 406, 429, 430, 503)
+                if (_bool_true_status is not None and _s is not None
+                        and not (_s in _STATUS_4XX_AMBIG_EVAL
+                                 and _bool_true_status in _STATUS_4XX_AMBIG_EVAL)):
                     return _s == _bool_true_status
-                # Body length comparison — skip when both lengths are equal (CDN cache / dynamic noise)
-                elif (_bool_true_len is not None and _bool_false_len is not None
+                # Body length comparison — also checked when status oracle is ambiguous (both 4xx);
+                # changed from elif to if so it fires even when status oracle was skipped above.
+                if (_bool_true_len is not None and _bool_false_len is not None
                         and _bool_true_len != _bool_false_len):
                     _bl_gap = abs(_bl - _bool_true_len) - abs(_bl - _bool_false_len)
                     # BUG-BODYLEN-AMBIGUOUS-EVAL FIX: require meaningful length gap (>5B) before
@@ -59217,6 +59240,15 @@ class Scanner:
                         and _bool_calibration_true_status is not None
                         and _bool_calibration_true_status not in _waf_4xx_statuses_wa):
                     return None  # WAF block — ambiguous, skip this probe
+                # BROAD-4XX-AMBIGUITY-GUARD (CRITICAL): mirrors the _eval guard — when
+                # calibration-TRUE status is 4xx AND probe status is also 4xx, ALL
+                # body-based oracle signals (SimHash, body-hash, body-length) are
+                # unreliable. Return None immediately before any body oracle fires.
+                _WAF_4XX_BROAD_WA = (400, 403, 406, 429, 430, 503)
+                if (_bool_true_status is not None and _s is not None
+                        and _s in _WAF_4XX_BROAD_WA
+                        and _bool_true_status in _WAF_4XX_BROAD_WA):
+                    return None
                 _body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if fp else ""
                 # Body hash — only when true/false hashes genuinely differ (same guard
                 # as _eval to prevent always-False when CDN returns equal cached bodies)
@@ -59278,7 +59310,14 @@ class Scanner:
                     if abs(_sim_gap_wa) < 0.05:
                         return None  # ambiguous — gap too small
                     return _sim_gap_wa > 0
-                if _bool_true_status is not None and _s is not None:
+                # STATUS-4XX-AMBIGUITY-GUARD (CRITICAL): same fix as _eval — when both
+                # calibration-TRUE status and probe status are 4xx WAF error codes, we
+                # cannot distinguish genuine SQL-true from WAF-blocked probe. Fall through
+                # to body-length oracle instead of returning True for every WAF-blocked probe.
+                _STATUS_4XX_AMBIG_WA = (400, 403, 406, 429, 430, 503)
+                if (_bool_true_status is not None and _s is not None
+                        and not (_s in _STATUS_4XX_AMBIG_WA
+                                 and _bool_true_status in _STATUS_4XX_AMBIG_WA)):
                     return _s == _bool_true_status
                 _bl = len(_body)
                 # Body length — skip when equal (CDN cache / dynamic noise)
