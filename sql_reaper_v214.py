@@ -15728,6 +15728,67 @@ from __future__ import annotations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 # =============================================================================
+# UNION SQL COLUMN SPLITTER  depth-aware top-level comma split
+# BUG-UNION-NAIVE-SPLIT-FIX (HIGH): naive .split(',') on a UNION SELECT column
+# list incorrectly tokenises SQL function arguments that contain commas, e.g.:
+#   CONCAT_WS(',','e',''),1,2  → 7 tokens instead of 3
+#   JSON_ARRAY(1,2,3),4        → 5 tokens instead of 2
+#   LPAD('a',5,'0'),RPAD('b',5,'0')  → 5 tokens instead of 2
+# This causes column count to be overcounted in Phase 0 detection (line ~40685)
+# and the wrong column to be overwritten in _union_extract (line ~63551/63566),
+# generating malformed SQL that silently returns empty extraction results.
+# Fix: parenthesis-depth–aware split that only splits on top-level commas.
+# =============================================================================
+def _split_sql_cols(s: str) -> list:
+    """Split a SQL UNION column list on top-level commas only (depth-aware).
+
+    Correctly handles nested function arguments:
+      'CONCAT_WS(\',\',a,b),1,NULL'  →  ['CONCAT_WS(\',\',a,b)', '1', 'NULL']
+    Handles single-quoted strings by treating their content as opaque
+    (escaped single-quotes \\'' are consumed in pairs).
+    """
+    parts: list = []
+    current: list = []
+    depth: int = 0
+    in_sq: bool = False   # inside a single-quoted string literal
+    i: int = 0
+    n: int = len(s)
+    while i < n:
+        ch = s[i]
+        if in_sq:
+            if ch == "'" and i + 1 < n and s[i + 1] == "'":
+                current.append("''")
+                i += 2
+                continue
+            elif ch == "'":
+                in_sq = False
+                current.append(ch)
+            else:
+                current.append(ch)
+        else:
+            if ch == "'":
+                in_sq = True
+                current.append(ch)
+            elif ch == '(':
+                depth += 1
+                current.append(ch)
+            elif ch == ')':
+                depth = max(0, depth - 1)
+                current.append(ch)
+            elif ch == ',' and depth == 0:
+                parts.append(''.join(current))
+                current = []
+                i += 1
+                continue
+            else:
+                current.append(ch)
+        i += 1
+    if current:
+        parts.append(''.join(current))
+    return parts
+
+
+# =============================================================================
 # COLUMN COUNT VALIDATION MACRO (FIX-NCOLS-VALIDATION)
 # =============================================================================
 def _validate_extraction_params(n_cols, sql_cols, func_name=""):
@@ -40682,7 +40743,9 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                                 r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|$)',
                                 _u_payload, _re.I | _re.S)
                             if _um_det:
-                                _det_cols = [c for c in _um_det.group(1).split(',')]
+                                # BUG-UNION-NAIVE-SPLIT-FIX: use depth-aware splitter so
+                                # CONCAT_WS(',','e',''),1,2 counts as 3 columns, not 7.
+                                _det_cols = _split_sql_cols(_um_det.group(1))
                                 _udet.union_columns = len(_det_cols)
                                 # BUG-V27-10 FIX: Persist confirmed column count to config so
                                 # the cross-category UNION supplement oracle (_union_cat_oracle)
@@ -63548,7 +63611,9 @@ class Scanner:
                     _before_col  = _base_payload[:_union_col_m.start(2)]
                     _col_section = _union_col_m.group(2)
                     _after_col   = _base_payload[_union_col_m.end(2):]
-                    _cols_split  = [c.strip() for c in _col_section.split(',')]
+                    # BUG-UNION-NAIVE-SPLIT-FIX: depth-aware split prevents splitting
+                    # inside SQL function arguments (CONCAT_WS, JSON_ARRAY, LPAD, etc.)
+                    _cols_split  = [c.strip() for c in _split_sql_cols(_col_section)]
                     _tgt_col     = min(_default_inject_col, len(_cols_split) - 1)
                     _cols_split[_tgt_col] = query_expr
                     modified_payload = _before_col + ', '.join(_cols_split) + _after_col
@@ -63563,7 +63628,8 @@ class Scanner:
                             _before_col2  = _base_payload[:_union_col_m2.start(2)]
                             _col_section2 = _union_col_m2.group(2)
                             _after_col2   = _base_payload[_union_col_m2.end(2):]
-                            _cols_split2  = [c.strip() for c in _col_section2.split(',')]
+                            # BUG-UNION-NAIVE-SPLIT-FIX: depth-aware split for fallback path
+                            _cols_split2  = [c.strip() for c in _split_sql_cols(_col_section2)]
                             if _cols_split2:
                                 _tgt_col2 = min(_default_inject_col, len(_cols_split2) - 1)
                                 _cols_split2[_tgt_col2] = query_expr
@@ -81768,7 +81834,13 @@ class FastExtractionEngine:
         if not _validate_extraction_params(n_cols, sql_cols, "union_extract_row"):
             LOG.error(f"[union_extract_row] Validation failed: n_cols={n_cols}, sql_cols len={len(sql_cols) if sql_cols else 0}")
             return None
-        
+        # BUG-UER-INJECT-COL-BOUNDS-FIX (MEDIUM): union_extract_table validates inject_col
+        # at line ~82281 but union_extract_row did not, causing IndexError when inject_col
+        # is out of range. _validate_extraction_params checks n_cols/sql_cols but not inject_col.
+        if not isinstance(inject_col, int) or inject_col < 0 or inject_col >= n_cols:
+            LOG.warning(f"[union_extract_row] Invalid inject_col: {inject_col} (must be 0-{n_cols-1})")
+            return None
+
         # ROOT CAUSE FIX #3: Properly retrieve detection context attributes
         # FIX-ROOT-CAUSE-#3: Use safe attribute access with proper defaults and validation
         _det_payload = getattr(self.result, 'payload', '') if self.result else ''
@@ -115012,9 +115084,21 @@ class TechniqueCascadeEngine:
         # Together they prove: (a) the body did change relative to baseline AND
         # (b) that change is consistent with DBMS-specific SQL execution AND
         # (c) a header changed between true/false probes. Hard to satisfy by accident.
+        # BUG-CHECKE-WAF-BYPASS-THRESHOLD-FIX (HIGH): When _check_a_all_waf_blocked=True
+        # and _a_pass=False, the block at line ~112814 enforces a 0.88 threshold for
+        # standalone Check E in the WAF-bypass scenario. If direct_sim < 0.88, that block
+        # prints "need timing proof" and falls through WITHOUT returning. This E+D path
+        # would then confirm at the lower 0.80 threshold (implicit in _e_pass=True),
+        # completely nullifying the 0.88 WAF-bypass guard — any single header difference
+        # (Check D) causes confirmation at 0.80 even when the code explicitly required 0.88.
+        # Fix: exclude the WAF-bypass scenario from this path. The 0.88 block at ~112825
+        # returns immediately if direct_sim>=0.88 (before reaching here), so the only
+        # time we reach this path with _check_a_all_waf_blocked=True is when direct_sim<0.88
+        # and the code decided timing proof is needed — E+D at 0.80 must not override that.
         if (_e_pass and not _timing_only_tech
                 and tech not in ("T", "TH", "HQ", "BT", "S", "DS")
-                and _d_count >= 1):
+                and _d_count >= 1
+                and not (_check_a_all_waf_blocked and not _a_pass)):
             print(f"[*]   [PCV] Result: CONFIRMED  Check E (DBMS-SQL consistency) + "
                   f"Check D ({_d_count} header diffs) dual-check passed "
                   f"[tech={tech} dbms={dbms}]", flush=True)
