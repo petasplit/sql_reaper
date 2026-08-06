@@ -46226,6 +46226,13 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
         # try/finally so the finally block always restores it regardless of how we exit.
         if _ext_time_sec is not None and result.technique in _timing_extract_techs:
             config.time_sec = _ext_time_sec
+            # BUG-EBF-CACHEKEY-MISMATCH FIX (storage-side alias): Store the original
+            # time_sec on config so TBExtract can alias the EBF cache entry under the
+            # canonical config.time_sec key.  MSE timing fallback always reads
+            # config.time_sec (after this finally restores it) for cache lookup; without
+            # this alias, the EBF bypass is stored under the reduced extract_time_sec key
+            # and the MSE lookup misses.
+            config._pre_extract_time_sec = _orig_time_sec
         # BUG-7D FIX: Removed early-exit guards for missing len_func/char_func keys.
         # SchemaExtractor._extract passes self._queries (which only contains schema SQL
         # templates like "dbs", "tables", "columns", "row_chunked") as the `queries`
@@ -46735,6 +46742,13 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
         return ""
     finally:
         config.time_sec = _orig_time_sec
+        # BUG-EBF-CACHEKEY-MISMATCH FIX: clear the ephemeral alias attribute.
+        # _pre_extract_time_sec is set only when extract_time_sec reduces time_sec;
+        # remove it so stale values from prior scan targets don't corrupt later lookups.
+        try:
+            del config._pre_extract_time_sec
+        except AttributeError:
+            pass
         # BUG-EXTRACT-ACTIVE-BLIND FIX (REQ 7/10): Only clear if WE set it.
         if _bes_set_active:
             _EXTRACTION_ACTIVE[0] = False
@@ -48677,15 +48691,46 @@ class Enumerator:
                 # WAF-proven bypass format.  This propagates the EBF bypass directly into the MSE
                 # timing oracle without any additional probes.
                 _ebf_tf_cache_key = f"{_url_tf}:{_det_param_tf}:{_t_sec_tf}"
-                if _ebf_tf_cache_key in _TB_EBF_CACHE:
-                    _ebf_tf_entry   = _TB_EBF_CACHE[_ebf_tf_cache_key]
+                # BUG-EBF-CACHEKEY-MISMATCH FIX (CRITICAL): TBExtract stores the EBF bypass
+                # entry under f"{url}:{param}:{t}" where t may be config.extract_time_sec
+                # (e.g. 2.0) rather than config.time_sec (e.g. 3.0).  _t_sec_tf above is
+                # read from config.time_sec (the original, unmodified value), while TBExtract
+                # uses config.extract_time_sec when it is set — producing a key like
+                # "http://target:param:2.0" while the MSE lookup above tries "…:3.0".
+                # The lookup always misses → EBF bypass is silently lost → timing fallback
+                # constructs a standard IF(SLEEP) payload → WAF blocks it → both true/false
+                # validation probes return False → oracle rejected → extraction returns "".
+                # Fix: derive candidate alternate t-values and probe the cache for each;
+                # accept the first matching key so the EBF bypass is always found.
+                _ebf_tf_found_key = _ebf_tf_cache_key if _ebf_tf_cache_key in _TB_EBF_CACHE else None
+                if _ebf_tf_found_key is None:
+                    _ext_t_tf_raw = getattr(self.config, 'extract_time_sec', None)
+                    _ebf_alt_t_candidates: list = []
+                    if _ext_t_tf_raw is not None:
+                        _ebf_alt_t_candidates.append(float(_ext_t_tf_raw))
+                    # Also try common integer/rounded forms (e.g. 2 vs 2.0, or rounding drift)
+                    for _at_raw in (int(_t_sec_tf), round(_t_sec_tf, 1), round(_t_sec_tf)):
+                        _atf = float(_at_raw)
+                        if _atf not in _ebf_alt_t_candidates and _atf != _t_sec_tf:
+                            _ebf_alt_t_candidates.append(_atf)
+                    for _alt_t_cand in _ebf_alt_t_candidates:
+                        _ak = f"{_url_tf}:{_det_param_tf}:{_alt_t_cand}"
+                        if _ak in _TB_EBF_CACHE:
+                            _ebf_tf_found_key = _ak
+                            LOG.info("[_extract_str] EBF cache key mismatch recovered: "
+                                     "primary key %r not found; using alt key %r "
+                                     "(config.time_sec=%.1f vs stored t=%.1f)",
+                                     _ebf_tf_cache_key, _ak, _t_sec_tf, _alt_t_cand)
+                            break
+                if _ebf_tf_found_key:
+                    _ebf_tf_entry   = _TB_EBF_CACHE[_ebf_tf_found_key]
                     _ebf_tf_tmpl    = _ebf_tf_entry[0]
                     _ebf_tf_wrapper = _ebf_tf_entry[2] if len(_ebf_tf_entry) > 2 else "{cond}"
                     _ebf_tf_tag     = _ebf_tf_entry[3] if len(_ebf_tf_entry) > 3 else ""
                     if _ebf_tf_tmpl:
                         LOG.info("[_extract_str] EBF bypass found in cache — wiring into timing "
                                  "fallback oracle (key=%s tmpl=%.60r wrapper=%r tag=%r)",
-                                 _ebf_tf_cache_key, _ebf_tf_tmpl, _ebf_tf_wrapper, _ebf_tf_tag)
+                                 _ebf_tf_found_key, _ebf_tf_tmpl, _ebf_tf_wrapper, _ebf_tf_tag)
                         def _build_timing_payload_tf(_cond,
                                                      _tmpl=_ebf_tf_tmpl,
                                                      _wrap=_ebf_tf_wrapper,
@@ -48700,7 +48745,9 @@ class Enumerator:
                         # Also use the EBF-calibrated threshold if available — the default
                         # `_base_ms_tf + _t_sec_tf * 500` may be too low for WAF-bypass targets
                         # where the bypass template adds significant extra latency.
-                        _ebf_cal_thresh = _TB_CALIBRATION_CACHE.get(_ebf_tf_cache_key)
+                        # BUG-EBF-CACHEKEY-MISMATCH FIX: use _ebf_tf_found_key for calibration
+                        # threshold lookup too — same key mismatch would lose the threshold.
+                        _ebf_cal_thresh = _TB_CALIBRATION_CACHE.get(_ebf_tf_found_key)
                         if _ebf_cal_thresh and isinstance(_ebf_cal_thresh, (int, float)):
                             _t_thresh_tf = float(_ebf_cal_thresh)
                             LOG.info("[_extract_str] Using EBF calibrated threshold=%.0fms "
@@ -144046,7 +144093,23 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     _ebf_tag_c    = getattr(_ebf_payload_fn, "_tag",      "")
                     _ebf_nofunc_c = getattr(_ebf_payload_fn, "_nofunc",   False)
                     if _ebf_tmpl_str:
-                        _tb_cache_insert(_TB_EBF_CACHE, _cal_key, (_ebf_tmpl_str, list(_ebf_tc), _ebf_wrapper, _ebf_tag_c, _ebf_nofunc_c), _TB_EBF_CACHE_MAX)  # BUG-CACHE-UNBOUNDED FIX
+                        _ebf_cache_entry = (_ebf_tmpl_str, list(_ebf_tc), _ebf_wrapper, _ebf_tag_c, _ebf_nofunc_c)
+                        _tb_cache_insert(_TB_EBF_CACHE, _cal_key, _ebf_cache_entry, _TB_EBF_CACHE_MAX)  # BUG-CACHE-UNBOUNDED FIX
+                        # BUG-EBF-CACHEKEY-MISMATCH FIX (storage-side alias): When
+                        # blind_extract_string temporarily sets config.time_sec=extract_time_sec
+                        # before calling TBExtract, _cal_key uses the reduced t value (e.g. 2.0).
+                        # MSE timing fallback later looks up with config.time_sec restored to
+                        # its original value (e.g. 3.0), causing a cache miss → EBF bypass lost.
+                        # If blind_extract_string stored the original time_sec in
+                        # config._pre_extract_time_sec, write an alias entry under the original
+                        # key so the MSE lookup always finds the bypass.
+                        _pre_ts = getattr(config, '_pre_extract_time_sec', None)
+                        if _pre_ts is not None and float(_pre_ts) != float(t):
+                            _ebf_alias_key = f"{url}:{result.param if hasattr(result,'param') else ''}:{float(_pre_ts)}"
+                            _tb_cache_insert(_TB_EBF_CACHE, _ebf_alias_key, _ebf_cache_entry, _TB_EBF_CACHE_MAX)
+                            _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_alias_key, timing_thresh, _TB_CALIBRATION_CACHE_MAX)
+                            LOG.info("[TBExtract] EBF cache aliased: %r → %r (t=%.1f → %.1f)",
+                                     _cal_key, _ebf_alias_key, float(t), float(_pre_ts))
                     print("[+] [TBExtract] ExtractionBypassFinder succeeded: "
                           f"thresh={timing_thresh:.0f}ms  extraction proceeding", flush=True)
                 else:
