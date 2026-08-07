@@ -40809,7 +40809,18 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                     try:
                         _wl_m = _u_cross_col_re.search(str(_wl_p))
                         if _wl_m:
-                            _wl_n = len([c for c in _wl_m.group(1).split(',')])
+                            # BUG-UNION-NAIVE-SPLIT-FILTER-FIX (HIGH; detect_union cross-cat filter):
+                            # The original `_wl_m.group(1).split(',')` splits on ALL commas,
+                            # including those inside function arguments (e.g. CONCAT_WS(',','a','b')
+                            # splits into 5 tokens instead of 1). This gives a wrong column count,
+                            # causing the filter to reject payloads whose column count actually
+                            # matches _u_cross_conf_cols. Example: 3-column UNION SELECT with
+                            # CONCAT_WS() in column 1 was rejected as a "5-column" payload,
+                            # dropping it silently before the HTTP probe is ever sent.
+                            # Fix: use _split_sql_cols (depth-aware, string-literal-aware) — the
+                            # same function already used at line 40748 for the confirmed-detection
+                            # column parse. Consistent with BUG-UNION-NAIVE-SPLIT-FIX comment there.
+                            _wl_n = len(_split_sql_cols(_wl_m.group(1)))
                             if _wl_n != _u_cross_conf_cols:
                                 continue  # column count mismatch → skip
                     except Exception:
@@ -144375,7 +144386,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     _ebf_result = True  # Signal EBF-mode extraction to proceed
                 else:
                     print(f"[!] [TBExtract] Static strategies blocked ({_ms_summary}ms) "
-                          " running ExtractionBypassFinder (~50-150 probes, flush=True)...")
+                          "running ExtractionBypassFinder (~50-150 probes)...", flush=True)
                 # EBF is only needed if not already cached
                 _ebf_result = None  # reset for conditional block below
                 if not (_ebf_mode[0] and _ebf_payload_fn_ref[0] is not None):
