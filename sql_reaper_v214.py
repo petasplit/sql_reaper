@@ -108336,12 +108336,12 @@ class TechniqueCascadeEngine:
             (
                 (_wassr_early_dist >= 0.80 and not _wassr_probe_both_blocked)
                 or
-                (_wassr_early_dist >= 0.50 and not _wassr_probe_both_blocked
+                (_wassr_early_dist >= 0.70 and not _wassr_probe_both_blocked  # RC-FINDING3-FP: raised 0.50→0.70
                  and bool(getattr(det, '_fp_guards_preconfirmed', False)))
             ) or
             (bool(getattr(det, '_fp_guards_preconfirmed', False))
              and getattr(det, '_fp_guards_confidence', 0.0) >= 0.85
-             and _wassr_early_dist >= 0.55)  # RC-FINDING3-FP: require independent Wasserstein signal
+             and _wassr_early_dist >= 0.70)  # RC-FINDING3-FP: raised 0.55→0.70; independent signal
         ) if det else False
 
         # BUG-PCV-BYPASS-FIX: Wasserstein preconfirmation is a strong signal but is NOT
@@ -115629,12 +115629,13 @@ class TechniqueCascadeEngine:
             if _fpg_conf >= 1.0:
                 # RC-FINDING5-FP: FP guards are a single statistical pipeline — a
                 # high-jitter CDN page can score conf >= 1.0 only when all layers agree.
-                # Require _wassr_early_dist >= 0.50 as an independently computed second
+                # Require _wassr_early_dist >= 0.90 as an independently computed second
                 # signal so that at least two distinct measurement methods agree before
-                # we confirm without a Check A canary.
-                if _wassr_early_dist >= 0.50:
+                # we confirm without a Check A canary.  Threshold raised from 0.50 to
+                # 0.90 to eliminate confirmed FP cases (observed: 0.703 triggering).
+                if _wassr_early_dist >= 0.90:
                     print("[*]   [PCV] Result: CONFIRMED  boolean FP guards pre-passed at HIGH confidence "
-                          f"({_fpg_conf:.3f} >= 1.0) + Wasserstein ({_wassr_early_dist:.3f} >= 0.50) "
+                          f"({_fpg_conf:.3f} >= 1.0) + Wasserstein ({_wassr_early_dist:.3f} >= 0.90) "
                           "— Check A canary skipped (3-layer statistical + Wasserstein dual-signal "
                           "at high confidence; RC-FINDING5-FP guard passed)",
                           flush=True)
@@ -115643,7 +115644,7 @@ class TechniqueCascadeEngine:
                     return True, 1, _details
                 else:
                     print(f"[*]   [PCV] FP guards HIGH conf ({_fpg_conf:.3f} >= 1.0) but Wasserstein "
-                          f"({_wassr_early_dist:.3f} < 0.50) insufficient — RC-FINDING5-FP: "
+                          f"({_wassr_early_dist:.3f} < 0.90) insufficient — RC-FINDING5-FP: "
                           "single-pipeline signal without independent corroboration; "
                           "Check A canary required for confirmation", flush=True)
         # BUG-CHECKE-CHECKD-DUAL FIX: When Check E passes (detection + DBMS-SQL
