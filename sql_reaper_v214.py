@@ -109756,11 +109756,22 @@ class TechniqueCascadeEngine:
             # the restore logic works correctly on ANY exception path.
             _pcv_ok = False
             _pcv_score = 0
+            # FIX-WASSR-ERROR-PAGE: Clear per-call error-page rejection flag before
+            # calling _post_confirm_verify → _inline_pcv_check. _inline_pcv_check sets
+            # self._pcv_error_page_rejected=True when PCV's baseline probe returns a 4xx
+            # error page (the page is genuinely unreachable). The WASSR OVERRIDE checks
+            # this flag to block the override when the error page is the real cause of
+            # PCV rejection (not WAF-blocked fresh probes). Clearing here ensures the
+            # flag reflects THIS call's PCV result, not a stale value from a prior call.
+            try:
+                self._pcv_error_page_rejected = False
+            except Exception:
+                pass
             _fp_true = await self._safe_confirm(method, url, data, data_fmt,
                 param, original + det.payload, self.tamper_chain)
             _fp_false = await self._safe_confirm(method, url, data, data_fmt,
                 param, original + _false_p, self.tamper_chain) if _false_p else None
-            
+
             # FIX-ISSUE12-B: Safely unpack _post_confirm_verify result.
             # The function returns (bool, score, details) but edge-case exception paths
             # might return a 2-tuple or None. Unpack safely to avoid ValueError.
@@ -109890,7 +109901,16 @@ class TechniqueCascadeEngine:
                                            getattr(det, '_fp_guards_preconfirmed', False) and
                                            getattr(det, '_fp_guards_confidence', 0.0) >= 1.0 and
                                            not getattr(det, '_both_probes_waf_blocked', False) and
-                                           not _saved_body_identical)
+                                           not _saved_body_identical and
+                                           # FIX-WASSR-ERROR-PAGE: Block WASSR OVERRIDE when PCV
+                                           # rejected due to the baseline being a genuine error page
+                                           # (4xx/5xx). An error page rejection means the target URL
+                                           # is unreachable — WASSR preconf cannot override that
+                                           # because no valid boolean oracle exists on an error page.
+                                           # This blocks the false-positive cascade: Wasserstein
+                                           # confirms CDN artifact → _fp_guards_preconfirmed=True →
+                                           # PCV rejects (baseline 404) → WASSR OVERRIDE fires.
+                                           not getattr(self, '_pcv_error_page_rejected', False))
                         if _preconf_direct:
                             _wassr_override = True
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
@@ -109965,10 +109985,22 @@ class TechniqueCascadeEngine:
                                         _wn_fp_preconf = bool(getattr(det, '_fp_guards_preconfirmed', False)) if det else False
                                         _wn_fp_conf = float(getattr(det, '_fp_guards_confidence', 0.0) or 0.0) if det else 0.0
                                         _wn_both_blocked = bool(getattr(det, '_both_probes_waf_blocked', False)) if det else False
+                                        _wn_error_page_rejected = getattr(self, '_pcv_error_page_rejected', False)
                                         # Very strong Wasserstein signal alone (>= 0.80, unblocked): override
                                         _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
-                                        # FP-guards preconfirmed with full confidence (unblocked): override
-                                        _wn_preconf_ok = _wn_fp_preconf and _wn_fp_conf >= 1.0 and not _wn_both_blocked
+                                        # FP-guards preconfirmed with full confidence (unblocked, no error-page): override
+                                        # FIX-WASSR-ERROR-PAGE: Added `not _wn_error_page_rejected` gate.
+                                        # When PCV rejected because the baseline is a genuine error page
+                                        # (e.g. 404, 1245B), the FP-guards preconfirmation must NOT
+                                        # override that rejection. The error page proves the target URL
+                                        # is unreachable — no boolean oracle is operative there. The
+                                        # previous code's `not _wn_both_blocked` only gated on WAF-
+                                        # blocked PROBES (4xx/5xx probe status), missing the silent-WAF
+                                        # case where probes return 200 but baseline returns 404 (CDN
+                                        # miss on path-injection endpoint). This fix closes that gap.
+                                        _wn_preconf_ok = (_wn_fp_preconf and _wn_fp_conf >= 1.0
+                                                          and not _wn_both_blocked
+                                                          and not _wn_error_page_rejected)
                                         # BUG-WASSR-STATUS-ORACLE FIX: Status-oracle detection in the
                                         # DETECTION fingerprints (fp_true/fp_false passed to _inline_pcv_check).
                                         # When the TRUE detection probe returned a different status than the
@@ -115831,6 +115863,20 @@ class TechniqueCascadeEngine:
             print(f"[*]   [PCV] Result: REJECTED  error page ({_bl_status}, {_bl_size}B) "
                   "requires timing proof or strong body evidence, all checks failed",
                   flush=True)
+            # FIX-WASSR-ERROR-PAGE: Flag this instance so the WASSR OVERRIDE in
+            # _post_confirm_verify_locked knows the rejection was caused by an error
+            # page, not by a legitimate FP guard failure on a live application page.
+            # The WASSR OVERRIDE's _preconf_direct and _wn_preconf_ok paths must not
+            # override a PCV rejection when the PCV baseline itself is a 404/4xx error
+            # page — the page is genuinely unreachable, not WAF-blocked by new probes.
+            # Gating WASSR OVERRIDE on this flag prevents the CDN/silent-WAF cascade:
+            # Wasserstein confirms CDN artifact → _fp_guards_preconfirmed=True set →
+            # PCV rejects (error page 404) → WASSR OVERRIDE fires via _wn_preconf_ok
+            # → false positive confirmed → extraction runs on garbage.
+            try:
+                self._pcv_error_page_rejected = True
+            except Exception:
+                pass
             return False, 0, _details
         if _a_pass:
             print(f"[*]   [PCV] Result: REJECTED  body canary borderline (A only, C={_c_pass}), timing+header failed — insufficient for confirmation", flush=True)
@@ -119502,8 +119548,15 @@ class TechniqueCascadeEngine:
                                 # Require full 5-probe window to reduce false suppression on early
                                 # probes (first 1-4 probes are handled by stable_page_outlier).
                                 _wass_all_high_consistent = (
-                                    not _wass_param_confirmed
-                                    and len(_wdh_p) >= 5
+                                    # FIX-WASS-RACE-CDN: Removed `not _wass_param_confirmed`
+                                    # guard. Prior code disabled this suppressor when another
+                                    # parallel surface already confirmed (shared _wass_dist_hist
+                                    # dict → _wass_param_confirmed=True from a different
+                                    # surface's prior confirmation). CDN uniform-high variance
+                                    # must be suppressed regardless of cross-surface confirmation
+                                    # state — a stale confirmation from Surface A does NOT prove
+                                    # Surface B's uniformly-high dist is SQL injection.
+                                    len(_wdh_p) >= 5
                                     and _wdh_p_below_stable == 0
                                     and _wdh_p_above_min == len(_wdh_p)
                                     and min(_wdh_p) > _wass_min * 0.75
@@ -119518,8 +119571,16 @@ class TechniqueCascadeEngine:
                                 # This guard mirrors _wass_all_high_consistent exactly except
                                 # it fires for the 3-4 probe window instead of 5+.
                                 _wass_early_high_window = (
-                                    not _wass_param_confirmed
-                                    and 3 <= len(_wdh_p) < 5
+                                    # FIX-WASS-RACE-CDN: Removed `not _wass_param_confirmed`
+                                    # guard. Same parallel-surface race condition fix as
+                                    # _wass_all_high_consistent above. The 3-4 probe window
+                                    # CDN pattern (all probes above min, none near zero) must
+                                    # be suppressed even when a different surface on the same
+                                    # param confirmed via Wasserstein first. Without this fix,
+                                    # surface B reads _wass_param_confirmed=True (set by
+                                    # surface A's prior confirmation), disables this guard,
+                                    # and confirms a CDN cache-miss artifact as injection.
+                                    3 <= len(_wdh_p) < 5
                                     and _wdh_p_below_stable == 0
                                     and _wdh_p_above_min == len(_wdh_p)
                                     and min(_wdh_p) > _wass_min * 0.75
@@ -119627,8 +119688,17 @@ class TechniqueCascadeEngine:
                                 # targets don't produce false positives when window temporarily
                                 # breaks the all-high-consistent pattern.
                                 _wass_cdnblock = (
-                                    not _wass_param_confirmed
-                                    and _wdh.get(f"_cdnblock_{param}", False)
+                                    # FIX-WASS-RACE-CDN: Removed `not _wass_param_confirmed`
+                                    # guard. The persistent CDN-block flag (_cdnblock_{param})
+                                    # is set when _wass_all_high_consistent or
+                                    # _wass_early_high_window detects CDN uniform-high variance.
+                                    # Prior code cleared this block when another surface
+                                    # confirmed (_wass_param_confirmed=True), allowing CDN
+                                    # artifact probes to bypass the persistent block. A CDN
+                                    # target is still a CDN target regardless of whether a
+                                    # different surface previously confirmed injection for the
+                                    # same param — the persistent block must survive.
+                                    _wdh.get(f"_cdnblock_{param}", False)
                                 )
                                 _wass_suppressed = (
                                     _wass_cdnblock
@@ -119645,8 +119715,17 @@ class TechniqueCascadeEngine:
                                     # FIX-WASS-ALL-HIGH-CONSISTENT v2: store persistent CDN-block
                                     # flag so future probes are suppressed even after window range
                                     # expands (which was the root cause of the prior false positives).
+                                    # FIX-WASS-RACE-CDN: Also clear any stale prior confirmation
+                                    # (_wass_confirmed_key) so a prior false positive from a parallel
+                                    # surface (which set _confirmed_{param}=True via the shared
+                                    # _wass_dist_hist dict) cannot bypass _wass_cdnblock on the
+                                    # next probe cycle. Without this clear, a stale True confirmation
+                                    # coexists with the CDN-block flag, allowing re-confirmation
+                                    # when _wass_cdnblock is checked without _wass_param_confirmed
+                                    # guard (see FIX-WASS-RACE-CDN above).
                                     try:
                                         _wdh[f"_cdnblock_{param}"] = True
+                                        _wdh[_wass_confirmed_key] = False  # FIX-WASS-RACE-CDN: clear stale cross-surface confirmation
                                         self._wass_dist_hist = _wdh
                                     except Exception:
                                         pass
@@ -119656,8 +119735,11 @@ class TechniqueCascadeEngine:
                                           f"-- uniformly-high page variance (CDN/dynamic), NOT injection",
                                           flush=True)
                                 elif _wass_early_high_window:
+                                    # FIX-WASS-RACE-CDN: Clear stale cross-surface confirmation
+                                    # same as _wass_all_high_consistent handler above.
                                     try:
                                         _wdh[f"_cdnblock_{param}"] = True
+                                        _wdh[_wass_confirmed_key] = False  # FIX-WASS-RACE-CDN: clear stale cross-surface confirmation
                                         self._wass_dist_hist = _wdh
                                     except Exception:
                                         pass
@@ -119670,6 +119752,14 @@ class TechniqueCascadeEngine:
                                     # Persistent CDN-block flag was set by a prior probe's
                                     # all-high-consistent detection. Suppress even though the
                                     # current window range may have temporarily expanded.
+                                    # FIX-WASS-RACE-CDN: Also clear stale confirmation here
+                                    # in case the CDN-block path is the first to run after
+                                    # a cross-surface race sets _wass_param_confirmed=True.
+                                    try:
+                                        _wdh[_wass_confirmed_key] = False  # FIX-WASS-RACE-CDN: clear stale cross-surface confirmation
+                                        self._wass_dist_hist = _wdh
+                                    except Exception:
+                                        pass
                                     LOG.debug("[Wasserstein] dist=%.4f CDN-BLOCK persistent flag "
                                               "(set by prior all-high-consistent window) — suppressed",
                                               _wass_dist)
@@ -119787,7 +119877,12 @@ class TechniqueCascadeEngine:
             # that proves the SQL condition controls the response.
             _status_gate_ok = True
 
-            if (combined > (1.0 - bool_thresh) or _wass_triggered) and _status_gate_ok:
+            if (combined >= (1.0 - bool_thresh) or _wass_triggered) and _status_gate_ok:
+                # FIX-BOOL-BOUNDARY-OUTER: Changed strict `>` to `>=` for consistency with
+                # _b_pass=combined>=... at line above.  Strict `>` dropped detections where
+                # combined is exactly at threshold (1.0 - bool_thresh).  The BUG-BOOL-BOUNDARY-
+                # STRICT FIX comment above explains the boundary rejection risk; the outer gate
+                # must use the same operator as the inner _b_pass check.
                 # Wasserstein already confirmed injection via EMD distance.
                 if _wass_triggered:
                     # BUG-WASSERSTEIN-NO-MULTIPROBE FIX: Wasserstein detection returned after
@@ -119877,6 +119972,24 @@ class TechniqueCascadeEngine:
                             # check (preconfirmed-direct and det-notes paths) blocks the override.
                             # Without this flag, _wn_preconf_ok=True when _fp_guards_preconfirmed=True
                             # → PCV FP-Guards WASSR OVERRIDE fires despite PCV rejection.
+                            _det_b._both_probes_waf_blocked = True
+                        elif 200 <= _true_status < 300 and 200 <= _false_status < 300:
+                            # FIX-SILENT-WAF-2XX-2XX: Both probes returned 2xx responses but the
+                            # server is a silent WAF that blocks SQL payloads by returning a 200-
+                            # status WAF challenge/block page body instead of the real application
+                            # response.  In DIFFERENTIAL oracle mode this is detected because the
+                            # CDN serves cached baseline (P95≈0ms) while injected payloads bypass
+                            # CDN to backend WAF, returning distinct 200-OK WAF bodies.
+                            # The Wasserstein distance measures the difference between the true-
+                            # probe WAF page body and the false-probe WAF page body — both of
+                            # which contain the reflected injected text — NOT SQL evaluation.
+                            # Result: dist≈0.6758 for EVERY probe pair regardless of SQL.
+                            # Flag _both_probes_waf_blocked so WASSR OVERRIDE is blocked when
+                            # PCV correctly rejects the detection (e.g. error page 404 in PCV).
+                            # Defense-in-depth: Fix 1 (FIX-WASS-RACE-CDN) should prevent
+                            # _wass_triggered=True for this pattern, but this flag ensures
+                            # the WASSR OVERRIDE cannot fire even if _wass_triggered somehow
+                            # becomes True (e.g. probe window edge case or future code change).
                             _det_b._both_probes_waf_blocked = True
                     except Exception:
                         pass
