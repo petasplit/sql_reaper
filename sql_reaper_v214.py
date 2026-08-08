@@ -115654,6 +115654,15 @@ class TechniqueCascadeEngine:
                           f"({_wassr_early_dist:.3f} < 0.90) insufficient — RC-FINDING5-FP: "
                           "single-pipeline signal without independent corroboration; "
                           "Check A canary required for confirmation", flush=True)
+                    # FIX-RC-FINDING5-FP-RETURN: Return REJECTED immediately.  The original code
+                    # fell through to subsequent confirmation paths (WAF-oracle direct detection
+                    # replay, Check E+D dual, etc.) which could confirm the injection despite the
+                    # Wasserstein-insufficient guard above.  When _fpg_conf >= 1.0 but Wasserstein
+                    # dist < 0.90, we have a single statistical pipeline without independent
+                    # corroboration — the only valid continuation is Check A (body canary), which
+                    # already failed.  All remaining paths below operate without Check A and would
+                    # produce false positives on CDN / path-injection surfaces.
+                    return False, 0, _details
         # BUG-CHECKE-CHECKD-DUAL FIX: When Check E passes (detection + DBMS-SQL
         # responses are consistent) AND Check D shows at least 1 header diff,
         # the combination is sufficient evidence for non-timing boolean techniques.
@@ -115790,7 +115799,13 @@ class TechniqueCascadeEngine:
             and _det_sim < (1.0 - max(_gap_threshold, 0.25))
             and fp_false is not None
             and getattr(fp_false, 'status_code', 0) != _pcv_bool_true_status
-            and getattr(fp_false, 'status_code', 200) < 400
+            # FIX-WAFORACLE-REQUIRE-2XX: The false probe must return a genuine 2xx response to
+            # prove SQL-conditional WAF blocking.  The original guard (< 400) accidentally allowed
+            # 401/403/404 false probes which are server error responses, not WAF-pass responses.
+            # true=400 (WAF blocked) + false=404 (path not found) is NOT evidence of SQL injection
+            # — it's evidence that the URL path doesn't exist.  Require an explicit 2xx response
+            # (200–299) for the false probe to confirm SQL-conditional WAF discrimination.
+            and 200 <= getattr(fp_false, 'status_code', 0) < 300
         )
         if _det_waf_oracle_replay_eligible:
             _det_false_sts = getattr(fp_false, 'status_code', 0)
@@ -119539,22 +119554,29 @@ class TechniqueCascadeEngine:
                                 _wass_true_st = getattr(fp, 'status_code', 0) or 0
                                 _wass_false_st = getattr(_fp_f2, 'status_code', 0) or 0
                                 _wass_asymmetric_waf = (
-                                    # Original: oracle=BLOCKED, bypass succeeded (true=2xx),
-                                    # false probe WAF-blocked — measures response-type asymmetry
-                                    (_wass_oracle_blocked
-                                     and 200 <= _wass_true_st < 300
-                                     and _wass_false_st in _wass_asym_statuses)
-                                    or
-                                    # FIX-WASS-ASYM-ANY-ORACLE: WAF blocks SQL-true payload
-                                    # (true=4xx) while SQL-false payload passes (false=2xx).
-                                    # The Wasserstein distance measures the structural difference
-                                    # between an error page body and a normal page body — NOT a
-                                    # SQL-conditional body difference.  This asymmetry produces
-                                    # dist≈0.60-0.70 consistently on any endpoint where the WAF
-                                    # selectively blocks SQL-true patterns.  Must be suppressed in
-                                    # ALL oracle modes, not just BLOCKED.
+                                    # Case A: WAF blocks SQL-true payload (true=4xx) while SQL-false
+                                    # payload passes (false=2xx). The Wasserstein distance measures the
+                                    # structural difference between an error page body and a normal page
+                                    # body — NOT a SQL-conditional body difference. Suppressed in ALL
+                                    # oracle modes (FIX-WASS-ASYM-ANY-ORACLE).
                                     (400 <= _wass_true_st < 600
                                      and 200 <= _wass_false_st < 300)
+                                    or
+                                    # Case B: true probe hits CDN cache (2xx, normal page body) while
+                                    # false probe misses cache (4xx, error page body with reflected URL).
+                                    # FIX-WASS-ASYM-TRUE2XX-FALSE4XX: The original guard only suppressed
+                                    # this when oracle=BLOCKED (narrow set {400,403,406,429}).  CDN cache
+                                    # hit/miss on path-injection surfaces produces true=200/false=404,
+                                    # causing dist≈0.67–0.70 on every probe pair regardless of SQL.
+                                    # Extend to ALL oracle modes and ALL 4xx/5xx false statuses so CDN
+                                    # cache transition artifacts on path-injection, header-injection, and
+                                    # URL-reflected surfaces are suppressed unconditionally.
+                                    # Note: when genuine SQL injection routes true=2xx and false=4xx,
+                                    # the SimHash boolean oracle would already confirm it (body diff is
+                                    # large: full page vs error page); Wasserstein only runs when SimHash
+                                    # gap is insufficient — CDN cache is the dominant cause of that.
+                                    (200 <= _wass_true_st < 300
+                                     and 400 <= _wass_false_st < 600)
                                 )
                                 # FIX-WASS-BOTH-ERROR-PAGES (HIGH, all DBMSes, all techniques,
                                 # path-injection surfaces, all HTTP methods):
@@ -119681,6 +119703,21 @@ class TechniqueCascadeEngine:
                                           f"({_wdh_p_below_stable} near-zero + {_wdh_p_above_min} above-threshold "
                                           f"in {len(_wdh_p)}-probe window) "
                                           f"-- CDN cache transition artifact, NOT injection", flush=True)
+                                    # FIX-BIMODAL-CDNBLOCK: The bimodal pattern (mix of near-zero CDN
+                                    # cache-hit probes and above-threshold cache-miss probes) is definitive
+                                    # evidence of CDN caching, not SQL injection.  Set a persistent CDN-block
+                                    # flag so that when the window later shifts to all-above-threshold
+                                    # (consecutive cache misses), the param is still suppressed even though
+                                    # neither _wass_bimodal_outlier nor _wass_all_high_consistent fires for
+                                    # that all-high window.  Without this, three consecutive cache misses
+                                    # after an earlier bimodal suppression confirm Wasserstein injection —
+                                    # the root cause of the false positives in log.txt / log1.txt.
+                                    try:
+                                        _wdh[f"_cdnblock_{param}"] = True
+                                        _wdh[_wass_confirmed_key] = False
+                                        self._wass_dist_hist = _wdh
+                                    except Exception:
+                                        pass
                                 elif _wass_asymmetric_waf:
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} ASYMMETRIC-WAF "
                                           f"(true={_wass_true_st}, false={_wass_false_st}) "
@@ -119828,6 +119865,18 @@ class TechniqueCascadeEngine:
                         elif (_wass_oracle_blocked and
                               200 <= _true_status < 300 and
                               _false_status in _waf_block_statuses):
+                            _det_b._both_probes_waf_blocked = True
+                        elif 200 <= _true_status < 300 and 400 <= _false_status < 600:
+                            # FIX-TRUE2XX-FALSE4XX-BLOCKED: true probe returned a normal page (2xx)
+                            # while false probe returned an error page (4xx/5xx).  This is the CDN
+                            # cache hit/miss pattern on path-injection / header-injection surfaces:
+                            # true probe hits CDN cache (200, full page), false probe misses cache
+                            # (404, small error page with reflected URL payload).  Wasserstein
+                            # distance measures response-TYPE difference, not SQL evaluation.
+                            # Flag _both_probes_waf_blocked so WASSR OVERRIDE's _wn_both_blocked
+                            # check (preconfirmed-direct and det-notes paths) blocks the override.
+                            # Without this flag, _wn_preconf_ok=True when _fp_guards_preconfirmed=True
+                            # → PCV FP-Guards WASSR OVERRIDE fires despite PCV rejection.
                             _det_b._both_probes_waf_blocked = True
                     except Exception:
                         pass
