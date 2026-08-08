@@ -25148,6 +25148,18 @@ class ScanSession:
 
     def record_vuln(self, param,technique,payload,dbms="",notes=""):
         param = param.replace("__path_seg__","path-injection").replace("__path__","path-injection")
+        # FIX-DUPLICATE-BANNER: If this param was already recorded (same or different
+        # technique/path), suppress the banner immediately.  Multiple code paths
+        # (BG failsafe, V13/V14 main block, _process_v11 deferred loop) all call
+        # record_vuln for the same injection.  The first call records and returns True
+        # (banner printed); all subsequent calls return False (banner suppressed).
+        # This prevents duplicate "[!!] SQL injection confirmed!" banners regardless
+        # of EXTRACTION_ACTIVE timing (race-condition-safe because Python dict __contains__
+        # is atomic in CPython and asyncio coroutines don't preempt at non-await points).
+        if param in self.vulnerabilities:
+            LOG.info(f"[PATCH-5] Second injection point param={param!r} technique={technique} "
+                     f"dbms={dbms} — logging only, already recorded (Req 5).")
+            return False
         self.vulnerabilities[param]={
             "technique":technique,"payload":payload,"dbms":dbms,
             "notes":notes,"found_at":time.time()
@@ -109784,6 +109796,13 @@ class TechniqueCascadeEngine:
                 _pcv_score = _pv_raw[1] if len(_pv_raw) > 1 else 0
             elif isinstance(_pv_raw, bool):
                 _pcv_ok = _pv_raw
+            # FIX-RACE-ERROR-PAGE: Capture error-page rejection flag immediately after
+            # _post_confirm_verify returns, before any await point. Between here and the
+            # WASSR OVERRIDE check (109913/109988), another parallel PCV coroutine can
+            # call _inline_pcv_check which resets self._pcv_error_page_rejected=False at
+            # line 109767.  Using a local snapshot prevents the race from making the
+            # WASSR OVERRIDE believe PCV did not reject due to an error page.
+            _pcv_error_page_rejected_local = getattr(self, '_pcv_error_page_rejected', False)
 
             # BUG-3-6 FIX (Req 3): For boolean-like techniques (B, BH, IN, WB, NV, EX, HY,
             # ST, O, UE), run _run_fp_guards_boolean as PRIMARY confirmation oracle when
@@ -109910,7 +109929,16 @@ class TechniqueCascadeEngine:
                                            # This blocks the false-positive cascade: Wasserstein
                                            # confirms CDN artifact → _fp_guards_preconfirmed=True →
                                            # PCV rejects (baseline 404) → WASSR OVERRIDE fires.
-                                           not getattr(self, '_pcv_error_page_rejected', False))
+                                           # FIX-RACE-ERROR-PAGE: Use local snapshot (not self attr)
+                                           # to avoid race condition where another PCV coroutine
+                                           # resets self._pcv_error_page_rejected=False mid-flight.
+                                           not _pcv_error_page_rejected_local and
+                                           # FIX-RC5-PRECONF-STRONG: Require strong Wasserstein
+                                           # signal (>=0.90) to use preconfirmed-direct path.
+                                           # CDN artifacts at ~0.67 set _fp_guards_preconfirmed=True
+                                           # unconditionally, but their Wasserstein dist is below
+                                           # 0.90 — blocking this path prevents false positives.
+                                           _wassr_early_dist >= 0.90)
                         if _preconf_direct:
                             _wassr_override = True
                             _preconf_conf_d = getattr(det, '_fp_guards_confidence', 0.0)
@@ -109927,7 +109955,15 @@ class TechniqueCascadeEngine:
                                 _wf_body = _fp_false.body if hasattr(_fp_false, 'body') else b""
                                 _wassr_dist = _wassr_gl.wasserstein1(_wt_body, _wf_body)
                                 _wassr_thresh = getattr(_wassr_gl, 'threshold', 0.012)
-                                _wassr_min = max(_wassr_thresh * 2.0, 0.25)
+                                # FIX-LIVE-WASSR-FLOOR: Raised floor from 0.25 → 0.50.
+                                # Live PCV canary probes use standard SQL (no bypass mutations),
+                                # so WAF-blocked probes return identical block pages (dist≈0).
+                                # On CDN targets both probes often get the same cached response
+                                # (dist≈0). The 0.25 floor was reachable from benign body variation
+                                # on dynamic pages (A/B test, timestamp injection). At 0.50 the
+                                # live Wasserstein signal must show a structurally meaningful
+                                # body difference between true and false canary responses.
+                                _wassr_min = max(_wassr_thresh * 2.0, 0.50)
                                 if _wassr_dist >= _wassr_min:
                                     _wassr_override = True
                                     print(f"[+] PCV FP-Guards WASSR OVERRIDE "
@@ -109956,7 +109992,21 @@ class TechniqueCascadeEngine:
                                     _wn_m = _re_wn.search(r'wasserstein_dist=(\d+\.\d+)', _det_notes_str)
                                     if _wn_m:
                                         _det_wass_dist = float(_wn_m.group(1))
-                                        _wn_min = 0.5000
+                                        # FIX-WASSR-DET-NOTES-THRESHOLD: Raised from 0.5000 to 0.9500.
+                                        # CDN cache hit/miss and WAF response-type artifacts produce
+                                        # Wasserstein dist in the range 0.60-0.75 (observed: 0.6758,
+                                        # 0.7031 in log1.txt/log2.txt). These are NOT SQL injection
+                                        # signals — they're structural response-body differences from
+                                        # CDN caching or WAF response type changes.
+                                        # Real boolean SQL injection produces dist >= 0.90 when the
+                                        # true-condition body differs semantically from the false-
+                                        # condition body (application renders different content).
+                                        # The 0.5000 threshold allowed CDN artifacts to trigger
+                                        # WASSR OVERRIDE via the fp-preconf-conf>=1.0 path even when
+                                        # PCV correctly rejected the detection with error page 404.
+                                        # Setting 0.9500 requires a very strong Wasserstein signal
+                                        # that genuine CDN/WAF noise cannot produce.
+                                        _wn_min = 0.9500
                                         # FIX-WASSR-DET-NOTES-FP (ROOT CAUSE of log.txt false positive):
                                         # The det-notes fallback used _wn_min (~0.25) as its only gate.
                                         # On a dynamic page (CDN, A/B test, Cloudflare WAF challenge tokens)
@@ -109985,7 +110035,13 @@ class TechniqueCascadeEngine:
                                         _wn_fp_preconf = bool(getattr(det, '_fp_guards_preconfirmed', False)) if det else False
                                         _wn_fp_conf = float(getattr(det, '_fp_guards_confidence', 0.0) or 0.0) if det else 0.0
                                         _wn_both_blocked = bool(getattr(det, '_both_probes_waf_blocked', False)) if det else False
-                                        _wn_error_page_rejected = getattr(self, '_pcv_error_page_rejected', False)
+                                        # FIX-RACE-ERROR-PAGE: Use local snapshot to avoid race
+                                        # condition. Another parallel PCV call resets
+                                        # self._pcv_error_page_rejected=False (line 109767) during
+                                        # the await _run_fp_guards_boolean() suspension, so re-reading
+                                        # self.attr here would see False even when THIS PCV call's
+                                        # _post_confirm_verify rejected due to error page.
+                                        _wn_error_page_rejected = _pcv_error_page_rejected_local
                                         # Very strong Wasserstein signal alone (>= 0.80, unblocked): override
                                         _wn_strong_alone = _det_wass_dist >= 0.80 and not _wn_both_blocked
                                         # FP-guards preconfirmed with full confidence (unblocked, no error-page): override
@@ -111530,15 +111586,28 @@ class TechniqueCascadeEngine:
                 # (e.g. a 1-row vs 0-row SQL result changing the table length) were
                 # never confirmed via the size delta. Replaced both references.
                 if not _passed and not _both_check_a_waf and _fp_t and _fp_f and _fp_t.body and _fp_f.body:
-                    # FIX-CHECKA-BODYSIZE-WAF: skip body-size delta when both probes are WAF-blocked.
-                    # A WAF returning different-size block pages for true vs false probes is noise
-                    # (e.g. 155B vs 557B both at HTTP 400) — not SQL injection signal.
                     _len_t = len(_extract_body_safe(_fp_t))
                     _len_f = len(_extract_body_safe(_fp_f))
                     _len_max = max(_len_t, _len_f, 1)
                     _len_pct = abs(_len_t - _len_f) / _len_max
-                    if _len_pct > 0.05 and abs(_len_t - _len_f) > 50:
-                        _passing_pairs.append((_len_pct, f"{_name}+size({_len_t}vs{_len_f})", _len_pct > 0.15))
+                    # FIX-CHECKA-CDN-STATUS-CLASS: Require both probes to be in the same
+                    # response class (both 2xx or both 4xx/5xx) before counting size delta.
+                    # A CDN hit/miss pattern (true=200 full page ~10KB vs false=404 error
+                    # ~500B) produces _len_pct≈0.95 >> 0.05 — the size difference measures
+                    # response-TYPE, not SQL execution. Accepting this as a "passing pair"
+                    # or setting _a_strong=True causes false positive Check A confirmation
+                    # on CDN-backed endpoints with path-injection URL patterns.
+                    # FIX-CHECKA-SIZE-THRESHOLD: Raised thresholds from (0.05, 50) to
+                    # (0.25, 200). Dynamic pages return slightly different content on every
+                    # request (CSRF tokens, timestamps, A/B widgets) — a 5%/50B difference
+                    # is achievable from natural jitter without SQL execution. At 25%/200B
+                    # the difference is too large to be explained by per-request token churn;
+                    # it requires a structural content change caused by SQL execution.
+                    _ca_st_t2 = getattr(_fp_t, 'status_code', 200) or 200
+                    _ca_st_f2 = getattr(_fp_f, 'status_code', 200) or 200
+                    _ca_same_class = ((_ca_st_t2 < 400) == (_ca_st_f2 < 400))
+                    if _ca_same_class and _len_pct > 0.25 and abs(_len_t - _len_f) > 200:
+                        _passing_pairs.append((_len_pct, f"{_name}+size({_len_t}vs{_len_f})", _len_pct > 0.40))
                 # BUG-CHECKA-STATUS-ORACLE-FIX (Fix 9, HIGH):
                 # On status-code oracles (True=400, False=200/404), the SQL condition
                 # changes the HTTP status code, not the body content. When the body stays
@@ -112934,7 +113003,13 @@ class TechniqueCascadeEngine:
             _e_pass = (
                 _bl_fetch_ok                                              # BUG-FP-1: real baseline required
                 and _e_canary_ok                                          # BUG-FP-10: canary must not be error/WAF-block
-                and _e_direct_sim >= 0.80
+                # FIX-CHECKE-SIM-THRESHOLD: Raised from 0.80 → 0.85. At 0.80, two
+                # WAF block pages that share structural HTML (header/footer) can score
+                # ≥ 0.80 similarity even when neither represents SQL execution — the
+                # structural similarity comes from the shared WAF challenge page template.
+                # At 0.85, the detection and DBMS-SQL responses must be more strongly
+                # consistent with each other, ruling out template-matched WAF responses.
+                and _e_direct_sim >= 0.85
                 and _det_sim <= (1.0 - max(_gap_threshold, 0.25))
             )
             _details["E"] = (f"direct_sim={_e_direct_sim:.3f} "
@@ -115627,17 +115702,19 @@ class TechniqueCascadeEngine:
         # A pass alone without C (or A+C not strong enough): borderline, reject
         # BUG-BOOL-PCV-STRICT FIX (Issue 12): Exception when FP guards pre-confirmed the injection.
         # If _run_fp_guards_boolean already ran 3 statistical layers (FalsePositiveGuardV18 L1-L6 +
-        # WelchConfirmer + FalsePositiveValidator) and they all passed with confidence ≥ 0.65,
+        # WelchConfirmer + FalsePositiveValidator) and they all passed with confidence ≥ 0.75,
         # then Check A pass alone IS sufficient for pure boolean techniques (B, BH, IN, NV, WB, ST,
         # EX, HY). The FP guards already proved the body changes are injection-triggered, not noise.
         # Without this exception, ALL boolean injections confirmed by 3 statistical layers are still
         # rejected here because Check C/E/D never fire for boolean — leaving no path to confirmation.
-        # FP guard preconfirm: require confidence >= 0.65.  At 0.65 the guard retains
-        # detections that pass all 3 statistical layers with a modest margin while
-        # blocking the 0.60-0.64 noise range that barely exceeds random fluctuation.
+        # FP guard preconfirm: require confidence >= 0.75.  FIX-PRECONF-THRESHOLD: Raised from
+        # 0.65 to 0.75 to exclude marginal FP-guard passes (0.65-0.74 range) that can occur on
+        # high-jitter CDN pages where individual L1-L6 layers pass by narrow margins.  The 3-
+        # layer guard (FalsePositiveGuardV18 + WelchConfirmer + FPV) sets confidence in [0.75-1.0]
+        # only when all layers independently agree; values below 0.75 indicate layer disagreement.
         _fp_preconfirmed = (det is not None and
                             getattr(det, '_fp_guards_preconfirmed', False) and
-                            getattr(det, '_fp_guards_confidence', 0.0) >= 0.65)
+                            getattr(det, '_fp_guards_confidence', 0.0) >= 0.75)
         _is_boolean_tech = tech in ("B", "BH", "IN", "NV", "WB", "ST", "EX", "HY")
         if _a_pass and _fp_preconfirmed and _is_boolean_tech:
             _fpg_conf = getattr(det, '_fp_guards_confidence', 0.70) if det else 0.70
@@ -119925,14 +120002,22 @@ class TechniqueCascadeEngine:
                     # 0.63 to 0.80 to exclude CDN/Cloudflare noise in the 0.63-0.79 range that
                     # produces false positives. WASSR OVERRIDE requires _fp_guards_confidence >= 1.0
                     # (preconfirmed-direct path) or dist >= 0.50 with full confidence (det-notes path).
-                    # FIX-WASS-PRECONF: Multi-probe Wasserstein oracle passed 7 suppression
-                    # guards + 3/5 probe window — this statistical strength is equivalent to
-                    # what the 0.80 single-probe threshold was enforcing. Set preconf flags
-                    # unconditionally for ANY _wass_triggered=True detection so PCV's
-                    # _preconf_direct path fires instead of requiring fresh WAF-blocked probes.
+                    # FIX-WASS-PRECONF: Multi-probe Wasserstein oracle passed suppression
+                    # guards + probe window — this statistical strength is used to
+                    # pre-set _fp_guards_preconfirmed for the PCV preconfirmed-direct path.
+                    # FIX-WASS-PRECONF-THRESHOLD (ROOT CAUSE of log1.txt/log2.txt FP):
+                    # Only set preconf when _wass_dist >= 0.90. CDN cache hit/miss artifacts
+                    # consistently produce dist in 0.60-0.75 range (observed: 0.6758, 0.7031).
+                    # Real boolean injection producing meaningful true/false body differences
+                    # yields dist >= 0.90. The previous unconditional assignment made CDN
+                    # artifacts trigger WASSR OVERRIDE via the _wn_preconf_ok path (which
+                    # requires preconfirmed=True + confidence>=1.0 + not both_blocked).
+                    # At dist < 0.90, preconf is NOT set — PCV must independently confirm
+                    # via Check A canary or timing oracle without any Wasserstein shortcut.
                     try:
-                        _det_b._fp_guards_preconfirmed = True
-                        _det_b._fp_guards_confidence = 1.0
+                        if _wass_dist >= 0.90:
+                            _det_b._fp_guards_preconfirmed = True
+                            _det_b._fp_guards_confidence = 1.0
                         # FIX-ST-FP-WASS-BLOCKED: If BOTH true-condition and false-condition
                         # probes were WAF-blocked (400/403/406/429), the Wasserstein distance
                         # reflects WAF page token variance, not SQL-controlled differences.
@@ -157041,7 +157126,13 @@ class FalsePositiveValidator:
             confidence = min(confidence, 0.55)  # stays below the 0.6 threshold
 
         return {
-            "valid": confidence >= 0.6 and _strong_signal,
+            # FIX-FPV-CONFIDENCE-THRESHOLD: Raised from 0.6 → 0.65. At 0.60, a single
+            # length_diff > 50 (confidence += 0.4) plus status_consistent (+=0.2) = 0.60
+            # satisfies valid=True even without low variance.  CDN A/B test pages can
+            # produce consistent 60-byte differences across 3 trials.  At 0.65 the
+            # validator requires an additional signal (status_different or low variance)
+            # alongside the length_diff, blocking single-signal CDN-size false positives.
+            "valid": confidence >= 0.65 and _strong_signal,
             "confidence": min(1.0, confidence),
             "mean_true_len": mean_t,
             "mean_false_len": mean_f,
@@ -168954,8 +169045,14 @@ class FalsePositiveGuardV18:
             # injection signal. Fix: with an empty norm_base, skip the baseline-relative
             # gap check and rely solely on the direct true-vs-false similarity check.
             _norm_base_empty = (norm_base == b"" or not norm_base)
+            # FIX-L2-THRESHOLD: Raised from 0.15 → 0.20. A dynamic CDN page that
+            # varies by >15% SimHash between any two consecutive requests (A/B test,
+            # session personalization) can pass L2 without SQL injection.  At 0.20
+            # the true/false responses must differ from baseline by a larger margin,
+            # ruling out high-variance dynamic pages at the cost of slightly fewer
+            # marginal injection detections.
             _l2_base_gap_fail = (not _norm_base_empty and
-                                 abs(sim_true_base - sim_neg_base) < 0.15)
+                                 abs(sim_true_base - sim_neg_base) < 0.20)
             # FIX-R3-A: When baseline is empty (stub), only the direct true-vs-false
             # similarity check is available. Relax threshold to 0.93 to avoid rejecting
             # genuine injections on pages where only one field changes (login status, etc.)
