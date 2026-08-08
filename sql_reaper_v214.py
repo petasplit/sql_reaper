@@ -113278,8 +113278,8 @@ class TechniqueCascadeEngine:
         except Exception:
             pass
         _d_probes_both_waf_blocked = (
-            _d_true_status in (400, 403, 406, 429, 503) and
-            _d_false_status in (400, 403, 406, 429, 503)
+            _d_true_status in {400, 403, 406, 429, 430, 444, 451} and
+            _d_false_status in {400, 403, 406, 429, 430, 444, 451}
         )
         if (_d_pass
                 and not _a_pass
@@ -113415,7 +113415,7 @@ class TechniqueCascadeEngine:
             _det_bypass_ok = (
                 _det_fp is not None
                 and (
-                    _det_status not in {400, 403, 406, 429, 503}
+                    _det_status not in {400, 403, 406, 429, 430, 444, 451}
                     or (  # FIX-TRUE-4XX-ORACLE-DETBYPASS: True=4xx oracle — expected True status is legitimate
                         _pcv_bool_true_is_4xx and _det_status == _pcv_bool_true_status
                     )
@@ -113434,7 +113434,7 @@ class TechniqueCascadeEngine:
             elif _det_fp is None:
                 print(f"[*]   [PCV] WAF-bypass replay: detection replay failed (no fingerprint); "
                       "cannot confirm without valid replay", flush=True)
-            elif _det_status in {400, 403, 406, 429, 503}:
+            elif _det_status in {400, 403, 406, 429, 430, 444, 451}:
                 print(f"[*]   [PCV] WAF-bypass replay: detection replay also WAF-blocked "
                       f"(status={_det_status}) — bypass technique no longer works; cannot confirm",
                       flush=True)
