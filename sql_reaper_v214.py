@@ -25156,8 +25156,9 @@ class ScanSession:
         if _EXTRACTION_ACTIVE[0] or _EXTRACTION_DONE[0]:
             LOG.info(f"[PATCH-5] Second injection point param={param!r} technique={technique} "
                      f"dbms={dbms} — logging only, extraction already active/done (Req 5).")
-            return
+            return False  # FIX-PATCH5-RETURN: callers check False to suppress banner
         LOG.info(f"Vulnerability confirmed  param={param.replace('__path__', 'path-injection')!r} technique={technique} dbms={dbms}")
+        return True
 
     def already_confirmed(self, param): return param in self.vulnerabilities
     def elapsed(self): return time.time()-self.start_time
@@ -112362,6 +112363,10 @@ class TechniqueCascadeEngine:
                         and _d_st_t > 0 and _d_st_f > 0
                         and _d_st_t == _pcv_bool_true_status
                         and _d_st_f != _pcv_bool_true_status
+                        and _d_st_f < 400  # FIX-CHECKD-WAF-BOTH4XX: false probe must be a
+                                           # normal (non-error) response, not another 4xx.
+                                           # TRUE=400+FALSE=404 are both error responses — not
+                                           # SQL-conditional routing evidence.
                     )
                     _d_status_waf_oracle_reversed = (
                         _pcv_bool_true_is_4xx
@@ -112369,6 +112374,8 @@ class TechniqueCascadeEngine:
                         and _d_st_t > 0 and _d_st_f > 0
                         and _d_st_f == _pcv_bool_true_status
                         and _d_st_t != _pcv_bool_true_status
+                        and _d_st_t < 400  # FIX-CHECKD-WAF-BOTH4XX: true probe must be a
+                                           # normal (non-error) response, not another 4xx.
                     )
                     if _d_status_oracle:
                         _d_pass = True
@@ -115783,6 +115790,7 @@ class TechniqueCascadeEngine:
             and _det_sim < (1.0 - max(_gap_threshold, 0.25))
             and fp_false is not None
             and getattr(fp_false, 'status_code', 0) != _pcv_bool_true_status
+            and getattr(fp_false, 'status_code', 200) < 400
         )
         if _det_waf_oracle_replay_eligible:
             _det_false_sts = getattr(fp_false, 'status_code', 0)
@@ -119531,9 +119539,22 @@ class TechniqueCascadeEngine:
                                 _wass_true_st = getattr(fp, 'status_code', 0) or 0
                                 _wass_false_st = getattr(_fp_f2, 'status_code', 0) or 0
                                 _wass_asymmetric_waf = (
-                                    _wass_oracle_blocked
-                                    and 200 <= _wass_true_st < 300
-                                    and _wass_false_st in _wass_asym_statuses
+                                    # Original: oracle=BLOCKED, bypass succeeded (true=2xx),
+                                    # false probe WAF-blocked — measures response-type asymmetry
+                                    (_wass_oracle_blocked
+                                     and 200 <= _wass_true_st < 300
+                                     and _wass_false_st in _wass_asym_statuses)
+                                    or
+                                    # FIX-WASS-ASYM-ANY-ORACLE: WAF blocks SQL-true payload
+                                    # (true=4xx) while SQL-false payload passes (false=2xx).
+                                    # The Wasserstein distance measures the structural difference
+                                    # between an error page body and a normal page body — NOT a
+                                    # SQL-conditional body difference.  This asymmetry produces
+                                    # dist≈0.60-0.70 consistently on any endpoint where the WAF
+                                    # selectively blocks SQL-true patterns.  Must be suppressed in
+                                    # ALL oracle modes, not just BLOCKED.
+                                    (400 <= _wass_true_st < 600
+                                     and 200 <= _wass_false_st < 300)
                                 )
                                 # FIX-WASS-BOTH-ERROR-PAGES (HIGH, all DBMSes, all techniques,
                                 # path-injection surfaces, all HTTP methods):
@@ -119661,10 +119682,19 @@ class TechniqueCascadeEngine:
                                           f"in {len(_wdh_p)}-probe window) "
                                           f"-- CDN cache transition artifact, NOT injection", flush=True)
                                 elif _wass_asymmetric_waf:
-                                    LOG.debug("[Wasserstein] dist=%.4f ASYMMETRIC WAF suppressed "
-                                              "(oracle=BLOCKED, true=%d 2xx, false=%d WAF-block) "
-                                              "— response-type asymmetry, NOT SQL boolean difference",
-                                              _wass_dist, _wass_true_st, _wass_false_st)
+                                    print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} ASYMMETRIC-WAF "
+                                          f"(true={_wass_true_st}, false={_wass_false_st}) "
+                                          f"-- WAF response-type asymmetry, NOT SQL boolean difference",
+                                          flush=True)
+                                    # FIX-WASS-ASYM-CDNBLOCK: Set CDN-block flag and clear
+                                    # stale confirmation so future probes on this param are
+                                    # suppressed without re-evaluating the asymmetric pattern.
+                                    try:
+                                        _wdh[f"_cdnblock_{param}"] = True
+                                        _wdh[_wass_confirmed_key] = False
+                                        self._wass_dist_hist = _wdh
+                                    except Exception:
+                                        pass
                                 elif _wass_both_error_pages:
                                     # FIX-WASS-BOTH-ERROR-PAGES: Both true and false probes returned
                                     # error pages (4xx/5xx). The Wasserstein distance measures payload
@@ -119781,7 +119811,19 @@ class TechniqueCascadeEngine:
                         _waf_block_statuses = {400, 403, 406, 429}
                         _true_status  = getattr(fp,     'status_code', 0) or 0
                         _false_status = getattr(_fp_f2, 'status_code', 0) or 0
-                        if _true_status in _waf_block_statuses and _false_status in _waf_block_statuses:
+                        if 400 <= _true_status < 600 and 400 <= _false_status < 600:
+                            # FIX-BOTH-PROBES-ANY-4XX: Both probes returned error pages
+                            # (any 4xx/5xx, not just the narrow _waf_block_statuses set).
+                            # 404 "Not Found" and other server-error responses are equally
+                            # non-evaluative — Wasserstein measures error page body variance,
+                            # not SQL evaluation.  The narrow set excluded 404/408/etc.
+                            _det_b._both_probes_waf_blocked = True
+                        elif 400 <= _true_status < 600 and 200 <= _false_status < 300:
+                            # FIX-TRUE4XX-FALSE2XX: WAF asymmetry — true probe blocked (4xx),
+                            # false probe passed (2xx).  Wasserstein distance measures the
+                            # structural difference between an error page and a normal page,
+                            # not SQL-conditional body change.  Flag so WASSR OVERRIDE is
+                            # blocked regardless of oracle mode.
                             _det_b._both_probes_waf_blocked = True
                         elif (_wass_oracle_blocked and
                               200 <= _true_status < 300 and
@@ -125200,22 +125242,26 @@ class UniversalScanOrchestrator:
                             _dbms_sess.dbms = _confirmed_dbms
                     except Exception:
                         pass
-            print("")
-            print("[!!] SQL injection confirmed!")
-            print(f"    Parameter : {('path-injection' if param in ('__path__','path-injection') else param)!r}")
-            print(f"    URL       : {url[:80]}")
-            print(f"    Technique : {result.detection.technique}")
-            print(f"    DBMS      : {_confirmed_dbms}")
-            print(f"    Bypass    : {result.bypass_used}")
-            print(f"    Confidence: {result.detection.confidence:.0%}")
-            _display_payload = getattr(result.detection, 'exact_sent_payload', None) or result.detection.payload
-            print(f"    Payload   : {_display_payload[:80]!r}")
-            print(f"    Requests  : {result.total_requests}")
-            print("")
             self._all_results.append(result)
-            self.session.record_vuln(
+            # FIX-PATCH5-BANNER: record_vuln returns False when PATCH-5 suppresses
+            # a second injection point (extraction already active/done).  Only print
+            # the confirmation banner when the vuln is genuinely the first recording.
+            _rv_recorded = self.session.record_vuln(
                 param, result.detection.technique,
                 result.detection.payload, result.detection.dbms)
+            if _rv_recorded is not False:
+                print("")
+                print("[!!] SQL injection confirmed!")
+                print(f"    Parameter : {('path-injection' if param in ('__path__','path-injection') else param)!r}")
+                print(f"    URL       : {url[:80]}")
+                print(f"    Technique : {result.detection.technique}")
+                print(f"    DBMS      : {_confirmed_dbms}")
+                print(f"    Bypass    : {result.bypass_used}")
+                print(f"    Confidence: {result.detection.confidence:.0%}")
+                _display_payload = getattr(result.detection, 'exact_sent_payload', None) or result.detection.payload
+                print(f"    Payload   : {_display_payload[:80]!r}")
+                print(f"    Requests  : {result.total_requests}")
+                print("")
 
             # FIX #1: TEST STACKED QUERY SUPPORT
             # BUG-R1/R4/R6 FIX: Was using hardcoded generic payloads outside _send_injected,
@@ -128104,7 +128150,7 @@ class ScannerV13(ScannerV12):
                     # FIX-V13-RECORD-VULN: record immediately so already_confirmed()
                     # skips this param on any subsequent encounter in the same scan
                     # (e.g. when --no-extract is set and _process_v11 never runs).
-                    self.session.record_vuln(
+                    _v13_rv_recorded = self.session.record_vuln(
                         param, det.technique, det.payload, det.dbms or "")
                     self.session.dbms = det.dbms or self.session.dbms
                     # Write back so DBMS-specific payloads fire in subsequent techniques
@@ -128130,24 +128176,27 @@ class ScannerV13(ScannerV12):
                     # banner was unconditionally skipped and the user never saw the confirmation
                     # summary.  Fix: print the banner here in the V13 path where all the
                     # required fields (param, url, det, cascade_r) are available.
-                    _v13_disp_param = ('path-injection'
-                                       if param in ('__path__', 'path-injection')
-                                       else param)
-                    _v13_disp_payload = (getattr(det, 'exact_sent_payload', None)
-                                         or det.payload or '')
-                    _v13_bypass = getattr(cascade_r, 'bypass_used', '') or ''
-                    _v13_reqs   = getattr(cascade_r, 'total_requests', 0)
-                    print("", flush=True)
-                    print("[!!] SQL injection confirmed!", flush=True)
-                    print(f"    Parameter : {_v13_disp_param!r}", flush=True)
-                    print(f"    URL       : {ep.url[:80]}", flush=True)
-                    print(f"    Technique : {det.technique}", flush=True)
-                    print(f"    DBMS      : {det.dbms or 'unknown'}", flush=True)
-                    print(f"    Bypass    : {('tamper:' + _v13_bypass) if _v13_bypass else 'none'}", flush=True)
-                    print(f"    Confidence: {det.confidence:.0%}", flush=True)
-                    print(f"    Payload   : {_v13_disp_payload[:80]!r}", flush=True)
-                    print(f"    Requests  : {_v13_reqs}", flush=True)
-                    print("", flush=True)
+                    # FIX-PATCH5-BANNER-V13: Only print when record_vuln returned True (not
+                    # suppressed by PATCH-5 second-injection-point guard).
+                    if _v13_rv_recorded is not False:
+                        _v13_disp_param = ('path-injection'
+                                           if param in ('__path__', 'path-injection')
+                                           else param)
+                        _v13_disp_payload = (getattr(det, 'exact_sent_payload', None)
+                                             or det.payload or '')
+                        _v13_bypass = getattr(cascade_r, 'bypass_used', '') or ''
+                        _v13_reqs   = getattr(cascade_r, 'total_requests', 0)
+                        print("", flush=True)
+                        print("[!!] SQL injection confirmed!", flush=True)
+                        print(f"    Parameter : {_v13_disp_param!r}", flush=True)
+                        print(f"    URL       : {ep.url[:80]}", flush=True)
+                        print(f"    Technique : {det.technique}", flush=True)
+                        print(f"    DBMS      : {det.dbms or 'unknown'}", flush=True)
+                        print(f"    Bypass    : {('tamper:' + _v13_bypass) if _v13_bypass else 'none'}", flush=True)
+                        print(f"    Confidence: {det.confidence:.0%}", flush=True)
+                        print(f"    Payload   : {_v13_disp_payload[:80]!r}", flush=True)
+                        print(f"    Requests  : {_v13_reqs}", flush=True)
+                        print("", flush=True)
 
                     #  Immediate extraction on each confirmed finding
                     _no_extract_val = getattr(cfg, "no_extract", False)
@@ -133033,7 +133082,9 @@ class ScannerV14(ScannerV13):
                     LOG.info(f" {param.replace('path-injection','path-injection').replace('__path__','path-injection')!r}: {result.technique} [{inj_context}] "
                              f"bypass={bypass} conf={result.confidence:.0%}")
                     # Record in session for summary count
-                    self.session.record_vuln(
+                    # FIX-PATCH5-BANNER-V14: record_vuln returns False when PATCH-5
+                    # suppresses a second injection point.  Only print banner on first.
+                    _v14_rv_recorded = self.session.record_vuln(
                         param, result.technique, result.payload, result.dbms or "")
                     self.session.dbms = result.dbms or self.session.dbms
                     # Write back so DBMS-specific payloads fire in subsequent techniques
@@ -133044,23 +133095,24 @@ class ScannerV14(ScannerV13):
                     # The detailed "[!!] SQL injection confirmed!" banner was never printed
                     # in the V14 scanner path — only LOG.info was called.  Print it here
                     # where param, ep.url, result, and bypass are all available.
-                    _v14_disp_param = ('path-injection'
-                                       if param in ('__path__', 'path-injection')
-                                       else param)
-                    _v14_disp_payload = (getattr(result, 'exact_sent_payload', None)
-                                         or result.payload or '')
-                    _v14_reqs = getattr(result, 'total_requests', 0)
-                    print("", flush=True)
-                    print("[!!] SQL injection confirmed!", flush=True)
-                    print(f"    Parameter : {_v14_disp_param!r}", flush=True)
-                    print(f"    URL       : {ep.url[:80]}", flush=True)
-                    print(f"    Technique : {result.technique}", flush=True)
-                    print(f"    DBMS      : {result.dbms or 'unknown'}", flush=True)
-                    print(f"    Bypass    : {('tamper:' + bypass) if bypass and bypass not in ('direct','waf_bypass_unknown') else bypass or 'none'}", flush=True)
-                    print(f"    Confidence: {result.confidence:.0%}", flush=True)
-                    print(f"    Payload   : {_v14_disp_payload[:80]!r}", flush=True)
-                    print(f"    Requests  : {_v14_reqs}", flush=True)
-                    print("", flush=True)
+                    if _v14_rv_recorded is not False:
+                        _v14_disp_param = ('path-injection'
+                                           if param in ('__path__', 'path-injection')
+                                           else param)
+                        _v14_disp_payload = (getattr(result, 'exact_sent_payload', None)
+                                             or result.payload or '')
+                        _v14_reqs = getattr(result, 'total_requests', 0)
+                        print("", flush=True)
+                        print("[!!] SQL injection confirmed!", flush=True)
+                        print(f"    Parameter : {_v14_disp_param!r}", flush=True)
+                        print(f"    URL       : {ep.url[:80]}", flush=True)
+                        print(f"    Technique : {result.technique}", flush=True)
+                        print(f"    DBMS      : {result.dbms or 'unknown'}", flush=True)
+                        print(f"    Bypass    : {('tamper:' + bypass) if bypass and bypass not in ('direct','waf_bypass_unknown') else bypass or 'none'}", flush=True)
+                        print(f"    Confidence: {result.confidence:.0%}", flush=True)
+                        print(f"    Payload   : {_v14_disp_payload[:80]!r}", flush=True)
+                        print(f"    Requests  : {_v14_reqs}", flush=True)
+                        print("", flush=True)
 
                     #  IMMEDIATE EXTRACTION  don't wait for all endpoints
                     if not getattr(cfg, "no_extract", False):
