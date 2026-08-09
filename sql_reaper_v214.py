@@ -21560,19 +21560,41 @@ def is_garbage_data(extracted_string: str) -> bool:
     if len(extracted_string) > 0 and non_printable / len(extracted_string) > 0.2:
         return True
 
-    # Layer 2b: Unicode supplementary plane garbage detection (BUG-GARBAGE-HIGHUNI FIX)
-    # Characters with codepoint > U+FFFF (above the Basic Multilingual Plane) appear in
-    # DBMS extraction output ONLY when the timing binary search oracle malfunctions:
-    # either the condition is always-true (WAF strips it) causing binary search to
-    # converge to the maximum codepoint (U+10FFFF = 1,114,111 for MySQL ORD()), or
-    # the oracle returns random True/False on every probe producing random high codepoints.
+    # Layer 2b: Unicode high-codepoint garbage detection (BUG-GARBAGE-HIGHUNI FIX)
+    # When the timing binary-search oracle malfunctions (WAF strips condition → always-True,
+    # or CDN jitter makes timing ambiguous), the binary search converges to random or maximum
+    # codepoints.  MySQL ORD() supports the full Unicode range (0–1,114,111), so a
+    # malfunctioning oracle produces codepoints far above ASCII/Latin-1.
+    #
     # Real DBMS metadata (version strings, database names, usernames, table names) consists
     # entirely of ASCII printable chars (U+0020–U+007E) and at most Latin-1 extended
-    # (U+0080–U+00FF).  Codepoints above U+FFFF never appear in real metadata.
-    # Threshold: >10% supplementary-plane chars → garbage.
-    high_unicode = sum(1 for c in extracted_string if ord(c) > 0xFFFF)
-    if len(extracted_string) > 0 and high_unicode / len(extracted_string) > 0.10:
-        return True
+    # (U+0080–U+00FF).  Characters above U+00FF (non-Latin-1) in DBMS metadata are almost
+    # always a sign of a malfunctioning binary-search oracle.
+    #
+    # Three sub-checks:
+    #   2b-i  : > 10% supplementary-plane chars (codepoint > U+FFFF) → always garbage.
+    #   2b-ii : > 20% BMP non-Latin-1 chars (codepoint > U+00FF ≤ U+FFFF) → garbage.
+    #           This catches CJK (U+4E00–U+9FFF), PUA-BMP (U+E000–U+F8FF), etc.
+    #           produced by a jitter-corrupted binary search that converges to intermediate
+    #           high codepoints rather than the absolute maximum.
+    #   2b-iii: Any character in the BMP Private Use Area (U+E000–U+F8FF) → garbage.
+    #           These codepoints are never assigned in any DBMS's own metadata strings and
+    #           appear only when the binary search stabilises on an unassigned/PUA value.
+    # NOTE: for genuinely user-supplied CJK/multilingual data use a context-aware caller
+    # that bypasses is_garbage_data() — this heuristic targets DBMS metadata extraction.
+    _n_chars = len(extracted_string)
+    if _n_chars > 0:
+        # 2b-i: supplementary plane (> U+FFFF)
+        _supp = sum(1 for c in extracted_string if ord(c) > 0xFFFF)
+        if _supp / _n_chars > 0.10:
+            return True
+        # 2b-ii: BMP non-Latin-1 (U+0100 – U+FFFF), excluding surrogates
+        _bmp_high = sum(1 for c in extracted_string if 0x0100 <= ord(c) <= 0xFFFF)
+        if _bmp_high / _n_chars > 0.20:
+            return True
+        # 2b-iii: any BMP Private Use Area character (U+E000 – U+F8FF)
+        if any(0xE000 <= ord(c) <= 0xF8FF for c in extracted_string):
+            return True
     
     # Layer 3: Binary data (too many null bytes >10%)
     null_bytes = extracted_string.count('\x00')
@@ -95728,11 +95750,23 @@ class MLWAFFingerprinter:
     # majority vote (ties resolved by highest average confidence).
     # Three structurally distinct probes reduce CDN cache correlation and
     # exercise different WAF rule sets, giving a more stable classification.
+    # BUG-MLWAF-PROBE-COUNT-FIX (MEDIUM): 3 probes gave unstable fingerprint when
+    # the vote was split (1 Imperva + 2 ModSecurity with low individual confidences).
+    # Expand to 5 structurally-distinct probes so a clear 3/5 majority can emerge.
+    # Each probe targets a different WAF rule family, reducing CDN cache correlation
+    # and making the ensemble more resilient to per-rule transient states.
+    # Also require a minimum absolute probe count of 3 before locking the fingerprint
+    # (handled in fingerprint() below).
     SQL_PROBES = [
-        "' AND 1=1 UNION SELECT NULL-- -",   # UNION-based — triggers UNION rules
-        "' AND 1=0 UNION SELECT NULL-- -",   # same family, negative variant
-        "' OR 1=1-- -",                       # OR-based — triggers different WAF rules
+        "' AND 1=1 UNION SELECT NULL-- -",          # UNION-based; triggers UNION rules
+        "' AND 1=0 UNION SELECT NULL-- -",           # UNION negative variant
+        "' OR 1=1-- -",                               # OR-based; triggers OR/always-true rules
+        "' AND SLEEP(0)-- -",                         # SLEEP keyword; triggers delay-injection rules
+        "' AND (SELECT 1 FROM information_schema.tables LIMIT 1)=1-- -",  # subquery; triggers schema-access rules
     ]
+    # Minimum number of probes that must succeed before the fingerprint is locked.
+    # Below this threshold the result is too noisy to drive bypass selection.
+    _MIN_PROBES_FOR_LOCK = 3
 
     async def fingerprint(self, engine: HTTPEngine, url: str,
                           param: str = "id") -> Tuple[str, float]:
@@ -95775,6 +95809,17 @@ class MLWAFFingerprinter:
             self._cached_result = ("Unknown", 0.0)
             return self._cached_result
 
+        # BUG-MLWAF-PROBE-COUNT-FIX: if fewer than _MIN_PROBES_FOR_LOCK probes succeeded,
+        # the vote is too noisy to drive bypass strategy.  Downgrade to Unknown so the
+        # scanner falls back to generic tampers rather than locking to a potentially wrong
+        # WAF fingerprint (e.g. 1 Imperva + 2 ModSec on 3 probes → wrong bypass chain).
+        _min_lock = getattr(self, '_MIN_PROBES_FOR_LOCK', 3)
+        if _n_probes_ok < _min_lock:
+            LOG.warning("ML WAF fingerprint: too few probes (%d < %d) — downgrading to Unknown",
+                        _n_probes_ok, _min_lock)
+            self._cached_result = ("Unknown", 0.0)
+            return self._cached_result
+
         # Majority vote: pick the WAF name with the most votes.
         # Ties broken by highest average confidence.
         _best_waf = max(
@@ -95782,6 +95827,16 @@ class MLWAFFingerprinter:
             key=lambda w: (len(_votes[w]), sum(_votes[w]) / max(len(_votes[w]), 1))
         )
         _best_conf = sum(_votes[_best_waf]) / max(len(_votes[_best_waf]), 1)
+        # BUG-MLWAF-SPLIT-VOTE-FIX: require a clear majority (>50% of votes) before
+        # locking the fingerprint.  A 2/3 split or 2/5 plurality is too weak to be
+        # actionable.  If no single WAF gets >50% of probes, downgrade to Unknown.
+        _best_vote_count = len(_votes[_best_waf])
+        if _best_waf != "Unknown" and _best_vote_count / _n_probes_ok <= 0.50:
+            LOG.warning("ML WAF fingerprint: no clear majority (%s got %d/%d probes) "
+                        "— downgrading to Unknown for conservative bypass",
+                        _best_waf, _best_vote_count, _n_probes_ok)
+            _best_waf = "Unknown"
+            _best_conf = 0.0
         # If Unknown wins the vote, keep it as Unknown regardless of confidence.
         confidence = min(1.0, _best_conf)
 
@@ -136264,6 +136319,14 @@ class SafeModeVerifier:
                                                       param, original + _tp, [])
                         fp_f2 = await _send_injected(engine, method, _df_url_f, data, _diff_data_fmt,
                                                       param, original + _fp, [])
+                        # BUG-SAFEMODE-DIFF-NULL-FP FIX: _send_injected may return None on
+                        # network errors.  Without this guard, fp_t2.body/fp_f2.body raises
+                        # AttributeError which is caught by the outer except block at line
+                        # ~136346 and silently resets diff_capable=False even when prior
+                        # rounds have already accumulated enough _diff_rounds for DIFFERENTIAL.
+                        # Skip the round instead so partial results are preserved.
+                        if fp_t2 is None or fp_f2 is None:
+                            continue
                         emd   = WassersteinResponseOracle.wasserstein1(fp_t2.body, fp_f2.body)
                         len_d = abs(fp_t2.content_length - fp_f2.content_length)
                         stat_d = _get_safe_status_code(fp_t2) != fp_f2.status_code
@@ -145240,19 +145303,51 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                         await asyncio.sleep(0.3)  # avoid rate-limit between calibration probes
                         _strat_false_ms = await _calibrate_probe(_false_form_payload, [])
                         _strat_margin = _ms - _strat_false_ms
-                        if _strat_margin < 80:
+                        # BUG-STRAT-MARGIN-CDN-FIX (CRITICAL): 80ms margin was insufficient for
+                        # CDN-jitter environments (measured jitter ≈150ms).  Any false probe with
+                        # +80ms jitter would exceed the threshold → oracle evaluates True on a
+                        # FALSE DBMS condition → binary search converges to max codepoint →
+                        # garbage Unicode output.  Raise minimum margin to 150ms so a ±75ms
+                        # jitter spike cannot flip a false probe above the threshold.
+                        if _strat_margin < 150:
                             print(f"[!] [TBExtract] '{_form_name}' non-conditional oracle: "
                                   f"true={_ms:.0f}ms false={_strat_false_ms:.0f}ms "
-                                  f"margin={_strat_margin:.0f}ms<80ms — WAF likely strips "
-                                  "condition or always-true bias — skipping strategy", flush=True)
-                            LOG.warning("[TBExtract] '%s' non-conditional (margin=%.0fms<80ms) — skip",
+                                  f"margin={_strat_margin:.0f}ms<150ms — WAF likely strips "
+                                  "condition or CDN jitter exceeds margin — skipping strategy", flush=True)
+                            LOG.warning("[TBExtract] '%s' non-conditional (margin=%.0fms<150ms) — skip",
                                         _form_name, _strat_margin)
                             continue
-                        # Midpoint threshold is more robust than 75%*true
-                        timing_thresh = max((_ms + _strat_false_ms) / 2, _base_time + 80)
+                        # Midpoint threshold with CDN-jitter floor:
+                        # Must be ≥150ms above the false-probe timing so network jitter on a
+                        # genuine false probe cannot push it over the threshold.
+                        timing_thresh = max((_ms + _strat_false_ms) / 2,
+                                            _strat_false_ms + 150,
+                                            _base_time + 80)
                     else:
-                        # Could not substitute (unexpected payload format) — use 75% heuristic
-                        timing_thresh = max(_ms * 0.75, _base_time + 150)
+                        # Substitution failed (payload format did not contain _tb_cal_true).
+                        # BUG-STRAT-SUBST-FAIL-FIX (CRITICAL): The old code accepted the strategy
+                        # with a 75% heuristic threshold (max(0.75*true_ms, base+150)).
+                        # For true_ms=381ms, base=200ms: max(285,350)=350ms.  With the actual
+                        # timing margin ~31ms above 350ms, CDN jitter of ±50ms corrupts the
+                        # oracle → binary search produces garbage Unicode.
+                        # Fix: probe with timing_payload("1e0=0e0") (a known-False DBMS condition
+                        # using the same timing_payload() closure) to verify conditionality, then
+                        # apply the same 150ms margin guard as the substitution path.
+                        _fp_false_ms = await _calibrate_probe(
+                            timing_payload(_tb_cal_false), tamper_chain)
+                        _strat_margin2 = _ms - _fp_false_ms
+                        if _strat_margin2 < 150:
+                            print(f"[!] [TBExtract] '{_form_name}' conditionality unverifiable "
+                                  f"(substitution failed) and timing_payload false probe margin "
+                                  f"={_strat_margin2:.0f}ms<150ms — skipping to prevent "
+                                  "garbage extraction", flush=True)
+                            LOG.warning("[TBExtract] '%s' subst-fail conditionality margin "
+                                        "%.0fms<150ms — skip", _form_name, _strat_margin2)
+                            continue
+                        # Sufficient margin from the timing_payload false probe — accept.
+                        timing_thresh = max((_ms + _fp_false_ms) / 2,
+                                            _fp_false_ms + 150,
+                                            _base_time + 80)
                     _det_form[0]   = _form_name
                     # Canary probe: verify WAF allows actual extraction conditions.
                     # Calibration only proves CASE WHEN (1=1) passes  WAFs
@@ -150598,7 +150693,22 @@ class ExtractionOrchestrator:
                 LOG.warning("[DetTemplate] Calibration margin %.0fms < 80ms  "
                             "timing oracle unreliable, aborting", _cal_margin)
                 return ""
-            self._dt_thresh = (_best_ms_t + _best_ms_f) / 2
+            # BUG-DETTEMPLATE-THRESH-CDN-FIX (CRITICAL): The old threshold was the
+            # simple midpoint (_best_ms_t + _best_ms_f) / 2.  For CDN-backed targets
+            # with ~150ms per-probe jitter, a false probe at _best_ms_f + 150ms
+            # can exceed the midpoint threshold → oracle evaluates True for a False
+            # DBMS condition → length binary-search converges to max_len=256 → every
+            # character extracted as max-codepoint → garbage Unicode output.
+            # Same root cause as BUG-STRAT-MARGIN-CDN-FIX (TBExtract) fixed earlier.
+            # Fix: use max(midpoint, false_floor + 150ms, 300ms) as threshold, identical
+            # to TBExtract's formula.  The +150ms floor ensures that a false probe with
+            # worst-case CDN jitter (+150ms above baseline) remains BELOW the threshold,
+            # so false conditions never flip to True in the extraction oracle.
+            # Numeric safety: threshold is compared against elapsed time in milliseconds;
+            # no SQL comparison operands, string delimiters, or literal values are affected.
+            self._dt_thresh = max((_best_ms_t + _best_ms_f) / 2,
+                                  _best_ms_f + 150,
+                                  300.0)
             self._dt_margin = _cal_margin
             # BUG-DETTEMPLATE-CAL-MSFF FIX: store false baseline so _eval can compute a
             # DBMS-adaptive dead-probe floor (instead of the fixed 30ms cutoff which
@@ -173503,7 +173613,11 @@ class PoCVerifier:
                         _true_ms  = getattr(fp,   'elapsed_ms', 0.0) or 0.0
                         _false_ms = getattr(fp_f, 'elapsed_ms', 0.0) or 0.0
                         _margin   = _true_ms - _false_ms
-                        if _margin >= 80:  # 80ms discriminating margin
+                        # BUG-POCVERIFIER-MARGIN-CDN-FIX: 80ms margin is below CDN jitter
+                        # (~150ms), meaning a network spike on the false probe could exceed
+                        # true-condition timing and flip the sign of _margin.  Raise to 150ms
+                        # to survive CDN jitter without accepting a non-conditional oracle.
+                        if _margin >= 150:
                             successes += 1
                     except Exception:
                         pass
@@ -177851,6 +177965,18 @@ class ScannerVFinal(ScannerV15):
                                 _ve, cfg, _vmethod, _vurl, cfg.data, _data_fmt,
                                 _vparam or "id", _orig, _tamper, n_samples=3), timeout=300)
                             _verifier = PoCVerifier(_ve, cfg, _vbaseline)
+                            # BUG-POCVERIFIER-DYNAP-FIX (MEDIUM): PoCVerifier._verify_boolean
+                            # calls getattr(self, "_dynamic_gap", 0.45) but _dynamic_gap is
+                            # never set on the PoCVerifier instance — always defaults to 0.45.
+                            # The scanner-calibrated gap is stored in the baseline dict under
+                            # "dynamic_gap" (set by BlindBoolCalibrator).  Using 0.45 instead
+                            # of the calibrated ~0.30 makes the boolean verification threshold
+                            # unnecessarily strict, causing valid detections to fail re-verification
+                            # and have their confidence halved without cause.
+                            # Fix: read "dynamic_gap" from the baseline and assign it.
+                            _dg = _vbaseline.get("dynamic_gap", 0.0) if _vbaseline else 0.0
+                            if _dg and _dg > 0.01:
+                                _verifier._dynamic_gap = _dg
                             _det = DetectionResult(
                                 param=_vparam,
                                 technique=vuln.get("technique","B"),
