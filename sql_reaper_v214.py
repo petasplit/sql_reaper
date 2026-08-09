@@ -49270,7 +49270,7 @@ class Enumerator:
                         # blind_extract_string — which is never called before _extract_str.
                         _ebf_prewarm_ok = False
                         try:
-                            if _result_tf is not None and _det_param_tf:
+                            if _det_param_tf:
                                 print("[*] [Extract] Timing fallback oracle blocked — running "
                                       "ExtractionBypassFinder to find WAF bypass for extraction...",
                                       flush=True)
