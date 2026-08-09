@@ -64705,6 +64705,24 @@ class Scanner:
                     if not body or len(body) < 3:
                         continue
 
+                    # BUG-V215-STACKED-EXTRACT-ERROR-PAGE FIX (HIGH, all DBMSes, S technique,
+                    # WAF-protected / path-injection surfaces): _stacked_extract parsed the HTTP
+                    # response body regardless of whether it was a 4xx/5xx error page. Stacked
+                    # queries execute on the database backend but do NOT reflect SQL output in the
+                    # HTTP response — on WAF-protected or CDN-fronted path-injection surfaces the
+                    # server returns a 404/400 error page. The body parser then extracted random
+                    # identifiers from the HTML error page (e.g. "PUBLIC" from a nav element,
+                    # "1.0" from a version string) as fabricated DB values, producing extraction
+                    # results like "database: PUBLIC / user: PUBLIC / version: 1.0" which are
+                    # completely detached from actual database state.
+                    # Fix: skip body parsing when the HTTP status indicates an error page. Stacked
+                    # query SQL output is never carried in a 4xx/5xx response body.
+                    _se_http_status = _get_safe_status_code(fp)
+                    if _se_http_status >= 400:
+                        LOG.debug("[StackedExtract] Skipping %d error response for %s — "
+                                  "SQL output not reflected in error pages", _se_http_status, label)
+                        continue
+
                     # BUG-V57-UNION-BODY-PARSE FIX applied here too: use DB-type-aware
                     # pattern matching instead of fragile HTML/JSON/generic-regex parsing.
                     # Reject SQL-error responses first.
@@ -121933,9 +121951,37 @@ class TechniqueCascadeEngine:
                                     _s_clean_body = _safe_decode_body(_s_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__s_fp_clean') if _s_fp_clean.body else ""
                                     _s_clean_err = any(re.search(p, _s_clean_body, re.I) for pats in SQL_ERROR_PATTERNS.values() for p in pats)
                                     _s_ctype = "original" if _s_clean_fallback else "false-cond"
+                                    # BUG-V215-S-CLEAN-DIFF FIX (CRITICAL, all DBMSes, S technique,
+                                    # path-injection surfaces): The clean probe check only verified
+                                    # SQL error consistency (if both probes have SQL errors → page
+                                    # content). It did NOT verify that the false-condition probe
+                                    # produces a response SIMILAR to baseline (not just different
+                                    # from it). On CDN-fronted path-injection surfaces, the stacked
+                                    # payload semicolon corrupts the URL path → 404 (1245B vs 50B
+                                    # baseline). The false-condition variant (e.g. 0x1→0x0) still
+                                    # contains the semicolon → ALSO 404. Both probes show diff≈0.5
+                                    # from the 50B CDN-cached baseline, but the clean probe check
+                                    # saw _s_clean_err=False / has_err=False → fired "clean probe OK"
+                                    # → false positive confirmed. Fix: when the false-condition clean
+                                    # probe (not the original-value fallback) also differs from
+                                    # baseline by > 0.20 AND no SQL errors are involved, the diff is
+                                    # structural (path manipulation / URL routing), NOT SQL semantic
+                                    # → reject as false positive.
+                                    _s_clean_norm2 = (ResponseNormaliser.normalise(
+                                        _extract_body_safe(_s_fp_clean))
+                                        if _validate_response(_s_fp_clean, allow_empty=True) else b"")
+                                    _s_clean_sim2 = SimHasher.body_similarity(norm_base, _s_clean_norm2)
+                                    _s_clean_diff2 = 1.0 - _s_clean_sim2
                                     if _s_clean_err and has_err:
                                         _s_clean_ok = False
                                         print(f"    [S-clean] ({_s_ctype}) error in clean probe too  page content")
+                                    elif not _s_clean_fallback and not has_err and _s_clean_diff2 > 0.20:
+                                        # False-condition variant also differs from baseline —
+                                        # diff is structural (path/URL manipulation), not SQL injection.
+                                        _s_clean_ok = False
+                                        print(f"    [S-clean] ({_s_ctype}) false-cond also differs from "
+                                              f"baseline (diff={_s_clean_diff2:.3f})  "
+                                              "path-manipulation FP rejected")
                                     else:
                                         print(f"    [S-clean] ({_s_ctype}) clean probe OK")
                             if _s_clean_ok:
@@ -173722,7 +173768,26 @@ class PoCVerifier:
             except Exception:
                 pass
         verified = successes >= 2  # at least 2/3 must show consistent signal
-        conf = result.confidence if verified else result.confidence * 0.5
+        # BUG-V215-POCVERIFIER-ZERO-CONF FIX (HIGH, all DBMSes, S technique):
+        # When PoCVerifier._verify_stacked runs 3 rounds and 0 succeed, the finding
+        # is confirmed as a false positive (no injection signal reproduced in any
+        # round). Previously, confidence was only halved (result.confidence × 0.5)
+        # regardless of how many rounds failed — a finding with 0/3 successes kept
+        # the same penalty as one with 1/3 successes. With 0/3 failures, the scanner
+        # cannot reproduce the detection signal at all; retaining the finding with
+        # a halved confidence is misleading (0/3 ≠ weak evidence — it's no evidence).
+        # Fix: for 0/3 failures set confidence = 0.0 so the finding is excluded from
+        # the final report (the reporter filters conf ≤ 0.0 as REJECTED). For 1/3
+        # (marginal evidence) retain the 0.5× halving as before.
+        if verified:
+            conf = result.confidence
+        elif successes == 0:
+            conf = 0.0
+            LOG.warning("[PoCVerifier] Stacked finding %r REJECTED — 0/%d verification rounds "
+                        "showed any injection signal; classifying as false positive",
+                        result.param, self.VERIFY_ROUNDS)
+        else:
+            conf = result.confidence * 0.5
         if not verified:
             LOG.warning("[PoCVerifier] Finding %r failed re-verification  confidence halved",
                         result.param)
@@ -178324,6 +178389,15 @@ class ScannerVFinal(ScannerV15):
                                 LOG.warning(
                                     f"[PoCVerifier] Finding {_vparam!r} "
                                     "failed re-verification  confidence halved")
+                            # BUG-V215-POCVERIFIER-REJECT FIX: When PoCVerifier sets
+                            # confidence = 0.0 (0/N rounds succeeded), mark the finding
+                            # as REJECTED so it is excluded from the final report.
+                            if adj_conf <= 0.0:
+                                vuln["rejected"] = True
+                                LOG.warning(
+                                    f"[PoCVerifier] Finding {_vparam!r} "
+                                    "REJECTED (conf=0.0 — 0/3 verification rounds) "
+                                    "— excluded from final report")
                         except Exception as _pv_e:
                             LOG.debug(f"[PoCVerifier] Single finding error: {_pv_e}")
             except Exception as _pv_outer_e:
@@ -178332,6 +178406,21 @@ class ScannerVFinal(ScannerV15):
                 # FIX-PCVGATE: release the PCV in-progress counter so the scan-stop gate
                 # returns to its normal blocked state after PoCVerifier completes.
                 _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
+
+        # BUG-V215-REJECTED-FILTER FIX: Remove findings marked rejected=True by
+        # PoCVerifier (0/N verification rounds) BEFORE calibration, CVSS scoring,
+        # bandit training, and all report writers.  Previously rejected=True was
+        # set on the dict but the list was never filtered, so every reporter
+        # (HTML, SARIF, Markdown, JSON, CSV) still included the 0-confidence
+        # false positives in its output.
+        _rejected_count = sum(1 for v in self.reporter.vulns if v.get("rejected", False))
+        if _rejected_count:
+            LOG.warning(
+                f"[PostScan] Removing {_rejected_count} rejected finding(s) "
+                "(conf=0.0 / 0 PoCVerifier rounds) from final report")
+            self.reporter.vulns = [
+                v for v in self.reporter.vulns if not v.get("rejected", False)
+            ]
 
         #  Calibrate all confidence scores via isotonic regression
         for vuln in self.reporter.vulns:
