@@ -128193,6 +128193,14 @@ class UniversalScanOrchestrator:
                                     # future _send_injected calls through the scan-stopped gate
                                     # indefinitely — burning CPU on dead requests.
                                     _EXTRACTION_ACTIVE[0] = False
+                                    # FIX-DONE-ELSEBRANCH: When _run_enumeration is called
+                                    # directly (no _process_v11), DONE was never set to True.
+                                    # STARTED is cleared in the outer finally, releasing the
+                                    # extraction slot — but with DONE=False a second extraction
+                                    # attempt can claim the slot immediately.  Setting DONE=True
+                                    # here closes the window and matches behaviour of all other
+                                    # _run_enumeration call sites (lines 53931, 70959, etc.).
+                                    _EXTRACTION_DONE[0] = True
                                     print(f"[*] Extraction completed for {param!r}", flush=True)
                         except BaseException as _e:
                             # BUG-EXTRACT-1 FIX: Catch BaseException so CancelledError
@@ -128949,6 +128957,15 @@ class ScannerV13(ScannerV12):
                                 _EXTRACTION_STARTED[0] = False
                                 _EXTRACTION_STARTED[1] = ""
                             _EXTRACTION_ACTIVE[0] = False
+                            # FIX-DONE-V13: _process_v11() sets _EXTRACTION_DONE[0]=True when
+                            # the caller already owns ACTIVE (lines 147580-147584).  But this
+                            # outer finally runs AFTER _process_v11 returns, so ACTIVE is False
+                            # by then and the inner DONE=True write in _process_v11 is the only
+                            # one.  However, if _process_v11 raises before its own finally runs
+                            # (asyncio.TimeoutError / Exception caught above), DONE stays False.
+                            # Set it here unconditionally so the V13 slot is always fully
+                            # released regardless of how _process_v11 exits.
+                            _EXTRACTION_DONE[0] = True
                     elif _no_extract_val:
                         print(f"[*] Extraction skipped (no_extract=True) for param={param!r}", flush=True)
                 else:
@@ -173640,23 +173657,71 @@ class PoCVerifier:
 
     async def _verify_stacked(self, result, method, url, data, data_fmt,
                                 original, tamper) -> tuple:
-        """Verify stacked-query detection by re-sending and checking response diff."""
+        """Verify stacked-query detection by re-sending and checking response diff.
+
+        Stacked injections fall into two sub-types:
+          1. Data-returning stacked (INSERT/UPDATE/INFORMATION_SCHEMA via second statement):
+             response body changes — body-similarity check is appropriate.
+          2. Time-delay stacked (SLEEP/pg_sleep/WAITFOR via second statement):
+             response body is IDENTICAL to clean baseline; only elapsed_ms differs.
+             Using the body-similarity check for type-2 always returns similarity≈1.0,
+             so (1.0 - sim) ≈ 0.0 < 0.20 → every round fails → confidence halved even
+             for a genuine injection.  Fix: detect timing keywords in the payload and
+             switch to an elapsed_ms-delta check for those payloads.
+        """
+        _pl = result.payload or ""
+        # Detect timing-based stacked payloads by keyword
+        _timing_kw = re.search(
+            r"(?:SLEEP|pg_sleep|WAITFOR\s+DELAY|DBMS_PIPE|DBMS_LOCK|DBMS_SESSION"
+            r"|RANDOMBLOB|heavy_query|BENCHMARK\s*\()", _pl, re.I)
+        _is_timing = bool(_timing_kw)
+
+        # Parse expected sleep duration from payload for threshold calculation
+        _sleep_sec = getattr(self.config, "time_sec", 2.0)
+        _sl_m = re.search(
+            r"SLEEP\s*\(\s*([\d.]+)|pg_sleep\s*\(\s*([\d.]+)"
+            r"|WAITFOR\s+DELAY\s+['\"]0:0:([\d.]+)['\"]"
+            r"|DBMS_PIPE\.\w+\s*\([^,]+,\s*([\d.]+)\)",
+            _pl, re.I)
+        if _sl_m:
+            _raw = next(g for g in _sl_m.groups() if g is not None)
+            try:
+                _sleep_sec = float(_raw)
+            except (ValueError, TypeError):
+                pass
+        # Require at least 60% of the expected delay to account for network jitter
+        _timing_thresh_ms = max((_sleep_sec * 1000) * 0.60, 800)
+
         successes = 0
         _base_fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                          result.param, original, tamper)
-        _base_norm = ResponseNormaliser.normalise(_extract_body_safe(_base_fp)) if _validate_response(_base_fp, allow_empty=True) else b"" if _base_fp else b""
+        _base_norm = (ResponseNormaliser.normalise(_extract_body_safe(_base_fp))
+                      if _validate_response(_base_fp, allow_empty=True)
+                      else b"" if _base_fp else b"")
+        _base_ms = _base_fp.elapsed_ms if _base_fp and hasattr(_base_fp, "elapsed_ms") else 0
+
         for _ in range(self.VERIFY_ROUNDS):
             try:
                 await asyncio.sleep(2.0)
                 fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                           result.param, original + result.payload, tamper)
-                _probe_norm = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
-                _sim = SimHasher.body_similarity(_base_norm, _probe_norm)
-                if (1.0 - _sim) > 0.20:  # still differs from clean baseline
-                    successes += 1
+                if fp is None:
+                    continue
+                if _is_timing:
+                    # Timing stacked: response body unchanged; check elapsed_ms delta
+                    _delta = fp.elapsed_ms - _base_ms
+                    if _delta >= _timing_thresh_ms or fp.elapsed_ms >= _timing_thresh_ms:
+                        successes += 1
+                else:
+                    # Data-returning stacked: check body deviation from clean baseline
+                    _probe_norm = (ResponseNormaliser.normalise(_extract_body_safe(fp))
+                                   if _validate_response(fp, allow_empty=True) else b"")
+                    _sim = SimHasher.body_similarity(_base_norm, _probe_norm)
+                    if (1.0 - _sim) > 0.20:  # still differs from clean baseline
+                        successes += 1
             except Exception:
                 pass
-        verified = successes >= 2  # at least 2/3 must show consistent diff
+        verified = successes >= 2  # at least 2/3 must show consistent signal
         conf = result.confidence if verified else result.confidence * 0.5
         if not verified:
             LOG.warning("[PoCVerifier] Finding %r failed re-verification  confidence halved",
@@ -178189,14 +178254,33 @@ class ScannerVFinal(ScannerV15):
         out_dir = Path(cfg.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        #  PoCVerifier: re-confirm every finding before scoring 
+        #  PoCVerifier: re-confirm every finding before scoring
         if self.reporter.vulns and not getattr(cfg, "skip_verify", False):
+            # FIX-PCVGATE: _send_injected blocks all probes when _SCAN_STOPPED=True unless
+            # _EXTRACTION_ACTIVE[0] or _PCV_IN_PROGRESS[0]>0.  At this point extraction is
+            # done (_EXTRACTION_ACTIVE=False) and scanning stopped (_SCAN_STOPPED=True), so
+            # every PoCVerifier probe was returning a dead ResponseFingerprint(status=0,body=b"").
+            # Increment _PCV_IN_PROGRESS so the gate lets PoCVerifier probes through.
+            _PCV_IN_PROGRESS[0] += 1
             try:
                 async with HTTPEngine(cfg, self.session) as _ve:
                     _vmethod = cfg.method
                     # FIX: data_fmt must reflect actual content, not hardcoded "form"
                     _data_fmt = "json" if (cfg.data or "").strip().startswith("{") else "form"
-                    for vuln in self.reporter.vulns:
+                    # FIX-PCVDEDUP: reporter.vulns can accumulate duplicate entries when
+                    # multiple scanner paths (V25, V14, BGExtraction, etc.) all call add_vuln
+                    # for the same param/technique.  Without dedup, PoCVerifier runs N times
+                    # for a single actual finding, each time emitting "confidence halved".
+                    # Deduplicate by (parameter, technique) before the verification loop so
+                    # each distinct finding is verified exactly once.
+                    _seen_pv_keys: set = set()
+                    _deduped_vulns: list = []
+                    for _v in self.reporter.vulns:
+                        _pv_key = (_v.get("parameter", ""), _v.get("technique", ""))
+                        if _pv_key not in _seen_pv_keys:
+                            _seen_pv_keys.add(_pv_key)
+                            _deduped_vulns.append(_v)
+                    for vuln in _deduped_vulns:
                         try:
                             # FIX BUG-D: use per-vuln url/method stored by add_vuln
                             # so crawl-mode findings are re-verified against their
@@ -178244,8 +178328,12 @@ class ScannerVFinal(ScannerV15):
                             LOG.debug(f"[PoCVerifier] Single finding error: {_pv_e}")
             except Exception as _pv_outer_e:
                 LOG.debug(f"[PoCVerifier] Outer error: {_pv_outer_e}")
+            finally:
+                # FIX-PCVGATE: release the PCV in-progress counter so the scan-stop gate
+                # returns to its normal blocked state after PoCVerifier completes.
+                _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
 
-        #  Calibrate all confidence scores via isotonic regression 
+        #  Calibrate all confidence scores via isotonic regression
         for vuln in self.reporter.vulns:
             raw_conf = vuln.get("confidence", 0.8)
             cal_conf = self._calibrator.calibrate(raw_conf)
