@@ -56696,15 +56696,37 @@ class Scanner:
         # → oracle always unreliable.  Strip common zero-width/BOM chars first.
         _payload_for_sleep = _re.sub(
             r'[\u00ad\u200b\u200c\u200d\u2060\ufeff\uffa0]', '', _payload_raw)
+        # BUG-SLEEP-REGEX-COMMENT-BYPASS-FIX: tampers like versioned_nested wrap SLEEP in
+        # /*!50000SLEEP(3)*/ and comment_content/keywordsplit split it as SL/*x*/EEP(t).
+        # Must expand versioned-comment content BEFORE stripping regular comments, otherwise
+        # /*!50000SLEEP(3)*/ \u2192 empty string instead of SLEEP(3).
+        _payload_for_sleep = _re.sub(
+            r'/\*!(?:\d+\s*)?(.*?)\*/', r'\1', _payload_for_sleep, flags=_re.DOTALL)
+        _payload_for_sleep = _re.sub(r'/\*.*?\*/', '', _payload_for_sleep, flags=_re.DOTALL)
+        # BUG-SLEEP-REGEX-FULLWIDTH-FIX: unicode_fullwidth tamper converts ASCII letters to
+        # fullwidth (e.g. \uff33\uff2c\uff25\uff25\uff30, U+FF33 U+FF2C U+FF25 U+FF25 U+FF30). Normalize
+        # fullwidth range U+FF01\u2013U+FF5E \u2192 ASCII U+0021\u2013U+007E so the regex matches.
+        _payload_for_sleep = ''.join(
+            chr(ord(c) - 0xFEE0) if 0xFF01 <= ord(c) <= 0xFF5E else c
+            for c in _payload_for_sleep
+        )
         _det_sleep_m = _re.search(
             r"pg_sleep\s*\(\s*([\d.]+)\s*\)"
             r"|SLEEP\s*\(\s*([\d.]+)\s*\)"
-            r"|WAITFOR\s+DELAY\s+['\"]\d+:\d+:([\d.]+)['\"]"
+            r"|WAITFOR\s+DELAY\s+['\"](\d+):(\d+):([\d.]+)['\"]"
             r"|BENCHMARK\s*\(\s*(\d+)",
             _payload_for_sleep, _re.IGNORECASE)
         if _det_sleep_m:
-            _matched_sl = next((g for g in _det_sleep_m.groups() if g is not None), None)
-            _det_sleep_val = float(_matched_sl) if _matched_sl else 0.5
+            _g = _det_sleep_m.groups()
+            # BUG-WAITFOR-MINUTES-FIX: old regex captured only the seconds field from
+            # WAITFOR DELAY 'H:M:S' (e.g. captured '30' from '0:01:30' \u2192 30s instead of 90s).
+            # New regex captures H, M, S as three separate groups (indices 2, 3, 4);
+            # compute total seconds = H*3600 + M*60 + S.
+            if _g[2] is not None:  # WAITFOR matched: groups[2]=H, groups[3]=M, groups[4]=S
+                _det_sleep_val = int(_g[2]) * 3600 + int(_g[3]) * 60 + float(_g[4])
+            else:
+                _matched_sl = next((g for g in (_g[0], _g[1], _g[5]) if g is not None), None)
+                _det_sleep_val = float(_matched_sl) if _matched_sl else 0.5
             # Use the confirmed SQL sleep value directly — do NOT max() it with
             # config.delay, which is the HTTP request pacing (time between requests)
             # not the SQL sleep duration.  Mixing them raises 0.1s to 0.5s which
@@ -57214,8 +57236,15 @@ class Scanner:
             # Below that threshold, CDN timing noise exceeds the injection signal and
             # 50-sample analysis would just confirm noise — at a cost of 100 HTTP requests
             # and 50+ seconds that forces the user to Ctrl+C.
-            _stat_min = max(30.0, _delay * 1000 * 0.30)
-            if not _boolean_oracle and abs(_margin) < 100 and _margin >= _stat_min:
+            # BUG-STAT-TIMING-IMPOSSIBLE-GATE-FIX: old floor was max(30.0, delay*1000*0.30)
+            # which gives ≥100ms for any delay ≥ 0.333s, but the upper bound was abs(_margin)<100.
+            # These two conditions are mutually exclusive for any standard sleep value, so the
+            # entire statistical block was dead code.  Fix: lower floor to 10% of sleep
+            # (minimum detectable signal above pure noise) and replace the hardcoded 100ms
+            # ceiling with _min_viable_margin so the gate covers the sub-viable-but-maybe-
+            # statistically-significant range: [10% of sleep .. 80% of sleep).
+            _stat_min = max(15.0, _delay * 1000 * 0.10)
+            if not _boolean_oracle and abs(_margin) < _min_viable_margin and abs(_margin) >= _stat_min:
                 LOG.info("[Inference]  FIX #4: STATISTICAL MICRO-TIMING ")
                 LOG.info("[Inference] Margin small (%.0fms)  trying statistical analysis (n=50)", _margin)
                 try:
