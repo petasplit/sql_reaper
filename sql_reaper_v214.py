@@ -30048,8 +30048,11 @@ class TamperLib:
         # FIX: removed \x0c (form feed) and \xa0 (NBSP) — both illegal in HTTP
         # header values.  httpx raises "Illegal header value" for \x0c and
         # 'ascii' codec error for \xa0, aborting the entire PUT/POST cascade.
-        # \t is RFC 7230 LWS (allowed in headers), \n is fine in URL params.
-        blanks=[" ","\t","\n","/**/"]
+        # FIX-TAB: removed \t — h11 rejects raw 0x09 in header field values as
+        # obsolete folding (RFC 9110 §5.5), causing LocalProtocolError crashes when
+        # the tampered URL leaks into a Referer header.  Use /**/ instead which is
+        # universally valid SQL whitespace and legal in HTTP header values.
+        blanks=[" ","\n","/**/", " /**/ "]
         return "".join(random.choice(blanks) if c==" " else c for c in p)
 
     #  Encoding 
@@ -35154,7 +35157,7 @@ class PayloadMutationEngine:
     @staticmethod
     def _random_whitespace(rng, dbms: str) -> str:
         """Generate random equivalent whitespace."""
-        _choices = [' ', '  ', '   ', ' \t', '\t ']
+        _choices = [' ', '  ', '   ', '/**/', ' /**/ ']
         # MySQL also treats /**/ as whitespace
         if dbms in ("MySQL", "MariaDB", "TiDB", "Generic"):
             # BUG-WHITESPACE-TIDB FIX: TiDB also treats /**/ as whitespace like MySQL.
@@ -72903,7 +72906,7 @@ class HTTPEngineV5(HTTPEngine):
                 except (UnicodeDecodeError, AttributeError, TypeError):
                     _hv_s = _hv.decode('latin-1', errors='replace') if isinstance(_hv, bytes) else str(_hv) if _hv else "" # Fallback
                 _clean = ''.join(
-                    c if (0x20 <= ord(c) <= 0x7E or c == '\t') else ' '
+                    c if (0x20 <= ord(c) <= 0x7E) else ' '
                     for c in _hv_s
                 )
                 if _clean != _hv_s:
@@ -72969,6 +72972,12 @@ class HTTPEngineV5(HTTPEngine):
                     _rand_hdrs = self._sig_randomizer.get_headers(url)
                     for _rk, _rv in _rand_hdrs.items():
                         if _rk not in hdrs:
+                            # Sanitize _rand_hdrs values (e.g. Referer from _last_url)
+                            # BEFORE merging — these headers arrive AFTER the main sanitization
+                            # loop above and would otherwise bypass it, allowing a raw \t from
+                            # a previous path-injection URL to reach h11 via the Referer header.
+                            if isinstance(_rv, str):
+                                _rv = ''.join(c if (0x20 <= ord(c) <= 0x7E) else ' ' for c in _rv)
                             hdrs[_rk] = _rv
                 # BUG-1 FIX: when Ctrl+C closes the HTTP client, asyncio.create_task
                 # extraction tasks continue running and hit this call.  The httpx
@@ -116897,6 +116906,11 @@ class TechniqueCascadeEngine:
         _b_method = ""
         _b_true_ms = 0.0
         _b_false_ms = 0.0
+        # Bug 1b hard guard: tracks when Check B timing probes were actually sent and
+        # EXPLICITLY returned non-timing evidence.  When True, the DP-timing oracle
+        # bypass is unconditionally blocked — no statistical confidence value can
+        # override empirical evidence that the server does NOT respond to timing injection.
+        _check_b_explicitly_failed = False
         _bl_mean_cb = (baseline.get("mean_timing", 100)
                       if isinstance(baseline, dict) else 100)
         _bl_std_cb  = max(baseline.get("std_timing", 50)
@@ -116977,6 +116991,7 @@ class TechniqueCascadeEngine:
             _b_method = f"skipped(non-timing tech={tech}, no SLEEP/WAITFOR in payload)"
             _details["B"] = _b_method
 
+        _canary_probes_sent = 0  # tracks how many canary pairs were actually attempted
         for _bt, _bf, _b_name in (_b_fallbacks if _timing_canary_applicable else []):
             # FIX-REQ9-CPU-CANARY: Add minimal inter-pair delay to prevent 100% CPU on
             # BUG-FIX-4 (Issue 9): Break checks moved BEFORE asyncio.sleep so a
@@ -116996,6 +117011,7 @@ class TechniqueCascadeEngine:
             # FIX-REQ9-CPU-CANARY: 30ms inter-pair throttle (only reached for real probes
             # since all early-exit checks above fire first when already confirmed/stopped).
             await asyncio.sleep(0.03)
+            _canary_probes_sent += 1
             _, _, _, _t_ms = await _pcv_send(_bt)
             # BUG-PCV-R3-D FIX: Check stop between the two timing probes.
             # If injection is confirmed on another surface between the true-condition
@@ -117355,6 +117371,10 @@ class TechniqueCascadeEngine:
                               flush=True)
                 except Exception as _trc_e:
                     LOG.debug(f"[PCV Check B] TimingRatioConfirmer Oracle HQ error: {_trc_e}")
+        # Bug 1b: if timing canary probes were actually sent and NONE confirmed,
+        # record an explicit Check B failure so the DP-timing oracle bypass is blocked.
+        if _timing_canary_applicable and _canary_probes_sent > 0 and not _b_pass:
+            _check_b_explicitly_failed = True
         _details["B"] = (f"{_b_method}: true={_b_true_ms:.0f}ms false={_b_false_ms:.0f}ms"
                          if _b_pass
                          else (_b_method if not _timing_canary_applicable else "failed"))
@@ -117565,41 +117585,45 @@ class TechniqueCascadeEngine:
                         else:
                             print("[*]   [PCV] Check B (absolute multi-probe): REJECTED  "
                                   "false probe also slow — server load, not injection", flush=True)
+                            _check_b_explicitly_failed = True  # Bug 1b: hard guard
                     else:
                         print("[*]   [PCV] Check B (absolute multi-probe): FAIL  "
                               f"only {_abs_slow_count}/5 probes slow (need ≥3)", flush=True)
+                        _check_b_explicitly_failed = True  # Bug 1b: hard guard
 
             # FIX-DP-TIMING-HIGHCONF-BYPASS (HIGH, all DBMSes, timing techniques,
             # all surfaces, all HTTP methods):
             # When DifferentialPrivacyTimingDetector confirmed injection with conf>=1.00
-            # and epsilon=1.0 (full standard deviation separation between sleep and no-sleep
-            # response distributions), Check B canary pairs may still fail because the same
-            # WAF that the DP-timing detection payload bypassed also blocks the plain
-            # SLEEP(N)/WAITFOR DELAY/pg_sleep(N) canary payloads (returning 404/403/WAF
-            # error pages, identical fast responses, or triggering CDN jitter).
-            # Root cause of "DP-timing confirmed (conf=1.00, eps=1.0)" log lines followed
-            # by "PCV FAILED  discarding": all four Check B paths (proportional, canary
-            # fallbacks, TimingRatioConfirmer, absolute multi-probe) use unobfuscated sleep
-            # functions — the same keyword patterns the DP timing oracle's detection payload
-            # bypassed. The DP oracle provides STRONGER statistical proof than any Check B
-            # canary: it uses Mann-Whitney/Laplace-noise DP on 20-30 observed response times
-            # vs a simple true/false canary pair. A conf=1.00 result means the null hypothesis
-            # (no timing difference) is rejected with 100% certainty at epsilon=1.0 std.dev.
-            # Guard: CDN-all detection voids timing proof (uniform latency from cache).
-            # Guard: require _dp_timing_oracle_confirmed=True (set only when DP oracle fired
-            # on an actual timing payload, not a cross-category boolean hit).
+            # and epsilon=1.0, Check B canary pairs may still fail because the same WAF
+            # that the DP-timing detection payload bypassed also blocks the plain
+            # SLEEP(N)/WAITFOR DELAY/pg_sleep(N) canary payloads.
+            #
+            # BUG-1A FIX (threshold): require >=25 DP baseline samples (previously 15)
+            # for stronger statistical proof. The sample count is stored on the detection
+            # result as _dp_baseline_sample_count when the DP oracle created it.
+            #
+            # BUG-1B FIX (hard guard): when Check B timing probes were EXPLICITLY sent
+            # and returned non-timing evidence (_check_b_explicitly_failed=True), the DP
+            # oracle bypass is UNCONDITIONALLY BLOCKED regardless of confidence.  Empirical
+            # evidence that the server does not respond to timing injection always overrides
+            # a statistical model: if the server cannot be made to sleep by the canary
+            # probes, the DP oracle's result is measuring something else (network jitter,
+            # CDN miss, server load spike) — not injection.
+            _dp_sample_count = getattr(det, '_dp_baseline_sample_count', 0) if det is not None else 0
             _dp_oracle_high_conf = (
                 det is not None
                 and getattr(det, '_dp_timing_oracle_confirmed', False)
                 and float(getattr(det, 'confidence', 0.0)) >= 1.00
+                and _dp_sample_count >= 25      # Bug 1a: stricter sample threshold
                 and not _cdn_all_detected
+                and not _check_b_explicitly_failed  # Bug 1b: HARD GUARD — never overrides Check B failure
             )
             if _dp_oracle_high_conf:
                 _dp_det_conf = float(getattr(det, 'confidence', 1.0))
                 print(f"[*]   [PCV] Result: CONFIRMED  DP-timing oracle bypass "
-                      f"(conf={_dp_det_conf:.2f}, epsilon=1.0) — statistically definitive "
-                      "timing injection; Check B canary failure overridden by DP oracle "
-                      f"statistical proof (20-30 sample Mann-Whitney) [tech={tech} dbms={dbms}]",
+                      f"(conf={_dp_det_conf:.2f}, n={_dp_sample_count} baseline samples) — "
+                      "statistically definitive timing injection; Check B canary was not "
+                      f"explicitly tried+failed (WAF-blocked canary path) [tech={tech} dbms={dbms}]",
                       flush=True)
                 try:
                     det._pcv_verified = True
@@ -117609,7 +117633,7 @@ class TechniqueCascadeEngine:
                     pass
                 _INJECTION_CONFIRMED[0] = True
                 _SCAN_STOPPED[0] = True
-                _details["B"] = f"dp_timing_oracle_bypass(conf={_dp_det_conf:.2f},epsilon=1.0)"
+                _details["B"] = f"dp_timing_oracle_bypass(conf={_dp_det_conf:.2f},n={_dp_sample_count})"
                 return True, 1, _details
 
             # After ALL timing confirmation paths exhausted (proportional + canary fallbacks
@@ -131088,7 +131112,7 @@ class DifferentialPrivacyTimingDetector:
                     param, original, tamper_chain, sleep_payload, t_sec):
         if not self._baseline_times:
             times = []
-            for _ in range(15):
+            for _ in range(25):
                 try:
                     fp = await _send_injected(engine, method, url, data,
                                                data_fmt, param, original, tamper_chain)
@@ -135165,6 +135189,13 @@ class ScannerV14(ScannerV13):
                                     payload=sleep_p, dbms=_dp_known_dbms,
                                     confidence=dp_conf,
                                     notes=f"dp_timing epsilon={self.dp_timing.epsilon}")
+                                # Store baseline sample count so PCV can verify the threshold
+                                # requirement for the DP-timing oracle bypass (Bug 1a fix).
+                                try:
+                                    _dp_det._dp_baseline_sample_count = len(
+                                        getattr(self.dp_timing, '_baseline_times', []))
+                                except Exception:
+                                    pass
                                 # BUG-DP-TIMING-XCAT FIX: when mutate_all obfuscated the timing
                                 # keyword (original had it, mutated form doesn't), mark the det
                                 # so _inline_pcv_check forces Check B instead of T→B boolean routing.
