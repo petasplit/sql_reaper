@@ -115781,7 +115781,12 @@ class TechniqueCascadeEngine:
                     _micro_ctx_pfx = " AND ("
                     _micro_ctx_sfx = ")-- -"
                 _micro_send_fn = lambda _p: _pcv_send(f"{_micro_ctx_pfx}{_p}{_micro_ctx_sfx}")
-                _micro_confirmed = await MicroTimingOracle.probe_bit(
+                # FIX-PCV-MICROTIMING-SAMPLES: increase from 20→40 samples and tighten
+                # stat thresholds (probe_bit now requires p<0.001, Cohen's d>=0.8, and
+                # abs_diff>=50% of delay) to make false-positive confirmation near-impossible.
+                # With 40 samples the Mann-Whitney normal approximation is very accurate and
+                # p<0.001 requires z≈3.29 (far above 5%-level noise).
+                _micro_result = await MicroTimingOracle.probe_bit(
                     _micro_send_fn,  # BUG-V72-MICROTIMING-SENDFN FIX: was lambda _p: _pcv_send(_p)
                     cond=_micro_cond,
                     dbms=dbms,
@@ -115791,12 +115796,20 @@ class TechniqueCascadeEngine:
                     # the detection sleep time so the micro-delay is always detectable above
                     # network noise, clamped to [0.10s, 0.50s] to avoid excessive delays.
                     delay_sec=max(0.10, min(_sleep_sec * 0.10, 0.50)),
-                    samples=20,
+                    samples=40,
                     sleep_fn_delay=0.2)
-                if _micro_confirmed:
+                if _micro_result:
                     _b_pass = True
-                    _b_method = "MicroTimingOracle(Mann-Whitney-U p<0.05)"
-                    _b_true_ms = 0.0; _b_false_ms = 0.0
+                    _b_method = "MicroTimingOracle(Mann-Whitney-U p<0.001)"
+                    # FIX-PCV-MICROTIMING-ZEROS: probe_bit now returns (True, mean_true,
+                    # mean_false) on success so callers can log actual measured timing.
+                    # The old code hardcoded 0.0/0.0 which produced misleading operator
+                    # output: "true=0ms false=0ms".
+                    if isinstance(_micro_result, tuple) and len(_micro_result) == 3:
+                        _b_true_ms = _micro_result[1]
+                        _b_false_ms = _micro_result[2]
+                    else:
+                        _b_true_ms = 0.0; _b_false_ms = 0.0
                     print("[*]     Check B (MicroTimingOracle): PASS  "
                           "Mann-Whitney U test confirmed sub-threshold timing",
                           flush=True)
@@ -145409,14 +145422,24 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             return ms
 
         def _cal_hit(ms: float) -> bool:
-            # FIX-CAL-HIT-THRESHOLD: The original `base * 1.2 + 100` fails for slow-baseline
-            # servers when base is large relative to t (e.g. base=5000ms, t=1s:
-            # threshold=6100ms but response=6000ms → miss).
-            # Add a sleep-relative alternative: fire if at least 40% of t is visible above
-            # baseline. Use min() for OR semantics — hit when EITHER threshold is satisfied.
+            # Two thresholds detect a genuine sleep signal:
+            #   _t_heuristic : 20% above baseline + 100ms  (catches slow servers)
+            #   _t_sleep_rel : baseline + 40% of sleep time  (sleep-proportion floor)
+            # FIX-CAL-HIT-THRESHOLD (ROOT CAUSE BUG): original code used min() which
+            # implements OR semantics — a calibration "hit" fired when EITHER threshold
+            # was satisfied.  For base=200ms, sleep=2s this gives:
+            #   min(340ms, 1000ms) = 340ms
+            # Network jitter of ~363ms exceeds 340ms → false calibration hit →
+            # timing_thresh is set to a noise-level value (350ms) → every extraction
+            # probe exceeds 350ms by jitter alone → all bits True → 100% garbage result
+            # → 24-hour extraction timeout.
+            # FIX: use max() (AND semantics) — the response must exceed BOTH thresholds,
+            # requiring a genuine sleep contribution that clears BOTH guards.
+            # With base=200ms, sleep=2s: max(340ms, 1000ms)=1000ms → 363ms jitter is
+            # correctly rejected → calibration fails → falls through to EBF correctly.
             _t_heuristic  = _base_time * 1.2 + 100       # original: 20% above baseline
             _t_sleep_rel  = _base_time + t * 1000 * 0.4  # 40% of sleep time above baseline
-            return ms > min(_t_heuristic, _t_sleep_rel)
+            return ms > max(_t_heuristic, _t_sleep_rel)
 
         # Strategy 0: standard form
         _tb_cal_dbms = dbms or ''
@@ -159261,11 +159284,28 @@ class MicroTimingOracle:
         # Cohen's d = (mean_true - mean_false) / pooled_std
         _pooled_std = ((_std_true ** 2 + _std_false ** 2) / 2) ** 0.5
         _cohens_d = abs(mean_true - mean_false) / _pooled_std if _pooled_std > 0 else 0.0
-        if _cohens_d < 0.5:
-            LOG.debug("[MicroTiming] FP suppressed: Cohen's d=%.2f < 0.5 (effect too small)", _cohens_d)
+        if _cohens_d < 0.8:
+            LOG.debug("[MicroTiming] FP suppressed: Cohen's d=%.2f < 0.8 (effect too small)", _cohens_d)
+            return False
+        # FIX-MICROTIMING-ABSDIFF: require minimum absolute timing difference equal to
+        # at least 50% of the requested micro-delay.  Cohen's d measures relative effect
+        # size but is unbounded for tiny absolute values when variance is near-zero (e.g.
+        # mean_true=2ms mean_false=1ms → d≈2.0 but 1ms jitter dominates).  This guard
+        # ensures a biologically meaningful timing signal even at low variance.
+        _min_abs_diff_ms = delay_sec * 1000 * 0.5
+        if mean_true - mean_false < _min_abs_diff_ms:
+            LOG.debug("[MicroTiming] FP suppressed: abs_diff=%.1fms < min_required=%.1fms",
+                      mean_true - mean_false, _min_abs_diff_ms)
             return False
 
-        return mean_true > mean_false and p_value < 0.05
+        # FIX-MICROTIMING-PVALUE: tighten from p<0.05 (5% FPR at n=30) to p<0.001.
+        # At n=30 the normal approximation gives z≈3.29 for p=0.001, requiring a
+        # much stronger rank-sum separation than p=0.05 (z≈1.96).
+        if not (mean_true > mean_false and p_value < 0.001):
+            return False
+        # Return timing values alongside the confirmation flag so callers can log
+        # the actual measured means without hardcoding zeros.
+        return (True, mean_true, mean_false)
 
 
 class ResourceBombOracle:
@@ -159641,7 +159681,7 @@ class NovelWAFBypassExtractor:
                 MicroTimingOracle.probe_bit(send_fn, _novel_true_cond, dbms, delay_sec=0.05, samples=10, sleep_fn_delay=delay),
                 timeout=90)
             if test_result:
-                print("[+] [Novel]  Micro-timing oracle viable (p<0.05)")
+                print("[+] [Novel]  Micro-timing oracle viable (p<0.001)")
 
                 # RC3 FIX: Micro-timing was running indefinitely.
                 # Original: samples=20 per bit × 7 bits × 50+ chars × ~1.5s/sample ≈ hours.
@@ -184162,9 +184202,16 @@ if __name__ == "__main__":
                     for _pt in _pending:
                         _pt.cancel()
                     try:
+                        # FIX-RUNMAIN-HANG-GATHER: original gather() had no timeout.
+                        # If any task ignores CancelledError or blocks in a non-cancellable
+                        # C extension (e.g. socket.getaddrinfo via run_in_executor), the
+                        # gather never completes and _main_thread.join() hangs forever.
+                        # Add a 30-second hard timeout so cleanup always terminates.
                         _loop.run_until_complete(
-                            _asyncio.gather(*_pending, return_exceptions=True))
-                    except Exception:
+                            _asyncio.wait_for(
+                                _asyncio.gather(*_pending, return_exceptions=True),
+                                timeout=30.0))
+                    except (_asyncio.TimeoutError, Exception):
                         pass
             finally:
                 try:
@@ -184172,8 +184219,19 @@ if __name__ == "__main__":
                 except Exception:
                     pass
                 try:
-                    _loop.run_until_complete(_loop.shutdown_default_executor())
-                except Exception:
+                    # FIX-RUNMAIN-HANG-EXECUTOR: shutdown_default_executor() waits for all
+                    # ThreadPoolExecutor threads to finish.  DNS resolution via
+                    # run_in_executor(None, socket.getaddrinfo) may have been cancelled at
+                    # the asyncio level but the OS thread is still blocking in the kernel
+                    # (getaddrinfo has no interrupt point).  Without a timeout, this call
+                    # hangs for the full OS resolver timeout (30-120s typically).
+                    # Add a 15-second timeout; the executor threads will be forcibly reaped
+                    # when the process exits regardless.
+                    _loop.run_until_complete(
+                        _asyncio.wait_for(
+                            _loop.shutdown_default_executor(),
+                            timeout=15.0))
+                except (_asyncio.TimeoutError, Exception):
                     pass
                 _loop.close()
 
