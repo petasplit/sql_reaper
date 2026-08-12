@@ -101312,45 +101312,51 @@ class ScannerV11(ScannerV10):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            # Secondary PCV returned a proper result tuple — it ran all
-                            # checks (A-E) and evaluated them. This is an authoritative
-                            # rejection regardless of inline PCV confirmation.
-                            # Transient failures (network errors, CancelledError) are
-                            # caught by the except block below and handled there.
-                            # FP-FIX-V214-E: The old BUG-V214-E FIX incorrectly kept
-                            # results when _INJECTION_CONFIRMED[0]=True from inline PCV,
-                            # even when secondary PCV properly ran and rejected (e.g.
-                            # WB: Check A pass, Checks B-E fail → "body canary borderline").
-                            # Inline PCV is less rigorous (Wasserstein shortcut, no full
-                            # A-E evaluation). Secondary PCV is the authoritative gate.
-                            # When secondary PCV returns (False, 0, details), trust it.
+                            # BUG-1-BUG-3-FIX (V11): Mirror _v14_cascade correct pattern.
+                            # When _INJECTION_CONFIRMED[0] is already True, secondary PCV
+                            # rejection is for a DIFFERENT concurrent candidate (e.g. a
+                            # background PUT/PATCH scan), not for the already-confirmed
+                            # injection. Discard only this candidate; leave extraction and
+                            # confirmation state untouched so in-flight extraction continues.
+                            #
+                            # When _INJECTION_CONFIRMED[0] is False, secondary PCV rejection
+                            # IS authoritative: no prior inline PCV confirmation exists,
+                            # this really is a false positive. Cancel extraction and reset.
+                            #
+                            # OLD BROKEN CODE cleared _INJECTION_CONFIRMED[0]=False even
+                            # when True — this caused _v14_cascade's secondary PCV gate to
+                            # see False and cancel an already-running extraction task, causing
+                            # the "[PCV-FP] Cancelling in-flight extraction task" false abort.
                             if _INJECTION_CONFIRMED[0]:
-                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
-                                      "A-E evaluation — discarding (secondary PCV is "
-                                      "authoritative; inline PCV confirmation overridden "
-                                      "to prevent false positive)",
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] "
+                                      "candidate after full A-E evaluation — discarding "
+                                      "this candidate only; original injection already "
+                                      "confirmed, extraction continues unaffected",
                                       flush=True)
-                                # BUG-SECONDARY-PCV-RACE-FIX (HIGH): When Gate KILL fired on
-                                # inline PCV confirmation, extraction may already be running
-                                # as a background task. Setting _INJECTION_CONFIRMED[0]=False
-                                # signals the extraction engine to abort (it checks this flag
-                                # periodically). Without this, extraction continues running
-                                # despite the secondary PCV rejection — wasting requests and
-                                # potentially leaking garbage results to the output. The
-                                # extraction engine's per-position loops check
-                                # _INJECTION_CONFIRMED[0] (or related flags) to decide whether
-                                # to continue. Clearing the flag causes the next check to stop.
-                                # Note: this only fires on authoritative secondary PCV rejection
-                                # (not on transient errors handled by the except block), so
-                                # genuine confirmations that had secondary PCV pass are unaffected.
-                                try:
-                                    _INJECTION_CONFIRMED[0] = False
-                                except Exception:
-                                    pass
+                                result = None
+                                # Do NOT touch _EXTRACTION_TASK, _EXTRACTION_ACTIVE,
+                                # _EXTRACTION_STARTED, _INJECTION_CONFIRMED, _SCAN_STOPPED —
+                                # these belong to the already-confirmed injection.
                             else:
-                                print(f"[!] PCV FAILED for [{_pcv_tech}]  "
-                                      "discarding detection", flush=True)
-                            result = None
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
+                                      "A-E evaluation — discarding (no prior inline PCV "
+                                      "confirmation; treating as false positive)",
+                                      flush=True)
+                                result = None
+                                # No prior confirmed injection — genuine FP.
+                                # Cancel any in-flight extraction and reset all flags.
+                                _pcv_rej_task = _EXTRACTION_TASK[0]
+                                if _pcv_rej_task is not None and not _pcv_rej_task.done():
+                                    print("[!] [PCV-FP] Cancelling in-flight extraction task "
+                                          "(secondary PCV rejected as false positive)",
+                                          flush=True)
+                                    _pcv_rej_task.cancel()
+                                    _EXTRACTION_TASK[0] = None
+                                _EXTRACTION_ACTIVE[0] = False
+                                _EXTRACTION_STARTED[0] = False
+                                _EXTRACTION_STARTED[1] = ""
+                                _INJECTION_CONFIRMED[0] = False
+                                _SCAN_STOPPED[0] = False  # FP — resume scanning
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
                         # Exception path: secondary PCV had a transient failure (network
@@ -101358,6 +101364,18 @@ class ScannerV11(ScannerV10):
                         # case, inline PCV confirmation (if set) is used as fallback.
                         if not _INJECTION_CONFIRMED[0]:
                             result = None  # BUG FIX: PCV exception must reject detection, not pass it through
+                            _pcv_exc_task = _EXTRACTION_TASK[0]
+                            if _pcv_exc_task is not None and not _pcv_exc_task.done():
+                                print("[!] [PCV-EXC] Cancelling in-flight extraction task "
+                                      "(PCV exception, no inline confirmation)",
+                                      flush=True)
+                                _pcv_exc_task.cancel()
+                                _EXTRACTION_TASK[0] = None
+                            _EXTRACTION_ACTIVE[0] = False
+                            _EXTRACTION_STARTED[0] = False
+                            _EXTRACTION_STARTED[1] = ""
+                            _INJECTION_CONFIRMED[0] = False
+                            _SCAN_STOPPED[0] = False
 
                 if result:
                     self.conf_matrix.record(param, result.technique, result.confidence)
@@ -106255,31 +106273,59 @@ class ScannerV12(ScannerV11):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            # Secondary PCV returned a proper result tuple — it ran all
-                            # checks (A-E) and evaluated them. This is an authoritative
-                            # rejection regardless of inline PCV confirmation.
-                            # Transient failures (network errors) are caught by except below.
-                            # FP-FIX-V214-E: The old BUG-V214-E FIX kept results when
-                            # _INJECTION_CONFIRMED[0]=True from inline PCV, even when
-                            # secondary PCV properly ran and rejected (WB: Check A pass,
-                            # Checks B-E fail). Inline PCV uses weaker shortcuts
-                            # (Wasserstein, FP-guards) without full A-E evaluation.
-                            # Secondary PCV is the authoritative final gate.
+                            # BUG-1-BUG-3-FIX (V12): Mirror _v14_cascade correct pattern.
+                            # When _INJECTION_CONFIRMED[0] is already True, secondary PCV
+                            # rejection is for a DIFFERENT concurrent candidate, not for
+                            # the already-confirmed injection. Discard this candidate only;
+                            # leave extraction and confirmation state untouched.
+                            #
+                            # When _INJECTION_CONFIRMED[0] is False, this is a genuine FP.
+                            # Cancel extraction and reset all state flags.
                             if _INJECTION_CONFIRMED[0]:
-                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
-                                      "A-E evaluation — discarding (secondary PCV is "
-                                      "authoritative; inline PCV confirmation overridden "
-                                      "to prevent false positive)",
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] "
+                                      "candidate after full A-E evaluation — discarding "
+                                      "this candidate only; original injection already "
+                                      "confirmed, extraction continues unaffected",
                                       flush=True)
+                                result = None
+                                # Do NOT touch _EXTRACTION_TASK, _EXTRACTION_ACTIVE,
+                                # _EXTRACTION_STARTED, _INJECTION_CONFIRMED, _SCAN_STOPPED —
+                                # these belong to the already-confirmed injection.
                             else:
-                                print(f"[!] PCV FAILED for [{_pcv_tech}]  "
-                                      "discarding detection", flush=True)
-                            result = None
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
+                                      "A-E evaluation — discarding (no prior inline PCV "
+                                      "confirmation; treating as false positive)",
+                                      flush=True)
+                                result = None
+                                _pcv_rej_task = _EXTRACTION_TASK[0]
+                                if _pcv_rej_task is not None and not _pcv_rej_task.done():
+                                    print("[!] [PCV-FP] Cancelling in-flight extraction task "
+                                          "(secondary PCV rejected as false positive)",
+                                          flush=True)
+                                    _pcv_rej_task.cancel()
+                                    _EXTRACTION_TASK[0] = None
+                                _EXTRACTION_ACTIVE[0] = False
+                                _EXTRACTION_STARTED[0] = False
+                                _EXTRACTION_STARTED[1] = ""
+                                _INJECTION_CONFIRMED[0] = False
+                                _SCAN_STOPPED[0] = False  # FP — resume scanning
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
                         # Exception path: transient failure. Inline PCV confirmation used as fallback.
                         if not _INJECTION_CONFIRMED[0]:
                             result = None  # BUG FIX: PCV exception must reject detection, not pass it through
+                            _pcv_exc_task = _EXTRACTION_TASK[0]
+                            if _pcv_exc_task is not None and not _pcv_exc_task.done():
+                                print("[!] [PCV-EXC] Cancelling in-flight extraction task "
+                                      "(PCV exception, no inline confirmation)",
+                                      flush=True)
+                                _pcv_exc_task.cancel()
+                                _EXTRACTION_TASK[0] = None
+                            _EXTRACTION_ACTIVE[0] = False
+                            _EXTRACTION_STARTED[0] = False
+                            _EXTRACTION_STARTED[1] = ""
+                            _INJECTION_CONFIRMED[0] = False
+                            _SCAN_STOPPED[0] = False
 
                 if result:
                     self.conf_matrix.record(param, result.technique, result.confidence)
