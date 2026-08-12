@@ -101265,10 +101265,33 @@ class ScannerV11(ScannerV10):
                             # FIX-ISSUE12-F: Initialize and safely unpack _post_confirm_verify result
                         _pcv_ok = False
                         _pcv_score = 0
-                        _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
-                            ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
-                            _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
-                            _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
+                        if _effective_pcv_tech_sg in ("S", "DS", "SO"):
+                            # BUG-FINAL-GATE-S-ROUTE FIX: _post_confirm_verify_locked has NO
+                            # S→T-CANARY logic. For tech="S" on path-injection surfaces:
+                            # Check A skips (stacked no body-canary), Check B N/A (S not in
+                            # _timing_only_tech), Check C fails (no timing gap from stacked),
+                            # Check D fails (header diff=0), Check E skips → ALWAYS returns
+                            # False → genuine S injections on path-injection surfaces are
+                            # always rejected by the secondary FINAL GATE PCV.
+                            # Fix: route S/DS/SO through _inline_pcv_check which contains the
+                            # correct S→T-CANARY (path-injection) and S→B boolean FP guard
+                            # (non-path) verification logic.
+                            # Outer _PCV_IN_PROGRESS increment allows _inline_pcv_check's
+                            # scan-stop gate to pass; S→T-CANARY manages its own inner
+                            # increment/decrement independently.
+                            _PCV_IN_PROGRESS[0] += 1
+                            try:
+                                _pv_raw_sg = await _pcv_cascade._inline_pcv_check(
+                                    _pcv_method_sg, ep.url, ep_data, ep_fmt, param, orig_val,
+                                    _bl_for_pcv, _norm_base_pcv,
+                                    _det_for_pcv, _effective_pcv_tech_sg, _det_for_pcv.dbms)
+                            finally:
+                                _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
+                        else:
+                            _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
+                                ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
+                                _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
+                                _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
                         if isinstance(_pv_raw_sg, tuple) and len(_pv_raw_sg) >= 1:
                             _pcv_ok = bool(_pv_raw_sg[0])
                             _pcv_score = _pv_raw_sg[1] if len(_pv_raw_sg) > 1 else 0
@@ -106185,10 +106208,33 @@ class ScannerV12(ScannerV11):
                             # FIX-ISSUE12-F: Initialize and safely unpack _post_confirm_verify result
                         _pcv_ok = False
                         _pcv_score = 0
-                        _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
-                            ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
-                            _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
-                            _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
+                        if _effective_pcv_tech_sg in ("S", "DS", "SO"):
+                            # BUG-FINAL-GATE-S-ROUTE FIX: _post_confirm_verify_locked has NO
+                            # S→T-CANARY logic. For tech="S" on path-injection surfaces:
+                            # Check A skips (stacked no body-canary), Check B N/A (S not in
+                            # _timing_only_tech), Check C fails (no timing gap from stacked),
+                            # Check D fails (header diff=0), Check E skips → ALWAYS returns
+                            # False → genuine S injections on path-injection surfaces are
+                            # always rejected by the secondary FINAL GATE PCV.
+                            # Fix: route S/DS/SO through _inline_pcv_check which contains the
+                            # correct S→T-CANARY (path-injection) and S→B boolean FP guard
+                            # (non-path) verification logic.
+                            # Outer _PCV_IN_PROGRESS increment allows _inline_pcv_check's
+                            # scan-stop gate to pass; S→T-CANARY manages its own inner
+                            # increment/decrement independently.
+                            _PCV_IN_PROGRESS[0] += 1
+                            try:
+                                _pv_raw_sg = await _pcv_cascade._inline_pcv_check(
+                                    _pcv_method_sg, ep.url, ep_data, ep_fmt, param, orig_val,
+                                    _bl_for_pcv, _norm_base_pcv,
+                                    _det_for_pcv, _effective_pcv_tech_sg, _det_for_pcv.dbms)
+                            finally:
+                                _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
+                        else:
+                            _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
+                                ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
+                                _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
+                                _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
                         if isinstance(_pv_raw_sg, tuple) and len(_pv_raw_sg) >= 1:
                             _pcv_ok = bool(_pv_raw_sg[0])
                             _pcv_score = _pv_raw_sg[1] if len(_pv_raw_sg) > 1 else 0
@@ -110738,12 +110784,48 @@ class TechniqueCascadeEngine:
                                   f"  → path-manipulation FP confirmed", flush=True)
                             return False
                         elif _spi_all_stacked_blocked:
-                            # WAF blocks all stacked queries → detection body diff was from
-                            # WAF error page vs normal page (not SQL execution) → FP
-                            print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
-                                  f"  benign_status={_spi_benign_st} (WAF blocks all stacked queries)"
-                                  f"  → detection was WAF-body-diff FP, not real injection", flush=True)
-                            return False
+                            if _s_already_mp_confirmed:
+                                # BUG-SPI-WAF-BLOCK-MP FIX: WAF blocks the unobfuscated benign
+                                # probe ('; SELECT 1-- -) but this does NOT disprove injection
+                                # already confirmed by 5/5 multi-probes + false-cond clean.
+                                # The WAF selectively blocks unobfuscated stacked payloads while
+                                # the original heavily-obfuscated detection payload bypassed it.
+                                # Multi-probe is authoritative: 5 independent true/false probe
+                                # pairs with structural consistency across all probes is not
+                                # achievable by path manipulation FPs or WAF block-page noise.
+                                print(f"[+] PCV CONFIRMED [S→T-CANARY+BENIGN-ORACLE+MP-OVERRIDE] {dbms}"
+                                      f"  benign_status={_spi_benign_st}"
+                                      f" (WAF blocks unobfuscated benign — differential WAF bypass)"
+                                      f"  → multi-probe (5/5 + false-cond clean) authoritative"
+                                      f"  → real injection", flush=True)
+                                try:
+                                    det._pcv_verified = True
+                                    if hasattr(det, 'detection') and det.detection is not None:
+                                        det.detection._pcv_verified = True
+                                except Exception:
+                                    pass
+                                _INJECTION_CONFIRMED[0] = True
+                                _SCAN_STOPPED[0] = True
+                                _cev_spi_waf = (getattr(self, '_confirmed_event', None) or
+                                                getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                                if _cev_spi_waf and not _cev_spi_waf.is_set():
+                                    try:
+                                        _cev_spi_waf._bg_result = det
+                                    except Exception:
+                                        pass
+                                    _cev_spi_waf.set()
+                                _gate_spi_waf = getattr(self, '_gate', None)
+                                if _gate_spi_waf and not getattr(_gate_spi_waf, 'killed', True):
+                                    try: _gate_spi_waf.kill()
+                                    except Exception: pass
+                                return True
+                            else:
+                                # WAF blocks all stacked queries and no multi-probe confirmation —
+                                # detection body diff was from WAF error page vs normal page → FP
+                                print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
+                                      f"  benign_status={_spi_benign_st} (WAF blocks all stacked queries)"
+                                      f"  → detection was WAF-body-diff FP, not real injection", flush=True)
+                                return False
                         elif _spi_benign_ok and _s_already_mp_confirmed:
                             # Benign stacked query returns 200 — SQL engine processes ';' correctly,
                             # no path corruption, WAF doesn't block benign stacked.
@@ -110776,14 +110858,46 @@ class TechniqueCascadeEngine:
                                 except Exception: pass
                             return True
                         else:
-                            print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
-                                  f"  true_ms={_spi_true_ms:.0f}  false_ms={_spi_false_ms:.0f}"
-                                  f"  threshold={_spi_threshold_ms:.0f}ms"
-                                  f"  benign_status={_spi_benign_st}"
-                                  f"  mp_confirmed={_s_already_mp_confirmed}"
-                                  f"  (benign_ok={_spi_benign_ok} but multi-probe not confirmed"
-                                  f"  — cannot confirm without 5/5 probe evidence)", flush=True)
-                            return False
+                            if _spi_benign_st is None and _s_already_mp_confirmed:
+                                # BUG-SPI-NONE-PROBE-MP FIX: Benign probe returned None (scan was
+                                # stopped while the probe was in-flight). This is a scan-stop
+                                # artifact, NOT a rejection signal. Multi-probe already confirmed
+                                # (5/5 + false-cond clean) BEFORE the scan stopped — that evidence
+                                # is authoritative and must not be discarded by a cancelled probe.
+                                print(f"[+] PCV CONFIRMED [S→T-CANARY+BENIGN-ORACLE+MP-OVERRIDE] {dbms}"
+                                      f"  benign_status=None (probe cancelled by scan stop)"
+                                      f"  → multi-probe (5/5 + false-cond clean) authoritative"
+                                      f"  → real injection", flush=True)
+                                try:
+                                    det._pcv_verified = True
+                                    if hasattr(det, 'detection') and det.detection is not None:
+                                        det.detection._pcv_verified = True
+                                except Exception:
+                                    pass
+                                _INJECTION_CONFIRMED[0] = True
+                                _SCAN_STOPPED[0] = True
+                                _cev_spi_none = (getattr(self, '_confirmed_event', None) or
+                                                 getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                                if _cev_spi_none and not _cev_spi_none.is_set():
+                                    try:
+                                        _cev_spi_none._bg_result = det
+                                    except Exception:
+                                        pass
+                                    _cev_spi_none.set()
+                                _gate_spi_none = getattr(self, '_gate', None)
+                                if _gate_spi_none and not getattr(_gate_spi_none, 'killed', True):
+                                    try: _gate_spi_none.kill()
+                                    except Exception: pass
+                                return True
+                            else:
+                                print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
+                                      f"  true_ms={_spi_true_ms:.0f}  false_ms={_spi_false_ms:.0f}"
+                                      f"  threshold={_spi_threshold_ms:.0f}ms"
+                                      f"  benign_status={_spi_benign_st}"
+                                      f"  mp_confirmed={_s_already_mp_confirmed}"
+                                      f"  (benign_ok={_spi_benign_ok} but multi-probe not confirmed"
+                                      f"  — cannot confirm without 5/5 probe evidence)", flush=True)
+                                return False
                 except Exception as _spi_err:
                     print(f"[!] PCV ERROR [S→T-CANARY] {dbms}: {_spi_err}  rejecting",
                           flush=True)
@@ -135858,10 +135972,33 @@ class ScannerV14(ScannerV13):
                             # FIX-ISSUE12-F: Initialize and safely unpack _post_confirm_verify result
                         _pcv_ok = False
                         _pcv_score = 0
-                        _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
-                            ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
-                            _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
-                            _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
+                        if _effective_pcv_tech_sg in ("S", "DS", "SO"):
+                            # BUG-FINAL-GATE-S-ROUTE FIX: _post_confirm_verify_locked has NO
+                            # S→T-CANARY logic. For tech="S" on path-injection surfaces:
+                            # Check A skips (stacked no body-canary), Check B N/A (S not in
+                            # _timing_only_tech), Check C fails (no timing gap from stacked),
+                            # Check D fails (header diff=0), Check E skips → ALWAYS returns
+                            # False → genuine S injections on path-injection surfaces are
+                            # always rejected by the secondary FINAL GATE PCV.
+                            # Fix: route S/DS/SO through _inline_pcv_check which contains the
+                            # correct S→T-CANARY (path-injection) and S→B boolean FP guard
+                            # (non-path) verification logic.
+                            # Outer _PCV_IN_PROGRESS increment allows _inline_pcv_check's
+                            # scan-stop gate to pass; S→T-CANARY manages its own inner
+                            # increment/decrement independently.
+                            _PCV_IN_PROGRESS[0] += 1
+                            try:
+                                _pv_raw_sg = await _pcv_cascade._inline_pcv_check(
+                                    _pcv_method_sg, ep.url, ep_data, ep_fmt, param, orig_val,
+                                    _bl_for_pcv, _norm_base_pcv,
+                                    _det_for_pcv, _effective_pcv_tech_sg, _det_for_pcv.dbms)
+                            finally:
+                                _PCV_IN_PROGRESS[0] = max(0, _PCV_IN_PROGRESS[0] - 1)
+                        else:
+                            _pv_raw_sg = await _pcv_cascade._post_confirm_verify(
+                                ep.method, ep.url, ep_data, ep_fmt, param, orig_val,
+                                _det_for_pcv.payload, _false_p, _bl_for_pcv, _norm_base_pcv,
+                                _effective_pcv_tech_sg, _det_for_pcv.dbms, _fp_t, _fp_f, _det_for_pcv)
                         if isinstance(_pv_raw_sg, tuple) and len(_pv_raw_sg) >= 1:
                             _pcv_ok = bool(_pv_raw_sg[0])
                             _pcv_score = _pv_raw_sg[1] if len(_pv_raw_sg) > 1 else 0
