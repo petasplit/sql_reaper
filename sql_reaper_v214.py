@@ -110541,36 +110541,24 @@ class TechniqueCascadeEngine:
                                'ALL_OBJECTS', 'DBA_OBJECTS', 'INFORMATION_SCHEMA.COLUMNS',
                                'ZEROBLOB(', 'PG_CLASS', 'BENCHMARK(')
             _s_has_timing_a = any(kw in _s_pcv_payload_up_a for kw in _s_timing_kws_a)
-            # BUG-PCV-S-MULTIPROBE FIX: bypass S→B rerouting when the S detector
-            # already ran full multi-probe verification (_multi_probe_confirmed=True).
-            # Multi-probe confirmation = N separate probes all differing from baseline
-            # + false-condition clean probe matching baseline. That IS PCV for stacked
-            # injection. Boolean FP guards test something orthogonal and always fail here.
+            # BUG-2-FIX: Removed S multi-probe early-return shortcut that bypassed
+            # S→B boolean FP guards when _multi_probe_confirmed=True.  Multi-probe
+            # confirmation alone is not sufficient for stacked non-timing injections:
+            # CDN/WAF path manipulation can produce consistent differential responses
+            # (all probes differ from baseline, false-cond clean) without actual SQL
+            # execution.  S→B boolean FP guards compare TRUE-condition vs FALSE-condition
+            # responses and are the only check that distinguishes real injection from
+            # path-level differential FPs.  They must always run regardless of multi-probe
+            # status.  When they pass, _pcv_verified=True is set so the secondary PCV
+            # Final Gate skips re-evaluation and does not cancel the extraction task.
             _s_already_mp_confirmed = getattr(det, '_multi_probe_confirmed', False)
-            if _s_already_mp_confirmed and not _s_has_timing_a:
-                _smp_count = getattr(det, '_multi_probe_count', '?')
-                print(f"[+] PCV [S] {dbms}: S multi-probe already confirmed"
-                      f" ({_smp_count} probes + false-cond clean)" " -- skipping S->B boolean FP guards (not applicable)", flush=True)
-                _INJECTION_CONFIRMED[0] = True
-                _SCAN_STOPPED[0] = True
-                _cev_smp = (getattr(self, '_confirmed_event', None) or
-                            getattr(getattr(self, 'config', None), '_confirmed_event', None))
-                if _cev_smp and not _cev_smp.is_set():
-                    try:
-                        _cev_smp._bg_result = det
-                    except Exception:
-                        pass
-                    _cev_smp.set()
-                _gate_smp = getattr(self, '_gate', None)
-                if _gate_smp and not getattr(_gate_smp, 'killed', True):
-                    try: _gate_smp.kill()
-                    except Exception: pass
-                return True
             if not _s_has_timing_a and det.payload:
-                # Non-timing payload detected via S oracle WITHOUT multi-probe
-                # confirmation — genuine cross-category hit, reroute to boolean FP guards.
-                print(f"[*] PCV [S→B] {dbms}: S-detected payload has no timing keywords — "
-                      "rerouting to boolean FP guards (cross-category hit)", flush=True)
+                # Non-timing payload detected via S oracle — route through S→B boolean FP
+                # guards regardless of multi-probe status.  Multi-probe confirmed = faster
+                # detection path but same boolean FP guard requirement.
+                _smp_label = " (multi-probe pre-confirmed)" if _s_already_mp_confirmed else ""
+                print(f"[*] PCV [S→B] {dbms}: S-detected payload has no timing keywords"
+                      f"{_smp_label} — routing through boolean FP guards", flush=True)
                 _PCV_IN_PROGRESS[0] += 1
                 try:
                     _false_s_bp_a = self._make_false_payload(det.payload) or " AND 1=2-- -"
@@ -110584,8 +110572,21 @@ class TechniqueCascadeEngine:
                             param, original, self.tamper_chain, baseline,
                             det.payload, _false_s_bp_a, _fp_s_t_a, _fp_s_f_a)
                         if _sb_ok_a:
+                            _mp_note = " (multi-probe pre-confirmed)" if _s_already_mp_confirmed else ""
                             print(f"[+] PCV CONFIRMED [S→B] {dbms}  boolean FP guards "
-                                  f"confirmed cross-category hit (conf={_sb_conf_a:.3f})", flush=True)
+                                  f"confirmed{_mp_note} (conf={_sb_conf_a:.3f})", flush=True)
+                            # BUG-3-FIX: Mark detection as inline-PCV-verified so the
+                            # secondary PCV Final Gate sees _already_pcv=True and skips
+                            # re-evaluation.  Without this, secondary PCV unconditionally
+                            # rejects S technique ("requires timing proof") and cancels the
+                            # extraction task even though inline PCV already confirmed via
+                            # S→B boolean FP guards — a stronger check than body canary.
+                            try:
+                                det._pcv_verified = True
+                                if hasattr(det, 'detection') and det.detection is not None:
+                                    det.detection._pcv_verified = True
+                            except Exception:
+                                pass
                             _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                             _SCAN_STOPPED[0] = True
                             _cev_sb_a = (getattr(self, '_confirmed_event', None) or
@@ -135592,47 +135593,57 @@ class ScannerV14(ScannerV13):
                             if _gate_fg and not _gate_fg.killed:
                                 _gate_fg.kill()
                         if not _pcv_ok:
-                            # Secondary PCV returned a proper result tuple — it ran all
-                            # checks (A-E) and evaluated them. This is an authoritative
-                            # rejection regardless of inline PCV confirmation.
-                            # Transient failures (network errors) are caught by except below.
-                            # FP-FIX-V214-E: The old BUG-V214-E FIX kept results when
-                            # _INJECTION_CONFIRMED[0]=True from inline PCV, even when
-                            # secondary PCV properly ran and rejected (WB: Check A pass,
-                            # Checks B-E fail). Inline PCV uses weaker shortcuts
-                            # (Wasserstein, FP-guards) without full A-E evaluation.
-                            # Secondary PCV is the authoritative final gate.
+                            # BUG-1-BUG-3-FIX: Secondary PCV rejection must NOT cancel
+                            # extraction that was correctly started by a concurrent
+                            # confirmation path.  Scenario: alt-method tasks run in parallel
+                            # (asyncio); GET confirms via inline PCV (S→B guards pass,
+                            # _INJECTION_CONFIRMED[0]=True, V25 extraction started); PUT
+                            # result arrives first in asyncio.wait → secondary PCV runs on
+                            # PUT, S technique unconditionally rejects → old code cancelled
+                            # the GET extraction and reset all flags (Bug 1: two extraction
+                            # tasks after retry; Bug 3: extraction never ran).
+                            #
+                            # Correct behaviour: when _INJECTION_CONFIRMED[0] is already
+                            # True, a secondary PCV rejection is for a DIFFERENT candidate
+                            # (the alt-method result), not for the already-confirmed
+                            # injection.  Discard only the current candidate result; leave
+                            # extraction and confirmation state untouched so the in-flight
+                            # extraction continues to completion.
+                            #
+                            # When _INJECTION_CONFIRMED[0] is False, secondary PCV rejection
+                            # IS authoritative: no prior inline PCV confirmation exists,
+                            # this really is a false positive.  Cancel extraction and reset.
                             if _INJECTION_CONFIRMED[0]:
-                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
-                                      "A-E evaluation — discarding (secondary PCV is "
-                                      "authoritative; inline PCV confirmation overridden "
-                                      "to prevent false positive)",
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] "
+                                      "candidate after full A-E evaluation — discarding "
+                                      "this candidate only; original injection already "
+                                      "confirmed, extraction continues unaffected",
                                       flush=True)
+                                result = None
+                                # Do NOT touch _EXTRACTION_TASK, _EXTRACTION_ACTIVE,
+                                # _EXTRACTION_STARTED, _INJECTION_CONFIRMED, _SCAN_STOPPED —
+                                # these belong to the already-confirmed injection.
                             else:
-                                print(f"[!] PCV FAILED for [{_pcv_tech}]  "
-                                      "discarding detection", flush=True)
-                            result = None
-                            # BUG-SECONDARY-PCV-CANCEL-EXTRACTION FIX (CRITICAL):
-                            # The extraction task was created inside _probe_one_param
-                            # when injection was tentatively confirmed (inline PCV passed).
-                            # Secondary PCV is the authoritative gate and just rejected —
-                            # this is a false positive.  Without cancellation the extraction
-                            # task runs indefinitely, producing garbage data from a non-
-                            # existent injection point and blocking scans on other params.
-                            # Fix: cancel the in-flight task and reset all extraction/scan
-                            # flags so the outer parameter loop can continue cleanly.
-                            _pcv_rej_task = _EXTRACTION_TASK[0]
-                            if _pcv_rej_task is not None and not _pcv_rej_task.done():
-                                print("[!] [PCV-FP] Cancelling in-flight extraction task "
-                                      "(secondary PCV rejected as false positive)",
+                                print(f"[!] Secondary PCV rejected [{_pcv_tech}] after full "
+                                      "A-E evaluation — discarding (no prior inline PCV "
+                                      "confirmation; treating as false positive)",
                                       flush=True)
-                                _pcv_rej_task.cancel()
-                                _EXTRACTION_TASK[0] = None
-                            _EXTRACTION_ACTIVE[0] = False
-                            _EXTRACTION_STARTED[0] = False
-                            _EXTRACTION_STARTED[1] = ""
-                            _INJECTION_CONFIRMED[0] = False
-                            _SCAN_STOPPED[0] = False  # FP — resume scanning on remaining params
+                                result = None
+                                # No prior confirmed injection — this is a genuine FP.
+                                # Cancel any in-flight extraction and reset all flags so
+                                # the outer parameter loop can continue scanning cleanly.
+                                _pcv_rej_task = _EXTRACTION_TASK[0]
+                                if _pcv_rej_task is not None and not _pcv_rej_task.done():
+                                    print("[!] [PCV-FP] Cancelling in-flight extraction task "
+                                          "(secondary PCV rejected as false positive)",
+                                          flush=True)
+                                    _pcv_rej_task.cancel()
+                                    _EXTRACTION_TASK[0] = None
+                                _EXTRACTION_ACTIVE[0] = False
+                                _EXTRACTION_STARTED[0] = False
+                                _EXTRACTION_STARTED[1] = ""
+                                _INJECTION_CONFIRMED[0] = False
+                                _SCAN_STOPPED[0] = False  # FP — resume scanning
                     except Exception as _pcv_e:
                         LOG.debug(f"V14 PCV error: {_pcv_e}")
                         # Exception path: transient failure. Inline PCV confirmation used as fallback.
