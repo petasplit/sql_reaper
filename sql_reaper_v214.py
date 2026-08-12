@@ -110591,33 +110591,66 @@ class TechniqueCascadeEngine:
                     _spi_time_sec = max(2.0, min(_spi_time_sec, 10.0))
                     _spi_n = int(_spi_time_sec)
                     _spi_threshold_ms = _spi_time_sec * 1000.0 * 0.65
-                    # Build DBMS-specific stacked timing canary payloads
+                    # Build DBMS-specific stacked timing canary payloads.
+                    # BUG-SPI-FALSE-PAY-FIX: The false-cond payload previously also contained
+                    # ';' (e.g. '; SELECT IF(1=2,SLEEP(N),SLEEP(0))-- -'), which means for path
+                    # manipulation FP the false-cond also returns 404 (';' corrupts path
+                    # regardless of the SQL condition). When SLEEP is WAF-blocked, both true-cond
+                    # (';' + SLEEP blocked → 404 or fast-200) and old false-cond (';' + SLEEP(0)
+                    # → 404 or fast-200) produce identically fast responses → timing test fails
+                    # → S→T-CANARY returns False → detection discarded even if injection is real.
+                    # Fix: use a false-cond WITHOUT ';' (bare boolean false condition) so the
+                    # false probe always gets the baseline 200 response (no path corruption).
+                    # This enables the STATUS CODE ORACLE below: when timing fails, compare
+                    # true-cond status (404 for path manipulation, non-404 for real injection
+                    # with WAF-blocked SLEEP) against false-cond status (always 200-class)
+                    # to distinguish the two cases deterministically without SLEEP.
+                    # MSSQL false-cond: no ';' needed — just a guaranteed-false WHERE condition.
                     if 'MSSQL' in _dbms_spi or 'SQL SERVER' in _dbms_spi or 'SQLSERVER' in _dbms_spi:
                         _spi_true_pay  = f"'; IF 1=1 WAITFOR DELAY '0:0:{_spi_n}'-- -"
-                        _spi_false_pay = f"'; IF 1=2 WAITFOR DELAY '0:0:{_spi_n}'-- -"
+                        _spi_false_pay = " AND 1=2-- "
+                    elif 'SYBASE' in _dbms_spi:
+                        # BUG-SPI-SYBASE-FIX: Sybase uses WAITFOR DELAY like MSSQL.
+                        # Without this branch Sybase fell through to MySQL SLEEP() — syntax error on Sybase.
+                        _spi_true_pay  = f"'; IF 1=1 WAITFOR DELAY '0:0:{_spi_n}'-- -"
+                        _spi_false_pay = " AND 1=2-- "
                     elif 'POSTGRESQL' in _dbms_spi or 'POSTGRES' in _dbms_spi or 'PGSQL' in _dbms_spi:
                         _spi_true_pay  = (f"'; SELECT CASE WHEN (1=1) THEN"
                                           f" pg_sleep({_spi_n}) ELSE pg_sleep(0) END-- -")
-                        _spi_false_pay = (f"'; SELECT CASE WHEN (1=2) THEN"
+                        _spi_false_pay = "' AND 1=2-- -"
+                    elif 'COCKROACH' in _dbms_spi or 'YUGABYTE' in _dbms_spi or 'REDSHIFT' in _dbms_spi:
+                        # BUG-SPI-PGCOMPAT-FIX: CockroachDB, YugabyteDB, Amazon Redshift are
+                        # PG-wire-compatible and use pg_sleep() — NOT MySQL SLEEP().
+                        # Without this branch they fell through to MySQL IF/SLEEP — syntax error.
+                        _spi_true_pay  = (f"'; SELECT CASE WHEN (1=1) THEN"
                                           f" pg_sleep({_spi_n}) ELSE pg_sleep(0) END-- -")
+                        _spi_false_pay = "' AND 1=2-- -"
                     elif 'ORACLE' in _dbms_spi:
                         _spi_true_pay  = f"'; BEGIN DBMS_SESSION.SLEEP({_spi_n}); END;-- -"
-                        _spi_false_pay = f"'; NULL-- -"
+                        _spi_false_pay = "' AND 1=2-- -"
                     elif 'SQLITE' in _dbms_spi:
-                        _spi_blob_n = _spi_n * 50000000
-                        _spi_true_pay  = f"'; SELECT RANDOMBLOB({_spi_blob_n})-- -"
-                        _spi_false_pay = f"'; SELECT 1-- -"
+                        # BUG-SPI-SQLITE-RANDOMBLOB-BOMB-FIX: _spi_n * 50000000 produces
+                        # 100-500MB RANDOMBLOB allocations — a resource bomb that can OOM-kill
+                        # the target server (responsible disclosure violation).
+                        # _derive_timing_payloads already fixed this by using a 2M-iteration
+                        # recursive CTE instead of RANDOMBLOB. Apply the same fix here.
+                        # The CTE with 2M iterations produces ~1-2s delay on real hardware —
+                        # sufficient for detection at _spi_threshold_ms ~= 1300ms (2s*0.65).
+                        _spi_true_pay  = ("'; SELECT (WITH RECURSIVE _spi_cnt(x) AS "
+                                          "(SELECT 1 UNION ALL SELECT x+1 FROM _spi_cnt WHERE x<2000000) "
+                                          "SELECT MAX(x) FROM _spi_cnt)-- -")
+                        _spi_false_pay = "' AND 1=2-- -"
                     else:
                         # MySQL / MariaDB / TiDB / generic default
                         _spi_true_pay  = f"'; SELECT IF(1=1,SLEEP({_spi_n}),SLEEP(0))-- -"
-                        _spi_false_pay = f"'; SELECT IF(1=2,SLEEP({_spi_n}),SLEEP(0))-- -"
+                        _spi_false_pay = "' AND 1=2-- -"
                     # Send true-cond timing probe
                     # (BUG-V39-BATCH FIX: use module-level `time` — no inline import)
                     _spi_t0 = time.monotonic()
                     _spi_true_resp = await self._safe_confirm(method, url, data, data_fmt,
                         param, original + _spi_true_pay, self.tamper_chain)
                     _spi_true_ms = (time.monotonic() - _spi_t0) * 1000.0
-                    # Send false-cond timing probe
+                    # Send false-cond timing probe (no ';' — always fast/baseline)
                     _spi_f0 = time.monotonic()
                     _spi_false_resp = await self._safe_confirm(method, url, data, data_fmt,
                         param, original + _spi_false_pay, self.tamper_chain)
@@ -110653,11 +110686,104 @@ class TechniqueCascadeEngine:
                             except Exception: pass
                         return True
                     else:
-                        print(f"[!] PCV FAILED [S→T-CANARY] {dbms}"
-                              f"  true={_spi_true_ms:.0f}ms  false={_spi_false_ms:.0f}ms"
-                              f"  threshold={_spi_threshold_ms:.0f}ms"
-                              f"  (path-manipulation FP or timing unstable)", flush=True)
-                        return False
+                        # BUG-SPI-BENIGN-ORACLE-FIX: When timing fails (SLEEP blocked by WAF
+                        # or network instability), use a BENIGN STACKED STATUS ORACLE to
+                        # distinguish three cases without relying on SLEEP timing:
+                        #
+                        #  1. Path manipulation FP: ';' corrupts the URL path segment → server
+                        #     returns 404 regardless of SQL content. ANY probe with ';' gets 404.
+                        #     A benign stacked query ('; SELECT 1-- -) without SLEEP bypasses
+                        #     SLEEP-specific WAF rules but still has ';' → triggers path routing
+                        #     failure → 404.
+                        #
+                        #  2. Real injection + WAF blocks SLEEP: ';' is processed by the SQL
+                        #     engine (not the URL router) → no path corruption. A benign probe
+                        #     without SLEEP clears WAF rules → returns 200 (same as baseline).
+                        #     This is proof that ';' is SQL, not URL structure.
+                        #
+                        #  3. WAF blocks ALL stacked queries: benign probe ('; SELECT 1-- -)
+                        #     is also blocked → 403/400. This means stacked injection through
+                        #     the WAF is impossible → the detection body diff was from WAF
+                        #     body (e.g. WAF block page vs normal page) not SQL → reject.
+                        #
+                        # WHY NOT use the SLEEP-carrying true-cond status code?
+                        #   When WAF blocks SLEEP specifically AND path manipulation exists,
+                        #   WAF intercepts BEFORE path routing → true-cond returns 403 (WAF)
+                        #   not 404 (path). Both real injection+WAF-block and path-manipulation
+                        #   +WAF-block look identical (true=403, false=200). The benign probe
+                        #   bypasses this ambiguity: it has ';' but no SLEEP/WAITFOR/etc.,
+                        #   so SLEEP-specific WAF rules don't fire, and only path routing
+                        #   determines the response (200 = SQL processed, 404 = path corrupted).
+                        _spi_benign_pay = "'; SELECT 1-- -"
+                        _spi_benign_resp = await self._safe_confirm(method, url, data, data_fmt,
+                            param, original + _spi_benign_pay, self.tamper_chain)
+                        _spi_benign_st = getattr(_spi_benign_resp, 'status_code', None) if _spi_benign_resp else None
+                        _spi_true_st   = getattr(_spi_true_resp,  'status_code', None) if _spi_true_resp  else None
+                        _spi_false_st  = getattr(_spi_false_resp, 'status_code', None) if _spi_false_resp else None
+                        _spi_waf_status_codes = (400, 403, 406, 429, 430, 444, 451)
+                        # Case 1: Path manipulation — benign probe (no SLEEP, but has ';') returns 404
+                        _spi_is_path_manip = (_spi_benign_st == 404)
+                        # Case 2: Real injection + WAF blocks SLEEP — benign probe bypasses WAF → 200
+                        _spi_benign_ok = (
+                            _spi_benign_st is not None and
+                            _spi_benign_st not in _spi_waf_status_codes and
+                            _spi_benign_st != 404
+                        )
+                        # Case 3: WAF blocks all stacked queries — benign also blocked
+                        _spi_all_stacked_blocked = (_spi_benign_st in _spi_waf_status_codes)
+                        if _spi_is_path_manip:
+                            print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
+                                  f"  benign_status={_spi_benign_st} (404 = ';' corrupts URL path)"
+                                  f"  true_ms={_spi_true_ms:.0f}  false_ms={_spi_false_ms:.0f}"
+                                  f"  → path-manipulation FP confirmed", flush=True)
+                            return False
+                        elif _spi_all_stacked_blocked:
+                            # WAF blocks all stacked queries → detection body diff was from
+                            # WAF error page vs normal page (not SQL execution) → FP
+                            print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
+                                  f"  benign_status={_spi_benign_st} (WAF blocks all stacked queries)"
+                                  f"  → detection was WAF-body-diff FP, not real injection", flush=True)
+                            return False
+                        elif _spi_benign_ok and _s_already_mp_confirmed:
+                            # Benign stacked query returns 200 — SQL engine processes ';' correctly,
+                            # no path corruption, WAF doesn't block benign stacked.
+                            # Multi-probe confirmed 5/5 probes with consistent body diff → real injection.
+                            # SLEEP is WAF-blocked but injection mechanism is confirmed via benign probe.
+                            print(f"[+] PCV CONFIRMED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
+                                  f"  benign_status={_spi_benign_st} (200 = ';' processed as SQL)"
+                                  f"  true_ms={_spi_true_ms:.0f}  true_status={_spi_true_st}"
+                                  f"  + multi-probe confirmed (5/5) → real injection (WAF blocks SLEEP)",
+                                  flush=True)
+                            try:
+                                det._pcv_verified = True
+                                if hasattr(det, 'detection') and det.detection is not None:
+                                    det.detection._pcv_verified = True
+                            except Exception:
+                                pass
+                            _INJECTION_CONFIRMED[0] = True
+                            _SCAN_STOPPED[0] = True
+                            _cev_spi2 = (getattr(self, '_confirmed_event', None) or
+                                         getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                            if _cev_spi2 and not _cev_spi2.is_set():
+                                try:
+                                    _cev_spi2._bg_result = det
+                                except Exception:
+                                    pass
+                                _cev_spi2.set()
+                            _gate_spi2 = getattr(self, '_gate', None)
+                            if _gate_spi2 and not getattr(_gate_spi2, 'killed', True):
+                                try: _gate_spi2.kill()
+                                except Exception: pass
+                            return True
+                        else:
+                            print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
+                                  f"  true_ms={_spi_true_ms:.0f}  false_ms={_spi_false_ms:.0f}"
+                                  f"  threshold={_spi_threshold_ms:.0f}ms"
+                                  f"  benign_status={_spi_benign_st}"
+                                  f"  mp_confirmed={_s_already_mp_confirmed}"
+                                  f"  (benign_ok={_spi_benign_ok} but multi-probe not confirmed"
+                                  f"  — cannot confirm without 5/5 probe evidence)", flush=True)
+                            return False
                 except Exception as _spi_err:
                     print(f"[!] PCV ERROR [S→T-CANARY] {dbms}: {_spi_err}  rejecting",
                           flush=True)
@@ -112686,6 +112812,39 @@ class TechniqueCascadeEngine:
             # result (large count or 1) is always truthy — only timing differs. No >= 0 fix needed.
             "SQLite": f"CASE WHEN SUBSTR('SQLReaper',1,1)='{{ch}}' THEN (WITH RECURSIVE _pcv_cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM _pcv_cnt WHERE x<2000000) SELECT MAX(x) FROM _pcv_cnt) ELSE 1 END",
             "MariaDB": f"IF({_substr}('SQLReaper',1,1)='{{ch}}',SLEEP({sleep_sec}),0)",
+            # BUG-DERIVE-TIMING-CRDB-FIX (HIGH; CockroachDB; _derive_timing_payloads; PCV Check B;
+            # T/TH/HQ techniques; all surfaces):
+            # CockroachDB is PG-wire-compatible and uses pg_sleep() — NOT MySQL SLEEP().
+            # Without an explicit entry CockroachDB fell through to the MySQL IF/SLEEP default,
+            # sending `IF(SUBSTRING('SQLReaper',1,1)='S',SLEEP(N),0)` which is a syntax error
+            # on CockroachDB.  Both half and double probes returned fast error responses (0ms)
+            # → Check B _double_ok=False → ALL CockroachDB timing detections were rejected by PCV.
+            # Fix: mirror the PostgreSQL pg_sleep template with SUBSTRING (CRDB supports it).
+            "CockroachDB": f"(CASE WHEN SUBSTRING('SQLReaper',1,1)='{{ch}}' THEN (SELECT 1 FROM pg_sleep({sleep_sec}::float)) ELSE 1 END)=1",
+            # BUG-DERIVE-TIMING-YUGABYTE-FIX (HIGH; YugabyteDB; _derive_timing_payloads; PCV Check B):
+            # YugabyteDB is PG-wire-compatible and uses pg_sleep() — NOT MySQL SLEEP().
+            # Same fallback bug as CockroachDB. Fix: mirror the PostgreSQL template.
+            "YugabyteDB": f"(CASE WHEN SUBSTRING('SQLReaper',1,1)='{{ch}}' THEN (SELECT 1 FROM pg_sleep({sleep_sec}::float)) ELSE 1 END)=1",
+            # BUG-DERIVE-TIMING-REDSHIFT-FIX (HIGH; Amazon Redshift; _derive_timing_payloads; PCV Check B):
+            # Amazon Redshift is PG-wire-compatible and uses pg_sleep() — NOT MySQL SLEEP().
+            # Same fallback bug. Fix: mirror the PostgreSQL template.
+            "Amazon Redshift": f"(CASE WHEN SUBSTRING('SQLReaper',1,1)='{{ch}}' THEN (SELECT 1 FROM pg_sleep({sleep_sec}::float)) ELSE 1 END)=1",
+            # BUG-DERIVE-TIMING-SYBASE-FIX (HIGH; Sybase; _derive_timing_payloads; PCV Check B;
+            # T/TH techniques):
+            # Sybase ASE uses WAITFOR DELAY — NOT MySQL SLEEP(). Without an explicit entry Sybase
+            # fell through to the MySQL IF/SLEEP default, sending invalid SQL on every Check B probe.
+            # Both half and double probes returned fast error responses → _double_ok=False →
+            # ALL Sybase timing detections were rejected by PCV.
+            # Fix: use the same heavy-query cross-join template as MSSQL (Sybase supports sys.objects
+            # equivalent via sysobjects).  WAITFOR DELAY cannot appear in a CASE expression on Sybase
+            # (T-SQL restriction, same as MSSQL), so the cross-join CPU-time approach is correct.
+            "Sybase": (
+                f"CASE WHEN SUBSTRING('SQLReaper',1,1)='{{ch}}' "
+                "THEN (SELECT COUNT(*) FROM sysobjects A CROSS JOIN (SELECT TOP 100 id FROM sysobjects) B "
+                "WHERE A.id IS NOT NULL) "
+                "ELSE CAST(0 AS INT) END >= 0"
+            ),
+            # TiDB is MySQL-wire-compatible: IF/SLEEP is correct. Falls through to the MySQL default below.
         }.get(dbms, f"IF(SUBSTRING('SQLReaper',1,1)='{{ch}}',SLEEP({sleep_sec}),0)")
         
         _bool_patterns = [
@@ -113309,6 +113468,24 @@ class TechniqueCascadeEngine:
         # IS visible to the outer scope without a nonlocal declaration.
         _check_a_waf_counts = [0, 0, 0]  # [blocked_count, total_pairs, zero_gap_non_waf_count]
         async def _run_check_a():
+            # BUG-CHECKA-STACKED-SKIP-FIX: S/DS/SO techniques use STACKED QUERIES, not
+            # WHERE-clause boolean conditions.  All fixed boolean canary pairs below
+            # (SUBSTRING/LENGTH/ASCII/tautology) inject into the WHERE clause context:
+            #   e.g. ' AND SUBSTRING('SQLReaper',1,1)='S'-- -
+            # For stacked injection the injected separator is ';' — these WHERE-clause
+            # canaries are appended to the original query AFTER the first statement ends.
+            # Result: BOTH true and false canary variants produce identical responses
+            # (either both cause syntax errors or both pass as no-ops), making gap≈0 for
+            # every pair.  This triggers _check_a_waf_counts[2]++ for each pair, which
+            # in turn sets _check_a_all_body_identical=True, and wastes 12+ HTTP probes
+            # (24+ requests) per secondary PCV run without any diagnostic value.
+            # Fix: return immediately with "skipped" for S/DS/SO so the probes are never
+            # sent.  The S-technique PCV path uses S→T-CANARY (timing) + STATUS-ORACLE
+            # instead of body-canary Check A.  DS and SO are deferred/second-order stacked
+            # injections whose HTTP response is the first query's result (async execution)
+            # — body diffs from WHERE-clause canaries are also inapplicable there.
+            if tech in ("S", "DS", "SO"):
+                return False, 0.0, "skipped-stacked-no-body-canary-applicable", False
             _substr = "SUBSTRING" if dbms not in ("Oracle", "SQLite") else "SUBSTR"
             # Enhancement #2: Skip derivation for timing detections (invalid SQL)
             _a_fallbacks = []
