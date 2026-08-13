@@ -59975,7 +59975,8 @@ class Scanner:
             if _val > 0 and not _len_waf_blocked_hex8:
                 _val_is_suspicious = (
                     _val > 200 or                          # unusually long for usernames/db names
-                    (_val & _hex8_mask_sum) == _hex8_mask_sum and _val > 100  # all hex-8 bits set
+                    (_val & _hex8_mask_sum) == _hex8_mask_sum and _val > 100 or  # all hex-8 bits set
+                    1 <= _val <= 3  # BUG-SMALL-LENGTH-VERIFY FIX: small values may have missed bits
                 )
                 if _val_is_suspicious:
                     _eq_verify_cond = f"{_len_fn}={_val}"
@@ -59997,9 +59998,34 @@ class Scanner:
                                             "failed — returning -1", _val, _val_stripped)
                                 return -1
                         else:
-                            LOG.warning("[Inference] _get_length_bitwise: suspicious length "
-                                        "%d failed equality verify — returning -1", _val)
-                            return -1
+                            # BUG-SMALL-LENGTH-VERIFY FIX: for small values (1-3), a single
+                            # missed bit during bitwise extraction causes val=1 when true=2,
+                            # val=2 when true=3, etc. No hex-8 bits to strip, but the value
+                            # is still wrong. Try linear scan of nearby candidates before
+                            # giving up, covering up to +5 (catches all single-missed-bit cases
+                            # within the low range). Stop on None (oracle ambiguous).
+                            if 1 <= _val <= 3:
+                                _small_found = False
+                                for _small_cand in range(_val + 1, min(_val + 6, 16)):
+                                    _eq_small_r = await _eval(f"{_len_fn}={_small_cand}")
+                                    if _eq_small_r is True:
+                                        LOG.info("[Inference] _get_length_bitwise: small "
+                                                 "length corrected %d → %d (missed bit in "
+                                                 "bitwise extraction)", _val, _small_cand)
+                                        _val = _small_cand
+                                        _small_found = True
+                                        break
+                                    elif _eq_small_r is None:
+                                        break  # oracle ambiguous — abort scan
+                                if not _small_found:
+                                    LOG.warning("[Inference] _get_length_bitwise: suspicious "
+                                                "small length %d failed equality verify and "
+                                                "linear scan — returning -1", _val)
+                                    return -1
+                            else:
+                                LOG.warning("[Inference] _get_length_bitwise: suspicious length "
+                                            "%d failed equality verify — returning -1", _val)
+                                return -1
                     elif _eq_verify_r is True:
                         # RC-3 FIX (CRITICAL): Equality probe returned True for a suspicious
                         # length (>200 or all-hex-8 pattern). When _use_bitwise_fallback=True,
@@ -61885,16 +61911,60 @@ class Scanner:
                     # true length 256 → blocked bit 8 → reads as 512, ratio=0.50) is caught by
                     # the > 20% ratio check. Power-of-two lengths are inherently suspicious in
                     # bitwise extraction (exactly 2^n could be a single bit stuck at 1).
-                    if _length > 0 and (_length >= max_len or _length > 200):
+                    # BUG-SMALL-LENGTH-VERIFY FIX (stability): Also trigger stability
+                    # re-check for small values (1-3) — a single missed bit at 1→2 or
+                    # 2→3 produces ratio=1.0 or 0.5 which would catch the instability,
+                    # but only if the second run fires. With the old condition,
+                    # _length=1/2/3 never reached the stability block (_length >= max_len
+                    # is False, _length > 200 is False). Now we include small values.
+                    if _length > 0 and (_length >= max_len or _length > 200 or 1 <= _length <= 3):
                         await asyncio.sleep(0.15)
                         _length2 = await _get_length_bitwise(query, max_bits=10)
                         if _length2 > 0:
                             _ratio = abs(_length - _length2) / max(_length, _length2)
                             if _ratio > 0.20:
-                                # Results disagree by > 20% — oracle unstable; cap to max_len
-                                LOG.warning("[Inference] %s: bitwise length unstable (%d vs %d, ratio=%.2f) — "
-                                            "capping to max_len=%d", label, _length, _length2, _ratio, max_len)
-                                _length = max_len
+                                # BUG-SMALL-LENGTH-VERIFY FIX (stability-cap): For small values
+                                # (1-3), both runs went through equality verification inside
+                                # _get_length_bitwise. If they disagree (e.g. one returns 2,
+                                # other returns 3), capping to max_len=1024 is catastrophically
+                                # wrong — extraction would scan 1024 positions. For small values,
+                                # use the larger of the two (bitwise extraction underestimates,
+                                # never overestimates, so the larger is more likely correct).
+                                # For large/normal values, keep the original max_len cap behavior.
+                                if 1 <= _length <= 3 and 1 <= _length2 <= 3:
+                                    # Both small: use the larger (bitwise underestimates,
+                                    # never overestimates; equality verify already ran in
+                                    # _get_length_bitwise for both values).
+                                    _small_larger = max(_length, _length2)
+                                    LOG.warning("[Inference] %s: bitwise small length unstable "
+                                                "(%d vs %d, ratio=%.2f) — using larger value %d "
+                                                "(bitwise underestimates; capping to max_len "
+                                                "skipped for small values)", label,
+                                                _length, _length2, _ratio, _small_larger)
+                                    _length = _small_larger
+                                elif 1 <= _length <= 3:
+                                    # BUG-SMALL-LENGTH-VERIFY FIX (asymmetric run): run 1
+                                    # returned a small equality-verified value; run 2 returned
+                                    # something large and unverified. The small verified value
+                                    # is more trustworthy — trust it over the large garbage.
+                                    LOG.warning("[Inference] %s: bitwise length asymmetric "
+                                                "(%d verified-small vs %d large, ratio=%.2f) — "
+                                                "trusting equality-verified small value %d",
+                                                label, _length, _length2, _ratio, _length)
+                                    # Keep _length unchanged (already the correct small value)
+                                elif 1 <= _length2 <= 3:
+                                    # Run 2 returned a small equality-verified value; run 1 was
+                                    # large and unverified. Trust the smaller verified result.
+                                    LOG.warning("[Inference] %s: bitwise length asymmetric "
+                                                "(%d large vs %d verified-small, ratio=%.2f) — "
+                                                "trusting equality-verified small value %d",
+                                                label, _length, _length2, _ratio, _length2)
+                                    _length = _length2
+                                else:
+                                    # Results disagree by > 20% — oracle unstable; cap to max_len
+                                    LOG.warning("[Inference] %s: bitwise length unstable (%d vs %d, ratio=%.2f) — "
+                                                "capping to max_len=%d", label, _length, _length2, _ratio, max_len)
+                                    _length = max_len
                             else:
                                 # Results agree — use the smaller (conservative) estimate
                                 _length = min(_length, _length2)
@@ -111399,8 +111469,18 @@ class TechniqueCascadeEngine:
                         # Case 3: WAF blocks all stacked queries — benign also blocked
                         _spi_all_stacked_blocked = (_spi_benign_st in _spi_waf_status_codes)
                         if _spi_is_path_manip:
+                            # BUG-SPI-BENIGN-STATUS-TEXT FIX (LOW): Was hardcoded "(404 = ';' corrupts
+                            # URL path)" regardless of actual benign_status.  When benign_status is 302,
+                            # 410, 500, etc., the message was misleading/wrong.  Make dynamic.
+                            _spi_manip_reason = (
+                                "(302 = ';' causes path redirect)" if _spi_benign_st == 302 else
+                                "(404 = ';' corrupts URL path)" if _spi_benign_st == 404 else
+                                "(410 = ';' resource gone after path corruption)" if _spi_benign_st == 410 else
+                                f"({_spi_benign_st // 100}xx server error from ';' path corruption)" if _spi_benign_st and _spi_benign_st >= 500 else
+                                f"(non-2xx non-WAF = ';' corrupts path/routing)"
+                            )
                             print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
-                                  f"  benign_status={_spi_benign_st} (404 = ';' corrupts URL path)"
+                                  f"  benign_status={_spi_benign_st} {_spi_manip_reason}"
                                   f"  true_ms={_spi_true_ms:.0f}  false_ms={_spi_false_ms:.0f}"
                                   f"  → path-manipulation FP confirmed", flush=True)
                             return False
@@ -111511,6 +111591,26 @@ class TechniqueCascadeEngine:
                                     except Exception: pass
                                 return True
                             else:
+                                # BUG-SPI-CONFIRMED-RACE FIX (CRITICAL): Check _INJECTION_CONFIRMED[0]
+                                # AGAIN before returning False.  Race window: this secondary PCV passed
+                                # the early-exit check at function entry (injection was not yet confirmed),
+                                # then the primary PCV confirmed injection and killed the gate, then all
+                                # our probes returned None (gate killed mid-flight).  At this point
+                                # _INJECTION_CONFIRMED[0]=True but this branch returns False — causing the
+                                # caller to log "Secondary PCV rejected" and potentially discard evidence.
+                                # Fix: re-check after probes complete; if confirmed by another coroutine
+                                # in the race window, defer to that confirmation rather than rejecting.
+                                if _INJECTION_CONFIRMED[0]:
+                                    print(f"[*] PCV [S→T-CANARY+BENIGN-ORACLE] {dbms}: probes returned "
+                                          f"None (gate killed by concurrent confirmation) — deferring "
+                                          f"to already-confirmed injection state", flush=True)
+                                    try:
+                                        det._pcv_verified = True
+                                        if hasattr(det, 'detection') and det.detection is not None:
+                                            det.detection._pcv_verified = True
+                                    except Exception:
+                                        pass
+                                    return True
                                 print(f"[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
                                       f"  true_ms={_spi_true_ms:.0f}  false_ms={_spi_false_ms:.0f}"
                                       f"  threshold={_spi_threshold_ms:.0f}ms"
