@@ -41865,7 +41865,8 @@ async def _detect_time_sleep_free(
 
     dbms_order: List[str] = ([confirmed_dbms] if confirmed_dbms else []) + [
         "MySQL", "PostgreSQL", "MSSQL", "SQLite", "Oracle", "MariaDB",
-        "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift"]  # BUG-SLEEPFREE-NEWDBMS FIX: wire-compat engines must be probed so _SLEEP_FREE_TIMING entries for them are exercised
+        # Removed: TiDB, CockroachDB, YugabyteDB, Amazon Redshift — no detection payloads in CERTIFIED_PAYLOAD_DATABASE
+    ]
     seen: set = set()
 
     for dbms in dbms_order:
@@ -50905,7 +50906,7 @@ class SecondOrderDetector:
         # be tested on every surface. Use _get_cascade_payloads (Error-first, merges all 10).
         _s2_detected_dbms = (getattr(self.config, 'forced_dbms', None) or
                               getattr(self.config, '_detected_dbms', None))
-        _s2_dbms_list = [_s2_detected_dbms] if _s2_detected_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+        _s2_dbms_list = [_s2_detected_dbms] if _s2_detected_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
         for _s2_dbms in _s2_dbms_list:
             _s2_err_payloads = _get_cascade_payloads(_s2_dbms, 'E', self.config.level)  # BUG-S2-ALLCATS FIX
             # BUG-R6-1 FIX (Req 6): Create per-DBMS mutator for second-order detection.
@@ -51480,7 +51481,7 @@ class GraphQLDetector:
         _gql_err_base_body = _safe_decode_body(_gql_err_base) if _gql_err_base and hasattr(_gql_err_base,"body") and _gql_err_base.body else ""
         # BUG-2 FIX (Req 1): use DBMS-specific Error payloads from CERTIFIED_PAYLOAD_DATABASE only
         _gql_e_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _gql_e_list = [_gql_e_dbms] if _gql_e_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+        _gql_e_list = [_gql_e_dbms] if _gql_e_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads merges ALL 10 CERTIFIED_PAYLOAD_DATABASE categories
         # (not a single 'Error' category). Req 2: all category payloads must flow through every
         # technique surface including GraphQL.  FIX-R6: mutate_all() applies all 20 mutation layers.
@@ -51569,7 +51570,7 @@ class GraphQLDetector:
         base=await self._baseline(url,body,var_name,original_val)
         # BUG-2 FIX (Req 1): use DBMS-specific Boolean payloads from CERTIFIED_PAYLOAD_DATABASE only
         _gql_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _gql_dbms_list = [_gql_dbms] if _gql_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+        _gql_dbms_list = [_gql_dbms] if _gql_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
         # FIX-R3: Require second confirmation probe — single-probe bool is vulnerable to FP on dynamic
         # pages (CSRF tokens / A/B widgets cause page-size deltas on any input).
@@ -51624,7 +51625,7 @@ class GraphQLDetector:
         expected=base["mean_timing"]+t*1000*0.8
         # BUG-2 FIX (Req 1): use DBMS-specific Timebased payloads from CERTIFIED_PAYLOAD_DATABASE only
         _gql_t_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _gql_t_list = [_gql_t_dbms] if _gql_t_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+        _gql_t_list = [_gql_t_dbms] if _gql_t_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads merges ALL 10 categories (Timebased-first).
         # FIX-R6: mutate_all() applies all 20 mutation layers to each payload.
         # FIX-R9: asyncio.sleep(0) yields event loop — prevents CPU spike.
@@ -52006,7 +52007,7 @@ class JWTInjector:
         LOG.info("alg:none accepted!")
         # BUG-2 FIX (Req 1): use DBMS-specific Boolean payloads only (no generic BOOLEAN_PAYLOADS)
         _jwt_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _jwt_dbms_list = [_jwt_dbms] if _jwt_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+        _jwt_dbms_list = [_jwt_dbms] if _jwt_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
         for claim,orig_val in [(k,str(v)) for k,v in jwt_p.items() if isinstance(v,str)]:
             for _jn_dbms in _jwt_dbms_list:
                 if _SCAN_STOPPED[0]: return None  # FIX-R4: stop outer DBMS loop
@@ -52107,7 +52108,7 @@ class JWTInjector:
         if secret in JWT_WEAK_SECRETS: LOG.warning(f"JWT weak secret: {secret!r}")
         # BUG-2 FIX (Req 1): use DBMS-specific Boolean payloads only (no generic BOOLEAN_PAYLOADS)
         _jwt_hs_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _jwt_hs_list = [_jwt_hs_dbms] if _jwt_hs_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+        _jwt_hs_list = [_jwt_hs_dbms] if _jwt_hs_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
         for claim,orig_val in [(k,str(v)) for k,v in jwt_p.items() if isinstance(v,str)]:
             for _jhs_dbms in _jwt_hs_list:
                 if _SCAN_STOPPED[0]: return None  # FIX-R4: stop outer DBMS loop
@@ -52384,7 +52385,7 @@ class _HTTPHeaderInjectorV1:
             # Error-based first (fast) — BUG-2C FIX: use _get_cascade_payloads for all 10 categories
             _hiv1_dbms = getattr(self.config, "_detected_dbms", None) or getattr(self.config, "forced_dbms", None) or "MySQL"
             _hiv1_dbms_list = ([_hiv1_dbms] if _hiv1_dbms != "MySQL" or getattr(self.config,"forced_dbms",None)
-                               else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"])
+                               else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"])
             _hiv1_outer_stopped = False  # BUG-4B FIX: propagate stop from inner loops upward
             for _hiv1_scan_dbms in _hiv1_dbms_list:
                 if _SCAN_STOPPED[0] or _hiv1_outer_stopped: break  # BUG-R4a FIX
@@ -52467,7 +52468,7 @@ class _HTTPHeaderInjectorV1:
             _hb_dbms = (getattr(self.config, "_detected_dbms", None) or
                         getattr(self.config, "forced_dbms", None))
             _hb_list = ([_hb_dbms] if _hb_dbms
-                        else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"])
+                        else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"])
             # BUG-BH-NO-TECHNIQUE22 FIX: The BH boolean loop had no WAF-block counter
             # while every other technique (IN, BT, T) applies TECHNIQUE-22 rotation
             # after N consecutive WAF-blocked responses.  In the observed log, BH ran
@@ -52708,7 +52709,7 @@ class _HTTPHeaderInjectorV1:
             if header_name in ("X-Forwarded-For","Referer","User-Agent") and self.config.level>=2:
                 t=self.config.time_sec
                 _ht_dbms = getattr(self.config,"_detected_dbms",None) or getattr(self.config,"forced_dbms",None)
-                _ht_list = [_ht_dbms] if _ht_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+                _ht_list = [_ht_dbms] if _ht_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
                 _ht_outer_stopped = False  # BUG-4B FIX: propagate stop from inner loops upward
                 for _ht_scan_dbms in _ht_list:
                     if _SCAN_STOPPED[0] or _ht_outer_stopped: break
@@ -52811,7 +52812,7 @@ class _HTTPHeaderInjectorV1:
             if _SCAN_STOPPED[0]: break
             _hx_dbms = getattr(self.config, "_detected_dbms", None) or getattr(self.config, "forced_dbms", None)
             _hx_list = ([_hx_dbms] if _hx_dbms
-                        else ["MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MSSQL", "Oracle", "SQLite"])
+                        else ["MySQL", "MariaDB", "PostgreSQL", "MSSQL", "Oracle", "SQLite"])
             _hx_stopped = False  # BUG-8-FIX: flag to propagate stop through nested loops
             for _hx_scan_dbms in _hx_list:
                 if _hx_stopped or _SCAN_STOPPED[0]: break  # BUG-8-FIX: propagate to DBMS loop
@@ -82223,7 +82224,7 @@ class AdvancedDBMSFingerprinter:
 
         else:
             # Error-based version extraction
-            for dbms in ("MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"):  # BUG-VEREXTRACT-NEWDBMS FIX: wire-compat engines added
+            for dbms in ("MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"):  # BUG-VEREXTRACT-NEWDBMS FIX: wire-compat engines added
                 qmap = DBMS_QUERIES.get(dbms, {})
                 if not qmap: continue
                 try:
@@ -90844,7 +90845,7 @@ class WebSocketInjector:
 
                 # Try error-based payloads  BUG-2 FIX (Req 1): CERTIFIED_PAYLOAD_DATABASE only
                 _ws_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-                _ws_dbms_list = [_ws_dbms] if _ws_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+                _ws_dbms_list = [_ws_dbms] if _ws_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
                 # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
                 # FIX-R6: mutate_all() applies all 20 mutation layers.
                 # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -91113,7 +91114,7 @@ class GRPCWebInjector:
 
             # Error-based probes  BUG-2 FIX (Req 1): CERTIFIED_PAYLOAD_DATABASE only
             _grpc_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-            _grpc_list = [_grpc_dbms] if _grpc_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+            _grpc_list = [_grpc_dbms] if _grpc_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
             # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
             # FIX-R6: mutate_all() applies all 20 mutation layers.
             # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -91238,7 +91239,7 @@ class GraphQLSubscriptionInjector:
 
                 # Test each variable  BUG-2 FIX (Req 1): CERTIFIED_PAYLOAD_DATABASE only
                 _gqls_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-                _gqls_list = [_gqls_dbms] if _gqls_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+                _gqls_list = [_gqls_dbms] if _gqls_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
                 # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
                 # FIX-R6: mutate_all() applies all 20 mutation layers.
                 # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -95115,7 +95116,7 @@ class ScannerV10(ScannerV9):
                 _spec_dbms = (getattr(cfg, 'forced_dbms', None) or
                               getattr(cfg, '_detected_dbms', None) or dbms_hint or 'MySQL')
                 _spec_dbms_list = ([_spec_dbms] if _spec_dbms != 'MySQL'
-                                   else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"])
+                                   else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"])
                 _spec_time_payloads = []
                 for _spec_d in _spec_dbms_list:
                     # BUG-R2-A FIX: use _get_cascade_payloads (all 10 categories merged,
@@ -95941,7 +95942,7 @@ class CachePoisonTimingDetector:
 
         # BUG-2 FIX (Req 1): use DBMS-specific Timebased payloads from CERTIFIED_PAYLOAD_DATABASE only
         _cpt_dbms = (getattr(self.config,'forced_dbms',None) or getattr(self.config,'_detected_dbms',None))
-        _cpt_list = [_cpt_dbms] if _cpt_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+        _cpt_list = [_cpt_dbms] if _cpt_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
         # FIX-R1/R2: _get_cascade_payloads merges ALL 10 CERTIFIED_PAYLOAD_DATABASE categories
         # (Timebased-first), not just a single Timebased category.
         # FIX-INDENT: the try: block was outside the inner for loop — it only ran ONCE after
@@ -108551,7 +108552,7 @@ DBMS_QUERIES_JSON_XML = _NormalizingDBMSDict(DBMS_QUERIES_JSON_XML)
 
 DBMS_PROBE_ORDER = [
     "MySQL", "PostgreSQL", "MSSQL", "SQLite", "Oracle", "MariaDB",
-    "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift",  # BUG-PROBEORDER-NEWDBMS FIX: wire-compatible engines must appear in probe order so their detection payloads are dispatched during blind scanning
+    # Removed: TiDB, CockroachDB, YugabyteDB, Amazon Redshift — no detection payloads in CERTIFIED_PAYLOAD_DATABASE
     # Removed: Generic (redundant  DBMS-specific payloads already cover all basic patterns)
     # Removed: DB2, Sybase, Firebird, H2, ClickHouse, HSQLDB, SAP_HANA,
     # Ingres (<1% of web apps combined)
@@ -135929,7 +135930,7 @@ class ScannerV14(ScannerV13):
                 if not result and (cfg.techniques in ("ALL","all","*") or "T" in cfg.techniques):
                     _dp_dbms = (getattr(cfg,'forced_dbms',None) or getattr(cfg,'_detected_dbms',None)
                                 or getattr(cfg,'_candidate_dbms',None))
-                    _dp_list = [_dp_dbms] if _dp_dbms else ["MySQL","MariaDB","TiDB","PostgreSQL","CockroachDB","YugabyteDB","Amazon Redshift","MSSQL","Oracle","SQLite"]
+                    _dp_list = [_dp_dbms] if _dp_dbms else ["MySQL","MariaDB","PostgreSQL","MSSQL","Oracle","SQLite"]
                     # FIX-R1/R2: _get_cascade_payloads gives ALL 10 CERTIFIED_PAYLOAD_DATABASE categories.
                     # FIX-R6: mutate_all() applies all 20 mutation layers.
                     # FIX-R9: asyncio.sleep(0) yields event loop between iterations.
@@ -187078,7 +187079,7 @@ except Exception as _cpdb_err:
 # With warm-up: all common (level=1..3) combinations are pre-computed once, giving
 # near-100% cache hits on all subsequent scan calls.
 try:
-    _WARMUP_DBMS = ["MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MSSQL", "Oracle", "SQLite"]  # BUG-WARMUP-NEWDBMS FIX: added TiDB/CockroachDB/YugabyteDB/Amazon Redshift so their payload combinations are pre-computed at startup
+    _WARMUP_DBMS = ["MySQL", "MariaDB", "PostgreSQL", "MSSQL", "Oracle", "SQLite"]  # TiDB/CockroachDB/YugabyteDB/Amazon Redshift removed: no detection payloads in CERTIFIED_PAYLOAD_DATABASE
     _WARMUP_TECHS = ["E","EH","B","BH","T","TH","S","DS","U","UE","HQ","IN","BT","ST","NV","WB","EX","HY","SO","UH","O"]
     _WARMUP_LEVELS = [1, 3, 5]
     _warmup_count = 0
