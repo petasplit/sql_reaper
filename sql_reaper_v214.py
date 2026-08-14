@@ -125647,6 +125647,23 @@ class TechniqueCascadeEngine:
                                                         f"benign ';' → {_s_sw_st} (not path-manip) → "
                                                         f"clean probe OK (status: det={_s_det_sc} "
                                                         f"clean={_s_cln_sc} diff={_s_clean_diff2:.3f})")
+                                        elif _s_det_is_path_err and not _s_cln_is_2xx and not _SCAN_STOPPED[0]:
+                                            # Detection probe returned non-2xx non-WAF (path corruption
+                                            # from ';' in URL), AND the clean probe also failed to return
+                                            # 2xx (status=0 = network error/cancelled, or non-2xx non-WAF).
+                                            # With an empty norm_base (CDN-cached empty body),
+                                            # SimHasher.body_similarity(b"", b"")=1.0 → diff=0.000.
+                                            # The zero diff is a SimHash artifact, NOT evidence of matching
+                                            # response semantics. The clean probe produced no usable 2xx
+                                            # response so it cannot confirm SQL processing; reject as
+                                            # path-manipulation FP. Applies to all DBMSes (MySQL, MSSQL,
+                                            # PostgreSQL, SQLite, Oracle, MariaDB) — the bug is DBMS-agnostic.
+                                            _s_clean_ok = False
+                                            print(
+                                                f"    [S-clean] ({_s_ctype}) clean probe FAILED "
+                                                f"(path-inj: det={_s_det_sc} clean={_s_cln_sc} "
+                                                f"diff={_s_clean_diff2:.3f}) → path-manipulation FP "
+                                                f"rejected at S-clean (no PCV needed)")
                                         if _s_clean_ok:
                                             print(
                                                 f"    [S-clean] ({_s_ctype}) clean probe OK "
@@ -125654,6 +125671,20 @@ class TechniqueCascadeEngine:
                                                 f"det={_s_det_sc} clean={_s_cln_sc})")
                                     else:
                                         print(f"    [S-clean] ({_s_ctype}) clean probe OK")
+                                else:
+                                    # _s_fp_clean is None — clean probe produced no response (network
+                                    # error, request cancelled, or _safe_confirm returned falsy).
+                                    # On a path-injection surface with the false-cond probe variant
+                                    # (not the original-value fallback), an absent response cannot
+                                    # confirm SQL processing: reject as path-manipulation FP rather
+                                    # than allowing _s_clean_ok to stay True and producing a cascade
+                                    # into PCV that wastes 4+ more probes to reach the same outcome.
+                                    if _s_is_path_inj and not _s_clean_fallback:
+                                        _s_clean_ok = False
+                                        print(
+                                            "    [S-clean] (false-cond) clean probe returned None "
+                                            "on path-inj surface → path-manipulation FP rejected "
+                                            "(no PCV needed)")
                             if _s_clean_ok:
                                 print("[+] Real injection confirmed via S on "
                                       f"{('path-injection' if param in ('__path__','path-injection') else param)!r}")
