@@ -125961,41 +125961,42 @@ class TechniqueCascadeEngine:
                                         print(f"    [S-clean] ({_s_ctype}) false-cond also differs from "
                                               f"baseline (diff={_s_clean_diff2:.3f})  "
                                               "path-manipulation FP rejected")
-                                    elif (_s_is_path_inj and not _s_clean_fallback
+                                    elif (not _s_clean_fallback
                                           and not has_err and _s_clean_diff2 <= 0.20):
-                                        # BUG-V215-1 FIX — S-CLEAN SILENT-WAF STATUS ORACLE
-                                        # (CRITICAL; S technique; path-injection; all DBMSes; silent WAF):
+                                        # BUG-V216-S-CLEAN-UNIVERSAL-PATH-ORACLE FIX (CRITICAL):
+                                        # The original condition guarded this benign oracle with
+                                        # `_s_is_path_inj and ...`, restricting it to URL-path
+                                        # parameters only.  Headers like X-Forwarded-Host can also
+                                        # cause path corruption when ';' appears in the value (a
+                                        # reverse proxy uses the header to build a backend URL and
+                                        # the semicolon breaks URL parsing → 404).  Because
+                                        # _s_is_path_inj = False for headers, the check never
+                                        # entered this block; instead Branch 4 (else:) fired and
+                                        # printed "clean probe OK" without any path-corruption
+                                        # verification.  PCV then correctly rejected the FP via
+                                        # T-CANARY+BENIGN-ORACLE, but the detection→PCV→reject cycle
+                                        # repeated for every stacked payload (100+ times per scan).
                                         #
-                                        # On path-injection surfaces with a silent WAF (HTTP 200 on
-                                        # blocked), the false-cond clean probe (`'; SELECT 1=2-- -`)
-                                        # can be WAF-blocked and returned with HTTP 200 + a body that
-                                        # closely resembles the baseline (either WAF serves the cached
-                                        # real page, or the WAF error page has low SimHash distance from
-                                        # baseline). The existing diff check (_s_clean_diff2 > 0.20) does
-                                        # NOT fire → "clean probe OK" → FP passes to PCV.
+                                        # Root cause in log.txt: X-Forwarded-Host + path-injection
+                                        # param both in DIFFERENTIAL oracle mode (norm_base=b"").
+                                        # False-cond probe `'; SLEEP(0)-- -` still contains ';' →
+                                        # ALSO causes 404 with empty body.
+                                        # SimHasher.body_similarity(b"", b"") = 1.0 → diff = 0.0.
+                                        # The 0.0 diff bypassed Branch 2 (diff > 0.20), and the
+                                        # `_s_is_path_inj=False` for headers bypassed Branch 3.
                                         #
-                                        # PCV S→T-CANARY correctly rejects the FP (benign oracle shows
-                                        # ';' causes non-2xx = path corruption), but the FP→PCV→reject
-                                        # cycle repeats for every payload in the loop, wasting 10,000+
-                                        # requests on a single scan without real injection found.
+                                        # Fix: remove _s_is_path_inj restriction — apply the benign
+                                        # oracle check universally for any param/header where
+                                        # the detection probe returned non-2xx non-WAF status
+                                        # (_s_det_is_path_err=True) while the clean probe returned
+                                        # low body-diff (≤ 0.20).  The internal _s_det_is_path_err
+                                        # guard ensures we only block when there is actual structural
+                                        # evidence of path corruption, not for genuine injections
+                                        # where the detection probe returned 2xx.
                                         #
-                                        # Fix: When on a path-injection surface and:
-                                        #   1. The detection probe (`fp`) returned non-2xx non-WAF status
-                                        #      (path corruption evidence — e.g. 404 from ';' in URL path),
-                                        #   2. The clean probe returned 2xx (possible silent WAF block), AND
-                                        #   3. _s_clean_diff2 ≤ 0.20 (clean probe body looks like baseline),
-                                        # send a BENIGN stacked probe ('; SELECT 1-- -, no SLEEP/timing
-                                        # keywords) to resolve the ambiguity:
-                                        #   - Path manipulation FP: ';' ALWAYS corrupts the URL path →
-                                        #     benign probe ALSO returns non-2xx (same path routing failure).
-                                        #     Silent WAF passes benign probe (no dangerous keywords) OR
-                                        #     blocks it (but returns WAF status, not path-corruption status).
-                                        #   - Real injection: ';' is SQL-processed (not URL-corrupting) →
-                                        #     benign probe returns 2xx (backend processes stacked query
-                                        #     normally). WAF may or may not block, but path routing is fine.
-                                        # Decision: if benign probe returns non-2xx non-WAF → FP confirmed
-                                        # (path manipulation). Set _s_clean_ok=False here, avoid PCV entirely,
-                                        # saving the full PCV probe budget (4+ probes + overhead) per FP.
+                                        # Applies to: all HTTP params/headers that embed ';' in a
+                                        # stacked payload and are processed by a reverse proxy or
+                                        # server that interprets the header value as a URL component.
                                         _s_det_sc = getattr(fp, 'status_code', None)
                                         _s_cln_sc = getattr(_s_fp_clean, 'status_code', None)
                                         # BUG-V215-1a-FIX: The old exclusion list included 400 (Bad
@@ -126107,9 +126108,12 @@ class TechniqueCascadeEngine:
                                         if _s_clean_ok:
                                             print(
                                                 f"    [S-clean] ({_s_ctype}) clean probe OK "
-                                                f"(path-inj diff={_s_clean_diff2:.3f} "
+                                                f"(diff={_s_clean_diff2:.3f} "
                                                 f"det={_s_det_sc} clean={_s_cln_sc})")
                                     else:
+                                        # _s_clean_fallback=True (original-value probe) or
+                                        # has_err=True with _s_clean_err=False: clean probe
+                                        # does not match any path-corruption pattern.
                                         print(f"    [S-clean] ({_s_ctype}) clean probe OK")
                                 else:
                                     # _s_fp_clean is None — clean probe produced no response (network
