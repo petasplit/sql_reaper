@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v216 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 15, 2026)         ║
-║  v215 base + 5 additional bugs fixed. v216 fixes the timing-oracle RC-2 bug,   ║
-║  the S-technique path-injection FP probe-waste (all 5 DBMSes), the direct      ║
-║  extractor calibration WAF-block garbage (ÿÿÿ), and the r7 empty-string bug    ║
-║  caused by WAF selective blocking of char-comparison probes at real data pos.  ║
+║  SQLReaper v217 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 15, 2026)         ║
+║  v216 base + 7 additional bugs fixed. v217 fixes the timing threshold NameError ║
+║  in the bitwise path, WAF-block blindness in body-size and bitwise oracles,    ║
+║  missing DBMS entries in the bitwise char-func map and bitwise operator         ║
+║  dispatch, the Check-E ClickHouse case-sensitivity gap, and missing Firebird/  ║
+║  ClickHouse entries in the SCE char-ord dispatch.                               ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v215 → v216) — 5 BUGS FIXED                           ║
@@ -94,6 +95,89 @@ r"""
 ║      lowercase ascii()/substring(); DB2 requires SUBSTR() not SUBSTRING();       ║
 ║      MEDIUM; _fallback_equality; Firebird/ClickHouse/DB2/SAP_HANA/H2 only.      ║
 ║      Fix: add explicit DBMS-correct entries for each missing DBMS.               ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v216 → v217) — 7 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V217-THRESH-UNSET-BODY-ORACLE: _thresh was only assigned inside        ║
+║      `if not _use_bool_body_oracle`, causing NameError: name '_thresh' is not   ║
+║      defined when the bitwise extraction path (_eval_d_bw) was entered on any   ║
+║      target where the body-size oracle won calibration. Root cause: the          ║
+║      variable was conditionally defined but unconditionally referenced in the    ║
+║      timing path of _eval_d_bw. HIGH; direct extractor; T/TH/BT techniques;    ║
+║      all DBMSes with timing fallback; all surfaces.                              ║
+║      Fix: `_thresh = (ms_t + ms_f) / 2` computed unconditionally before the     ║
+║      oracle-mode branch, so both body-size and timing paths always have it.     ║
+║                                                                                    ║
+║  [✓] BUG-V217-BODY-ORACLE-WAF-BLOCK: Body-size oracle path (_eval_d) lacked a  ║
+║      WAFBlockDiscriminator guard. A WAF-blocked response has a constant body     ║
+║      size (e.g. 155 B Imperva block page) that, depending on threshold, either  ║
+║      always satisfies or never satisfies the > _bool_threshold check — making   ║
+║      the oracle emit a constant True or False for every probe. On targets where  ║
+║      WAF selective-block rate is >10 %, the body oracle silently produces all-   ║
+║      True (lo→255 → 'ÿ') or all-False (empty result). MEDIUM-HIGH; _eval_d;    ║
+║      B/BH/BT/HQ techniques; all DBMSes; WAF-blocking targets.                   ║
+║      Fix: `if WAFBlockDiscriminator.is_waf_block(fp): return None` before the  ║
+║      body-size comparison so WAF-blocked probes propagate None (oracle unknown). ║
+║                                                                                    ║
+║  [✓] BUG-V217-EVAL-D-BW-WAF-BLOCK: `_eval_d_bw` (bitwise oracle path) lacked  ║
+║      a WAFBlockDiscriminator guard. WAF-blocked responses (fast, ~30 ms) are    ║
+║      always below _thresh → oracle always returns False → all bit masks test    ║
+║      as 0 → every extracted character is chr(0) → extraction produces NUL-      ║
+║      filled garbage silently. MEDIUM; _eval_d_bw; WB/BT/TH techniques; all     ║
+║      DBMSes; Imperva/Cloudflare/ModSecurity WAF targets.                         ║
+║      Fix: `if WAFBlockDiscriminator.is_waf_block(fp): return None` before       ║
+║      `return ms >= _thresh` so WAF-blocked bit probes are skipped cleanly.      ║
+║                                                                                    ║
+║  [✓] BUG-V217-EXTRACT-BITWISE-DE-BW-MISSING-DBMS: Firebird and ClickHouse      ║
+║      were absent from the `_de_bw_ascii` character-function map used in the     ║
+║      direct bitwise extraction path. Both fell through to `KeyError` (dict      ║
+║      lookup) or the generic default `ASCII(SUBSTRING(...))` — invalid SQL on    ║
+║      Firebird (uses ASCII_VAL(SUBSTRING(x FROM p FOR 1))) and on ClickHouse     ║
+║      (function names are case-sensitive: ascii() not ASCII()). Every bitwise    ║
+║      probe on these DBMSes raised a DB exception → oracle returned None for     ║
+║      all 8 bit masks → extracted char always chr(0) → extraction returned NUL-  ║
+║      filled result silently. MEDIUM; direct bitwise extractor; Firebird and     ║
+║      ClickHouse targets only.                                                    ║
+║      Fix: add `"Firebird": "ASCII_VAL(SUBSTRING(({e}) FROM {p} FOR 1))"` and   ║
+║      `"ClickHouse": "ascii(substring(({e}),{p},1))"` to `_de_bw_ascii`.        ║
+║                                                                                    ║
+║  [✓] BUG-V217-EXTRACT-BITWISE-INFIX-ORACLE: Char-level bitwise extraction      ║
+║      always used the `&` infix operator for the bit-mask comparison regardless  ║
+║      of DBMS. Oracle, DB2, and Sybase do not support the `&` infix operator     ║
+║      (they use BITAND(a,b)); Firebird uses BIN_AND(a,b); ClickHouse uses        ║
+║      bitAnd(a,b). Every bitwise char probe on these DBMSes produced a SQL        ║
+║      syntax error → oracle always returned None → extracted char always chr(0). ║
+║      MEDIUM; direct bitwise extractor; Oracle, DB2, Sybase, Firebird,           ║
+║      ClickHouse targets.                                                         ║
+║      Fix: per-DBMS dispatch: BITAND(ascii_e, mask)=mask for Oracle/DB2/Sybase; ║
+║      BIN_AND(ascii_e, mask)=mask for Firebird; bitAnd(ascii_e, mask)=mask for  ║
+║      ClickHouse; (ascii_e)&mask=mask for all others.                            ║
+║                                                                                    ║
+║  [✓] BUG-V217-CHECKE-CLICKHOUSE-CASE: ClickHouse was absent from the Check-E  ║
+║      DBMS-specific SQL payload dictionary. The fallback behaviour was to use     ║
+║      the PostgreSQL payload — which calls SUBSTRING()/LENGTH()/UPPER() with      ║
+║      uppercase names. ClickHouse function lookup is case-sensitive: SUBSTRING() ║
+║      raises "Unknown function SUBSTRING", LENGTH() raises "Unknown function      ║
+║      LENGTH", UPPER() raises "Unknown function UPPER". Every Check-E probe on   ║
+║      ClickHouse returned a DB error response → Check-E always failed → PCV      ║
+║      rejected valid injections on ClickHouse targets. MEDIUM; Check-E guard;   ║
+║      ClickHouse targets only.                                                    ║
+║      Fix: add `"ClickHouse": "' AND substring('SQLReaper',1,1)='S' AND          ║
+║      length('SQLReaper')=9 AND upper('a')='A'-- -"` to the payload dict.        ║
+║                                                                                    ║
+║  [✓] BUG-V217-SCE-CHAR-ORD-MISSING-DBMS: Firebird and ClickHouse were absent   ║
+║      from the SideChannelExtractor (SCE) char-ord dispatch that builds the per- ║
+║      character threshold expression used in OOB timing fallback extraction.     ║
+║      Firebird fell to the generic default `ASCII(SUBSTR(...))>=threshold` —     ║
+║      invalid on Firebird which requires `ASCII_VAL(SUBSTR(x FROM p FOR 1))`.   ║
+║      ClickHouse fell to the same default with uppercase `ASCII()` — invalid on  ║
+║      ClickHouse which requires lowercase `ascii()`. Both produced SQL exceptions ║
+║      → SCE extracted chr(0) or empty string for every position. MEDIUM; SCE;    ║
+║      Firebird and ClickHouse targets; OOB/timing fallback extraction path.      ║
+║      Fix: add explicit Firebird and ClickHouse branches with correct function   ║
+║      names and syntax.                                                           ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v214.1 → v215) — 3 BUGS FIXED                         ║
