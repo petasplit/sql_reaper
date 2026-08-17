@@ -119848,6 +119848,9 @@ class TechniqueCascadeEngine:
             _details["B"] = _b_method
 
         _canary_probes_sent = 0  # tracks how many canary pairs were actually attempted
+        _canary_valid_pairs = 0  # BUG-CHECK-B-WAF-BLOCKED-CANARY FIX: pairs where BOTH probes
+        # returned non-zero responses (not WAF-blocked). Used to distinguish "canary produced no
+        # timing signal" from "WAF blocked canary before any timing measurement was possible".
         for _bt, _bf, _b_name in (_b_fallbacks if _timing_canary_applicable else []):
             # FIX-REQ9-CPU-CANARY: Add minimal inter-pair delay to prevent 100% CPU on
             # BUG-FIX-4 (Issue 9): Break checks moved BEFORE asyncio.sleep so a
@@ -119946,6 +119949,12 @@ class TechniqueCascadeEngine:
                 LOG.debug(f"[PCV Check B] True probe returned {_t_ms:.0f}ms for {_b_name} "
                           "— network failure or scan stopped; skipping pair")
                 continue
+            # BUG-CHECK-B-WAF-BLOCKED-CANARY FIX (part 2): Both probes returned
+            # valid (non-zero) timing responses — count this as a real measurement pair.
+            # Only pairs counted here can set _check_b_explicitly_failed, so WAF-blocked
+            # pairs (where both or one probe returned 0ms) do not trigger the DP-timing
+            # oracle bypass block.
+            _canary_valid_pairs += 1
             if _t_ms > _true_needed and _f_ms < _false_cutoff:
                 # FIX-REQ4/9: Stop-check + CPU yield before every additional probe inside triple-verify.
                 # Without these, a confirmed injection on another surface keeps sending
@@ -120239,7 +120248,13 @@ class TechniqueCascadeEngine:
                     LOG.debug(f"[PCV Check B] TimingRatioConfirmer Oracle HQ error: {_trc_e}")
         # Bug 1b: if timing canary probes were actually sent and NONE confirmed,
         # record an explicit Check B failure so the DP-timing oracle bypass is blocked.
-        if _timing_canary_applicable and _canary_probes_sent > 0 and not _b_pass:
+        # BUG-CHECK-B-WAF-BLOCKED-CANARY FIX (part 3): Gate on _canary_valid_pairs
+        # (pairs where BOTH probes returned >0ms) instead of _canary_probes_sent (pairs
+        # attempted regardless of WAF blocking). When the WAF blocks every canary probe
+        # and returns 0ms, _canary_valid_pairs stays 0 — canary result is INCONCLUSIVE,
+        # not FAILED. Treating inconclusive as failed was wrongly blocking the DP-timing
+        # oracle bypass even when timing evidence was strong.
+        if _timing_canary_applicable and _canary_valid_pairs > 0 and not _b_pass:
             _check_b_explicitly_failed = True
         _details["B"] = (f"{_b_method}: true={_b_true_ms:.0f}ms false={_b_false_ms:.0f}ms"
                          if _b_pass
@@ -122651,30 +122666,30 @@ class TechniqueCascadeEngine:
                         # avoid excessive scan time on genuine RANDOMBLOB timing injections.
                         if 'RANDOMBLOB' in payload.upper() and _sl_v > 100:
                             _sl_v = _sl_v / 10_000_000  # bytes → approx seconds (10MB/s conservative)
+                        # BUG-PERLOAD-THRESHOLD-FLOOR FIX (ROOT CAUSE OF LOG FALSE POSITIVE):
+                        # The per-payload threshold formula used std_t * 1.5 as its noise floor,
+                        # which is only 1.5-sigma (75ms for std=50ms). This allowed payloads with
+                        # small SLEEP values (e.g. SLEEP(0.25)) to compute a threshold below CDN
+                        # latency:
+                        #   SLEEP(0.25): mean_t=200 + max(125, 75) = 325ms < CDN latency (329ms)
+                        # Result (confirmed in log line 22255): "Cross-category timing signal via
+                        # HY oracle: elapsed1=329ms elapsed2=329ms → T technique" — CDN latency
+                        # masquerading as SQL SLEEP injection.
+                        #
+                        # ROOT CAUSE: The global threshold uses std_t * 3.0 (3-sigma) as its
+                        # noise floor: threshold = mean_t + max(t*1000*0.50, std_t*3.0).
+                        # The per-payload threshold used 1.5 (half the global floor), allowing
+                        # per-payload thresholds 2× lower than CDN-jitter-calibrated safety floor.
+                        #
+                        # FIX: Use std_t * 3.0 to match the global threshold's noise floor,
+                        # ensuring per-payload thresholds never drop below 3σ of CDN jitter.
+                        # HIGH_JITTER path (cv >= 0.60) already uses 4.0 (increased from 1.5):
+                        #   std=178ms × 4.0 = 712ms → threshold 912ms > 734ms (3σ boundary) ✓
+                        # Normal path: std=50ms × 3.0 = 150ms → threshold 350ms > CDN 329ms ✓
+                        # For SLEEP(0.25): max(125, 150) = 150ms → threshold 350ms > CDN 329ms ✓
                         _payload_threshold = mean_t + max(_sl_v * 1000 * 0.50,
-                                                          # BUG-T-THRESHOLD-HIGH-JITTER FIX:
-                                                          # The floor `std_t * 1.5` is too low
-                                                          # when std_t is small (baseline defaulted
-                                                          # to 50ms minimum) or when HIGH_JITTER
-                                                          # makes the actual std very large.
-                                                          # Root cause is the same as BUG-HQ-THRESHOLD-
-                                                          # HIGH-JITTER: with HIGH_JITTER cv=0.89,
-                                                          # mean=200ms, std≈178ms.  The formula:
-                                                          #   std_t * 1.5 = 50 * 1.5 = 75ms
-                                                          # gives _payload_threshold=440ms for
-                                                          # SLEEP(0.48s) — well inside the natural
-                                                          # jitter envelope (mean + 3σ ≈ 734ms).
-                                                          # The log shows:
-                                                          #   req#2920: elapsed=436ms threshold=440ms HIT
-                                                          #   T-confirm fp2=154ms pass=False  ← correctly rejected
-                                                          # The confirm detects the false positive but
-                                                          # wastes 2 requests.  Apply same HIGH_JITTER
-                                                          # scaling as HQ: when std/mean ≥ 0.60
-                                                          # (HIGH_JITTER regime), use std × 4.0 so the
-                                                          # floor clears the 3σ boundary:
-                                                          #   178 × 4.0 = 712ms → threshold 912ms > 734ms
                                                           std_t * (4.0 if (mean_t > 0 and std_t / mean_t >= 0.60)
-                                                                   else 1.5))
+                                                                   else 3.0))
                     else:
                         _payload_threshold = threshold  # non-timing payload
                     # Test this payload under each detected injection context
@@ -124252,6 +124267,27 @@ class TechniqueCascadeEngine:
                                         _xcat_canary_ok = False
                                         LOG.debug(f"[xcat-timing] FP suppressed: canary slow "
                                                   f"({_xcat_canary.elapsed_ms:.0f}ms >= {_xcat_canary_thresh:.0f}ms)")
+                                    # BUG-XCAT-IDENTICAL-TIMING FIX: Also reject when timing probes
+                                    # are NOT significantly slower than the canary.  CDN uniform latency
+                                    # makes ALL requests equally slow (including canary).  A genuine SQL
+                                    # SLEEP injection must produce responses meaningfully above the canary
+                                    # (the canary runs without SLEEP and returns at baseline speed).
+                                    # Confirmed in log line 22255: elapsed1=329ms elapsed2=329ms canary≈329ms
+                                    # — no differential → CDN latency, not SQL SLEEP.
+                                    # Require probes to exceed canary by ≥30% of (threshold - baseline);
+                                    # floor at 80ms to prevent over-suppression on very-low-threshold cases.
+                                    if _xcat_canary_ok:
+                                        _xcat_expected_delta = max(
+                                            (time_threshold - _xcat_bl_mean) * 0.30, 80)
+                                        _xcat_probe_min = min(fp.elapsed_ms, _cc_fp2.elapsed_ms)
+                                        _xcat_probe_delta = _xcat_probe_min - _xcat_canary.elapsed_ms
+                                        if _xcat_probe_delta < _xcat_expected_delta:
+                                            _xcat_canary_ok = False
+                                            LOG.debug(
+                                                "[xcat-timing] FP suppressed: probes not faster than "
+                                                "canary by expected delta (delta=%.0fms need=%.0fms) "
+                                                "— CDN uniform latency, not SQL SLEEP",
+                                                _xcat_probe_delta, _xcat_expected_delta)
                             except Exception:
                                 pass  # canary error — proceed with detection (fail-open for sensitivity)
                             if _xcat_canary_ok:
