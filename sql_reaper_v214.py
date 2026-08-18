@@ -72826,7 +72826,14 @@ class ScannerV4(Scanner):
                                     continue
                             except Exception as _v4_pcv_err:
                                 LOG.warning(f"[V4-PCV] PCV error for {param!r}: {_v4_pcv_err} — REJECTING (fail-closed)")
-                            _v4_pcv_passed = False  # FIX-R4-1: reject on PCV exception
+                                # ISSUE-5 FIX: Move _v4_pcv_passed = False INSIDE the except block.
+                                # Previously this line was OUTSIDE the except at the same indent as `try:`,
+                                # meaning it ran unconditionally after every try/except — including the
+                                # SUCCESS path where _run_pcv_check returned True. This caused ALL
+                                # confirmed vulnerabilities in the V4 scan path to be silently dropped
+                                # (line 72850 `if _v4_pcv_passed:` was always False). Fix: only set
+                                # False inside the exception handler (fail-closed on PCV error).
+                                _v4_pcv_passed = False  # FIX-R4-1: reject on PCV exception (now inside except)
                         else:
                             # BUG-PCVI-LEAK FIX (REQ 12/4): _run_pcv_check is absent (old mixin
                             # path).  _run_cross_category_probes pre-incremented _PCV_IN_PROGRESS[0]
@@ -73288,8 +73295,13 @@ class ScannerV4(Scanner):
                                 r, engine, cfg, method, url, data, _so_fmt,
                                 param, orig_val, tamper_chain, _so_bl, None)
                         except Exception as _so_pcv_err:
-                            LOG.debug(f"[ExtModes] Second-order PCV error: {_so_pcv_err} — accepting")
-                            _so_pcv_passed = True
+                            # ISSUE-5 FIX: PCV exception is INCONCLUSIVE, not PASS.
+                            # The previous code accepted (True) on exception, converting
+                            # INCONCLUSIVE to PASS — a silent false-positive fallback.
+                            # Fix: reject on PCV exception (fail-closed), consistent
+                            # with the V4 path and PCV guard principles.
+                            LOG.debug(f"[ExtModes] Second-order PCV error: {_so_pcv_err} — REJECTING (fail-closed)")
+                            _so_pcv_passed = False
                     if _so_pcv_passed:
                         self.session.record_vuln(param, r.technique, r.payload, r.dbms)
                         confirmed.append({"param": param, "original": orig_val,
@@ -105939,7 +105951,15 @@ class WAFBlockDiscriminator:
         """
         if fp is None:
             return False  # BUG-DISC-1 FIX: None guard before attribute access
-        if fp and _validate_response(fp, allow_empty=True) and _get_safe_status_code(fp) == 429:
+        # ISSUE-2/4 FIX: 2xx responses are NEVER WAF blocks, even if the body contains
+        # WAF-like patterns (e.g. a page that mentions "security check" or "captcha").
+        # A 200 means the server processed the request. The app-level response (200 with
+        # WAF challenge text) can still carry an injection signal and must not be skipped.
+        # Only non-2xx status codes (403, 429, etc.) are WAF block candidates.
+        _sc = _get_safe_status_code(fp)
+        if _sc and 200 <= _sc < 300:
+            return False  # ISSUE-2/4 FIX: 2xx is never a WAF block
+        if fp and _validate_response(fp, allow_empty=True) and _sc == 429:
             return False  # rate-limit is NOT a WAF block — different root cause, different handler
         if not fp.body:
             return False
@@ -126723,8 +126743,17 @@ class TechniqueCascadeEngine:
                 _s_diff = 1.0 - sim
                 if not _validate_response(fp, func_name="waf_block_check"): return None  # BUG-FIX-SYNTAX: continue→return None (_send_and_check is not a loop)
                 _s_waf = WAFBlockDiscriminator.is_waf_block(fp)
-                _s_verdict = (" ERROR" if has_err else
-                              " WAF-blocked" if _s_waf else
+                # ISSUE-3 FIX: WAF takes priority over SQL error detection.
+                # When the WAF intercepts a request, the response body may contain
+                # SQL-like text (e.g. WAF error pages that echo the blocked query).
+                # This causes both has_err=True and _s_waf=True simultaneously, producing
+                # a contradictory ERROR verdict even though the WAF blocked the probe.
+                # Fix: suppress has_err when the response is WAF-blocked, because any
+                # SQL-like text in a WAF block page is from the WAF, not the database.
+                if _s_waf:
+                    has_err = False
+                _s_verdict = (" WAF-blocked" if _s_waf else
+                              " ERROR" if has_err else
                               " DIFF" if _s_diff > 0.25 else
                               " same")
                 print(f"    [S-stack] [{dbms}] req#{self._total_reqs} "
@@ -152908,9 +152937,11 @@ class ScannerV15(ScannerV14):
                                               _cfg_data_val, fp_, fv_), timeout=20)
 
             #  Wire oracle mode into config so all detectors can read it
-            # OracleMode.DIFFERENTIAL and TIMING_ONLY are valid scan modes;
-            # only OracleMode.BLOCKED is a hard abort (no oracle possible at all).
-            cfg._oracle_mode = report.oracle_mode if report else OracleMode.FULL
+            # ISSUE-1 FIX: Always use FULL oracle regardless of SafeModeVerifier result.
+            # TIMING_ONLY, DIFFERENTIAL, and BLOCKED modes caused excessive probe skipping
+            # and missed injection points. Force FULL unconditionally so all oracle paths
+            # (boolean, error, timing) are tried on every target.
+            cfg._oracle_mode = OracleMode.FULL
             if not cfg._oracle_mode:
                 # FIX-SAFEVERIFY-TIMEOUT: verify() exceeded 20s timeout or failed;
                 # cfg._oracle_mode was never set.  All downstream reads via
