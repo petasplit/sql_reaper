@@ -104841,7 +104841,17 @@ class URLPathInjector:
                         test_url = self.build_url_with_segment(url, seg_idx, ep)
                         fp       = await self.engine.send(method, test_url, headers=headers)
                         body     = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                        # RCA-1 FIX: Use a flag to break the outer DBMS loop after the
+                        # first matching DBMS so MySQL and MariaDB (which share identical
+                        # error patterns like "you have an error in your sql") cannot both
+                        # be appended as separate DetectionResult objects for the same
+                        # payload.  Previously the inner `break` only exited `for pat in
+                        # patterns:`, leaving the outer `for dbms, patterns` loop to
+                        # continue and append a second result under a different DBMS name.
+                        _ps_matched_dbms = False
                         for dbms, patterns in SQL_ERROR_PATTERNS.items():
+                            if _ps_matched_dbms:
+                                break
                             for pat in patterns:
                                 if re.search(pat, body, re.I):
                                     if _ps_bl_body and re.search(pat, _ps_bl_body, re.I):
@@ -104861,6 +104871,7 @@ class URLPathInjector:
                                         dbms=dbms, confidence=0.92,
                                         notes=f"path_segment_injection idx={seg_idx} confirmed=2/2"))
                                     LOG.info(f"Path injection: segment {seg_idx} ({seg_val!r})")
+                                    _ps_matched_dbms = True  # stop checking other DBMSes
                                     break
                         if results: break
                     except Exception as _sqr_e:
@@ -139668,9 +139679,18 @@ class ScannerV14(ScannerV13):
                                 method, url, data, "header", r.param, "",
                                 {}, b"", r, r.technique, r.dbms)
                             if _pcv_ok:
-                                print(f"[+] [SURFACE] Header PCV PASSED: {r.param} ", flush=True)
-                                # Record vuln only after PCV passes
-                                orch.session.record_vuln(r.param, r.technique, r.payload, r.dbms)
+                                # RCA-3/RCA-4 FIX: include technique, DBMS, tamper chain, and
+                                # request count in the PCV PASSED line (mirrors _scan_path output).
+                                _hdr_tc = getattr(_pcv_cascade, 'tamper_chain', None) or tamper_chain or []
+                                _hdr_req = TechniqueCascadeEngine._CLASS_REQ_COUNTER[0] if hasattr(TechniqueCascadeEngine, '_CLASS_REQ_COUNTER') else '?'
+                                print(f"[+] [SURFACE] Header PCV PASSED: {r.param} [{r.technique}] {r.dbms}", flush=True)
+                                if _hdr_tc:
+                                    print(f"[+] [SURFACE] Tamper chain : {' -> '.join(str(t) for t in _hdr_tc)}", flush=True)
+                                print(f"[+] [SURFACE] Requests so far: {_hdr_req}", flush=True)
+                                # Record vuln only after PCV passes; include tamper in notes so
+                                # record_vuln()'s banner can display the tamper chain.
+                                _hdr_notes = (f"tamper={' -> '.join(str(t) for t in _hdr_tc)}" if _hdr_tc else "")
+                                orch.session.record_vuln(r.param, r.technique, r.payload, r.dbms, notes=_hdr_notes)
                                 _results.append({"param":r.param,"original":"","result":r,
                                                    "url":url,"method":method,"data_fmt":"header","data":data})
                             else:
@@ -139736,7 +139756,10 @@ class ScannerV14(ScannerV13):
                                 if _path_tc:
                                     print(f"[+] [SURFACE] Tamper chain : {' -> '.join(str(t) for t in _path_tc)}", flush=True)
                                 print(f"[+] [SURFACE] Requests so far: {_path_req}", flush=True)
-                                orch.session.record_vuln(r.param, r.technique, r.payload, r.dbms)
+                                # RCA-3 FIX: pass tamper chain in notes so record_vuln()'s banner
+                                # can display the tamper chain instead of silently omitting it.
+                                _path_notes = (f"tamper={' -> '.join(str(t) for t in _path_tc)}" if _path_tc else "")
+                                orch.session.record_vuln(r.param, r.technique, r.payload, r.dbms, notes=_path_notes)
                                 _results.append({"param":r.param,"original":"","result":r,
                                                    "url":url,"method":method,"data_fmt":"path","data":None})
                             else:
@@ -139788,8 +139811,16 @@ class ScannerV14(ScannerV13):
                                 method, url, data, "json", r.param, "",
                                 {}, b"", r, r.technique, r.dbms)
                             if _pcv_ok:
-                                print(f"[+] [SURFACE] JSON PCV PASSED: {r.param} ", flush=True)
-                                orch.session.record_vuln(r.param, r.technique, r.payload, r.dbms)
+                                # RCA-3/RCA-5 FIX: include technique, DBMS, tamper chain, and
+                                # request count (mirrors _scan_path output).
+                                _json_tc = getattr(_pcv_c, 'tamper_chain', None) or tamper_chain or []
+                                _json_req = TechniqueCascadeEngine._CLASS_REQ_COUNTER[0] if hasattr(TechniqueCascadeEngine, '_CLASS_REQ_COUNTER') else '?'
+                                print(f"[+] [SURFACE] JSON PCV PASSED: {r.param} [{r.technique}] {r.dbms}", flush=True)
+                                if _json_tc:
+                                    print(f"[+] [SURFACE] Tamper chain : {' -> '.join(str(t) for t in _json_tc)}", flush=True)
+                                print(f"[+] [SURFACE] Requests so far: {_json_req}", flush=True)
+                                _json_notes = (f"tamper={' -> '.join(str(t) for t in _json_tc)}" if _json_tc else "")
+                                orch.session.record_vuln(r.param, r.technique, r.payload, r.dbms, notes=_json_notes)
                                 _results.append({"param":r.param,"original":"","result":r,
                                                    "url":url,"method":method,"data_fmt":"json","data":data})
                             else:
