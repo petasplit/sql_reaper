@@ -25699,20 +25699,22 @@ class ScanSession:
                      f"dbms={dbms} — logging only, extraction already active/done (Req 5).")
             return False  # FIX-PATCH5-RETURN: callers check False to suppress banner
         LOG.info(f"Vulnerability confirmed  param={param.replace('__path__', 'path-injection')!r} technique={technique} dbms={dbms}")
-        # BUG-DETECTION-DISPLAY FIX: print detection payload so the user can see what was
-        # injected.  Previously record_vuln only wrote to the log — nothing was printed to
-        # stdout, so the terminal showed CONFIRMED but no payload/technique details.
         _rv_param_display = param.replace('__path__', 'path-injection').replace('__path_seg__', 'path-injection')
+        # UI-OUTPUT FIX: Print prominent [!!] SQL INJECTION CONFIRMED banner so confirmation
+        # is always visible in the terminal regardless of which code path triggers record_vuln.
+        _rv_req_count = TechniqueCascadeEngine._CLASS_REQ_COUNTER[0] if hasattr(TechniqueCascadeEngine, '_CLASS_REQ_COUNTER') else '?'
+        print(f"\n[!!] SQL INJECTION CONFIRMED  [{technique}] {dbms}  param={_rv_param_display!r}", flush=True)
         print(f"[+] Technique : {technique}  DBMS: {dbms}  Param: {_rv_param_display!r}", flush=True)
         if payload:
-            print(f"[+] Payload   : {str(payload)[:150]}", flush=True)
+            print(f"[+] Payload   : {str(payload)[:200]}", flush=True)
+        print(f"[+] Requests  : {_rv_req_count}", flush=True)
         # Extract tamper chain from notes if present (stored as "tamper=a,b,c" or tamper list repr)
         if notes:
             _rv_notes_str = str(notes)
             _rv_tamper_idx = _rv_notes_str.lower().find('tamper')
             if _rv_tamper_idx >= 0:
-                _rv_tamper_snippet = _rv_notes_str[_rv_tamper_idx:_rv_tamper_idx + 120]
-                print(f"[+] Notes     : {_rv_tamper_snippet}", flush=True)
+                _rv_tamper_snippet = _rv_notes_str[_rv_tamper_idx:_rv_tamper_idx + 200]
+                print(f"[+] Tamper    : {_rv_tamper_snippet}", flush=True)
         return True
 
     def already_confirmed(self, param): return param in self.vulnerabilities
@@ -113449,7 +113451,33 @@ class TechniqueCascadeEngine:
                     _e_body = _safe_decode_body(_fp_e, encoding="utf-8", errors='replace', func_name='extraction__fp_e').lower()
                     _c_body = (_safe_decode_body(_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__fp_clean').lower()
                                if _fp_clean.body else "")
-                    # Full per-DBMS pattern set (matches _post_confirm_verify_locked Check C)
+                    # FP-ROOT-CAUSE FIX: Reject inject response that is itself a WAF block page.
+                    # When Cloudflare/other WAFs return a challenge page, the page body may reflect
+                    # SQL keywords from the payload (e.g. "Suspicious query: EXTRACTVALUE(...)").
+                    # Without this guard, pattern matching on the challenge body is identical to
+                    # matching a real database error — causing a false positive on E-PCV.
+                    _waf_disc = getattr(self, '_waf_disc', None) or getattr(getattr(self, 'config', None), '_waf_disc', None)
+                    if _waf_disc is None:
+                        try:
+                            from __main__ import WAFBlockDiscriminator as _WBDC
+                            _waf_disc = _WBDC()
+                        except Exception:
+                            _waf_disc = None
+                    if _waf_disc is not None:
+                        try:
+                            if _waf_disc.is_waf_block(_fp_e):
+                                print(f"[!] PCV FAILED [{tech}] {dbms}  inject response is a WAF block page — rejecting (anti-FP)", flush=True)
+                                return False
+                        except Exception:
+                            pass
+                    # Full per-DBMS pattern set — tight, DBMS-specific error strings only.
+                    # ROOT-CAUSE FP FIX: Removed SQL function names ("extractvalue", "updatexml")
+                    # from MariaDB patterns — these are payload keywords, not DB error strings.
+                    # Removed overly broad English phrases from PostgreSQL ("function",
+                    # "does not exist", "could not", "violates", "out of range", "value too long",
+                    # "permission denied", "must be owner", "unterminated dollar-quoted") and
+                    # SQLite ("syntax error", "near", "incomplete input", "subquery returns") that
+                    # appear in WAF challenge page HTML and other non-database content.
                     _all_pats = {
                         "MySQL": [
                             "you have an error in your sql", "error 1064", "sqlstate[",
@@ -113460,15 +113488,9 @@ class TechniqueCascadeEngine:
                             "error:  syntax error", "error:  unterminated", "pg_query",
                             "error:  division by zero", "error:  invalid input syntax",
                             "sqlstate: 22012", "sqlstate: 42601", "npgsql.", "org.postgresql",
-                            # BUG-PCV-R3-C FIX: bracket-format SQLSTATE and middleware sub-strings
                             "sqlstate[22012]", "sqlstate[42601]", "sqlstate[42p01]",
                             "division by zero", "syntax error at or near", "invalid input syntax for type",
                             "relation does not exist", "column does not exist",
-                            # FIX-REQ3-PG-ERR: Additional patterns from certified payloads
-                            "operator does not exist", "function", "does not exist",
-                            "cannot cast", "integer out of range", "out of range",
-                            "value too long", "numeric field overflow", "unterminated dollar-quoted",
-                            "permission denied", "must be owner", "could not", "violates",
                         ],
                         "MSSQL": [
                             "incorrect syntax near", "unclosed quotation mark", "msg 156",
@@ -113478,52 +113500,28 @@ class TechniqueCascadeEngine:
                         "Oracle": [
                             "ora-00904", "ora-00933", "ora-01756",
                             "ora-00936", "ora-00942", "ora-01476", "ora-06550",
-                            # FIX-6 (Req 3): Add missing Oracle error patterns.
-                            # ORA-01722 fires on CAST-based error payloads in ORACLE_ERROR_PAYLOADS.
-                            # ORA-00900 fires on syntax errors in Oracle-specific payload variants.
-                            # ORA-12801 fires on parallel query errors from heavy-query timing payloads
-                            # that also leak error output. ORA-06502 fires on PL/SQL numeric errors.
-                            # ORA-01031 fires when privilege check payloads are used (insufficient privileges).
-                            # These patterns are present in ORACLE_ERROR_PAYLOADS but were missing
-                            # from E-PCV error matching, causing false PCV rejections.
                             "ora-01722", "ora-00900", "ora-12801", "ora-06502", "ora-01031",
                             "ora-00907", "ora-00911", "ora-00917", "ora-00918", "ora-00923",
                             "oci_execute(", "oracle.jdbc", "divisor is equal to zero",
-                            # BUG-8-A FIX: Additional Oracle error patterns for XMLELEMENT/
-                            # XMLATTRIBUTES payloads (used in ORACLE_ERROR_PAYLOADS).
-                            # These produce ORA-00932 (inconsistent datatypes: expected - got XML)
-                            # which is specific to XML type coercion and distinguishable from
-                            # pre-existing baseline errors.
                             "ora-00932", "inconsistent datatypes",
-                            "expected - got xml", "ora-01722", "invalid number",
-                            "ora-01732", "ora-06502",
+                            "expected - got xml", "invalid number",
+                            "ora-01732",
                         ],
                         "SQLite": [
                             "sqlite3.operationalerror", "unrecognized token",
                             "sqlite3_prepare", "sqlite3_exec", "no such table",
                             "sqlite.exception", "system.data.sqlite",
-                            # FIX-REQ3-SQLITE-ERR: Additional patterns from certified payloads
-                            "no such column", "ambiguous column name", "near", "syntax error",
-                            "sqlite_error", "incomplete input", "subquery returns",
+                            "no such column", "ambiguous column name",
+                            "sqlite_error",
                         ],
-                        # BUG-MARIADB-EPATH-FIX (Req 3): MariaDB error patterns expanded.
-                        # MariaDB 10.x/11.x wraps MySQL error messages but with MariaDB-specific
-                        # text. The minimal 4-pattern set missed SQLSTATE errors, PHP/PDO error
-                        # strings, JDBC driver messages, and XPATH error patterns used in
-                        # MARIADB_ERROR_PAYLOADS. Without these patterns, error-based MariaDB
-                        # detections pass detection but FAIL E-PCV (no pattern matches), causing
-                        # the injection to be silently discarded every time.
                         "MariaDB": [
                             "you have an error in your sql", "mariadb server version",
                             "check the manual that corresponds to your mariadb", "error 1064",
-                            # SQLSTATE and PDO formats
                             "sqlstate[", "sqlstate[42000]", "sqlstate[22007]",
-                            # PHP/PDO/JDBC error strings
                             "warning: mysqli_", "mysql_fetch_array()", "supplied argument is not a valid mysql",
                             "com.mysql.jdbc", "com.mariadb.jdbc", "org.mariadb.jdbc",
-                            # XPATH errors from EXTRACTVALUE/UPDATEXML payloads
-                            "xpath syntax error", "extractvalue", "updatexml",
-                            # MariaDB-specific error texts
+                            # XPATH error TEXT (not the function name itself — the DB error message):
+                            "xpath syntax error",
                             "right syntax to use near", "unknown column", "table doesn't exist",
                             "incorrect integer value", "data too long", "division by 0",
                         ],
@@ -113531,12 +113529,28 @@ class TechniqueCascadeEngine:
                     _pats = _all_pats.get(dbms, [p for ps in _all_pats.values() for p in ps])
                     _found_in_inject = any(p in _e_body for p in _pats)
                     _found_in_clean = any(p in _c_body for p in _pats)
+                    # FP-ANTI-REFLECTION FIX: Require at least one matched pattern that does NOT
+                    # appear verbatim in the injection payload itself.  When a WAF challenge page
+                    # reflects the SQL payload in its body (e.g. "EXTRACTVALUE" appears in the
+                    # challenge text), every pattern that matches will also be present in the
+                    # payload string — so _non_reflective_matched is empty → reject as FP.
+                    # This is the primary root-cause fix for the MariaDB/WAF false positive.
+                    _pay_lower_epcv = (getattr(det, 'payload', '') or '').lower()
+                    _non_reflective_matched = [p for p in _pats if p in _e_body and p not in _pay_lower_epcv]
                     if _found_in_inject and not _found_in_clean:
-                        print(f"[+] PCV CONFIRMED [{tech}] {dbms}  error pattern reproduced, absent in baseline", flush=True)
-                        # BUG-4A FIX: Immediate stop so concurrent probes exit on next check
-                        # BUG-PCV-STOPFLAGS-E FIX (Req 3/4): Also fire _confirmed_event and
-                        # kill the gate — previously only _SCAN_STOPPED was set, so header-batch
-                        # probe loops that poll _confirmed_event kept firing one extra round-trip.
+                        if not _non_reflective_matched:
+                            print(f"[!] PCV FAILED [{tech}] {dbms}  all matched patterns are payload-reflective (WAF reflection FP) — rejecting", flush=True)
+                            return False
+                        # Confirmed — print full confirmation banner with technique, DBMS, payload,
+                        # tamper chain, and request count so the user sees all details immediately.
+                        _req_count_epcv = TechniqueCascadeEngine._CLASS_REQ_COUNTER[0] if hasattr(TechniqueCascadeEngine, '_CLASS_REQ_COUNTER') else '?'
+                        _tc_epcv = getattr(self, 'tamper_chain', None) or []
+                        print(f"\n[!!] SQL INJECTION CONFIRMED  [{tech}] {dbms}", flush=True)
+                        print(f"[!!] Payload   : {(det.payload or '')[:200]}", flush=True)
+                        if _tc_epcv:
+                            print(f"[!!] Tamper    : {' -> '.join(str(t) for t in _tc_epcv)}", flush=True)
+                        print(f"[!!] Requests  : {_req_count_epcv}", flush=True)
+                        print(f"[+] PCV CONFIRMED [{tech}] {dbms}  error pattern reproduced, absent in baseline  matched={_non_reflective_matched[:3]}", flush=True)
                         _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
                         _SCAN_STOPPED[0] = True
                         _cev_e_explicit = (getattr(self, '_confirmed_event', None) or
@@ -139679,12 +139693,25 @@ class ScannerV14(ScannerV13):
                     
                     print("[*] [SURFACE] Testing path segment injection...", flush=True)
                     _path_hits = await orch.scan_path_segments(url, method, req_headers)
+                    # MARIADB-DEDUP FIX: Track payloads that already failed PCV across DBMSes.
+                    # Without this, MySQL's failed PCV payload is retried under MariaDB's identity
+                    # on the next hit (new TechniqueCascadeEngineV18 instance resets
+                    # _pcv_excluded_payloads), allowing WAF-reflection false positives to slip
+                    # through on the second attempt against the same payload.
+                    _path_failed_pcv_payloads: set = set()
                     for r in _path_hits:
                         # Check again before processing each hit
                         if _injection_confirmed and _injection_confirmed.is_set():
                             print("[*] [SURFACE] Stopping path scan  injection confirmed", flush=True)
                             break
-                        
+
+                        # MARIADB-DEDUP FIX: Skip this hit if an identical payload already failed
+                        # PCV for a different DBMS (e.g. MySQL failed, MariaDB same payload).
+                        _hit_payload_key = (getattr(r, 'payload', '') or '').strip().lower()
+                        if _hit_payload_key and _hit_payload_key in _path_failed_pcv_payloads:
+                            print(f"[!] [SURFACE] Path PCV SKIPPED: {r.param} [{r.technique}] {r.dbms}  payload already failed PCV for another DBMS", flush=True)
+                            continue
+
                         print(f"[+] [SURFACE] Path detection: {r.param} [{r.technique}] {r.dbms}", flush=True)
                         # PCV gate for path detections
                         try:
@@ -139701,14 +139728,27 @@ class ScannerV14(ScannerV13):
                                 method, url, data, "path", r.param, "",
                                 {}, b"", r, r.technique, r.dbms)
                             if _pcv_ok:
-                                print(f"[+] [SURFACE] Path PCV PASSED: {r.param} ", flush=True)
+                                # UI-OUTPUT FIX: Show tamper chain and request count immediately
+                                # after path PCV passes so the terminal always shows full details.
+                                _path_tc = getattr(_pcv_c, 'tamper_chain', None) or tamper_chain or []
+                                _path_req = TechniqueCascadeEngine._CLASS_REQ_COUNTER[0] if hasattr(TechniqueCascadeEngine, '_CLASS_REQ_COUNTER') else '?'
+                                print(f"[+] [SURFACE] Path PCV PASSED: {r.param} [{r.technique}] {r.dbms}", flush=True)
+                                if _path_tc:
+                                    print(f"[+] [SURFACE] Tamper chain : {' -> '.join(str(t) for t in _path_tc)}", flush=True)
+                                print(f"[+] [SURFACE] Requests so far: {_path_req}", flush=True)
                                 orch.session.record_vuln(r.param, r.technique, r.payload, r.dbms)
                                 _results.append({"param":r.param,"original":"","result":r,
                                                    "url":url,"method":method,"data_fmt":"path","data":None})
                             else:
                                 print(f"[!] [SURFACE] Path PCV FAILED: {r.param}  discarded", flush=True)
+                                # MARIADB-DEDUP FIX: Record failed payload so subsequent DBMS
+                                # variants of the same payload are skipped without re-probing.
+                                if _hit_payload_key:
+                                    _path_failed_pcv_payloads.add(_hit_payload_key)
                         except Exception as _pcv_e:
                             print(f"[!] [SURFACE] Path PCV error: {_pcv_e}  rejecting", flush=True)
+                            if _hit_payload_key:
+                                _path_failed_pcv_payloads.add(_hit_payload_key)
                     if not _path_hits:
                         print("[*] [SURFACE] Path scan complete  no injections found", flush=True)
                 except Exception as _e:
