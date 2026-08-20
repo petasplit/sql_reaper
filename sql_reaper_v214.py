@@ -30118,6 +30118,18 @@ class ParameterParser:
         if not _first.startswith("--"):
             return data  # malformed; return unchanged
         _boundary = _first[2:].strip()
+        # BUG-MULTIPART-INJECT-BOUNDARY-COLLISION FIX: if the injected SQL payload
+        # contains the boundary string the reconstructed multipart body will be split
+        # at unexpected positions, corrupting every field after the injection point.
+        # Replace the boundary with a unique one that is guaranteed not to appear in
+        # the payload value.
+        import hashlib as _hashlib
+        _safe_boundary = _boundary
+        if _boundary in value:
+            _safe_boundary = "----SqlRprBndry" + _hashlib.md5(
+                (value + _boundary).encode("latin-1", errors="replace")).hexdigest()[:16]
+            data = data.replace(f"--{_boundary}", f"--{_safe_boundary}")
+            _boundary = _safe_boundary
         _delimiter = f"--{_boundary}"
         _crlf = "\r\n" if "\r\n" in data else "\n"
         _body_sep = _crlf + _crlf
@@ -30248,21 +30260,31 @@ class ParameterParser:
                 d=json.loads(data); keys=param.split(".")
                 obj=d
                 for k in keys[:-1]:
-                    # Handle both dict keys and list indices
+                    # BUG-JSON-INJECT-ARRAY-ROOT FIX: handle both list indices (int)
+                    # and dict keys.  Lists do not have .setdefault(); calling it raises
+                    # AttributeError which was silently swallowed, returning the original
+                    # unchanged data for all root-level array JSON bodies.
                     if isinstance(obj, list):
                         try: obj=obj[int(k)]
                         except (ValueError, IndexError): break
-                    else:
+                    elif isinstance(obj, dict):
                         obj=obj.setdefault(k, {})
+                    else:
+                        break
                 # Set the final key
                 last=keys[-1]
                 if isinstance(obj, list):
-                    try: obj[int(last)]=value
+                    try:
+                        idx = int(last)
+                        # Extend list if necessary so the index is valid
+                        while len(obj) <= idx:
+                            obj.append(None)
+                        obj[idx]=value
                     except (ValueError, IndexError): pass
-                else:
+                elif isinstance(obj, dict):
                     obj[last]=value
                 return json.dumps(d)
-            except (json.JSONDecodeError, TypeError, KeyError):
+            except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
                 return data  # return original if injection fails
         # BUG-MP-INJECT-DATA FIX: multipart/form-data bodies must be reconstructed
         # using _inject_multipart() which preserves boundary, CRLF, and all other
@@ -54523,6 +54545,12 @@ class Scanner:
         cfg=self.config
         if cfg.request_file:
             url,method,req_headers,data=self._parse_request_file(cfg.request_file)
+            # BUG-RF-HEADER-PROPAGATION FIX (legacy Scanner path)
+            _skip_mg = {"host","cookie","content-length","transfer-encoding","connection"}
+            _mgd = dict(getattr(cfg,"headers",{}) or {})
+            for _hkl,_hvl in req_headers.items():
+                if _hkl.lower() not in _skip_mg: _mgd[_hkl]=_hvl
+            cfg.headers = _mgd
         else:
             url=cfg.url; method=cfg.method; req_headers=dict(cfg.headers); data=cfg.data
 
@@ -54530,13 +54558,14 @@ class Scanner:
             LOG.warning(f"URL outside scope ({cfg.scope}), aborting"); return
 
         async with HTTPEngine(cfg,self.session) as engine:
-            #  Parameter discovery 
+            #  Parameter discovery
             browser_requests=[]
             if cfg.browser:
                 browser_requests=await self._browser_crawl(url,engine)
 
             url_params=ParameterParser.from_url(url)
-            data_fmt,data_params=(ParameterParser.from_data(data) if data else ("form",{}))
+            _rf_ct_leg = getattr(cfg,"_request_file_content_type","")
+            data_fmt,data_params=(ParameterParser.from_data(data,_rf_ct_leg) if data else ("form",{}))
             all_params={**url_params,**data_params}
 
             if cfg.param:
@@ -70233,6 +70262,14 @@ class Scanner:
         if _ct_hdr:
             self.config._request_file_content_type = _ct_hdr
 
+        # BUG-RF-CONTENT-LENGTH FIX: Remove hop-by-hop / auto-computed headers that
+        # conflict with httpx's own header generation after payload injection resizes
+        # the body.  Content-Length is always wrong after injection (payload is longer);
+        # Transfer-Encoding and Connection are hop-by-hop and must not be forwarded.
+        _drop_headers = {"content-length", "transfer-encoding", "connection"}
+        headers = {k: v for k, v in headers.items()
+                   if k.lower() not in _drop_headers}
+
         # Determine scheme: only use plain HTTP when explicit port signals it.
         # Default to HTTPS; use HTTP only for plain port 80/8080 or host with :80/:8080 suffix.
         _plain_http_ports = (":80", ":8080", ":8000", ":3000")
@@ -72813,6 +72850,13 @@ class ScannerV4(Scanner):
 
         if cfg.request_file:
             url, method, req_headers, data = self._parse_request_file(cfg.request_file)
+            # BUG-RF-HEADER-PROPAGATION FIX (v7 path): same propagation fix as _run_v14.
+            _skip_merge_v7 = {"host", "cookie", "content-length", "transfer-encoding", "connection"}
+            _merged_v7 = dict(getattr(cfg, "headers", {}) or {})
+            for _hk7, _hv7 in req_headers.items():
+                if _hk7.lower() not in _skip_merge_v7:
+                    _merged_v7[_hk7] = _hv7
+            cfg.headers = _merged_v7
         else:
             url     = cfg.url
             method  = cfg.method
@@ -72844,7 +72888,8 @@ class ScannerV4(Scanner):
             else:
                 # Single-URL mode  synthesize endpoint from args
                 url_params = ParameterParser.from_url(url)
-                data_fmt, data_params = (ParameterParser.from_data(data) if data else ("form", {}))
+                _rf_ct_v7b = getattr(cfg, "_request_file_content_type", "")
+                data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v7b) if data else ("form", {}))
                 all_params = {**url_params, **data_params}
                 if cfg.param and cfg.param in all_params:
                     all_params = {cfg.param: all_params[cfg.param]}
@@ -75559,13 +75604,21 @@ class ScannerV5(ScannerV4):
         # Parse target first so we can set up UI
         if cfg.request_file:
             url, method, req_headers, data = self._parse_request_file(cfg.request_file)
+            # BUG-RF-HEADER-PROPAGATION FIX (ScannerV5 path)
+            _skip_merge_v5 = {"host", "cookie", "content-length", "transfer-encoding", "connection"}
+            _merged_v5 = dict(getattr(cfg, "headers", {}) or {})
+            for _hk5, _hv5 in req_headers.items():
+                if _hk5.lower() not in _skip_merge_v5:
+                    _merged_v5[_hk5] = _hv5
+            cfg.headers = _merged_v5
         else:
             url = cfg.url or ""; method = cfg.method
             req_headers = dict(cfg.headers); data = cfg.data
 
         # Count parameters for UI progress
         url_params = ParameterParser.from_url(url)
-        _, data_params = ParameterParser.from_data(data) if data else ("form", {})
+        _rf_ct_v5c = getattr(cfg, "_request_file_content_type", "")
+        _, data_params = ParameterParser.from_data(data, _rf_ct_v5c) if data else ("form", {})
         all_param_count = len({**url_params, **data_params}) or 1
 
         # Start UI
@@ -75620,7 +75673,8 @@ class ScannerV5(ScannerV4):
                 all_endpoints.extend(discovered)
             else:
                 url_params = ParameterParser.from_url(url)
-                data_fmt, data_params = (ParameterParser.from_data(data) if data else ("form", {}))
+                _rf_ct_v5d = getattr(cfg, "_request_file_content_type", "")
+                data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v5d) if data else ("form", {}))
                 all_params = {**url_params, **data_params}
                 if cfg.param and cfg.param in all_params:
                     all_params = {cfg.param: all_params[cfg.param]}
@@ -84462,7 +84516,8 @@ class ScannerV7(ScannerV6):
                 all_endpoints = crawl_results
             else:
                 url_params = ParameterParser.from_url(url)
-                data_fmt, data_params = (ParameterParser.from_data(data)
+                _rf_ct_v6 = getattr(cfg, "_request_file_content_type", "")
+                data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v6)
                                           if data else ("form",{}))
                 all_params = {**url_params, **data_params}
                 if cfg.param and cfg.param in all_params:
@@ -85221,6 +85276,19 @@ class InjectionMarkerParser:
             if INJECT_MARKER in v:
                 pre, suf = v.split(INJECT_MARKER, 1)
                 found.append(cls.MarkedParam(k, pre, suf, "url", v))
+
+        # BUG-MARKER-AMP-IN-PATH FIX: some URLs embed query parameters in the path
+        # with & but no leading ?, e.g. /api/cb&param=value* — urlparse places these
+        # in parsed.path and leaves parsed.query empty, so the loop above finds nothing.
+        # Re-parse path for &-in-path params and check for markers there too.
+        if not parsed.query and "&" in parsed.path and "=" in parsed.path:
+            _path_base, *_path_rest = parsed.path.split("&", 1)
+            if _path_rest and "=" in _path_rest[0]:
+                for k, vals in parse_qs(_path_rest[0], keep_blank_values=True).items():
+                    v = vals[0]
+                    if INJECT_MARKER in v:
+                        pre, suf = v.split(INJECT_MARKER, 1)
+                        found.append(cls.MarkedParam(k, pre, suf, "url", v))
 
         # POST body (form-encoded)
         if data and not data.strip().startswith("{"):
@@ -88528,7 +88596,8 @@ class ScannerV8(ScannerV7):
             all_endpoints = crawl_results
         else:
             url_params  = ParameterParser.from_url(url)
-            data_fmt, data_params = (ParameterParser.from_data(data) if data
+            _rf_ct_v8 = getattr(cfg, "_request_file_content_type", "")
+            data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v8) if data
                                       else ("form",{}))
             all_params  = {**url_params, **data_params}
             if cfg.param and cfg.param in all_params:
@@ -91063,7 +91132,8 @@ class ScannerV9(ScannerV8):
             all_endpoints = crawl_results
         else:
             url_params  = ParameterParser.from_url(url)
-            data_fmt, data_params = (ParameterParser.from_data(data) if data
+            _rf_ct_v9 = getattr(cfg, "_request_file_content_type", "")
+            data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v9) if data
                                       else ("form",{}))
             all_params  = {**url_params, **data_params}
             if cfg.param and cfg.param in all_params:
@@ -94923,7 +94993,8 @@ class ScannerV10(ScannerV9):
                 max_depth=getattr(cfg,"max_depth",5), scope_host=domain)
         else:
             url_params  = ParameterParser.from_url(url)
-            data_fmt, data_params = (ParameterParser.from_data(data) if data
+            _rf_ct_v10 = getattr(cfg, "_request_file_content_type", "")
+            data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v10) if data
                                       else ("form",{}))
             all_params  = {**url_params, **data_params}
             if cfg.param and cfg.param in all_params:
@@ -102886,7 +102957,8 @@ class ScannerV11(ScannerV10):
                 max_depth=getattr(cfg,"max_depth",5), scope_host=domain)
         else:
             url_params  = ParameterParser.from_url(url)
-            data_fmt, data_params = (ParameterParser.from_data(data) if data
+            _rf_ct_v11 = getattr(cfg, "_request_file_content_type", "")
+            data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v11) if data
                                       else ("form",{}))
             all_params  = {**url_params, **data_params}
             if cfg.param and cfg.param in all_params:
@@ -107789,7 +107861,8 @@ class ScannerV12(ScannerV11):
                 max_depth=getattr(cfg,"max_depth",5), scope_host=domain)
         else:
             url_params  = ParameterParser.from_url(url)
-            data_fmt, data_params = (ParameterParser.from_data(data) if data
+            _rf_ct_v12 = getattr(cfg, "_request_file_content_type", "")
+            data_fmt, data_params = (ParameterParser.from_data(data, _rf_ct_v12) if data
                                       else ("form",{}))
             all_params  = {**url_params, **data_params}
             if cfg.param and cfg.param in all_params:
@@ -134045,7 +134118,8 @@ class ScannerV13(ScannerV12):
                 max_depth=getattr(cfg,"max_depth",5), scope_host=domain)
         else:
             up_params  = ParameterParser.from_url(url)
-            df, dp     = (ParameterParser.from_data(data) if data else ("form",{}))
+            _rf_ct_v13 = getattr(cfg, "_request_file_content_type", "")
+            df, dp     = (ParameterParser.from_data(data, _rf_ct_v13) if data else ("form",{}))
             all_params = {**up_params, **dp}
             if cfg.param and cfg.param in all_params:
                 all_params = {cfg.param: all_params[cfg.param]}
@@ -135379,6 +135453,16 @@ class ScannerV14(ScannerV13):
 
         if cfg.request_file:
             url,method,req_headers,data = self._parse_request_file(cfg.request_file)
+            # BUG-RF-HEADER-PROPAGATION FIX: merge auth/custom headers from the raw
+            # request file into cfg.headers so _build_headers() includes them in every
+            # probe.  Skip pseudo-headers already stripped in _parse_request_file and
+            # also skip Host (set from URL) and Cookie (propagated to cfg.cookie above).
+            _skip_merge = {"host", "cookie", "content-length", "transfer-encoding", "connection"}
+            _merged = dict(getattr(cfg, "headers", {}) or {})
+            for _hk, _hv in req_headers.items():
+                if _hk.lower() not in _skip_merge:
+                    _merged[_hk] = _hv
+            cfg.headers = _merged
         else:
             url=cfg.url or ""; method=cfg.method
             req_headers=dict(cfg.headers); data=cfg.data
@@ -135538,7 +135622,12 @@ class ScannerV14(ScannerV13):
                 max_depth=getattr(cfg,"max_depth",5), scope_host=domain)
         else:
             up = ParameterParser.from_url(url)
-            df, dp = (ParameterParser.from_data(data) if data else ("form",{}))
+            # BUG-FROM-DATA-NO-CT FIX: pass the Content-Type from the raw request file
+            # so from_data() correctly detects multipart/form-data bodies and extracts
+            # the boundary string.  Without this hint, multipart bodies are mis-detected
+            # as form-encoded and parsed incorrectly (zero fields discovered).
+            _rf_ct = getattr(cfg, "_request_file_content_type", "")
+            df, dp = (ParameterParser.from_data(data, _rf_ct) if data else ("form",{}))
             all_params = {**up, **dp}
             if cfg.param and cfg.param in all_params:
                 all_params = {cfg.param: all_params[cfg.param]}
@@ -153175,7 +153264,8 @@ class ScannerV15(ScannerV14):
             # 1. Try POST body first (covers form-encoded and JSON POST requests)
             if _cfg_data:
                 try:
-                    _body_fmt, _body_params = ParameterParser.from_data(_cfg_data)
+                    _rf_ct_cv = getattr(cfg, "_request_file_content_type", "")
+                    _body_fmt, _body_params = ParameterParser.from_data(_cfg_data, _rf_ct_cv)
                     if _body_params:
                         # Flatten JSON dict to string values for scalar fields only
                         _flat = {}
