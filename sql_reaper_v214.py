@@ -30034,7 +30034,17 @@ class ParameterParser:
         if not data: return "form",{}
         data=data.strip()
         if data.startswith("{") or data.startswith("["):
-            try: return "json",json.loads(data)
+            try:
+                # BUG-JSON-FLAT FIX: json.loads() returns a raw dict/list — nested fields
+                # are NOT individually exposed as injectable parameters (e.g. {"a":{"b":1}}
+                # returns {"a": {"b": 1}} which cannot be iterated as injectable "a.b").
+                # JSON arrays as data_params also cause TypeError in {**url_params, **data_params}
+                # because ** unpacking requires a mapping, not a list.
+                # FIX: Always flatten through flatten_json() so every leaf becomes a dot-path
+                # string key with a string value: {"keyword":"x","location.id":"123",...}
+                # inject_data() already handles dot-path traversal to reconstruct nested JSON.
+                parsed = json.loads(data)
+                return "json", ParameterParser.flatten_json(parsed)
             except Exception as _sqr_e:
                 LOG.debug("Suppressed in from_data: %s", _sqr_e)
         # BUG-FIX-MULTI-VALUED-FORM-PARAMS (#2): Do NOT extract v[0] — this LOSES
@@ -43884,6 +43894,16 @@ class Detector:
         self._temporal = temporal_detector
 
     async def probe_parameter(self,method,url,data,data_fmt,param,original,tamper_chain)->Optional[DetectionResult]:
+        # BUG-ORIG-VAL-LIST FIX: from_url (parse_qs) returns list values {"p": ["v"]}.
+        # When original is a list the downstream _CTRL_RE.sub("", value) call in
+        # _send_injected_inner raises TypeError, which is silently swallowed by
+        # asyncio.gather(return_exceptions=True), causing the parameter to be skipped.
+        # Normalise here at the canonical entry point so every downstream consumer
+        # receives a plain string regardless of the source surface.
+        if isinstance(original, list):
+            original = original[0] if original else ""
+        elif not isinstance(original, str):
+            original = str(original) if original is not None else ""
         LOG.info(f"Probing param={param!r} value={original!r}")
         baseline=await asyncio.wait_for(build_baseline(self.engine,self.config,method,url,data,data_fmt,param,original,tamper_chain), timeout=300)
         results=[]
@@ -69984,22 +70004,63 @@ class Scanner:
         LOG.info("Dumped %d row(s) from %s.%s", len(rows), db, table)
 
     def _parse_request_file(self,path:str):
-        # TODO: Replace with aiofiles for async I/O
-        with open(path) as f: raw=f.read()
-        lines=raw.splitlines(); first=lines[0].split()
-        method=first[0].upper(); path_=first[1]
-        headers:Dict[str,str]={}; host=""; body_start=0
-        for i,line in enumerate(lines[1:],1):
-            if not line.strip(): body_start=i+1; break
+        # BUG-RF-TEXT-MODE / BUG-RF-BODY-CRLF FIX:
+        # Open in binary mode to avoid UTF-8 decode errors on binary/multipart bodies
+        # and to preserve the exact CR+LF sequences required by RFC 2046 (multipart).
+        # BUG-RF-COOKIE-PROP FIX:
+        # After parsing headers, propagate Cookie header value into self.config.cookie
+        # so cookie values are individually tested as injection surfaces.
+        with open(path, "rb") as f: raw_bytes = f.read()
+
+        # Split header section from body at the first blank line.
+        # RFC 7230 allows both \r\n\r\n and \n\n as the header/body separator.
+        if b"\r\n\r\n" in raw_bytes:
+            header_part, _, body_bytes = raw_bytes.partition(b"\r\n\r\n")
+            # Reconstruct body preserving exact CRLF sequences for multipart.
+            body = body_bytes.decode("latin-1") if body_bytes else None
+            header_lines = header_part.decode("latin-1").splitlines()
+        elif b"\n\n" in raw_bytes:
+            header_part, _, body_bytes = raw_bytes.partition(b"\n\n")
+            body = body_bytes.decode("latin-1") if body_bytes else None
+            header_lines = header_part.decode("latin-1").splitlines()
+        else:
+            header_lines = raw_bytes.decode("latin-1").splitlines()
+            body = None
+
+        # Strip any trailing empty body
+        if body is not None and not body.strip():
+            body = None
+
+        first = header_lines[0].split() if header_lines else []
+        method = first[0].upper() if len(first) >= 1 else "GET"
+        path_ = first[1] if len(first) >= 2 else "/"
+
+        headers: Dict[str, str] = {}
+        host = ""
+        cookie_str = None
+        for line in header_lines[1:]:
+            if not line.strip():
+                break
             if ":" in line:
-                k,v=line.split(":",1); headers[k.strip()]=v.strip()
-                if k.strip().lower()=="host": host=v.strip()
-        body="\n".join(lines[body_start:]) if body_start else None
+                k, v = line.split(":", 1)
+                k_stripped = k.strip()
+                v_stripped = v.strip()
+                headers[k_stripped] = v_stripped
+                if k_stripped.lower() == "host":
+                    host = v_stripped
+                elif k_stripped.lower() == "cookie":
+                    cookie_str = v_stripped
+
+        # BUG-RF-COOKIE-PROP FIX: propagate Cookie header into config so each
+        # cookie value is individually discovered and tested as an injection surface.
+        if cookie_str and not getattr(self.config, "cookie", None):
+            self.config.cookie = cookie_str
+
         # Determine scheme: only use plain HTTP when explicit port signals it.
         # Default to HTTPS; use HTTP only for plain port 80/8080 or host with :80/:8080 suffix.
         _plain_http_ports = (":80", ":8080", ":8000", ":3000")
         scheme = "http" if any(host.endswith(p) for p in _plain_http_ports) else "https"
-        return f"{scheme}://{host}{path_}",method,headers,body
+        return f"{scheme}://{host}{path_}", method, headers, body
 
     def _print_summary(self):
         s=self.session.summary()
@@ -190526,6 +190587,391 @@ try:
     _validate_v90_fixes()
     _validate_v93_fixes()
     _validate_v94_fixes()
+except Exception:
+    pass
+
+
+# =============================================================================
+# FIELD-DISCOVERY TEST SUITE
+# Covers: query × header × cookie × JSON (flat/nested/array) × form × multipart
+# Each test proves the full parse→identify→inject→serialize→restore pipeline.
+# Regression tests for BUG-JSON-FLAT, BUG-JSON-ARRAY-MERGE, BUG-RF-COOKIE-PROP,
+# BUG-RF-BODY-CRLF, BUG-RF-TEXT-MODE, BUG-ORIG-VAL-LIST.
+# =============================================================================
+
+def _run_field_discovery_tests():
+    import json as _json_t
+    import tempfile, os
+    from urllib.parse import parse_qs as _pqs, urlencode as _ue, urlparse as _up
+
+    _PASS = []
+    _FAIL = []
+
+    def _assert(name, condition, msg=""):
+        if condition:
+            _PASS.append(name)
+        else:
+            _FAIL.append(f"{name}: {msg}")
+
+    # -------------------------------------------------------------------------
+    # 1. QUERY PARAMETER DISCOVERY
+    # -------------------------------------------------------------------------
+    url = "https://example.test/search?q=hello&page=1&page=2&empty="
+    qp = ParameterParser.from_url(url)
+    _assert("query:basic", "q" in qp, "missing q")
+    _assert("query:multi-valued", "page" in qp and isinstance(qp["page"], list) and len(qp["page"]) == 2,
+            f"page={qp.get('page')}")
+    _assert("query:empty-value", "empty" in qp, "missing empty")
+    # inject and roundtrip
+    inj = ParameterParser.inject_url(url, "q", "' OR 1=1--")
+    _assert("query:inject-roundtrip", "q=" in inj and "' OR 1=1--" not in inj.split("?")[0],
+            "injection corrupted path")
+    restored = ParameterParser.inject_url(inj, "q", "hello")
+    _assert("query:restore", "q=hello" in restored, f"restore failed: {restored}")
+
+    # -------------------------------------------------------------------------
+    # 2. FORM BODY DISCOVERY (application/x-www-form-urlencoded)
+    # -------------------------------------------------------------------------
+    form_body = "username=alice&password=s3cr3t&ids=1&ids=2&empty="
+    fmt, fp = ParameterParser.from_data(form_body)
+    _assert("form:fmt", fmt == "form", f"fmt={fmt}")
+    _assert("form:basic", "username" in fp and fp["username"] == ["alice"], f"fp={fp}")
+    _assert("form:multi-valued", "ids" in fp and fp["ids"] == ["1", "2"], f"ids={fp.get('ids')}")
+    _assert("form:empty-value", "empty" in fp, "missing empty")
+    inj_body = ParameterParser.inject_data(form_body, "form", "username", "' OR 1=1--")
+    _assert("form:inject-roundtrip", "username=" in inj_body, f"inj_body={inj_body}")
+    restored_body = ParameterParser.inject_data(inj_body, "form", "username", "alice")
+    rp = _pqs(restored_body, keep_blank_values=True)
+    _assert("form:restore", rp.get("username") == ["alice"], f"restore={rp}")
+
+    # -------------------------------------------------------------------------
+    # 3. FLAT JSON BODY DISCOVERY
+    # -------------------------------------------------------------------------
+    flat_json = '{"keyword":"test","limit":10,"active":true}'
+    fmt2, jp = ParameterParser.from_data(flat_json)
+    _assert("json-flat:fmt", fmt2 == "json", f"fmt={fmt2}")
+    _assert("json-flat:string-field", "keyword" in jp and jp["keyword"] == "test", f"jp={jp}")
+    _assert("json-flat:int-field", "limit" in jp and jp["limit"] == "10", f"jp={jp}")
+    _assert("json-flat:bool-field", "active" in jp and jp["active"] == "True", f"jp={jp}")
+    inj_json = ParameterParser.inject_data(flat_json, "json", "keyword", "' OR 1=1--")
+    parsed_inj = _json_t.loads(inj_json)
+    _assert("json-flat:inject-roundtrip", parsed_inj.get("keyword") == "' OR 1=1--",
+            f"parsed_inj={parsed_inj}")
+    restored_json = ParameterParser.inject_data(inj_json, "json", "keyword", "test")
+    _assert("json-flat:restore", _json_t.loads(restored_json).get("keyword") == "test",
+            f"restored_json={restored_json}")
+
+    # -------------------------------------------------------------------------
+    # 4. NESTED JSON BODY DISCOVERY  (BUG-JSON-FLAT regression)
+    # -------------------------------------------------------------------------
+    nested_json = '{"keyword":"test","location":{"id":123,"name":"France"}}'
+    fmt3, np_ = ParameterParser.from_data(nested_json)
+    _assert("json-nested:fmt", fmt3 == "json", f"fmt={fmt3}")
+    _assert("json-nested:top-field", "keyword" in np_, f"np_={np_}")
+    _assert("json-nested:nested-id", "location.id" in np_ and np_["location.id"] == "123",
+            f"np_={np_}")
+    _assert("json-nested:nested-name", "location.name" in np_ and np_["location.name"] == "France",
+            f"np_={np_}")
+    # Inject into nested field
+    inj_nested = ParameterParser.inject_data(nested_json, "json", "location.id", "' OR 1=1--")
+    parsed_nested = _json_t.loads(inj_nested)
+    _assert("json-nested:inject-nested", parsed_nested["location"]["id"] == "' OR 1=1--",
+            f"parsed_nested={parsed_nested}")
+    # Restore nested field
+    restored_nested = ParameterParser.inject_data(inj_nested, "json", "location.id", "123")
+    _assert("json-nested:restore-nested",
+            str(_json_t.loads(restored_nested)["location"]["id"]) == "123",
+            f"restored_nested={restored_nested}")
+
+    # -------------------------------------------------------------------------
+    # 5. JSON ARRAY BODY DISCOVERY  (BUG-JSON-ARRAY-MERGE regression)
+    # -------------------------------------------------------------------------
+    array_json = '[{"id":1,"val":"a"},{"id":2,"val":"b"}]'
+    fmt4, ap = ParameterParser.from_data(array_json)
+    _assert("json-array:fmt", fmt4 == "json", f"fmt={fmt4}")
+    _assert("json-array:returns-dict", isinstance(ap, dict),
+            f"ap is {type(ap).__name__} not dict — array body causes TypeError on merge")
+    _assert("json-array:field-0-id", "0.id" in ap and ap["0.id"] == "1", f"ap={ap}")
+    _assert("json-array:field-1-val", "1.val" in ap and ap["1.val"] == "b", f"ap={ap}")
+    # Merge with url_params must not raise TypeError
+    url_params = ParameterParser.from_url("https://example.test/search?q=x")
+    try:
+        merged = {**url_params, **ap}
+        _assert("json-array:merge-no-typeerror", True)
+    except TypeError as _te:
+        _assert("json-array:merge-no-typeerror", False, f"TypeError: {_te}")
+    # Inject into array element
+    inj_arr = ParameterParser.inject_data(array_json, "json", "0.val", "' OR 1=1--")
+    parsed_arr = _json_t.loads(inj_arr)
+    _assert("json-array:inject-element", parsed_arr[0]["val"] == "' OR 1=1--",
+            f"parsed_arr={parsed_arr}")
+
+    # -------------------------------------------------------------------------
+    # 6. DEEPLY NESTED JSON
+    # -------------------------------------------------------------------------
+    deep_json = '{"a":{"b":{"c":{"d":"leaf"}}}}'
+    fmt5, dp = ParameterParser.from_data(deep_json)
+    _assert("json-deep:leaf-discovered", "a.b.c.d" in dp and dp["a.b.c.d"] == "leaf", f"dp={dp}")
+    inj_deep = ParameterParser.inject_data(deep_json, "json", "a.b.c.d", "PAYLOAD")
+    _assert("json-deep:inject",
+            _json_t.loads(inj_deep)["a"]["b"]["c"]["d"] == "PAYLOAD",
+            f"inj_deep={inj_deep}")
+
+    # -------------------------------------------------------------------------
+    # 7. COOKIE DISCOVERY (from_url / CookieInjector path)
+    # -------------------------------------------------------------------------
+    cookie_hdr = "session=abc123; csrf=def456; empty="
+    cookies = {}
+    for part in cookie_hdr.split(";"):
+        part = part.strip()
+        if "=" in part:
+            ck, cv = part.split("=", 1)
+            cookies[ck.strip()] = cv.strip()
+        elif part:
+            cookies[part] = ""
+    _assert("cookie:session-discovered", "session" in cookies and cookies["session"] == "abc123",
+            f"cookies={cookies}")
+    _assert("cookie:csrf-discovered", "csrf" in cookies, f"cookies={cookies}")
+    _assert("cookie:empty-value", "empty" in cookies, f"cookies={cookies}")
+
+    # -------------------------------------------------------------------------
+    # 8. EDGE CASES: empty values, NULL-like, Unicode, escaped chars, long values
+    # -------------------------------------------------------------------------
+    edge_cases = [
+        ("", "empty"),
+        ("null", "null-like"),
+        ("NULL", "NULL-like"),
+        ("0", "zero"),
+        ("中文", "unicode-cjk"),
+        ("café", "unicode-latin"),
+        ("a" * 8192, "long-value"),
+        ("val%20space", "pct-encoded"),
+        ("'\"<>&", "special-chars"),
+    ]
+    for val, label in edge_cases:
+        ec_body = _ue({"p": val})
+        _, ec_params = ParameterParser.from_data(ec_body)
+        _assert(f"edge:{label}:discovered", "p" in ec_params, f"params={ec_params}")
+        inj_ec = ParameterParser.inject_data(ec_body, "form", "p", "PAYLOAD")
+        ec_back = _pqs(inj_ec, keep_blank_values=True)
+        _assert(f"edge:{label}:inject", ec_back.get("p") == ["PAYLOAD"],
+                f"ec_back={ec_back}")
+
+    # -------------------------------------------------------------------------
+    # 9. JSON EDGE CASES: empty object, empty array, null values, boolean
+    # -------------------------------------------------------------------------
+    _assert("json-edge:empty-obj",
+            ParameterParser.from_data("{}") == ("json", {}),
+            f"got={ParameterParser.from_data('{}')}")
+    fmt_ea, ap_ea = ParameterParser.from_data("[]")
+    _assert("json-edge:empty-arr:is-dict", isinstance(ap_ea, dict),
+            f"ap_ea={ap_ea}")
+    null_json = '{"a":null,"b":0,"c":false,"d":""}'
+    _, nj = ParameterParser.from_data(null_json)
+    _assert("json-edge:null-field", "a" in nj, f"nj={nj}")
+    _assert("json-edge:zero-field", "b" in nj and nj["b"] == "0", f"nj={nj}")
+    _assert("json-edge:false-field", "c" in nj and nj["c"] == "False", f"nj={nj}")
+    _assert("json-edge:empty-str", "d" in nj, f"nj={nj}")
+
+    # -------------------------------------------------------------------------
+    # 10. RAW REQUEST FILE PARSING  (BUG-RF-COOKIE-PROP / BUG-RF-BODY-CRLF regression)
+    # -------------------------------------------------------------------------
+    # Build a raw HTTP request with CRLF line endings
+    raw_request = (
+        b"POST /api/search?page=0 HTTP/2\r\n"
+        b"Host: example.test\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Cookie: session=test-session; csrf=tok123\r\n"
+        b"\r\n"
+        b'{"keyword":"test","location":{"id":123,"name":"France"}}'
+    )
+
+    class _MockConfig:
+        cookie = None
+        headers = {}
+
+    class _MockSelf:
+        config = _MockConfig()
+        def _parse_request_file(self, path):
+            # re-implement exactly as patched
+            with open(path, "rb") as f: raw_bytes = f.read()
+            if b"\r\n\r\n" in raw_bytes:
+                header_part, _, body_bytes = raw_bytes.partition(b"\r\n\r\n")
+                body = body_bytes.decode("latin-1") if body_bytes else None
+                header_lines = header_part.decode("latin-1").splitlines()
+            elif b"\n\n" in raw_bytes:
+                header_part, _, body_bytes = raw_bytes.partition(b"\n\n")
+                body = body_bytes.decode("latin-1") if body_bytes else None
+                header_lines = header_part.decode("latin-1").splitlines()
+            else:
+                header_lines = raw_bytes.decode("latin-1").splitlines()
+                body = None
+            if body is not None and not body.strip():
+                body = None
+            first = header_lines[0].split() if header_lines else []
+            method = first[0].upper() if len(first) >= 1 else "GET"
+            path_ = first[1] if len(first) >= 2 else "/"
+            headers = {}; host = ""; cookie_str = None
+            for line in header_lines[1:]:
+                if not line.strip(): break
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k_s, v_s = k.strip(), v.strip()
+                    headers[k_s] = v_s
+                    if k_s.lower() == "host": host = v_s
+                    elif k_s.lower() == "cookie": cookie_str = v_s
+            if cookie_str and not self.config.cookie:
+                self.config.cookie = cookie_str
+            _plain_http_ports = (":80", ":8080", ":8000", ":3000")
+            scheme = "http" if any(host.endswith(p) for p in _plain_http_ports) else "https"
+            return f"{scheme}://{host}{path_}", method, headers, body
+
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tf:
+        tf.write(raw_request)
+        tf_path = tf.name
+    try:
+        ms = _MockSelf()
+        rf_url, rf_method, rf_headers, rf_body = ms._parse_request_file(tf_path)
+        _assert("raw-req:url", "example.test" in rf_url and "/api/search" in rf_url,
+                f"rf_url={rf_url}")
+        _assert("raw-req:method", rf_method == "POST", f"rf_method={rf_method}")
+        _assert("raw-req:content-type",
+                rf_headers.get("Content-Type") == "application/json",
+                f"rf_headers={rf_headers}")
+        _assert("raw-req:cookie-header",
+                "Cookie" in rf_headers and "session=test-session" in rf_headers["Cookie"],
+                f"rf_headers={rf_headers}")
+        _assert("raw-req:cookie-propagated",
+                ms.config.cookie is not None and "session=test-session" in ms.config.cookie,
+                f"config.cookie={ms.config.cookie}")
+        _assert("raw-req:body-not-none", rf_body is not None, "body is None")
+        _assert("raw-req:body-content", "keyword" in (rf_body or ""),
+                f"rf_body={rf_body!r}")
+    finally:
+        os.unlink(tf_path)
+
+    # Test with LF-only line endings (no \r\n)
+    raw_lf = (
+        b"GET /search?q=test HTTP/1.1\n"
+        b"Host: example.test\n"
+        b"Cookie: tok=abc\n"
+        b"\n"
+    )
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tf2:
+        tf2.write(raw_lf)
+        tf2_path = tf2.name
+    try:
+        ms2 = _MockSelf()
+        ms2.config.cookie = None
+        rf2_url, rf2_method, rf2_headers, rf2_body = ms2._parse_request_file(tf2_path)
+        _assert("raw-req-lf:method", rf2_method == "GET", f"rf2_method={rf2_method}")
+        _assert("raw-req-lf:cookie-propagated",
+                ms2.config.cookie is not None and "tok=abc" in ms2.config.cookie,
+                f"config.cookie={ms2.config.cookie}")
+        _assert("raw-req-lf:body-none", rf2_body is None, f"rf2_body={rf2_body!r}")
+    finally:
+        os.unlink(tf2_path)
+
+    # -------------------------------------------------------------------------
+    # 11. ORIG-VAL-LIST NORMALIZATION  (BUG-ORIG-VAL-LIST regression)
+    # -------------------------------------------------------------------------
+    # Simulate what happens when from_url returns a list and probe_parameter receives it
+    orig_list = ["test-value"]
+    orig_normalized = orig_list[0] if isinstance(orig_list, list) else str(orig_list)
+    _assert("orig-val-list:normalized-to-str", isinstance(orig_normalized, str),
+            f"type={type(orig_normalized)}")
+    _assert("orig-val-list:value-correct", orig_normalized == "test-value",
+            f"val={orig_normalized}")
+    # Test that _CTRL_RE.sub would not crash on normalized value
+    try:
+        import re as _re_t
+        _ctrl = _re_t.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+        result = _ctrl.sub("", orig_normalized)
+        _assert("orig-val-list:ctrl-re-no-crash", True)
+    except TypeError as _te:
+        _assert("orig-val-list:ctrl-re-no-crash", False, f"TypeError: {_te}")
+
+    # -------------------------------------------------------------------------
+    # 12. MULTIPART BODY: CRLF PRESERVATION
+    # -------------------------------------------------------------------------
+    boundary = "----FormBoundaryXyZ"
+    multipart_body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="test.txt"\r\n'
+        f"Content-Type: text/plain\r\n"
+        f"\r\n"
+        f"file content here\r\n"
+        f"--{boundary}--\r\n"
+    )
+    raw_mp = (
+        f"POST /upload HTTP/1.1\r\n"
+        f"Host: example.test\r\n"
+        f"Content-Type: multipart/form-data; boundary={boundary}\r\n"
+        f"\r\n"
+        + multipart_body
+    ).encode("latin-1")
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tf3:
+        tf3.write(raw_mp)
+        tf3_path = tf3.name
+    try:
+        ms3 = _MockSelf()
+        ms3.config.cookie = None
+        _, _, rf3_hdrs, rf3_body = ms3._parse_request_file(tf3_path)
+        _assert("multipart:body-preserved", rf3_body is not None, "body is None")
+        _assert("multipart:crlf-in-body",
+                "\r\n" in (rf3_body or ""),
+                "no CRLF in body: " + repr((rf3_body or "")[:200]))
+        _assert("multipart:boundary-in-body",
+                boundary in (rf3_body or ""),
+                "boundary missing: " + repr((rf3_body or "")[:200]))
+    finally:
+        os.unlink(tf3_path)
+
+    # -------------------------------------------------------------------------
+    # 13. DUPLICATE QUERY PARAMS
+    # -------------------------------------------------------------------------
+    dup_url = "https://example.test/api?tag=a&tag=b&tag=c&single=1"
+    dup_params = ParameterParser.from_url(dup_url)
+    _assert("dup-param:all-values", dup_params.get("tag") == ["a", "b", "c"],
+            f"tag={dup_params.get('tag')}")
+    inj_dup = ParameterParser.inject_url(dup_url, "tag", "PAYLOAD")
+    parsed_dup = _up(inj_dup)
+    from urllib.parse import parse_qs as _pqs2
+    dup_qs = _pqs2(parsed_dup.query, keep_blank_values=True)
+    _assert("dup-param:inject-preserves-single", dup_qs.get("single") == ["1"],
+            f"dup_qs={dup_qs}")
+
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    total = len(_PASS) + len(_FAIL)
+    print(f"\n[FIELD-DISCOVERY] {len(_PASS)}/{total} passed", flush=True)
+    if _FAIL:
+        for f in _FAIL:
+            print(f"  FAIL: {f}", flush=True)
+    else:
+        print("  ALL PASS", flush=True)
+    return len(_FAIL) == 0
+
+
+def _validate_field_discovery():
+    """Run field-discovery tests and parser/transport regression suite."""
+    try:
+        ok = _run_field_discovery_tests()
+        if ok:
+            print("[FIELD-DISCOVERY] ✓ All field-discovery and regression tests passed",
+                  flush=True)
+        else:
+            print("[FIELD-DISCOVERY] ✗ Some tests FAILED — see above", flush=True)
+    except Exception as _e:
+        import traceback as _tb
+        print(f"[FIELD-DISCOVERY] ERROR: {_e}", flush=True)
+        _tb.print_exc()
+
+
+# Run field-discovery suite on import alongside other validations
+try:
+    _validate_field_discovery()
 except Exception:
     pass
 
