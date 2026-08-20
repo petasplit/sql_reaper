@@ -64364,7 +64364,14 @@ class Scanner:
                         _consecutive_fails += 1
                         if _consecutive_fails >= 3:
                             LOG.warning("[Inference] %s: oracle dead at pos=%d", label, pos)
-                            return result
+                            # BUG-CONSEC-FAILS-RETURN-BYPASSES-FALLBACK FIX (HIGH):
+                            # `return result` skipped the fallback chain (_fallback_bitshift,
+                            # _fallback_equality) entirely. The counter pre-loads via the
+                            # null-check None path (line 64252) which increments and continues
+                            # without resetting — so 2 null-check None + 1 bisect None fires
+                            # `return result` at the first bisect failure, before any fallback
+                            # runs. Fix: `break` out of the bisection while loop so the
+                            # fallback chain at lines 64403-64411 always executes.
                         break
 
                     _consecutive_fails = 0
