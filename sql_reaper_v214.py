@@ -140397,21 +140397,26 @@ class ScannerV14(ScannerV13):
                 # Parse parameters from URL and data instead of using all_endpoints
                 _ep_params = {}
                 try:
-                    from urllib.parse import urlparse, parse_qs
-                    _parsed = urlparse(url)
-                    # FIX: Keep full list structure to preserve multi-valued parameters
-                    _ep_params = parse_qs(_parsed.query)
+                    # BUG-ALT-METHOD-URL-NO-QUESTION-MARK FIX: use ParameterParser.from_url()
+                    # which handles URLs where query params are embedded in the path using &
+                    # without a ? separator (e.g. /path&param=value). bare parse_qs(_parsed.query)
+                    # misses these params and triggers the synthetic {"id":"1"} fallback.
+                    _ep_params = ParameterParser.from_url(url)
                     if data and not data.strip().startswith("{"):
                         # Form data - merge with URL params preserving all values
+                        from urllib.parse import parse_qs
                         _form_params = parse_qs(data)
                         for k, v in _form_params.items():
                             if k in _ep_params:
-                                _ep_params[k].extend(v)
+                                if isinstance(_ep_params[k], list):
+                                    _ep_params[k].extend(v)
+                                else:
+                                    _ep_params[k] = [_ep_params[k]] + v
                             else:
                                 _ep_params[k] = v
                 except Exception:
                     pass
-                
+
                 if not _ep_params:
                     _ep_params = {"id": "1"}
                 # BUG-ALT-METHOD-LIST-ORIGINAL FIX: parse_qs() returns
