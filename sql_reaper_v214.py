@@ -62967,8 +62967,10 @@ class Scanner:
                                         _stab_len_fn = f"LEN((SELECT TOP 1 CONVERT(VARCHAR(8000),({query}))))"
                                     elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                                         _stab_len_fn = f"CHAR_LENGTH(({query}))"
-                                    elif _dbms in ("Firebird", "Oracle"):
+                                    elif _dbms == "Oracle":
                                         _stab_len_fn = f"LENGTHC(({query}))"
+                                    elif _dbms == "Firebird":
+                                        _stab_len_fn = f"CHAR_LENGTH(({query}))"
                                     else:
                                         _stab_len_fn = f"LENGTH(({query}))"
                                     _stab_eq_r = await _eval(f"{_stab_len_fn}={_length}")
@@ -63122,8 +63124,10 @@ class Scanner:
                             _cap_len_fn = f"LEN((SELECT TOP 1 CONVERT(VARCHAR(8000),({query}))))"
                         elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                             _cap_len_fn = f"CHAR_LENGTH(({query}))"
-                        elif _dbms in ("Firebird", "Oracle"):
+                        elif _dbms == "Oracle":
                             _cap_len_fn = f"LENGTHC(({query}))"
+                        elif _dbms == "Firebird":
+                            _cap_len_fn = f"CHAR_LENGTH(({query}))"
                         else:
                             _cap_len_fn = f"LENGTH(({query}))"
                         _cap_verify_cond = f"{_cap_len_fn}={_length}"
