@@ -24478,7 +24478,7 @@ class Config:
             else: tamper=[t.strip() for t in a.tamper.split(",")]
         cols=[c for c in a.cols.split(",")] if a.cols else []
         return cls(
-            url=a.url, request_file=a.request, data=a.data, headers=h,
+            url=a.url, request_file=a.request or getattr(a,"raw_file",None), data=a.data, headers=h,
             cookie=a.cookie, param=a.param, techniques=a.technique.upper(),
             _techniques_from_cli=(a.technique.upper() != "ALL"),
             level=a.level, risk=a.risk, time_sec=a.time_sec,
@@ -30018,6 +30018,16 @@ class ParameterParser:
         # OLD (BROKEN): {k: v[0] for k,v in qs.items()} → {'id': '1'}  ← id=2 LOST!
         # NEW (FIXED): qs as-is → {'id': ['1', '2']}  ← both values preserved
         qs = parse_qs(parsed.query,keep_blank_values=True)
+        # BUG-URL-NO-QUESTION-MARK FIX: some URLs embed query parameters in the path
+        # segment using & without a leading ?, e.g.:
+        #   /oauth2/callback&response_type=code&rhlk=js&scope=profile+email
+        # urlparse places the entire path-plus-params in parsed.path and leaves
+        # parsed.query empty, so parse_qs returns {}. Detect this pattern and re-parse
+        # the fragment after the first & as a conventional query string.
+        if not qs and "&" in parsed.path and "=" in parsed.path:
+            _path_parts = parsed.path.split("&", 1)
+            if "=" in _path_parts[1]:
+                qs = parse_qs(_path_parts[1], keep_blank_values=True)
         # Asterisk in query value: ?id=1*  mark that param
         # Since qs values are now lists, find params containing "*" in any value
         marked = {k:[v.replace("*","") for v in vlist if "*" in v] for k, vlist in qs.items() if any("*" in v for v in vlist)}
@@ -30030,7 +30040,130 @@ class ParameterParser:
         return qs
 
     @staticmethod
-    def from_data(data:str)->Tuple[str,Dict[str,Any]]:
+    def _parse_multipart(data: str, content_type: str = "") -> Dict[str, Any]:
+        """Parse a multipart/form-data body into {field_name: [value]} dict.
+
+        BUG-MP-FROM-DATA FIX: Extract boundary from the first line of the body
+        (avoids requiring a Content-Type hint), then split on boundary delimiters
+        and parse Content-Disposition headers to recover all field names and values.
+        Returns the same {name: [value]} list-value structure as parse_qs so callers
+        can iterate fields uniformly.
+        """
+        boundary = ""
+        # Prefer explicit Content-Type hint (more reliable for uncommon boundary strings)
+        if content_type and "boundary=" in content_type:
+            for _seg in content_type.split(";"):
+                _seg = _seg.strip()
+                if _seg.lower().startswith("boundary="):
+                    boundary = _seg[9:].strip().strip('"\'')
+                    break
+        # Fall back to extracting boundary from the first line of the body
+        if not boundary:
+            _first = data.split("\r\n", 1)[0] if "\r\n" in data else data.split("\n", 1)[0]
+            if _first.startswith("--"):
+                boundary = _first[2:].strip()
+        if not boundary:
+            return {}
+        _crlf = "\r\n" if "\r\n" in data else "\n"
+        _delimiter = f"--{boundary}"
+        fields: Dict[str, Any] = {}
+        _parts = data.split(_delimiter)
+        for _part in _parts:
+            _ps = _part.strip()
+            # Skip preamble, epilogue (-- suffix), and empty chunks
+            if not _ps or _ps == "--":
+                continue
+            if _ps.startswith("--"):  # closing delimiter "--boundary--"
+                continue
+            # Strip leading CRLF added by the boundary split
+            if _part.startswith(_crlf):
+                _part = _part[len(_crlf):]
+            # Locate the blank line separating part-headers from part-body
+            _body_sep = _crlf + _crlf
+            _sep_idx = _part.find(_body_sep)
+            if _sep_idx == -1:
+                continue
+            _part_hdrs = _part[:_sep_idx]
+            _part_body = _part[_sep_idx + len(_body_sep):]
+            # Extract field name from Content-Disposition
+            _name = None
+            for _hline in _part_hdrs.splitlines():
+                if _hline.lower().startswith("content-disposition:"):
+                    for _hseg in _hline.split(";"):
+                        _hseg = _hseg.strip()
+                        if _hseg.lower().startswith("name="):
+                            _name = _hseg[5:].strip().strip('"\'')
+                            break
+                if _name:
+                    break
+            if not _name:
+                continue
+            # Strip trailing CRLF appended before next boundary
+            if _part_body.endswith(_crlf):
+                _part_body = _part_body[:-len(_crlf)]
+            fields[_name] = [_part_body]
+        return fields
+
+    @staticmethod
+    def _inject_multipart(data: str, param: str, value: str) -> str:
+        """Replace the value of a named field in a multipart/form-data body.
+
+        BUG-MP-INJECT-DATA FIX: Reconstruct the multipart body with the injected
+        value while preserving the boundary, CRLF line endings, all other fields,
+        Content-Disposition headers, and the closing boundary delimiter. Uses the
+        boundary extracted from the first line of the body so no Content-Type is
+        needed.
+        """
+        _first = data.split("\r\n", 1)[0] if "\r\n" in data else data.split("\n", 1)[0]
+        if not _first.startswith("--"):
+            return data  # malformed; return unchanged
+        _boundary = _first[2:].strip()
+        _delimiter = f"--{_boundary}"
+        _crlf = "\r\n" if "\r\n" in data else "\n"
+        _body_sep = _crlf + _crlf
+        _parts = data.split(_delimiter)
+        _new_parts: list = []
+        for _part in _parts:
+            # Identify and preserve closing delimiter / preamble unchanged
+            _ps = _part.strip()
+            if not _ps or _ps == "--" or (_ps.startswith("--") and len(_ps) <= 2):
+                _new_parts.append(_part)
+                continue
+            # Strip leading CRLF from the part content
+            _stripped = _part
+            if _stripped.startswith(_crlf):
+                _leading = _crlf
+                _stripped = _stripped[len(_crlf):]
+            else:
+                _leading = ""
+            _sep_idx = _stripped.find(_body_sep)
+            if _sep_idx == -1:
+                _new_parts.append(_part)
+                continue
+            _hdrs = _stripped[:_sep_idx]
+            _body_with_tail = _stripped[_sep_idx + len(_body_sep):]
+            # Check whether this part's field name matches the injection target
+            _target = False
+            for _hline in _hdrs.splitlines():
+                if _hline.lower().startswith("content-disposition:"):
+                    for _hseg in _hline.split(";"):
+                        _hseg = _hseg.strip()
+                        if _hseg.lower().startswith("name="):
+                            if _hseg[5:].strip().strip('"\'') == param:
+                                _target = True
+                            break
+                if _target:
+                    break
+            if _target:
+                # Preserve the trailing CRLF that precedes the next boundary
+                _tail = _crlf if _body_with_tail.endswith(_crlf) else ""
+                _new_parts.append(_leading + _hdrs + _body_sep + value + _tail)
+            else:
+                _new_parts.append(_part)
+        return _delimiter.join(_new_parts)
+
+    @staticmethod
+    def from_data(data:str, content_type:str="")->Tuple[str,Dict[str,Any]]:
         if not data: return "form",{}
         data=data.strip()
         if data.startswith("{") or data.startswith("["):
@@ -30047,6 +30180,22 @@ class ParameterParser:
                 return "json", ParameterParser.flatten_json(parsed)
             except Exception as _sqr_e:
                 LOG.debug("Suppressed in from_data: %s", _sqr_e)
+        # BUG-MP-FROM-DATA FIX: multipart/form-data bodies start with "--boundary".
+        # parse_qs() cannot parse them and silently returns {}, making every multipart
+        # field invisible to the injection engine. Detect by leading "--" and delegate
+        # to _parse_multipart(). Also accept an explicit content_type hint (e.g. from
+        # req_headers["Content-Type"]) for cases where the body may not start with "--"
+        # due to whitespace stripping, or where additional validation is required.
+        if data.startswith("--"):
+            try:
+                return "multipart", ParameterParser._parse_multipart(data, content_type=content_type)
+            except Exception as _sqr_e:
+                LOG.debug("Suppressed multipart parse in from_data: %s", _sqr_e)
+        elif content_type and "multipart/form-data" in content_type:
+            try:
+                return "multipart", ParameterParser._parse_multipart(data, content_type=content_type)
+            except Exception as _sqr_e:
+                LOG.debug("Suppressed ct-hint multipart parse in from_data: %s", _sqr_e)
         # BUG-FIX-MULTI-VALUED-FORM-PARAMS (#2): Do NOT extract v[0] — this LOSES
         # multi-valued parameters from the original form data. Keep the full list
         # structure so all parameter values are preserved during injection and testing.
@@ -30101,6 +30250,12 @@ class ParameterParser:
                 return json.dumps(d)
             except (json.JSONDecodeError, TypeError, KeyError):
                 return data  # return original if injection fails
+        # BUG-MP-INJECT-DATA FIX: multipart/form-data bodies must be reconstructed
+        # using _inject_multipart() which preserves boundary, CRLF, and all other
+        # fields. Falling through to urlencode() would destroy the multipart structure
+        # and produce a malformed request body that servers reject with 400/422.
+        if fmt=="multipart":
+            return ParameterParser._inject_multipart(data, param, value)
         # BUG-FIX-URLENCODE-DOSEQ (#2): parse_qs returns {param: [val1, val2, ...]}
         # DO NOT extract v[0] — this LOSES multi-valued form parameters.
         # Use doseq=True in urlencode() to properly handle lists of values.
@@ -70055,6 +70210,14 @@ class Scanner:
         # cookie value is individually discovered and tested as an injection surface.
         if cookie_str and not getattr(self.config, "cookie", None):
             self.config.cookie = cookie_str
+
+        # BUG-MP-CONTENT-TYPE-DETECTION FIX: store the Content-Type from the raw
+        # request file on config so downstream callers of from_data() can pass it
+        # as a hint for multipart boundary extraction. Without this the boundary
+        # is unavailable when the body does not start with "--" (e.g. after strip).
+        _ct_hdr = headers.get("Content-Type") or headers.get("content-type") or ""
+        if _ct_hdr:
+            self.config._request_file_content_type = _ct_hdr
 
         # Determine scheme: only use plain HTTP when explicit port signals it.
         # Default to HTTPS; use HTTP only for plain port 80/8080 or host with :80/:8080 suffix.
@@ -168526,7 +168689,22 @@ Examples:
 
     g = p.add_argument_group("Target")
     g.add_argument("-u","--url"); g.add_argument("--domain")
-    g.add_argument("-m","--multiple"); g.add_argument("-r","--request")
+    g.add_argument("-m","--multiple")
+    g.add_argument("-r","--request",
+                   metavar="FILE",
+                   help="Raw HTTP request file. The file must contain the full HTTP request "
+                        "(request line, headers, blank line, optional body). "
+                        "Supports CRLF and LF line endings, JSON/form/multipart bodies, "
+                        "and URL-encoded paths. Alias: --raw-file.")
+    g.add_argument("--raw-file",
+                   dest="raw_file",
+                   metavar="FILE",
+                   help="Alias for -r/--request. Load the target, method, headers, cookie, "
+                        "and body from a raw HTTP request file captured from a proxy "
+                        "(e.g. Burp Suite, mitmproxy). "
+                        "Request line: 'METHOD /path?query HTTP/1.x'. "
+                        "Supported body formats: JSON, application/x-www-form-urlencoded, "
+                        "multipart/form-data, and plain text.")
     g.add_argument("--data"); g.add_argument("--headers")
     g.add_argument("--cookie"); g.add_argument("--param")
     g.add_argument("--config")
@@ -190842,6 +191020,9 @@ def _run_field_discovery_tests():
                     elif k_s.lower() == "cookie": cookie_str = v_s
             if cookie_str and not self.config.cookie:
                 self.config.cookie = cookie_str
+            _ct_hdr = headers.get("Content-Type") or headers.get("content-type") or ""
+            if _ct_hdr:
+                self.config._request_file_content_type = _ct_hdr
             _plain_http_ports = (":80", ":8080", ":8000", ":3000")
             scheme = "http" if any(host.endswith(p) for p in _plain_http_ports) else "https"
             return f"{scheme}://{host}{path_}", method, headers, body
@@ -191085,6 +191266,165 @@ def _run_field_discovery_tests():
     _assert("multipart:filename-field-name",
             'name="upload"' in _fn_body,
             f"field name missing: {_fn_body[:300]!r}")
+
+    # -------------------------------------------------------------------------
+    # 17. BUG-URL-NO-QUESTION-MARK REGRESSION
+    # Params in path with & but no leading ? must be discovered.
+    # -------------------------------------------------------------------------
+    _noq_url = "https://accounts.example.test/oauth2/callback&response_type=code&rhlk=js&rrk=47&scope=profile+email"
+    _noq_params = ParameterParser.from_url(_noq_url)
+    _assert("url-no-qmark:response_type-discovered",
+            "response_type" in _noq_params,
+            f"params={list(_noq_params.keys())}")
+    _assert("url-no-qmark:rhlk-discovered",
+            "rhlk" in _noq_params,
+            f"params={list(_noq_params.keys())}")
+    _assert("url-no-qmark:scope-discovered",
+            "scope" in _noq_params,
+            f"params={list(_noq_params.keys())}")
+    # A normal URL with ? must still work
+    _norm_url = "https://example.test/search?q=hello&page=1"
+    _norm_params = ParameterParser.from_url(_norm_url)
+    _assert("url-no-qmark:normal-url-unaffected",
+            "q" in _norm_params and "page" in _norm_params,
+            f"params={list(_norm_params.keys())}")
+
+    # -------------------------------------------------------------------------
+    # 18. BUG-MP-FROM-DATA REGRESSION
+    # Multipart bodies must be discovered via from_data, not silently return {}.
+    # -------------------------------------------------------------------------
+    _mp_boundary = "----FormBoundaryTest12345"
+    _mp_raw_body = (
+        f"--{_mp_boundary}\r\n"
+        f'Content-Disposition: form-data; name="username"\r\n'
+        f"\r\n"
+        f"alice\r\n"
+        f"--{_mp_boundary}\r\n"
+        f'Content-Disposition: form-data; name="message"\r\n'
+        f"\r\n"
+        f"hello world\r\n"
+        f"--{_mp_boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="test.txt"\r\n'
+        f"Content-Type: text/plain\r\n"
+        f"\r\n"
+        f"file content here\r\n"
+        f"--{_mp_boundary}--\r\n"
+    )
+    _mp_fmt, _mp_fields = ParameterParser.from_data(_mp_raw_body)
+    _assert("mp-from-data:fmt-multipart", _mp_fmt == "multipart",
+            f"fmt={_mp_fmt}")
+    _assert("mp-from-data:username-discovered",
+            "username" in _mp_fields,
+            f"fields={list(_mp_fields.keys())}")
+    _assert("mp-from-data:username-value",
+            _mp_fields.get("username") == ["alice"],
+            f"username={_mp_fields.get('username')}")
+    _assert("mp-from-data:message-discovered",
+            "message" in _mp_fields,
+            f"fields={list(_mp_fields.keys())}")
+    _assert("mp-from-data:file-field-discovered",
+            "file" in _mp_fields,
+            f"fields={list(_mp_fields.keys())}")
+    # LF-only multipart body must also be parsed
+    _mp_lf_body = (
+        f"--{_mp_boundary}\n"
+        f'Content-Disposition: form-data; name="lf_field"\n'
+        f"\n"
+        f"lf_value\n"
+        f"--{_mp_boundary}--\n"
+    )
+    _mp_lf_fmt, _mp_lf_fields = ParameterParser.from_data(_mp_lf_body)
+    _assert("mp-from-data:lf-fmt-multipart", _mp_lf_fmt == "multipart",
+            f"fmt={_mp_lf_fmt}")
+    _assert("mp-from-data:lf-field-discovered",
+            "lf_field" in _mp_lf_fields,
+            f"fields={list(_mp_lf_fields.keys())}")
+    _assert("mp-from-data:lf-value-correct",
+            _mp_lf_fields.get("lf_field") == ["lf_value"],
+            f"lf_field={_mp_lf_fields.get('lf_field')}")
+    # Content-Type hint path
+    _mp_ct_hint = f"multipart/form-data; boundary={_mp_boundary}"
+    _mp_ct_fmt, _mp_ct_fields = ParameterParser.from_data(_mp_raw_body, content_type=_mp_ct_hint)
+    _assert("mp-from-data:ct-hint-fmt-multipart", _mp_ct_fmt == "multipart",
+            f"fmt={_mp_ct_fmt}")
+    _assert("mp-from-data:ct-hint-fields-present",
+            "username" in _mp_ct_fields and "message" in _mp_ct_fields,
+            f"fields={list(_mp_ct_fields.keys())}")
+
+    # -------------------------------------------------------------------------
+    # 19. BUG-MP-INJECT-DATA REGRESSION
+    # inject_data with fmt="multipart" must replace the target field value while
+    # preserving boundary, CRLF, and all other fields.
+    # -------------------------------------------------------------------------
+    _mp_inj = ParameterParser.inject_data(_mp_raw_body, "multipart", "username", "' OR 1=1--")
+    # Verify the injected body is still a valid multipart structure
+    _assert("mp-inject:boundary-preserved",
+            _mp_boundary in _mp_inj,
+            f"boundary missing from injected body")
+    _assert("mp-inject:injected-value-present",
+            "' OR 1=1--" in _mp_inj,
+            f"payload missing from injected body: {_mp_inj[:300]!r}")
+    _assert("mp-inject:other-field-intact",
+            "hello world" in _mp_inj,
+            f"message field lost after injection: {_mp_inj[:300]!r}")
+    _assert("mp-inject:crlf-preserved",
+            "\r\n" in _mp_inj,
+            f"CRLF lost after injection")
+    # Verify the injected username parses back correctly
+    _, _mp_inj_fields = ParameterParser.from_data(_mp_inj)
+    _assert("mp-inject:roundtrip-username-updated",
+            _mp_inj_fields.get("username") == ["' OR 1=1--"],
+            f"username={_mp_inj_fields.get('username')}")
+    _assert("mp-inject:roundtrip-message-unchanged",
+            _mp_inj_fields.get("message") == ["hello world"],
+            f"message={_mp_inj_fields.get('message')}")
+    # Restore original value
+    _mp_restored = ParameterParser.inject_data(_mp_inj, "multipart", "username", "alice")
+    _, _mp_rest_fields = ParameterParser.from_data(_mp_restored)
+    _assert("mp-inject:restore-username",
+            _mp_rest_fields.get("username") == ["alice"],
+            f"restored username={_mp_rest_fields.get('username')}")
+
+    # -------------------------------------------------------------------------
+    # 20. BUG-MP-CONTENT-TYPE-DETECTION REGRESSION
+    # _parse_request_file must store Content-Type on config._request_file_content_type.
+    # -------------------------------------------------------------------------
+    _mp_ct_boundary = "----BoundaryForCTDetection"
+    _mp_ct_raw = (
+        f"POST /upload HTTP/1.1\r\n"
+        f"Host: example.test\r\n"
+        f"Content-Type: multipart/form-data; boundary={_mp_ct_boundary}\r\n"
+        f"\r\n"
+        f"--{_mp_ct_boundary}\r\n"
+        f'Content-Disposition: form-data; name="field1"\r\n'
+        f"\r\n"
+        f"value1\r\n"
+        f"--{_mp_ct_boundary}--\r\n"
+    ).encode("latin-1")
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as _tf_ct:
+        _tf_ct.write(_mp_ct_raw)
+        _tf_ct_path = _tf_ct.name
+    try:
+        _ms_ct = _MockSelf()
+        _ms_ct.config.cookie = None
+        _rf_ct_url, _rf_ct_method, _rf_ct_hdrs, _rf_ct_body = _ms_ct._parse_request_file(_tf_ct_path)
+        _assert("mp-ct-detect:ct-stored-on-config",
+                getattr(_ms_ct.config, "_request_file_content_type", None) is not None and
+                "multipart/form-data" in getattr(_ms_ct.config, "_request_file_content_type", ""),
+                f"_request_file_content_type={getattr(_ms_ct.config, '_request_file_content_type', None)!r}")
+        _assert("mp-ct-detect:body-not-none",
+                _rf_ct_body is not None, "body is None")
+        # from_data with the stored content_type must return multipart fields
+        _stored_ct = getattr(_ms_ct.config, "_request_file_content_type", "")
+        _rf_ct_fmt, _rf_ct_fields = ParameterParser.from_data(_rf_ct_body, content_type=_stored_ct)
+        _assert("mp-ct-detect:fmt-multipart",
+                _rf_ct_fmt == "multipart",
+                f"fmt={_rf_ct_fmt}")
+        _assert("mp-ct-detect:field1-discovered",
+                "field1" in _rf_ct_fields,
+                f"fields={list(_rf_ct_fields.keys())}")
+    finally:
+        os.unlink(_tf_ct_path)
 
     # -------------------------------------------------------------------------
     # Summary
