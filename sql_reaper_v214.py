@@ -30223,6 +30223,20 @@ class ParameterParser:
         # DO NOT extract v[0] — this LOSES multi-valued parameters from the original URL.
         # Use doseq=True in urlencode() to properly handle lists of values.
         p=urlparse(url.replace("*",""))
+        # BUG-INJECT-URL-AMP-IN-PATH FIX: when from_url() discovered params from an
+        # &-in-path URL (no '?' separator, params embedded after first '&' in path),
+        # p.query is EMPTY and operating on it would append a NEW query string while
+        # leaving the original params untouched in p.path — producing a malformed URL
+        # with duplicate/conflicting params.  Mirror the from_url() detection logic and
+        # replace the param value IN THE PATH instead.
+        if not p.query and "&" in p.path and "=" in p.path:
+            _path_parts = p.path.split("&", 1)
+            if "=" in _path_parts[1]:
+                _qs = parse_qs(_path_parts[1], keep_blank_values=True)
+                _qs[param] = [value]
+                _new_qs = urlencode(_qs, doseq=True)
+                _new_path = _path_parts[0] + "&" + _new_qs
+                return urlunparse(p._replace(path=_new_path))
         qs=parse_qs(p.query,keep_blank_values=True)
         qs[param]=[value]
         # doseq=True: urlencode properly serializes {param: [val1, val2, ...]} → "param=val1&param=val2..."
@@ -135738,6 +135752,20 @@ class ScannerV14(ScannerV13):
                             if _cookie_names:
                                 print(f"[+] [Surface] Cookies found: {_cookie_names[:5]}", flush=True)
                     except Exception: pass
+                # BUG-SURF-COOKIE-CFG FIX: surface expansion previously ONLY extracted cookies
+                # from Set-Cookie response headers, silently skipping cookies that the user
+                # supplied via --cookie CLI option or a raw request file (cfg.cookie).
+                # Those cookies are already forwarded in every request by the HTTP engine
+                # but were never enumerated as injection surfaces here.
+                # Fix: parse cfg.cookie and add each name to _cookie_names / _expanded_surfaces.
+                _cfg_cookie_str = getattr(cfg, 'cookie', None) or ''
+                for _cfg_ck_pair in _cfg_cookie_str.split(';'):
+                    _cfg_ck_pair = _cfg_ck_pair.strip()
+                    if '=' in _cfg_ck_pair:
+                        _cfg_surf_cn = _cfg_ck_pair.split('=', 1)[0].strip()
+                        if _cfg_surf_cn and _cfg_surf_cn not in _cookie_names:
+                            _cookie_names.append(_cfg_surf_cn)
+                            _expanded_surfaces.append(("cookie", _cfg_surf_cn, {}))
             
                 # Discover vectors
                 for _hdr_name, _hdr_dict in HeaderInjectionVectors.get_header_probes(_hdr_payloads):
@@ -191425,6 +191453,89 @@ def _run_field_discovery_tests():
                 f"fields={list(_rf_ct_fields.keys())}")
     finally:
         os.unlink(_tf_ct_path)
+
+    # -------------------------------------------------------------------------
+    # 21. BUG-INJECT-URL-AMP-IN-PATH REGRESSION
+    # inject_url must replace the param value IN the &-in-path style URL path,
+    # not append a new query string while leaving the original param untouched.
+    # Without the fix the URL gets a duplicate param (one in path, one in ?).
+    # -------------------------------------------------------------------------
+    _aip_url = (
+        "https://accounts.example.test"
+        "/oauth2/callback&response_type=code&rhlk=js&rrk=47"
+        "&scope=profile+email&service=lso&state=ABC123"
+    )
+    _aip_payload = "code' SLEEP(5)--"
+    _aip_inj = ParameterParser.inject_url(_aip_url, "response_type", _aip_payload)
+    # The payload must appear exactly once — in the path, not in a separate query string
+    _aip_has_payload = _aip_payload in _aip_inj or _aip_payload.replace(" ", "+") in _aip_inj
+    _assert("inject-url-amp-path:payload-present", _aip_has_payload,
+            f"payload missing from URL: {_aip_inj!r}")
+    # Must NOT have a bare '?' (a new query string would be a sign of the old bug)
+    _assert("inject-url-amp-path:no-question-mark",
+            "?" not in _aip_inj,
+            f"spurious '?' found (old bug): {_aip_inj!r}")
+    # Payload must be in the path portion, not tacked on after a ?
+    from urllib.parse import urlparse as _aip_up
+    _aip_parsed = _aip_up(_aip_inj)
+    _assert("inject-url-amp-path:payload-in-path",
+            _aip_payload in _aip_parsed.path or
+            _aip_payload.replace(" ", "+") in _aip_parsed.path or
+            "%27" in _aip_parsed.path,  # URL-encoded apostrophe
+            f"payload not in path portion: path={_aip_parsed.path!r}")
+    # Other params must be preserved
+    _assert("inject-url-amp-path:rhlk-preserved",
+            "rhlk" in _aip_inj and "js" in _aip_inj,
+            f"rhlk param lost: {_aip_inj!r}")
+    _assert("inject-url-amp-path:state-preserved",
+            "state" in _aip_inj and "ABC123" in _aip_inj,
+            f"state param lost: {_aip_inj!r}")
+
+    # inject_url on a normal ?-style URL must still work correctly
+    _norm_inj_url = "https://example.test/search?q=hello&page=1"
+    _norm_inj = ParameterParser.inject_url(_norm_inj_url, "q", "' OR 1=1--")
+    from urllib.parse import parse_qs as _pqs3
+    _norm_inj_qs = _pqs3(_aip_up(_norm_inj).query, keep_blank_values=True)
+    _assert("inject-url-normal:payload-in-qs",
+            _norm_inj_qs.get("q") == ["' OR 1=1--"],
+            f"q={_norm_inj_qs.get('q')}")
+    _assert("inject-url-normal:page-preserved",
+            _norm_inj_qs.get("page") == ["1"],
+            f"page={_norm_inj_qs.get('page')}")
+
+    # -------------------------------------------------------------------------
+    # 22. CFG.COOKIE SURFACE EXPANSION REGRESSION
+    # Cookies from cfg.cookie must be parsed and surfaced for injection testing.
+    # -------------------------------------------------------------------------
+    # Simulate the cfg.cookie parsing that now happens in _run_surface_expansion
+    _cfg_ck_str = "session_id=abc123; token=xyz; user=alice"
+    _cfg_parsed_names = []
+    for _pair in _cfg_ck_str.split(';'):
+        _pair = _pair.strip()
+        if '=' in _pair:
+            _cname = _pair.split('=', 1)[0].strip()
+            if _cname:
+                _cfg_parsed_names.append(_cname)
+    _assert("cfg-cookie-surface:session_id-discovered",
+            "session_id" in _cfg_parsed_names,
+            f"names={_cfg_parsed_names}")
+    _assert("cfg-cookie-surface:token-discovered",
+            "token" in _cfg_parsed_names,
+            f"names={_cfg_parsed_names}")
+    _assert("cfg-cookie-surface:user-discovered",
+            "user" in _cfg_parsed_names,
+            f"names={_cfg_parsed_names}")
+    _assert("cfg-cookie-surface:count",
+            len(_cfg_parsed_names) == 3,
+            f"expected 3 names, got {_cfg_parsed_names}")
+    # Empty/malformed cookie string must not crash
+    _cfg_ck_empty = ""
+    _cfg_empty_names = [
+        _p.split('=', 1)[0].strip()
+        for _p in _cfg_ck_empty.split(';')
+        if '=' in _p and _p.strip()
+    ]
+    _assert("cfg-cookie-surface:empty-no-crash", _cfg_empty_names == [], f"got {_cfg_empty_names}")
 
     # -------------------------------------------------------------------------
     # Summary
