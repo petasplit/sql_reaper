@@ -133588,6 +133588,17 @@ class UniversalScanOrchestrator:
                  f"({len(params)} parameters)")
 
         for param, original in params.items():
+            # BUG-LIST-ORIG-NORMALIZE FIX: ParameterParser.from_url() returns
+            # Dict[str, List[str]] via parse_qs(). When that dict is passed here
+            # without prior normalization, `original` is a List[str].  Every
+            # downstream call that does `original + payload` (build_baseline,
+            # _send_injected, UNION sentinel scan at line 131040, path-injection
+            # demo at line 130892) raises TypeError: can only concatenate list
+            # (not "str") to list.  Normalize to the first element or empty string.
+            if isinstance(original, list):
+                original = original[0] if original else ""
+            elif not isinstance(original, str):
+                original = str(original)
             # BUG-REQ4-SURFACE FIX: Stop scanning immediately when injection is confirmed.
             # Previously the loop continued probing all remaining parameters even after
             # _SCAN_STOPPED was set by PCV confirmation — violating Req 4.
@@ -133957,6 +133968,15 @@ class ScannerV13(ScannerV12):
                 key=lambda x: causal_scores.get(x[0], 0.5), reverse=True)
 
             for param, orig_val in params_ordered:
+                # BUG-LIST-ORIG-NORMALIZE FIX: ep.params comes from
+                # ParameterParser.from_url() which returns Dict[str, List[str]].
+                # Normalize here so warmup_mgr, CSRF injection, and scan_surface
+                # all receive a plain str.  The same normalization also runs inside
+                # scan_surface itself as a defensive second layer.
+                if isinstance(orig_val, list):
+                    orig_val = orig_val[0] if orig_val else ""
+                elif not isinstance(orig_val, str):
+                    orig_val = str(orig_val)
                 # Smart/causal filters
                 if causal_scores and causal_scores.get(param, 0.5) < 0.05:
                     self.conf_matrix.record_skipped(param, "causal-filtered")
@@ -190940,6 +190960,131 @@ def _run_field_discovery_tests():
     dup_qs = _pqs2(parsed_dup.query, keep_blank_values=True)
     _assert("dup-param:inject-preserves-single", dup_qs.get("single") == ["1"],
             f"dup_qs={dup_qs}")
+
+    # -------------------------------------------------------------------------
+    # 14. HEADER INJECTION DISCOVERY
+    # -------------------------------------------------------------------------
+    # Verify that the HTTPHeaderInjector tier lists contain the minimum set of
+    # commonly injectable headers so the scanner is never deployed blind.
+    _required_tier1 = {
+        "X-Forwarded-For", "User-Agent", "Referer",
+        "X-Real-IP", "CF-Connecting-IP", "X-Client-IP",
+    }
+    _actual_tier1 = set(HTTPHeaderInjector.TIER1_HEADERS)
+    _missing_tier1 = _required_tier1 - _actual_tier1
+    _assert("header:tier1-not-empty",
+            len(HTTPHeaderInjector.TIER1_HEADERS) >= 6,
+            f"TIER1 has only {len(HTTPHeaderInjector.TIER1_HEADERS)} entries")
+    _assert("header:tier1-required-present",
+            len(_missing_tier1) == 0,
+            f"missing from TIER1: {_missing_tier1}")
+    _assert("header:tier2-not-empty",
+            len(HTTPHeaderInjector.TIER2_HEADERS) >= 5,
+            f"TIER2 has only {len(HTTPHeaderInjector.TIER2_HEADERS)} entries")
+    _required_tier2_sample = {"Accept-Language", "Host", "X-Requested-With"}
+    _missing_tier2 = _required_tier2_sample - set(HTTPHeaderInjector.TIER2_HEADERS)
+    _assert("header:tier2-required-present",
+            len(_missing_tier2) == 0,
+            f"missing from TIER2: {_missing_tier2}")
+    # No overlap between tiers (deduplication sanity check).
+    # Some headers appear in both tiers by deliberate design (probed at different
+    # priority levels); only truly unexpected overlaps are test failures.
+    _overlap = set(HTTPHeaderInjector.TIER1_HEADERS) & set(HTTPHeaderInjector.TIER2_HEADERS)
+    # Known intentional overlaps — probed at both priority levels.
+    _known_overlap = {"Accept-Language", "Via", "X-Cluster-Client-IP"}
+    _unexpected_overlap = _overlap - _known_overlap
+    _assert("header:tier-overlap-expected",
+            len(_unexpected_overlap) == 0,
+            f"unexpected TIER1∩TIER2 overlap: {_unexpected_overlap}")
+
+    # -------------------------------------------------------------------------
+    # 15. PATH INJECTION DISCOVERY
+    # -------------------------------------------------------------------------
+    # Verify URLPathInjector.extract_segments correctly identifies injectable
+    # path segments from a REST-style URL.
+    class _MinimalConfig:
+        pass
+    _path_inj = URLPathInjector(engine=None, config=_MinimalConfig())
+
+    # Numeric ID segment must be discovered
+    _segs_num = _path_inj.extract_segments("https://api.example.test/users/1337/orders")
+    _seg_vals = [s[1] for s in _segs_num]
+    _assert("path:numeric-id-discovered", "1337" in _seg_vals,
+            f"segments={_segs_num}")
+
+    # String status segment must be discovered
+    _segs_str = _path_inj.extract_segments("https://api.example.test/products/widget/details")
+    _seg_vals_str = [s[1] for s in _segs_str]
+    _assert("path:string-segment-discovered",
+            "widget" in _seg_vals_str or "details" in _seg_vals_str,
+            f"segments={_segs_str}")
+
+    # Versioned path: v1/v2 prefix must NOT appear as injectable segment
+    _segs_ver = _path_inj.extract_segments("https://api.example.test/api/v1/users/42")
+    _ver_vals = [s[1] for s in _segs_ver]
+    _assert("path:version-prefix-skipped",
+            "v1" not in _ver_vals and "api" not in _ver_vals,
+            f"version segments leaked: {_ver_vals}")
+    _assert("path:numeric-under-version-discovered",
+            "42" in _ver_vals,
+            f"numeric id missing: {_ver_vals}")
+
+    # Injection roundtrip via build_url_with_segment.
+    # Use the discovered segment's own index (first element of the tuple) to
+    # avoid hardcoding a positional index that doesn't match the segment table.
+    _base_url = "https://api.example.test/users/1337/orders"
+    _segs_rt = _path_inj.extract_segments(_base_url)
+    if _segs_rt:
+        _first_seg_idx, _first_seg_val, _ = _segs_rt[0]
+        _rt_url = _path_inj.build_url_with_segment(_base_url, _first_seg_idx, "PAYLOAD")
+        _assert("path:inject-roundtrip",
+                "PAYLOAD" in _rt_url,
+                f"_rt_url={_rt_url}")
+        _rt_restored = _path_inj.build_url_with_segment(_rt_url, _first_seg_idx, _first_seg_val)
+        _assert("path:restore-roundtrip",
+                _first_seg_val in _rt_restored,
+                f"_rt_restored={_rt_restored}")
+
+    # Empty path — no segments
+    _segs_empty = _path_inj.extract_segments("https://api.example.test/")
+    _assert("path:empty-path-no-segments", _segs_empty == [],
+            f"expected [] got {_segs_empty}")
+
+    # -------------------------------------------------------------------------
+    # 16. MULTIPART FIELD INJECTION ROUNDTRIP
+    # -------------------------------------------------------------------------
+    # Verify MultipartInjector.build_multipart_body correctly constructs a body
+    # with an injected payload, preserving boundary structure and CRLF.
+    _fields = {"username": "alice", "message": "hello world", "age": "30"}
+    _mp_body, _mp_ct = MultipartInjector.build_multipart_body(
+        _fields, inject_param="username", inject_value="' OR 1=1--")
+    _assert("multipart:content-type-has-boundary",
+            "boundary=" in _mp_ct,
+            f"ct={_mp_ct}")
+    _assert("multipart:inject-payload-present",
+            "' OR 1=1--" in _mp_body,
+            f"payload missing from body: {_mp_body[:300]!r}")
+    _assert("multipart:non-injected-field-intact",
+            "hello world" in _mp_body,
+            f"message field missing: {_mp_body[:300]!r}")
+    _assert("multipart:crlf-structure",
+            "\r\n" in _mp_body,
+            "CRLF missing from multipart body")
+    _assert("multipart:boundary-open-tag",
+            "--" in _mp_body,
+            "boundary open tag missing")
+    _assert("multipart:boundary-close-tag",
+            "--\r\n" in _mp_body or _mp_body.rstrip().endswith("--"),
+            "boundary close tag missing")
+    # Filename injection roundtrip
+    _fn_body, _fn_ct = MultipartInjector.build_filename_injection(
+        "'; DROP TABLE users;--", field_name="upload")
+    _assert("multipart:filename-inject-present",
+            "'; DROP TABLE users;--" in _fn_body,
+            f"filename payload missing: {_fn_body[:300]!r}")
+    _assert("multipart:filename-field-name",
+            'name="upload"' in _fn_body,
+            f"field name missing: {_fn_body[:300]!r}")
 
     # -------------------------------------------------------------------------
     # Summary
