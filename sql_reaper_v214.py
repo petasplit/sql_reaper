@@ -117259,10 +117259,30 @@ class TechniqueCascadeEngine:
                     # causing Check C to silently fail for DBMSes where one canonical error
                     # message fires regardless of which payload triggers it (e.g. PostgreSQL
                     # "division by zero" always shows the same ERROR: string).
-                    _note = f" (same-pattern-2-payloads: {_pat1[:25]})"
-                    if _any_status_500:
-                        _note += " + HTTP 500"
-                    return True, _all_c_matches[0][0], _pat1, _note
+                    #
+                    # BUG-CHECKC-WAF-DOUBLEMATCH-FP FIX (FALSE POSITIVE — all DBMSes, WAF targets):
+                    # When two error-triggering payloads are BOTH WAF-blocked, both entries in
+                    # _all_c_matches carry the synthetic pattern "waf_block_detected".  The
+                    # same-pattern-2-payloads branch then unconditionally returns True with the
+                    # "waf_block_detected" token — confirming Check C based purely on the WAF
+                    # firing twice, with zero actual SQL error text in any response body.
+                    # A WAF that blocks ALL SQL-like payloads regardless of injection validity
+                    # would create a permanent false positive through this path.
+                    # Fix: exclude the synthetic WAF pseudo-pattern from the unconditional same-
+                    # pattern path.  When the shared pattern is "waf_block_detected" (no real
+                    # DBMS error text was matched), fall through to the _status_500_count >= 2
+                    # fallback (line ~+20) which runs a non-SQL canary control probe to verify
+                    # that the 400/500 responses are selective to SQL payloads, not triggered by
+                    # any arbitrary modification — eliminating the false-positive path.
+                    if _pat1 == "waf_block_detected":
+                        # No real SQL error text confirmed; let the selectivity-gated
+                        # HTTP-500 fallback decide (falls through to _status_500_count check).
+                        pass
+                    else:
+                        _note = f" (same-pattern-2-payloads: {_pat1[:25]})"
+                        if _any_status_500:
+                            _note += " + HTTP 500"
+                        return True, _all_c_matches[0][0], _pat1, _note
             elif len(_all_c_matches) == 1:
                 # Single match  only accept with status 500 boost
                 if _any_status_500:
