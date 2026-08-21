@@ -166702,7 +166702,16 @@ class NovelWAFBypassExtractor:
                 'x-trace-id','x-amz-request-id','x-amzn-requestid','x-ms-request-id',
                 'x-correlation-id','x-b3-traceid','traceparent','x-envoy-upstream-service-time',
                 'server-timing','x-served-by','x-served-in','x-cache','via',
-                'timing-allow-origin','x-nf-request-id','x-vercel-id','fly-request-id'}
+                'timing-allow-origin','x-nf-request-id','x-vercel-id','fly-request-id',
+                # BUG-RESP-SPLIT-XTIMER FIX: Per-request CDN timing/counter/ID headers
+                # always differ between consecutive requests regardless of SQL injection
+                # outcome, matching _HDR_SKIP in the header oracle.  Without exclusion,
+                # Fastly x-timer timestamps, Varnish hit counters, CDN TTL countdowns,
+                # and per-request trace IDs are captured as version_split false positives
+                # (confirmed in log: version_split='S1787272870.735461,VS0,VE115').
+                'x-timer','x-cache-hits','x-ttl','cf-request-id','x-cache-status',
+                'x-request-context','x-vcl','x-hits','x-grace','x-age',
+                'x-fastly-request-id','x-amz-cf-id','x-amz-cf-pop'}
             headers = getattr(fp_split, "headers", {})
             for hname, hval in (headers.items() if hasattr(headers, 'items') else []):
                 hname_lower = str(hname).lower()
@@ -167287,6 +167296,25 @@ class NovelWAFBypassExtractor:
         except Exception as e:
             LOG.debug("[Novel] CHR bypass: %s", e)
 
+        # BUG-NOVEL-FINAL-PRINTABLE FIX: Apply printability guard at the terminal
+        # return so any contaminated value (CDN header residue, WAF-homogenised
+        # bytes, control chars) that bypassed an earlier early-return is stripped.
+        # A legitimate SQL extraction result must be printable ASCII; non-printable
+        # chars indicate a corrupt or non-functional oracle.  The version_split key
+        # requires extra validation: must look like DB data (contains a letter or
+        # dot/digit sequence), not a CDN timing string (S<ts>,VS<n>,VE<n> format).
+        import re as _re_final
+        _cdn_timing_pat = _re_final.compile(r'^S\d+\.\d+,VS\d+,VE\d+$')
+        def _novel_val_ok(k, v):
+            s = str(v)
+            if len(s) < 3:
+                return False
+            if not all(32 <= ord(c) <= 126 for c in s):
+                return False
+            if k == "version_split" and _cdn_timing_pat.match(s):
+                return False
+            return True
+        results = {k: v for k, v in results.items() if _novel_val_ok(k, v)}
         return results
 
 
