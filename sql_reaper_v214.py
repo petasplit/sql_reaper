@@ -136397,7 +136397,12 @@ class ScannerV14(ScannerV13):
                                                                 # server-timing + content-length is a known CDN noise pair; both change every
                                                                 # Cloudflare request. Even in _dynamic_headers it would trigger _dynamic_diffs>=2.
                                                                 # content-length + etag/last-modified still correctly trigger _d_pass.
-                                                                _d_dynamic_hdrs = ["content-length", "etag", "last-modified", "set-cookie"]
+                                                                # BUG-INLINE-CHECKD-SETCOOKIE FIX: set-cookie is excluded (per BUG-D3 FIX in
+                                                                # outline Check D) because CSRF tokens/session IDs change on every request to
+                                                                # session-aware apps regardless of SQL injection. Including set-cookie caused
+                                                                # content-length+set-cookie=2 dynamic diffs → _d_pass=True on ALL session-aware
+                                                                # apps. Replaced with vary which is a more meaningful caching signal.
+                                                                _d_dynamic_hdrs = ["content-length", "etag", "last-modified", "vary"]
                                                                 _d_security_diffs = []
                                                                 _d_dynamic_diffs = []
                                                                 for hdr in _d_security_hdrs:
@@ -136411,8 +136416,12 @@ class ScannerV14(ScannerV13):
                                                                     if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                         _d_dynamic_diffs.append(hdr)
                                                                 _pcv_d_count = len(_d_security_diffs) + len(_d_dynamic_diffs)
-                                                                # Pass: >= 1 security diff OR >= 1 dynamic diffs
-                                                                _d_pass_inline = (len(_d_security_diffs) >= 1 or len(_d_dynamic_diffs) >= 1)
+                                                                # BUG-INLINE-CHECKD-DYNAMIC-THRESHOLD FIX: require >= 2 dynamic diffs to
+                                                                # match outline Check D (len(_dynamic_diffs) >= 2 per RC3-FP comment).
+                                                                # >= 1 dynamic diffs allowed content-length alone (changes on any dynamic
+                                                                # server) to satisfy Check D, making it trivially true on most targets.
+                                                                # Pass: >= 1 security diff OR >= 2 dynamic diffs (e.g. content-length + etag)
+                                                                _d_pass_inline = (len(_d_security_diffs) >= 1 or len(_d_dynamic_diffs) >= 2)
                                                             else:
                                                                 _d_pass_inline = False
                                                             
@@ -136876,7 +136885,8 @@ class ScannerV14(ScannerV13):
                                                                         "x-upstream", "x-backend", "x-pool",
                                                                     ]
                                                                     # BUG-5 FIX: server-timing excluded (not in security or dynamic list)
-                                                                    _d_dyn_hdrs_j = ["content-length", "etag", "last-modified", "set-cookie"]
+                                                                    # BUG-INLINE-CHECKD-SETCOOKIE FIX: set-cookie → vary (per outline BUG-D3 FIX)
+                                                                    _d_dyn_hdrs_j = ["content-length", "etag", "last-modified", "vary"]
                                                                     _d_sec_diffs_j = []
                                                                     _d_dyn_diffs_j = []
                                                                     for hdr in _d_sec_hdrs_j:
@@ -136888,7 +136898,8 @@ class ScannerV14(ScannerV13):
                                                                         if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                             _d_dyn_diffs_j.append(hdr)
                                                                     _pcv_d_count = len(_d_sec_diffs_j) + len(_d_dyn_diffs_j)
-                                                                    _d_json_pass = (len(_d_sec_diffs_j) >= 1 or len(_d_dyn_diffs_j) >= 1)
+                                                                    # BUG-INLINE-CHECKD-DYNAMIC-THRESHOLD FIX: >= 2 dynamic diffs (matches outline)
+                                                                    _d_json_pass = (len(_d_sec_diffs_j) >= 1 or len(_d_dyn_diffs_j) >= 2)
                                                                 
                                                                 if _d_json_pass:
                                                                     _pcv_checks_passed.append(f"D(headers:{_pcv_d_count})")
@@ -137303,7 +137314,8 @@ class ScannerV14(ScannerV13):
                                                                 "x-upstream", "x-backend", "x-pool",
                                                             ]
                                                             # BUG-5 FIX: server-timing excluded (not in security or dynamic list)
-                                                            _d_dyn_hdrs_gql = ["content-length", "etag", "last-modified", "set-cookie"]
+                                                            # BUG-INLINE-CHECKD-SETCOOKIE FIX: set-cookie → vary (per outline BUG-D3 FIX)
+                                                            _d_dyn_hdrs_gql = ["content-length", "etag", "last-modified", "vary"]
                                                             _d_sec_diffs_gql = []
                                                             _d_dyn_diffs_gql = []
                                                             for hdr in _d_sec_hdrs_gql:
@@ -137315,7 +137327,8 @@ class ScannerV14(ScannerV13):
                                                                 if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                     _d_dyn_diffs_gql.append(hdr)
                                                             _pcv_d_count = len(_d_sec_diffs_gql) + len(_d_dyn_diffs_gql)
-                                                            _d_gql_pass = (len(_d_sec_diffs_gql) >= 1 or len(_d_dyn_diffs_gql) >= 1)
+                                                            # BUG-INLINE-CHECKD-DYNAMIC-THRESHOLD FIX: >= 2 dynamic diffs (matches outline)
+                                                            _d_gql_pass = (len(_d_sec_diffs_gql) >= 1 or len(_d_dyn_diffs_gql) >= 2)
                                                         
                                                         if _d_gql_pass:
                                                             _pcv_checks_passed.append(f"D(headers:{_pcv_d_count})")
@@ -137706,7 +137719,8 @@ class ScannerV14(ScannerV13):
                                                             "x-upstream", "x-backend", "x-pool",
                                                         ]
                                                         # BUG-5 FIX: server-timing excluded (not in security or dynamic list)
-                                                        _d_dyn_hdrs_xml = ["content-length", "etag", "last-modified", "set-cookie"]
+                                                        # BUG-INLINE-CHECKD-SETCOOKIE FIX: set-cookie → vary (per outline BUG-D3 FIX)
+                                                        _d_dyn_hdrs_xml = ["content-length", "etag", "last-modified", "vary"]
                                                         _d_sec_diffs_xml = []
                                                         _d_dyn_diffs_xml = []
                                                         for hdr in _d_sec_hdrs_xml:
@@ -137718,7 +137732,8 @@ class ScannerV14(ScannerV13):
                                                             if (v_t and v_f and v_t != v_f) or (v_t and not v_f) or (v_f and not v_t):
                                                                 _d_dyn_diffs_xml.append(hdr)
                                                         _pcv_d_count = len(_d_sec_diffs_xml) + len(_d_dyn_diffs_xml)
-                                                        _d_xml_pass = (len(_d_sec_diffs_xml) >= 1 or len(_d_dyn_diffs_xml) >= 1)
+                                                        # BUG-INLINE-CHECKD-DYNAMIC-THRESHOLD FIX: >= 2 dynamic diffs (matches outline)
+                                                        _d_xml_pass = (len(_d_sec_diffs_xml) >= 1 or len(_d_dyn_diffs_xml) >= 2)
                                                     
                                                     if _d_xml_pass:
                                                         _pcv_checks_passed.append(f"D(headers:{_pcv_d_count})")
