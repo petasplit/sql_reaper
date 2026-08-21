@@ -116283,6 +116283,14 @@ class TechniqueCascadeEngine:
             # — body diffs from WHERE-clause canaries are also inapplicable there.
             if tech in ("S", "DS", "SO"):
                 return False, 0.0, "skipped-stacked-no-body-canary-applicable", False
+            # BUG-PCV-A-BL-GUARD FIX: guard against failed baseline fetch.
+            # If _bl_fetch_ok is False, _bl_fp is None or garbage from a failed response.
+            # SimHasher.body_similarity(canary_body, None/garbage_baseline) is undefined
+            # and could produce a meaningless gap that exceeds the threshold → false positive.
+            # Check C already guards this at its start (line 116724). Add same guard here.
+            if not _bl_fetch_ok:
+                LOG.debug("[PCV] Check A SKIPPED: baseline fetch failed → cannot compute gap vs baseline")
+                return False, 0.0, "bl_fetch_failed", False
             _substr = "SUBSTRING" if dbms not in ("Oracle", "SQLite") else "SUBSTR"
             # Enhancement #2: Skip derivation for timing detections (invalid SQL)
             _a_fallbacks = []
@@ -121066,7 +121074,7 @@ class TechniqueCascadeEngine:
                     if _abs_slow_count >= 3:
                         # Verify false payload is fast (rules out uniformly slow server)
                         _abs_false_p = self._make_false_payload(payload) or ""
-                        _abs_false_fast = True
+                        _abs_false_fast = False  # BUG-PCV-ABS-B-FALSEPROBE FIX: start conservative; MUST prove fast
                         if _abs_false_p:
                             try:
                                 _abs_ff, _, _, _abs_f_elapsed = await _pcv_send(_abs_false_p)
@@ -121076,6 +121084,20 @@ class TechniqueCascadeEngine:
                                       flush=True)
                             except Exception:
                                 _abs_false_fast = False  # BUG-18 FIX: network error on false probe → conservatively reject
+                        else:
+                            # BUG-PCV-ABS-B-FALSEPROBE FIX: _make_false_payload() returned None/empty.
+                            # Previously _abs_false_fast=True was assumed without any measurement — fail-open.
+                            # Fix: send a clean baseline probe (no injection) as a proxy for the false condition.
+                            # If the baseline is also slow, that proves server load rather than injection.
+                            try:
+                                _, _, _, _abs_bl2_elapsed = await _pcv_send("")
+                                _abs_false_fast = _abs_bl2_elapsed < _abs_threshold_ms * 0.5
+                                print(f"[*]       false probe (clean baseline proxy, no false payload available): "
+                                      f"{_abs_bl2_elapsed:.0f}ms "
+                                      f"{'✓ fast' if _abs_false_fast else '✗ ALSO SLOW (server load FP)'}",
+                                      flush=True)
+                            except Exception:
+                                _abs_false_fast = False  # conservative: baseline unreachable → cannot verify → reject
                         if _abs_false_fast:
                             print("[*]   [PCV] Check B (absolute multi-probe): PASS  "
                                   f"{_abs_slow_count}/5 probes slow "
