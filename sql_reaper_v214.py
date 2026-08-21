@@ -159474,7 +159474,16 @@ class ExtractionOrchestrator:
                                                 _cand, _d_sim, _d_false_sim)
                                             _dict_diff_ok = False
                                 except Exception:
-                                    pass  # differential check failure: trust the sim > 0.75 match
+                                    # BUG-DICT-CDN-DIFF-EXCEPT FIX (RC-2, all 5 DBMSes):
+                                    # Any exception during the false-probe differential check
+                                    # (connection error, timeout, validation failure) must be
+                                    # treated as a FAILED differential, not a passed one.
+                                    # The old `pass` left _dict_diff_ok=True, accepting the
+                                    # candidate without verification — identical to CDN caching
+                                    # the candidate value spuriously.  Fail-safe: when we
+                                    # cannot prove the oracle distinguishes true from false,
+                                    # reject the candidate to prevent extraction false positives.
+                                    _dict_diff_ok = False
                                 if _dict_diff_ok:
                                     LOG.info(f"[Orchestrator] Dictionary match: '{_cand}' (sim={_d_sim:.3f})")
                                     return _cand
@@ -163292,6 +163301,87 @@ class DictionaryExtractor:
                 }]
                 _dbms_sys = [v for v in values if v in _sys_dbs]
                 values = _dbms_sys + _generic_app  # DBMS-specific system dbs first
+        elif dbms and context == "user":
+            # BUG-DICT-USER-DBMS-FILTER FIX (RC-3, all 5 DBMSes): Previously "user" context
+            # returned ALL candidates cross-DBMS. MySQL 'root' was tried (and spuriously
+            # matched via CDN caching) against PostgreSQL targets. Each DBMS has its own
+            # set of built-in administrative users; these sets are mutually exclusive.
+            # Filter to DBMS-specific users first, then generic app users (appuser, admin).
+            _mysql_users    = {"root", "mysql.sys", "mysql.session", "mysql.infoschema"}
+            _pg_users       = {"postgres", "pg_monitor", "pg_signal_backend"}
+            _mssql_users    = {"sa", "dbo", "guest", "INFORMATION_SCHEMA", "sys",
+                               "db_owner", "db_datareader", "db_datawriter"}
+            _oracle_users   = {"SYS", "SYSTEM", "DBSNMP", "OUTLN", "HR",
+                               "SCOTT", "XDB", "ANONYMOUS"}
+            _sqlite_users   = set()  # SQLite has no built-in users
+            _mariadb_users  = {"root", "mariadb.sys", "mysql"}
+            _tidb_users     = {"root", "tidb"}
+            _dbms_users_map = {
+                "MySQL":          _mysql_users,
+                "MariaDB":        _mariadb_users,
+                "TiDB":           _tidb_users,
+                "PostgreSQL":     _pg_users,
+                "CockroachDB":    _pg_users,
+                "YugabyteDB":     _pg_users,
+                "Amazon Redshift":_pg_users,
+                "MSSQL":          _mssql_users,
+                "MSSQLServer":    _mssql_users,
+                "SQLServer":      _mssql_users,
+                "Oracle":         _oracle_users,
+                "SQLite":         _sqlite_users,
+            }
+            _all_sys_users = (
+                _mysql_users | _pg_users | _mssql_users | _oracle_users
+                | _mariadb_users | _tidb_users | {"sa", "dbo", "guest", "sys"}
+            )
+            _dbms_specific_users = _dbms_users_map.get(dbms, set())
+            # Generic app-level users (appuser, webapp, admin, etc.) are kept regardless
+            # of DBMS since any DBMS can have them. System users from other DBMSes are
+            # removed to prevent DBMS-mismatch false positives.
+            _generic_users = [v for v in values if v not in _all_sys_users]
+            _dbms_sys_users = [v for v in values if v in _dbms_specific_users]
+            values = _dbms_sys_users + _generic_users
+        elif dbms and context == "table":
+            # BUG-DICT-TABLE-DBMS-FILTER FIX (RC-3, all 5 DBMSes): Previously "table"
+            # context returned ALL candidates cross-DBMS. DBMS-specific system tables
+            # (e.g. MySQL 'user' table in mysql database) were tried against PostgreSQL.
+            # Filter system-schema tables to DBMS-appropriate ones; keep generic app
+            # table names (users, orders, products, sessions) for all DBMSes.
+            _mysql_sys_tables  = {"user", "db", "tables_priv", "columns_priv",
+                                  "procs_priv", "proxies_priv", "time_zone"}
+            _pg_sys_tables     = {"pg_user", "pg_roles", "pg_tables", "pg_class",
+                                  "pg_namespace", "pg_attribute", "pg_proc"}
+            _mssql_sys_tables  = {"sysusers", "sysobjects", "syscolumns", "sysindexes",
+                                  "sysdatabases", "syslogins", "syspermissions"}
+            _oracle_sys_tables = {"ALL_TABLES", "ALL_USERS", "ALL_OBJECTS",
+                                  "DBA_TABLES", "DBA_USERS", "USER_TABLES",
+                                  "V$SESSION", "V$DATABASE"}
+            _sqlite_sys_tables = {"sqlite_master", "sqlite_temp_master",
+                                  "sqlite_sequence", "sqlite_stat1"}
+            _all_sys_tables = (
+                _mysql_sys_tables | _pg_sys_tables | _mssql_sys_tables
+                | _oracle_sys_tables | _sqlite_sys_tables
+            )
+            _dbms_table_map = {
+                "MySQL":          _mysql_sys_tables,
+                "MariaDB":        _mysql_sys_tables,
+                "TiDB":           _mysql_sys_tables,
+                "PostgreSQL":     _pg_sys_tables,
+                "CockroachDB":    _pg_sys_tables,
+                "YugabyteDB":     _pg_sys_tables,
+                "Amazon Redshift":_pg_sys_tables,
+                "MSSQL":          _mssql_sys_tables,
+                "MSSQLServer":    _mssql_sys_tables,
+                "SQLServer":      _mssql_sys_tables,
+                "Oracle":         _oracle_sys_tables,
+                "SQLite":         _sqlite_sys_tables,
+            }
+            _dbms_specific_tables = _dbms_table_map.get(dbms, set())
+            # Generic app tables (users, orders, products, sessions, …) are kept for all
+            # DBMSes. System-schema tables from other DBMSes are excluded.
+            _generic_tables = [v for v in values if v not in _all_sys_tables]
+            _dbms_sys_tables_filt = [v for v in values if v in _dbms_specific_tables]
+            values = _dbms_sys_tables_filt + _generic_tables
         # Can't do async in classmethod easily, return candidates instead
         return values
 
@@ -176824,7 +176914,27 @@ class FalsePositiveGuardV18:
                 self._remove_reflection(fp_neg.body, false_payload), true_payload)
             norm_false_resp = ResponseNormaliser.normalise(false_body_stripped)
             sim_neg_base    = SimHasher.body_similarity(norm_base, norm_false_resp)
-            sim_true_base   = SimHasher.body_similarity(norm_base, norm_true)
+            # BUG-FPG-L2-CDN-STALE FIX (RC-1, all 5 DBMSes): L2 must compare a LIVE true
+            # probe against the false probe — NOT the original detection-time true_fp body.
+            # Root cause: detection can fire on a CDN cache miss (backend serves different
+            # content than cached pages).  true_fp.body then holds the backend response
+            # while subsequent probes hit the CDN edge cache and return the cached body.
+            # Using norm_true (from true_fp, the stale backend body) for sim_true_base and
+            # _sim_true_false creates a false differential:
+            #   sim_true_base = sim(CDN_baseline, backend_body) → LOW  (body differs)
+            #   sim_neg_base  = sim(CDN_baseline, CDN_cached)   → HIGH (≈ 1.0)
+            #   gap = |LOW - HIGH| >> 0.20 → _l2_base_gap_fail = False → PASSES
+            #   _sim_true_false = sim(backend_body, CDN_cached) → LOW < 0.90 → PASSES
+            # Both L2 checks pass even though no boolean SQL injection exists; the
+            # apparent differential is solely from CDN cache miss/hit timing.
+            # Fix: use _l1_ref_body (the first LIVE L1 probe, sent NOW in the current
+            # CDN state) instead of norm_true for both comparisons.  When CDN caches
+            # everything identically, _l1_ref_body ≈ norm_false_resp → gap ≈ 0 < 0.20
+            # → _l2_base_gap_fail=True → L2 REJECTS.  For genuine injection, the live
+            # true probe produces a different body from the live false probe → L2 PASSES.
+            # _l1_ref_body is always a live probe here: L1 returns early (False, 0.0)
+            # when _l1_probes_sent==0, so we only reach L2 when _l1_ref_body is fresh.
+            sim_true_base   = SimHasher.body_similarity(norm_base, _l1_ref_body)
             # BUG-PCV-B FIX: capture whether the false payload also changed the response.
             # A dynamic page (search page, template engine) changes for ANY input, so
             # even the false payload diverges from baseline.  This raises `c` in L3,
@@ -176846,7 +176956,10 @@ class FalsePositiveGuardV18:
             # false responses must differ from EACH OTHER by ≥0.10 (not just differ from
             # baseline independently), blocking cases where both diverge from baseline
             # the same amount but in the same direction (e.g., session rotation).
-            _sim_true_false = SimHasher.body_similarity(norm_true, norm_false_resp)
+            # BUG-FPG-L2-CDN-STALE FIX: compare live _l1_ref_body vs live false probe
+            # (same temporal context) so CDN cache miss/hit timing cannot create a false
+            # differential here.
+            _sim_true_false = SimHasher.body_similarity(_l1_ref_body, norm_false_resp)
             # BUG-FPG-L2-EMPTY-BASELINE FIX: When baseline has no samples (stub),
             # norm_base = b"" → sim_true_base ≈ sim_neg_base ≈ 0.5 for all pages.
             # abs(0.5 - 0.5) = 0.0 < 0.15 → L2 always rejects regardless of actual
