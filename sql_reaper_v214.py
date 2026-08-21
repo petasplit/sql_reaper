@@ -117837,9 +117837,9 @@ class TechniqueCascadeEngine:
                     # valid: they reflect caching metadata differences that can legitimately
                     # signal injection-driven data changes independent of status codes.
                     _dynamic_headers = (
-                        ["etag", "last-modified", "vary"]
+                        ["etag", "last-modified"]
                         if _d_status_driven
-                        else ["content-length", "etag", "last-modified", "vary"]
+                        else ["content-length", "etag", "last-modified"]
                     )
                     _security_diffs = []
                     _dynamic_diffs = []
@@ -119264,6 +119264,11 @@ class TechniqueCascadeEngine:
                 # Use int() for compute payloads; float is fine for SLEEP/pg_sleep.
                 _is_int_arg = bool(_re.search(
                     r'BENCHMARK|RANDOMBLOB|HEX\(RANDOMBLOB|GENERATE_SERIES'
+                    # ZEROBLOB(N) is SQLite's heavy-allocation timing function. N is a byte
+                    # count (integer), not seconds. Without this, _double_val is computed as
+                    # round(N*2, 4) → float (e.g. 40000000.0) → ZEROBLOB(40000000.0) is
+                    # invalid SQLite syntax → proportional probe returns error → timing fails.
+                    r'|ZEROBLOB'
                     # FIX-ORACLE-ROWNUM-INTARG: Oracle ROWNUM<N and cross-join counts
                     # require integer values. _targeted_sleep_replace now scales the
                     # ROWNUM limit, so _double_val and _half_val must be integers
@@ -119326,6 +119331,7 @@ class TechniqueCascadeEngine:
                         (_wf_pat, _wf_repl),
                         (r'(BENCHMARK\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                         (r'(RANDOMBLOB\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
+                        (r'(ZEROBLOB\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                         (r'(RECEIVE_MESSAGE\s*\([^,]+,\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                         (r'(DBMS_SESSION\.SLEEP\s*\(\s*)' + _re.escape(old_s), r'\g<1>' + new_s),
                         # BUG-PCV-T2 FIX: DBMS_SESSION.SLEEP was missing — half/double probes
