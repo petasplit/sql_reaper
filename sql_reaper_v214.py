@@ -32489,14 +32489,26 @@ class GlobalRequestGate:
                 if retry_after_secs:
                     # Server told us exactly when to retry
                     pause_time = retry_after_secs + random.uniform(5, 15)  # Add buffer
-                    self._paused_until = time.monotonic() + pause_time
+                    # BUG-CB-429-PAUSE-SHORTEN FIX (CRITICAL): When the circuit breaker is
+                    # already open with a 300s pause, a subsequent 429 record() call was
+                    # unconditionally overwriting _paused_until with a shorter backoff value
+                    # (e.g. 15-45s from smart_pause or retry_after). acquire()'s wait loop
+                    # exits as soon as _paused_until elapses, so the 300s CB pause was silently
+                    # reduced to 15-45s, allowing new requests far before the CB intended.
+                    # Fix: only extend _paused_until, never shorten an active circuit-breaker pause.
+                    _new_paused_until = time.monotonic() + pause_time
+                    if _new_paused_until > self._paused_until:
+                        self._paused_until = _new_paused_until
                     print(f"[!] [Gate] 429 rate-limited  Server says wait {retry_after_secs}s, "
                           f"pausing {pause_time:.0f}s", flush=True)
                 else:
                     #  OPTIMIZATION 8: Use smart backoff instead of fixed 30s
                     retry_count = self._rpm_429_boost + 1
                     smart_pause = self.backoff_calc.calculate_backoff(retry_count)
-                    self._paused_until = time.monotonic() + smart_pause
+                    # BUG-CB-429-PAUSE-SHORTEN FIX: same guard as retry_after_secs branch.
+                    _new_paused_until = time.monotonic() + smart_pause
+                    if _new_paused_until > self._paused_until:
+                        self._paused_until = _new_paused_until
                     print(f"[!] [Gate] 429 rate-limited  smart backoff {smart_pause:.0f}s "
                           f"(retry {retry_count})", flush=True)
                 
@@ -32742,23 +32754,26 @@ class AdaptiveRateController:
     async def acquire(self):
         """Acquire rate slot  waits if paused or circuit is open."""
         # Circuit breaker  wait until errors stop or timeout.
-        # BUG-CB-COUNTER-RESET FIX: reset error counter at start of each recovery probe
-        # window so probe failures don't inflate the counter unboundedly (was 200→395+).
-        # When the 60s window expires, reset _consecutive_fail to threshold so the next
-        # probe can succeed without fighting a 200+ failure count.
-        _cb_waited = 0
-        while self._circuit_open and _cb_waited < 60:
+        # BUG-CB-ARC-PAUSE-DURATION FIX (CRITICAL): The previous implementation waited
+        # a hardcoded 60 seconds before resetting the circuit, but GlobalRequestGate's
+        # record() can set _paused_until up to 300 seconds out (5-minute CB pause on
+        # repeated generic errors, or server-instructed Retry-After values).
+        # The 60s cap caused ARC's circuit to reset 240s early — recovery probes fired
+        # while the server was still banning requests, immediately re-tripping the circuit
+        # and producing the unbounded counter growth seen in log1.txt (200→395+).
+        # Fix: mirror GlobalRequestGate's pattern — wait until _paused_until elapses,
+        # bounded by a 300s hard deadline, then tentatively reset (same deadlock fix).
+        _cb_deadline = time.monotonic() + 300  # 5-min absolute cap matches GRG
+        while self._circuit_open and time.monotonic() < _cb_deadline:
             await asyncio.sleep(2)
-            _cb_waited += 2
+            if time.monotonic() >= self._paused_until:
+                break
         if self._circuit_open:
-            # BUG-CB-ARC-DEADLOCK FIX: After the 60-second wait, _circuit_open is only
+            # BUG-CB-ARC-DEADLOCK FIX: After the pause elapses, _circuit_open is only
             # cleared by record() on 3 consecutive successes — but no successes can arrive
-            # while acquire() raises RuntimeError for every caller, creating a permanent
-            # deadlock identical to the GlobalRequestGate CB-DEADLOCK.  The previous fix
-            # (BUG-CB-ARC-FALLTHROUGH) correctly prevented silent fallthrough, but replaced
-            # it with permanent lockout.  Fix: tentatively reset the circuit after the pause
-            # (same pattern as GlobalRequestGate) so recovery probes can flow through.
-            # If probes fail, record() will re-open the circuit.
+            # while acquire() blocks every caller, creating a permanent deadlock.
+            # Fix: tentatively reset the circuit once the pause elapses so recovery
+            # probes can flow through. If probes fail, record() will re-open the circuit.
             self._circuit_open = False
             self._consecutive_fail = 0
         await self._semaphore.acquire()
@@ -32838,6 +32853,13 @@ class AdaptiveRateController:
                         # increment an already-large counter, driving pause times to the cap
                         # and making the counter useless as a recovery signal.
                         self._consecutive_fail = 10
+                        # BUG-CB-ARC-NO-PAUSE FIX: ARC circuit open did not set _paused_until,
+                        # so the acquire() wait loop's `_paused_until`-based break fired
+                        # immediately (since _paused_until was in the past) — effectively
+                        # reducing the circuit wait to 2s (one loop tick).  Set a 60s minimum
+                        # pause when opening the circuit so recovery probes don't fire until
+                        # the server has had time to stop rate-limiting.
+                        self._paused_until = time.monotonic() + 60
                         print(f"[!] [RateCtrl] CIRCUIT BREAKER  {self._consecutive_fail} consecutive "
                               "errors, halting new requests until recovery", flush=True)
                 elif self._consecutive_fail >= 3:
