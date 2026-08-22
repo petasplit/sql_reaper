@@ -32261,6 +32261,11 @@ class GlobalRequestGate:
         self._circuit_open = False   # True = halt ALL requests (IP banned/server down)
         self._circuit_open_since = 0.0
         self._circuit_trip_count = 0  # BUG-CB-PROGRESSIVE-BACKOFF FIX: count trips for escalating pause
+        # BUG-CB-RAPID-RETRP-KILL FIX: track rapid re-trips (circuit opens again within
+        # 360s of last recovery). After 3 rapid re-trips, target is permanently unresponsive
+        # → kill the scan rather than looping forever through pause/recover/fail cycles.
+        self._cb_last_recovery = 0.0   # monotonic time when circuit last recovered
+        self._cb_rapid_trips = 0       # consecutive rapid re-trips since last clean recovery
         # RPM limiter  proactive rate control
         self._rpm_limit = rpm_limit
         self._rpm_timestamps: collections.deque = collections.deque(maxlen=rpm_limit + 50)
@@ -32323,6 +32328,9 @@ class GlobalRequestGate:
                 if self._circuit_open and time.monotonic() >= self._paused_until:
                     self._circuit_open = False
                     self._consecutive_fail = 0
+                    # BUG-CB-RAPID-RETRP-KILL FIX: record recovery time so record() can
+                    # detect re-trips that happen within a short window of this recovery.
+                    self._cb_last_recovery = time.monotonic()
                     print("[*] [Gate] Circuit breaker: pause elapsed — allowing recovery probes", flush=True)
 
         # ── RPM gate: check + record inside lock, sleep OUTSIDE ─────────────
@@ -32519,6 +32527,17 @@ class GlobalRequestGate:
                         self._paused_until = time.monotonic() + circuit_pause
                         print("[!] [Gate]  CIRCUIT BREAKER OPEN (5+ consecutive 429s) ")
                         print(f"    Halting ALL requests for {circuit_pause}s (5 min)", flush=True)
+                        # BUG-CB-RAPID-RETRP-KILL FIX: check for rapid re-trips
+                        _now_rt = time.monotonic()
+                        if self._cb_last_recovery > 0 and (_now_rt - self._cb_last_recovery) < 360:
+                            self._cb_rapid_trips += 1
+                            if self._cb_rapid_trips >= 3:
+                                self.kill()
+                                print(f"[!] [Gate] RAPID CB TRIPS ({self._cb_rapid_trips} in "
+                                      f"{_now_rt - self._cb_last_recovery:.0f}s) — target permanently "
+                                      f"unresponsive, killing scan permanently", flush=True)
+                        else:
+                            self._cb_rapid_trips = 0
 
 
             elif status_code == 403:
@@ -32559,6 +32578,17 @@ class GlobalRequestGate:
                     self._paused_until = time.monotonic() + _pause
                     print(f"[!] [Gate]  CIRCUIT BREAKER OPEN  {self._consecutive_fail} consecutive errors  "
                           f"halting ALL requests for {_pause:.0f}s", flush=True)
+                    # BUG-CB-RAPID-RETRP-KILL FIX: kill scan after 3 rapid re-trips in 360s
+                    _now_rt = time.monotonic()
+                    if self._cb_last_recovery > 0 and (_now_rt - self._cb_last_recovery) < 360:
+                        self._cb_rapid_trips += 1
+                        if self._cb_rapid_trips >= 3:
+                            self.kill()
+                            print(f"[!] [Gate] RAPID CB TRIPS ({self._cb_rapid_trips} in "
+                                  f"{_now_rt - self._cb_last_recovery:.0f}s of last recovery) — "
+                                  f"target permanently WAF-blocked, killing scan permanently", flush=True)
+                    else:
+                        self._cb_rapid_trips = 0
 
             elif error:
                 self._consecutive_ok = 0
@@ -32595,6 +32625,18 @@ class GlobalRequestGate:
                         self._paused_until = time.monotonic() + _pause
                         print(f"[!] [Gate]  CIRCUIT BREAKER OPEN  {self._consecutive_fail} consecutive errors  "
                               f"halting ALL requests for {_pause:.0f}s", flush=True)
+                        # BUG-CB-RAPID-RETRP-KILL FIX: kill scan after 3 rapid re-trips in 360s
+                        _now_rt = time.monotonic()
+                        if self._cb_last_recovery > 0 and (_now_rt - self._cb_last_recovery) < 360:
+                            self._cb_rapid_trips += 1
+                            if self._cb_rapid_trips >= 3:
+                                self.kill()
+                                print(f"[!] [Gate] RAPID CB TRIPS ({self._cb_rapid_trips} in "
+                                      f"{_now_rt - self._cb_last_recovery:.0f}s of last recovery) — "
+                                      f"target unreachable (network down or IP banned), "
+                                      f"killing scan permanently", flush=True)
+                        else:
+                            self._cb_rapid_trips = 0
                 elif self._consecutive_fail >= 3:
                     old = self._delay
                     self._delay = min(self._max_delay, self._delay * 2.0 + 0.5)
@@ -64682,6 +64724,24 @@ class Scanner:
                                 "%d consecutive True results — comparison oracle blocked, "
                                 "aborting to equality fallback",
                                 label, pos, lo, _bisect_consec_true)
+                            break  # lo != hi → post-bisect guard fires → equality fallback
+                        # BUG-BISECT-SMP-ABSOLUTE-GUARD FIX: The consecutive-True counter
+                        # (_bisect_consec_true) resets to 0 on any False result, so an
+                        # intermittent WAF (blocks ~95% of probes, passes ~5%) can prevent
+                        # the >=3 guard from firing while lo climbs into the supplementary
+                        # Unicode plane (> U+FFFF, i.e. lo > 65535).  Database identifiers,
+                        # usernames, version strings, and typical string column values never
+                        # use code points above the BMP.  Any bisection that reaches lo > 65535
+                        # is definitively wrong regardless of consecutive-count state.
+                        # This absolute ceiling fires before _is_garbage can run (which would
+                        # also catch it but only after 2 full garbage-char extractions, wasting
+                        # ~40 extra HTTP probes at lo > 1M).
+                        elif lo > 0xFFFF:
+                            LOG.warning(
+                                "[Inference] %s[%d] bisection entered supplementary plane "
+                                "(lo=%d > 65535) — WAF-contaminated oracle, aborting to "
+                                "equality fallback",
+                                label, pos, lo)
                             break  # lo != hi → post-bisect guard fires → equality fallback
                     else:
                         hi = mid
