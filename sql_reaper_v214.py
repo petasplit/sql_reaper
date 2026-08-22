@@ -61219,6 +61219,19 @@ class Scanner:
             _most_common_count = _counts.most_common(1)[0][1]
             if _most_common_count > len(text) * 0.6:
                 return True
+            # BUG-IS-GARBAGE-NON-ASCII-ALNUM FIX: Python's isalnum() returns True for
+            # non-ASCII Unicode letters (Cyrillic U+04EB, Canadian Syllabics U+1669,
+            # CJK ideographs, etc.), so strings like 'ᙩӫ?' pass Check 1 above with
+            # _alnum=2/3=67% despite being BMP-range garbage from a broken oracle.
+            # These artifacts occur when binary search converges in the BMP non-Latin
+            # range due to a WAF-uniform-blocked oracle returning True for all probes.
+            # Fix: if >60% of characters are outside printable ASCII (U+0020–U+007E),
+            # the string is extraction garbage.  Allows real Latin-Extended data
+            # ('café' = 1/4=25%, 'über' = 1/4=25%) while catching BMP artifacts
+            # ('ᙩӫ?' = 2/3=67%, 'ᙩӫ' = 2/2=100%).
+            _non_ascii_printable = sum(1 for c in text if ord(c) > 0x7E or ord(c) < 0x20)
+            if _non_ascii_printable > len(text) * 0.6:
+                return True
             # Check 3: fewer than 3 unique characters in a string of 5+
             if len(text) >= 5 and len(_counts) < 3:
                 return True
@@ -147576,6 +147589,31 @@ class MultiStrategyExtractor:
             _success_streak += 1
             _fail_count = 0
             prefix += found_char
+            if len(prefix) >= 2:
+                # BUG-MSE-PER-CHAR-GARBAGE FIX: Unlike the inference engine (which has an
+                # _is_garbage check at line 64860 in the bisect/fallback path), MSE's
+                # extract_string loop had no per-character garbage detection.  When the oracle
+                # is broken (e.g. WAF-uniform pre-check missed an edge case), MSE could
+                # accumulate 'ᙩ', 'ᙩӫ', 'ᙩӫ?' over successive positions and return the
+                # full garbage string.  Without BUG-IS-GARBAGE-NON-ASCII-ALNUM fix above,
+                # _is_garbage('ᙩӫ?') returned False because Python isalnum() counted
+                # 'ᙩ','ӫ' as alnum.  With both fixes together: this guard aborts at pos=2
+                # when prefix='ᙩӫ' is seen (non-ASCII=100% > 60% threshold → garbage=True).
+                # NOTE: _is_garbage() is defined as a nested function inside Scanner.run()
+                # and is not accessible from this MSE method scope. The critical checks
+                # are inlined here: supplementary-plane detection (any ord > 0xFFFF) and
+                # high-density non-printable-ASCII detection (>60% of chars outside U+0020–U+007E).
+                _pfx_supp = any(ord(c) > 0xFFFF for c in prefix)
+                _pfx_non_ascii = sum(1 for c in prefix if ord(c) > 0x7E or ord(c) < 0x20)
+                if _pfx_supp or _pfx_non_ascii > len(prefix) * 0.6:
+                    LOG.warning("[MSE] %s: garbage detected at pos=%d (%r) — oracle "
+                                "producing BMP non-Latin or supplementary-plane characters; "
+                                "aborting extraction to prevent garbage from propagating to "
+                                "r7 results (supp=%s, non_ascii=%d/%d)",
+                                _label, pos, prefix, _pfx_supp, _pfx_non_ascii, len(prefix))
+                    print(f"[MSE] {_label}: garbage at pos={pos} ({prefix[:12]!r}) — "
+                          f"aborting extraction (oracle broken)", flush=True)
+                    return ""
             # (BUG-V39-BATCH FIX: removed inline `import time as _t_prog` — use module-level `time`)
             if self._start_time is None:
                 self._start_time = time.monotonic()
