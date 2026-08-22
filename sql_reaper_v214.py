@@ -32524,6 +32524,9 @@ class GlobalRequestGate:
                     if not self._circuit_open:
                         self._circuit_open = True
                         self._circuit_open_since = time.monotonic()
+                        # BUG-CB-COUNTER-RESET FIX: reset counter to threshold on first open so
+                        # probe failures (during recovery window) don't inflate it unboundedly.
+                        self._consecutive_fail = _cb_threshold
                     # Escalate pause: 60s base + 30s per 5 extra errors above threshold
                     _extra = max(0, (self._consecutive_fail - _cb_threshold) // 5) * 30
                     _pause = min(300, 60 + _extra + random.uniform(0, 15))
@@ -32630,11 +32633,18 @@ class AdaptiveRateController:
 
     async def acquire(self):
         """Acquire rate slot  waits if paused or circuit is open."""
-        # Circuit breaker  wait until errors stop
+        # Circuit breaker  wait until errors stop or timeout.
+        # BUG-CB-COUNTER-RESET FIX: reset error counter at start of each recovery probe
+        # window so probe failures don't inflate the counter unboundedly (was 200→395+).
+        # When the 60s window expires, reset _consecutive_fail to threshold so the next
+        # probe can succeed without fighting a 200+ failure count.
         _cb_waited = 0
         while self._circuit_open and _cb_waited < 60:
             await asyncio.sleep(2)
             _cb_waited += 2
+        if self._circuit_open:
+            # Still open after wait — reset counter so probe failures don't accumulate.
+            self._consecutive_fail = 10
         await self._semaphore.acquire()
         # Honor pause (backoff after throttle/ban)
         now = time.monotonic()
@@ -32706,6 +32716,12 @@ class AdaptiveRateController:
                 if self._consecutive_fail >= 10:
                     if not self._circuit_open:
                         self._circuit_open = True
+                        # BUG-CB-COUNTER-RESET FIX: reset the error counter to the threshold
+                        # so the counter doesn't inflate unboundedly while the circuit is open.
+                        # Without this, probe failures (allowed through after the wait period)
+                        # increment an already-large counter, driving pause times to the cap
+                        # and making the counter useless as a recovery signal.
+                        self._consecutive_fail = 10
                         print(f"[!] [RateCtrl] CIRCUIT BREAKER  {self._consecutive_fail} consecutive "
                               "errors, halting new requests until recovery", flush=True)
                 elif self._consecutive_fail >= 3:
@@ -60071,6 +60087,7 @@ class Scanner:
             Re-calibrate boolean baselines from the template afterward."""
             nonlocal _error_oracle, _err_true_sig, _err_false_sig
             nonlocal _boolean_oracle, _bool_true_status, _bool_true_len, _bool_false_len
+            nonlocal _oracle_inverted
             # TRUE  1/0 division error, FALSE  no error
             _ERR_PAYLOADS = {
                 "PostgreSQL": ("1/((1>0)::int-1)", "1/((1>2)::int-1)"),
@@ -60146,6 +60163,9 @@ class Scanner:
                     if _rt_s != _rf_s and _rt_s is not None:
                         _boolean_oracle = True
                         _bool_true_status = _rt_s
+                        # BUG-ORACLE-INVERTED-RESET FIX: timing inversion must not carry into
+                        # boolean oracle — clear the flag so _eval does not flip boolean results.
+                        _oracle_inverted = False
                         LOG.info("[Inference]  Re-calibrated BOOLEAN oracle: status %s vs %s", _rt_s, _rf_s)
                     elif len(_rt_b) != len(_rf_b):
                         _rc_diff = abs(len(_rt_b) - len(_rf_b))
@@ -60155,6 +60175,8 @@ class Scanner:
                             _boolean_oracle = True
                             _bool_true_len = len(_rt_b)
                             _bool_false_len = len(_rf_b)
+                            # BUG-ORACLE-INVERTED-RESET FIX: same reset for body-length oracle.
+                            _oracle_inverted = False
                             LOG.info("[Inference]  Re-calibrated BOOLEAN oracle: body %dB vs %dB (%.1f%%)",
                                      len(_rt_b), len(_rf_b), _rc_pct*100)
                         else:
@@ -60164,9 +60186,11 @@ class Scanner:
 
         if _error_oracle and not _boolean_oracle:
             _boolean_oracle = True
+            # BUG-ORACLE-INVERTED-RESET FIX: clear timing inversion flag on error oracle upgrade.
+            _oracle_inverted = False
             LOG.info("[Inference] Upgraded to ERROR ORACLE  zero timing noise")
 
-        # 
+        #
         # PARADIGM 4: Operator alternatives for WAF bypass
         # If > is blocked, try BETWEEN, NOT BETWEEN, LIKE, >=, <
         # 
@@ -62043,6 +62067,9 @@ class Scanner:
         await _probe_error_oracle()
         if _error_oracle and not _boolean_oracle:
             _boolean_oracle = True
+            # BUG-ORACLE-INVERTED-RESET FIX: error oracle upgrade replaces timing oracle;
+            # clear inversion flag so boolean _eval results are not flipped.
+            _oracle_inverted = False
             LOG.info("[Inference] Upgraded to ERROR ORACLE  zero timing noise")
         # Always probe operator alternatives — template confirmation and operator
         # availability are independent concerns.  Previously this was gated on
