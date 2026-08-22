@@ -32312,6 +32312,18 @@ class GlobalRequestGate:
                     break
             if self._circuit_open and time.monotonic() >= _cb_deadline:
                 return False
+            # BUG-CB-DEADLOCK FIX: The wait loop exits when _paused_until elapses
+            # (not the 300s hard deadline). _circuit_open is only cleared by
+            # record() after 5 consecutive successes — but no successes can arrive
+            # while acquire() returns False for every caller, creating a permanent
+            # deadlock.  Fix: tentatively reset _circuit_open here once the pause
+            # elapses so recovery probes flow through.  If the probes fail, record()
+            # will re-open the circuit (with an escalated pause on the next trip).
+            async with self._lock:
+                if self._circuit_open and time.monotonic() >= self._paused_until:
+                    self._circuit_open = False
+                    self._consecutive_fail = 0
+                    print("[*] [Gate] Circuit breaker: pause elapsed — allowing recovery probes", flush=True)
 
         # ── RPM gate: check + record inside lock, sleep OUTSIDE ─────────────
         # CRITICAL: never await asyncio.sleep() while holding self._lock.
@@ -32521,7 +32533,12 @@ class GlobalRequestGate:
                 # is only applied when _consecutive_fail >= 3 (existing escalation logic).
                 self._consecutive_ok = 0
                 self._consecutive_fail += 1
-                if self._consecutive_fail >= 3:
+                # BUG-CB-403-SLIDING-PAUSE FIX: do NOT update _paused_until while the
+                # circuit is already open.  Without this guard every 403 response from
+                # in-flight coroutines (already past the gate) resets _paused_until to
+                # now+10s, pushing the deadline forward continuously and preventing the
+                # CB pause from ever elapsing → acquire() wait loop never breaks.
+                if self._consecutive_fail >= 3 and not self._circuit_open:
                     old_delay = self._delay
                     self._delay = min(self._max_delay, self._delay * 2 + 0.5)
                     self._paused_until = time.monotonic() + 10 + random.uniform(0, 5)
@@ -32692,13 +32709,16 @@ class AdaptiveRateController:
             await asyncio.sleep(2)
             _cb_waited += 2
         if self._circuit_open:
-            # Still open after wait — reset counter so probe failures don't accumulate.
-            self._consecutive_fail = 10
-            # BUG-CB-ARC-FALLTHROUGH FIX: Previously execution fell through to
-            # self._semaphore.acquire() even when _circuit_open was still True after
-            # the 60-second wait, allowing a request through a supposedly closed circuit.
-            # Raise to abort this request; the caller's exception handler will skip it.
-            raise RuntimeError("AdaptiveRateController: circuit still open after wait — request aborted")
+            # BUG-CB-ARC-DEADLOCK FIX: After the 60-second wait, _circuit_open is only
+            # cleared by record() on 3 consecutive successes — but no successes can arrive
+            # while acquire() raises RuntimeError for every caller, creating a permanent
+            # deadlock identical to the GlobalRequestGate CB-DEADLOCK.  The previous fix
+            # (BUG-CB-ARC-FALLTHROUGH) correctly prevented silent fallthrough, but replaced
+            # it with permanent lockout.  Fix: tentatively reset the circuit after the pause
+            # (same pattern as GlobalRequestGate) so recovery probes can flow through.
+            # If probes fail, record() will re-open the circuit.
+            self._circuit_open = False
+            self._consecutive_fail = 0
         await self._semaphore.acquire()
         # Honor pause (backoff after throttle/ban)
         now = time.monotonic()
@@ -64896,13 +64916,39 @@ class Scanner:
                         # Activate global inversion so all subsequent oracle calls return
                         # the correct logical value. Clear the eval cache so stale
                         # non-inverted results (from earlier calibration) are not reused.
-                        _oracle_inverted = True
-                        _eval_cache.clear()
-                        LOG.info(
-                            "[Inference] Deferred oracle sanity: INVERTED polarity detected "
-                            "(1=1→False, 1=2→True) — activating oracle inversion; "
-                            "all subsequent True/False oracle results will be flipped"
-                        )
+                        #
+                        # BUG-DEFERRED-SAN-BOOLEAN-OVERRIDE FIX (CRITICAL): Do NOT override
+                        # _oracle_inverted when a calibrated boolean oracle is already in use.
+                        # _probe_error_oracle() correctly sets _oracle_inverted=False when it
+                        # establishes a status-based boolean oracle (e.g. 403=True / 200=False).
+                        # The deferred sanity check uses the FULL extraction template (with
+                        # injection context and surrounding SQL), which may produce apparent
+                        # polarity inversion even when the oracle itself is correctly calibrated
+                        # (e.g. the surrounding `WHERE email='' AND` clause short-circuits, or
+                        # the 403=True WAF signal mixes with the injection context nesting).
+                        # Overriding _oracle_inverted=True here after the boolean oracle was
+                        # correctly set to False causes the _eval wrapper to flip all subsequent
+                        # True/False values — bisection climbs to high Unicode, equality scan
+                        # returns the first (lowest) candidate (97='a') for every position,
+                        # and all r7/MSE extraction produces garbage ('aaaa...', 'ᙩӫ?').
+                        # Fix: trust the boolean oracle calibration; skip the inversion override
+                        # when _boolean_oracle=True and the inversion signal is ambiguous.
+                        if _boolean_oracle:
+                            LOG.warning(
+                                "[Inference] Deferred oracle sanity: inverted signal detected "
+                                "(1=1→False, 1=2→True) BUT boolean oracle already calibrated "
+                                "by _probe_error_oracle — IGNORING inversion to preserve "
+                                "calibrated status-oracle polarity; deferred sanity polarity "
+                                "may differ due to injection-context SQL nesting"
+                            )
+                        else:
+                            _oracle_inverted = True
+                            _eval_cache.clear()
+                            LOG.info(
+                                "[Inference] Deferred oracle sanity: INVERTED polarity detected "
+                                "(1=1→False, 1=2→True) — activating oracle inversion; "
+                                "all subsequent True/False oracle results will be flipped"
+                            )
                     elif _san_t is None and _san_f is None:
                         # Both probes returned None (WAF blocked both). This does NOT mean
                         # the oracle is broken — it means the simple 1=1/1=2 conditions hit
@@ -64944,6 +64990,23 @@ class Scanner:
                             "PME mutation cannot fix a non-WAF oracle failure) — aborting; "
                             "falling back to error-based extraction",
                             _san_t
+                        )
+                    elif _san_t is None and _san_f is False:
+                        # BUG-DEFERRED-SAN-PARTIAL-NONE-FIX: True-condition probe returned None
+                        # (WAF 4xx broad ambiguity guard, expected when True=403 status oracle)
+                        # but False-condition correctly returned False.  The oracle CAN distinguish
+                        # False conditions; True probes are WAF-blocked before reaching SQL.
+                        # For a 403=True status oracle this is NORMAL — do not mark fragile.
+                        LOG.info(
+                            "[Inference] Deferred oracle sanity: True-condition probe WAF-ambiguous "
+                            "(None, expected for 403=True status oracle), False-condition correctly "
+                            "returned False — oracle not fragile; proceeding with deferred extraction"
+                        )
+                    elif _san_t is True and _san_f is None:
+                        # Symmetric case: False probe WAF-ambiguous but True-condition confirmed.
+                        LOG.info(
+                            "[Inference] Deferred oracle sanity: True-condition confirmed (True), "
+                            "False-condition probe WAF-ambiguous (None) — oracle not fragile"
                         )
                     else:
                         _oracle_fragile = True
