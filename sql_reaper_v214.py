@@ -32793,7 +32793,12 @@ class AdaptiveRateController:
 
     async def wait(self):
         """Wait the current delay + jitter before a request (legacy interface)."""
-        _wait_deadline = time.monotonic() + 120  # max 2 min wait
+        # BUG-CB-ARC-WAIT-DEADLINE FIX: was 120s. Circuit breaker sets _paused_until
+        # = now+60s and acquire() uses a 300s hard deadline. wait() is a legacy wrapper
+        # that calls the same circuit-open path; using 120s meant wait() callers could
+        # exit the loop 180s early while the circuit was still open, sending requests
+        # before the server ban lifted. Align with acquire()'s 300s deadline.
+        _wait_deadline = time.monotonic() + 300  # match acquire()'s 5-min hard cap
         while self._circuit_open and time.monotonic() < _wait_deadline:
             await asyncio.sleep(2)
         if self._circuit_open:
@@ -32822,7 +32827,16 @@ class AdaptiveRateController:
             #  MULTIPLICATIVE DECREASE (fast reaction to trouble) 
             if status_code == 429:
                 self._delay = min(self._max_delay, self._delay * 3 + 1.0)
-                self._paused_until = time.monotonic() + 30 + random.uniform(0, 10)
+                # BUG-CB-ARC-429-PAUSE-SHORTEN FIX (CRITICAL): mirrors GRG's
+                # BUG-CB-429-PAUSE-SHORTEN FIX. When the circuit breaker is open with
+                # a 60s pause set by the error handler, a 429 response during the circuit
+                # window was unconditionally overwriting _paused_until with a shorter value
+                # (30–40s). acquire()'s break fires at _paused_until, so the 60s circuit
+                # pause was silently cut to 30s, allowing recovery probes 30s early.
+                # Fix: only extend _paused_until, never shorten an active pause.
+                _new_arc_429_pause = time.monotonic() + 30 + random.uniform(0, 10)
+                if _new_arc_429_pause > self._paused_until:
+                    self._paused_until = _new_arc_429_pause
                 self._consecutive_ok = 0
                 self._consecutive_fail += 1
                 self._total_throttles += 1
@@ -32835,7 +32849,12 @@ class AdaptiveRateController:
             elif status_code == 403 and self._consecutive_fail >= 3:
                 # Multiple 403s = likely IP soft-ban
                 self._delay = min(self._max_delay, self._delay * 2 + 0.5)
-                self._paused_until = time.monotonic() + 15 + random.uniform(0, 5)
+                # BUG-CB-ARC-403-PAUSE-SHORTEN FIX: same guard as 429 branch above.
+                # Soft-ban 403s set a 15–20s pause; if the circuit is open (60s pause),
+                # this would shorten the CB window. Use max() to only extend.
+                _new_arc_403_pause = time.monotonic() + 15 + random.uniform(0, 5)
+                if _new_arc_403_pause > self._paused_until:
+                    self._paused_until = _new_arc_403_pause
                 self._consecutive_ok = 0
                 self._total_throttles += 1
                 print(f"[!] [RateCtrl] Repeated 403s  possible soft-ban, delay{self._delay:.1f}s", flush=True)
@@ -63931,6 +63950,56 @@ class Scanner:
                                 break
                             await asyncio.sleep(max(0.1, _fe_rtt_s * 0.5))  # BUG-FALLBACK-EQ-SLEEP-PERF FIX: was _delay
                         if _r_retry is True:
+                            # BUG-EQUALITY-AMBIGUOUS-RETRY-NO-COMPLEMENT FIX (CRITICAL):
+                            # The original retry path returned the first ambiguous candidate
+                            # that returned True on retry WITHOUT running the ordinal-0/1
+                            # WAF-uniform guard (RC9). Root cause: ordinal-0 returned None
+                            # (CDN cached the =0 probe as ambiguous) during the main scan,
+                            # deferring val to _fe_ambiguous. On retry, the CDN may still
+                            # serve cached True for ALL nonzero ordinal probes (WAF blocking
+                            # =97, =98, \u2026 uniformly). The retry returns True for the first
+                            # candidate (97='a') and exits \u2014 producing 'aaa...' garbage.
+                            #
+                            # Fix: re-run the RC9 two-step complement check here before
+                            # committing. If ordinal-0 is now resolvable (CDN evicted the
+                            # cache entry) and ordinal-1 is True (WAF blocks nonzero), abort.
+                            # Only return the candidate when both complements are False.
+                            if _fe_seen_false:
+                                # RC8 path: use last WAF-safe False as complement
+                                _retry_comp_val = _fe_seen_false[-1]
+                                _retry_comp_r = await _eval(f"({_ae})={_retry_comp_val}")
+                                if _retry_comp_r is True:
+                                    LOG.warning(
+                                        "[Inference] pos=%d equality ambiguous-retry: "
+                                        "val=%d retry-True AND WAF-safe complement (val=%d) "
+                                        "ALSO True \u2014 WAF-uniform; aborting scan.",
+                                        p, _val, _retry_comp_val)
+                                    return None
+                                if _retry_comp_r is None:
+                                    # Cannot confirm \u2014 skip this candidate, try next
+                                    continue
+                            else:
+                                # RC9 path: no WAF-safe False values seen \u2014 use ordinal 0+1
+                                _retry_c0 = await _eval(f"({_ae})=0")
+                                if _retry_c0 is True:
+                                    LOG.warning(
+                                        "[Inference] pos=%d equality ambiguous-retry: "
+                                        "val=%d retry-True AND ordinal-0 ALSO True \u2014 "
+                                        "WAF-uniform; aborting scan.", p, _val)
+                                    return None
+                                if _retry_c0 is None:
+                                    continue  # cannot confirm; skip to next candidate
+                                # ordinal-0 is False \u2014 now check ordinal-1
+                                _retry_c1 = await _eval(f"({_ae})=1")
+                                if _retry_c1 is True:
+                                    LOG.warning(
+                                        "[Inference] pos=%d equality ambiguous-retry WAF-nonzero: "
+                                        "ordinal-0 False but ordinal-1 True \u2014 WAF blocks nonzero "
+                                        "equality; aborting scan.", p)
+                                    return None
+                                if _retry_c1 is None:
+                                    continue  # cannot confirm; skip to next candidate
+                                # Both ordinal-0 and ordinal-1 False \u2192 genuine True
                             LOG.info("[Inference] pos=%d equality (ambiguous-retry) \u2192 %r "
                                      "(val=%d)", p, chr(_val), _val)
                             return chr(_val)
