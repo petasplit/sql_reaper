@@ -32455,6 +32455,16 @@ class GlobalRequestGate:
         """Instantly stop all scanning. Extraction-only mode."""
         self._killed = True
         self._total_blocked = 0
+        # RC-CB-KILL FIX: Set _SCAN_STOPPED[0]=True so all detection scan loops
+        # break out immediately instead of iterating through hundreds of surface/payload
+        # combinations that all return None (killed gate).  Observed in log1.txt: script
+        # ran 192,135 lines after the CB exhausted its trips because the outer header
+        # scanner loop checked _SCAN_STOPPED[0] (not gate._killed) to decide whether to
+        # continue.  Setting _SCAN_STOPPED[0] here causes every break/return guard in the
+        # scan loops to fire on the next iteration, terminating cleanly.
+        # Note: gate.kill() is called when the target is permanently unreachable so no
+        # extraction will be attempted — the scan exits with no findings.
+        _SCAN_STOPPED[0] = True
         print("[!] [Gate] KILL  all scanning stopped, extraction-only mode", flush=True)
 
     def revive(self):
@@ -58488,6 +58498,7 @@ class Scanner:
         _body_hash_true = None
         _body_hash_false = None
         _bool_true_status = None
+        _bool_false_status = None  # RC-A/RC-B FIX: tracks HTTP status of FALSE calibration probe; used to gate BROAD-4XX and STATUS-4XX ambiguity guards — when False is non-4xx, True-4xx is unambiguous
         _bool_calibration_true_status = None  # BUG-EXTRACT-REVERSED-POLARITY-ORACLE FIX: tracks HTTP status of TRUE calibration probe for WAF-block detection in _eval/_waf_aware_eval
         _bool_true_len = None
         _bool_norm_true = None   # normalized body for SimHash oracle
@@ -58670,11 +58681,12 @@ class Scanner:
             if _true_status != _false_status and _true_status is not None and not _both_waf_blocked:
                 _boolean_oracle = True
                 _bool_true_status = _true_status
+                _bool_false_status = _false_status  # RC-A/RC-B FIX: capture False-probe status so _eval guards can distinguish True=4xx/False=non-4xx (unambiguous) from True=4xx/False=4xx (ambiguous)
                 # Store normalized bodies for SimHash fallback
                 if fp_true and fp_false:
                     _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
                     _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
-                LOG.info("[Inference]  BOOLEAN ORACLE detected! status %s vs %s (attempt %d)", 
+                LOG.info("[Inference]  BOOLEAN ORACLE detected! status %s vs %s (attempt %d)",
                          _true_status, _false_status, _bool_oracle_attempts)
             elif len(_true_body) != len(_false_body):
                 _bl_diff = abs(len(_true_body) - len(_false_body))
@@ -59191,6 +59203,7 @@ class Scanner:
                     if _ts != _fs and _ts is not None:
                         _boolean_oracle = True
                         _bool_true_status = _ts
+                        _bool_false_status = _fs  # RC-C FIX: capture False status from arithmetic-fallback boolean oracle detection so BROAD-4XX and STATUS-4XX guards correctly distinguish True=4xx/False=non-4xx (unambiguous) from True=4xx/False=4xx (ambiguous)
                         LOG.info("[Inference]  Boolean oracle from arithmetic: status %s vs %s", _ts, _fs)
                         _arith_ok = True
 
@@ -60463,7 +60476,7 @@ class Scanner:
             If error differentiation works, we know the target processes our SQL.
             Re-calibrate boolean baselines from the template afterward."""
             nonlocal _error_oracle, _err_true_sig, _err_false_sig
-            nonlocal _boolean_oracle, _bool_true_status, _bool_true_len, _bool_false_len
+            nonlocal _boolean_oracle, _bool_true_status, _bool_false_status, _bool_true_len, _bool_false_len
             nonlocal _oracle_inverted
             # TRUE  1/0 division error, FALSE  no error
             _ERR_PAYLOADS = {
@@ -60540,6 +60553,7 @@ class Scanner:
                     if _rt_s != _rf_s and _rt_s is not None:
                         _boolean_oracle = True
                         _bool_true_status = _rt_s
+                        _bool_false_status = _rf_s  # RC-A/RC-B FIX: capture re-calibrated False status
                         # BUG-ORACLE-INVERTED-RESET FIX: timing inversion must not carry into
                         # boolean oracle — clear the flag so _eval does not flip boolean results.
                         _oracle_inverted = False
@@ -62411,9 +62425,15 @@ class Scanner:
                 # fall to the broad guard when SimHash gap < 0.05 (ambiguous — WAF and app
                 # pages too similar to reliably discriminate).
                 _WAF_4XX_BROAD_EVAL = (400, 403, 406, 429, 430, 503)
+                # RC-A FIX: BROAD-4XX-AMBIGUITY-GUARD must NOT fire when False-calibration
+                # status is non-4xx (e.g. True=403, False=200).  In that case True-4xx is
+                # unambiguous — the probe returning 403 genuinely means SQL-True.  Only
+                # fire the guard when False is ALSO 4xx (both 4xx → WAF-uniform, ambiguous).
+                _false_also_4xx = (_bool_false_status is None or _bool_false_status in _WAF_4XX_BROAD_EVAL)
                 if (_bool_true_status is not None and _s is not None
                         and _s in _WAF_4XX_BROAD_EVAL
-                        and _bool_true_status in _WAF_4XX_BROAD_EVAL):
+                        and _bool_true_status in _WAF_4XX_BROAD_EVAL
+                        and _false_also_4xx):
                     if _bool_norm_true is not None and _bool_norm_false is not None:
                         # SimHash pre-check: evaluate body similarity before suppressing signal
                         _norm_pre_e = (ResponseNormaliser.normalise(_extract_body_safe(fp))
@@ -62496,9 +62516,15 @@ class Scanner:
                 # because every WAF-blocked bit probe was counted as a set bit.
                 # Fix: skip status oracle when both sides are 4xx; fall through to body-length.
                 _STATUS_4XX_AMBIG_EVAL = (400, 403, 406, 429, 430, 503)
+                # RC-B FIX: STATUS-4XX-AMBIGUITY-GUARD must NOT skip status comparison when
+                # False-calibration status is non-4xx (e.g. True=403, False=200).  Probe
+                # returning 403 is unambiguously SQL-True; status comparison is valid.
+                # Only suppress when False is ALSO 4xx (both 4xx → WAF-uniform → ambiguous).
+                _false_also_4xx_s = (_bool_false_status is None or _bool_false_status in _STATUS_4XX_AMBIG_EVAL)
                 if (_bool_true_status is not None and _s is not None
                         and not (_s in _STATUS_4XX_AMBIG_EVAL
-                                 and _bool_true_status in _STATUS_4XX_AMBIG_EVAL)):
+                                 and _bool_true_status in _STATUS_4XX_AMBIG_EVAL
+                                 and _false_also_4xx_s)):
                     return _s == _bool_true_status
                 # Body length comparison — also checked when status oracle is ambiguous (both 4xx);
                 # changed from elif to if so it fires even when status oracle was skipped above.
