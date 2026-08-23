@@ -32316,20 +32316,33 @@ class GlobalRequestGate:
 
         # Circuit breaker: wait outside the lock until pause expires
         if self._circuit_open:
-            _cb_deadline = time.monotonic() + 300  # 5-min absolute cap
+            # BUG-CB-DEADLINE-ORDER FIX (CRITICAL): Use _paused_until + 60s as the hard
+            # deadline rather than a fixed 300s offset.  The old `_cb_deadline = now + 300`
+            # was equal to `_paused_until` whenever the CB pause was 300s (max escalation,
+            # trips 5+), creating a race: the while-loop's inner break fires at the moment
+            # both timers expire, then the old deadline guard `time.monotonic() >= _cb_deadline`
+            # fired BEFORE the tentative-reset block could run — returning False permanently
+            # so no recovery probe ever went out and the circuit stayed open forever.
+            # With 429-driven pauses that exceed 300s (retry_after + buffer), `_paused_until`
+            # can exceed the old 300s deadline, causing the loop to hit `_cb_deadline` first
+            # and return False before the pause even elapsed — same deadlock, different source.
+            # Fix A: snapshot _paused_until at the start so _cb_deadline is always > it.
+            # Fix B: move the tentative-reset block BEFORE the hard-deadline guard so the
+            # reset attempt runs regardless of whether the deadline also elapsed.
+            _pause_snapshot = self._paused_until
+            _cb_deadline = _pause_snapshot + 60.0  # 60s grace window beyond the pause
             while self._circuit_open and time.monotonic() < _cb_deadline:
                 await asyncio.sleep(2)
                 if time.monotonic() >= self._paused_until:
                     break
-            if self._circuit_open and time.monotonic() >= _cb_deadline:
-                return False
             # BUG-CB-DEADLOCK FIX: The wait loop exits when _paused_until elapses
-            # (not the 300s hard deadline). _circuit_open is only cleared by
-            # record() after 5 consecutive successes — but no successes can arrive
-            # while acquire() returns False for every caller, creating a permanent
-            # deadlock.  Fix: tentatively reset _circuit_open here once the pause
-            # elapses so recovery probes flow through.  If the probes fail, record()
-            # will re-open the circuit (with an escalated pause on the next trip).
+            # (not the hard deadline). _circuit_open is only cleared by record() after
+            # 5 consecutive successes — but no successes can arrive while acquire()
+            # returns False for every caller, creating a permanent deadlock.
+            # Fix: tentatively reset _circuit_open here once the pause elapses so
+            # recovery probes flow through.  If the probes fail, record() will
+            # re-open the circuit (with an escalated pause on the next trip).
+            # CRITICAL: this block must run BEFORE the hard-deadline guard below.
             async with self._lock:
                 if self._circuit_open and time.monotonic() >= self._paused_until:
                     self._circuit_open = False
@@ -32338,6 +32351,8 @@ class GlobalRequestGate:
                     # detect re-trips that happen within a short window of this recovery.
                     self._cb_last_recovery = time.monotonic()
                     print("[*] [Gate] Circuit breaker: pause elapsed — allowing recovery probes", flush=True)
+            if self._circuit_open and time.monotonic() >= _cb_deadline:
+                return False
 
         # ── RPM gate: check + record inside lock, sleep OUTSIDE ─────────────
         # CRITICAL: never await asyncio.sleep() while holding self._lock.
@@ -65234,15 +65249,19 @@ class Scanner:
                         # >=3 and >200 the abort fires before lo leaves the Latin-1 range,
                         # cutting wasted probes from ~6 to 3 and handing off to the WAF-safe
                         # equality fallback much earlier.
-                        if _bisect_consec_true >= 3 and lo > 127:
-                            # BUG-BISECT-WAF-UNIFORM-THRESHOLD FIX: was `lo > 200` (past
-                            # printable ASCII). Changed to `lo > 127` (past all 7-bit ASCII)
-                            # so the abort fires before bisection can enter the Latin-1
-                            # extended range.  With `> 200` a two-True / one-False / two-True
-                            # pattern can push lo to ~1,097,597 before the third consecutive
-                            # True fires; with `> 127` the abort triggers at the first crossing
-                            # past standard ASCII, cutting wasted probes when lo rises above
-                            # the printable range (~97 vs ~1M) in WAF-uniform scenarios.
+                        if _bisect_consec_true >= 2 and lo > 63:
+                            # BUG-BISECT-WAF-UNIFORM-THRESHOLD2 FIX: Lowered from >=3 / >127
+                            # to >=2 / >63.  Root cause: an intermittent WAF (95% block rate)
+                            # resets `_bisect_consec_true` on any False response, preventing the
+                            # >=3 guard from firing; lo climbs to 1,097,597 before the absolute
+                            # lo>0xFFFF guard triggers. With >=2 the abort fires after just two
+                            # consecutive True results with lo above the control-char range (>63
+                            # = past '?' — no real DB identifier starts below '@'=64).
+                            # Two consecutive True results with lo>63 in bisection unambiguously
+                            # indicates WAF-uniform blocking — a legitimate bisection that starts
+                            # at 0 and converges on a printable char never emits two consecutive
+                            # True results with lo>63 because the convergence path alternates
+                            # True/False as the interval shrinks around the target.
                             LOG.warning(
                                 "[Inference] %s[%d] bisection WAF-uniform suspected: lo=%d after "
                                 "%d consecutive True results — comparison oracle blocked, "
@@ -148323,9 +148342,15 @@ class MultiStrategyExtractor:
                 lo = mid + 1
                 _cbs_consec_true += 1
                 # BUG-MSE-CBS-WAF-UNIFORM-FIX: abort if oracle is WAF-uniform True.
-                # After 3+ consecutive True results with lo > 127, the oracle is biased.
-                # Return None so the caller falls through to the per-char garbage check.
-                if _cbs_consec_true >= 3 and lo > 127:
+                # BUG-MSE-CBS-WAF-UNIFORM-THRESHOLD2 FIX: Lowered from >=3/127 to >=2/63
+                # to match the tightened inference_extract guard.  An intermittent WAF
+                # (~95% block rate) can reset _cbs_consec_true on any passing probe, so
+                # the >=3 guard fires too late (lo climbs into BMP/supplementary range).
+                # Two consecutive True results with lo>63 (past control/punctuation chars)
+                # unambiguously indicate WAF-uniform — legitimate bisection alternates True
+                # /False as the interval shrinks and never emits two consecutive True
+                # results above the low-special range.
+                if _cbs_consec_true >= 2 and lo > 63:
                     LOG.warning("[MSE] CBS Phase 2 WAF-uniform suspected: lo=%d after %d "
                                 "consecutive True — falling back to None (garbage guard "
                                 "at caller level will abort)", lo, _cbs_consec_true)
