@@ -32652,6 +32652,13 @@ class GlobalRequestGate:
                         print(f"[!] [Gate] CB trip #{self._circuit_trip_count} — "
                               f"max ({_MAX_CB_TRIPS}) reached, target permanently unreachable, "
                               f"killing scan", flush=True)
+                elif self._circuit_open:
+                    # BUG-CB-COUNTER-CAP-WHILE-OPEN FIX (403 branch): circuit is already open;
+                    # cap _consecutive_fail at the threshold so in-flight 403 responses (which
+                    # completed after the CB opened) cannot inflate the counter unboundedly.
+                    # The elif error: branch has had this cap since initial implementation
+                    # (see line ~32725); the 403 branch was missing it.
+                    self._consecutive_fail = _cb_threshold_403
 
             elif error:
                 self._consecutive_ok = 0
