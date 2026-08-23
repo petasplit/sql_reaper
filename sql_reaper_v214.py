@@ -32787,6 +32787,8 @@ class AdaptiveRateController:
         self._paused_until = 0.0
         self._semaphore = asyncio.Semaphore(2)  # max 2 concurrent requests
         self._circuit_open = False  # True = stop sending requests
+        self._circuit_trip_count = 0  # BUG-ARC-MAX-TRIPS FIX: track cumulative trips for hard cap
+        self._permanently_stopped = False  # set True after max CB trips — blocks all further acquire()
 
     @property
     def delay(self) -> float:
@@ -32799,6 +32801,12 @@ class AdaptiveRateController:
 
     async def acquire(self):
         """Acquire rate slot  waits if paused or circuit is open."""
+        # BUG-ARC-MAX-TRIPS FIX: permanently stopped after max CB trips — block all requests.
+        if self._permanently_stopped:
+            # Sleep forever so the caller's asyncio task eventually gets cancelled by the scan
+            # teardown. This avoids busy-looping and mirrors Gate's _killed=True behaviour.
+            while True:
+                await asyncio.sleep(60)
         # Circuit breaker  wait until errors stop or timeout.
         # BUG-CB-ARC-PAUSE-DURATION FIX (CRITICAL): The previous implementation waited
         # a hardcoded 60 seconds before resetting the circuit, but GlobalRequestGate's
@@ -32912,6 +32920,7 @@ class AdaptiveRateController:
                 if self._consecutive_fail >= 10:
                     if not self._circuit_open:
                         self._circuit_open = True
+                        self._circuit_trip_count += 1  # BUG-ARC-MAX-TRIPS FIX: track cumulative trips
                         # BUG-CB-COUNTER-RESET FIX: reset the error counter to the threshold
                         # so the counter doesn't inflate unboundedly while the circuit is open.
                         # Without this, probe failures (allowed through after the wait period)
@@ -32927,6 +32936,15 @@ class AdaptiveRateController:
                         self._paused_until = time.monotonic() + 60
                         print(f"[!] [RateCtrl] CIRCUIT BREAKER  {self._consecutive_fail} consecutive "
                               "errors, halting new requests until recovery", flush=True)
+                        # BUG-ARC-MAX-TRIPS FIX: hard-cap total trips at 8. Without this,
+                        # the circuit cycles open/close indefinitely when the target is
+                        # permanently rate-limited or IP-banned (mirrors Gate's _MAX_CB_TRIPS).
+                        _ARC_MAX_CB_TRIPS = 8
+                        if self._circuit_trip_count >= _ARC_MAX_CB_TRIPS:
+                            self._permanently_stopped = True  # signals acquire() to block forever
+                            print(f"[!] [RateCtrl] CB trip #{self._circuit_trip_count} — "
+                                  f"max ({_ARC_MAX_CB_TRIPS}) reached, target permanently unreachable, "
+                                  f"halting scan", flush=True)
                 elif self._consecutive_fail >= 3:
                     old_delay = self._delay
                     self._delay = min(self._max_delay, self._delay * 2.0 + 0.5)
@@ -32943,11 +32961,16 @@ class AdaptiveRateController:
                 self._consecutive_ok = 0
 
             else:
-                #  ADDITIVE INCREASE (slow recovery) 
+                #  ADDITIVE INCREASE (slow recovery)
                 self._consecutive_ok += 1
-                self._consecutive_fail = max(0, self._consecutive_fail - 1)
+                # BUG-ARC-CB-SUCCESS-NODECREMENT FIX: Decrementing by 1 per success means a
+                # failure storm that built the counter to 200+ takes 200 clean requests to drain,
+                # keeping the circuit on the edge of re-opening indefinitely.  Reset to 0 on any
+                # genuine success so the controller recovers cleanly (mirrors Gate fix).
+                self._consecutive_fail = 0
                 if self._circuit_open and self._consecutive_ok >= 3:
                     self._circuit_open = False
+                    self._consecutive_fail = 0  # explicit reset on circuit close
                     print("[!] [RateCtrl] Circuit breaker CLOSED  requests resuming", flush=True)
                 if self._consecutive_ok >= 10:
                     self._delay = max(self._min_delay, self._delay - 0.03)
