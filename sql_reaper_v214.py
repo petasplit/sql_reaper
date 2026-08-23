@@ -42000,9 +42000,15 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                         # the injectable one — even though the detection payload already
                         # tells us exactly which column reflected the sentinel.
                         try:
+                            import unicodedata as _u_unicodedata
+                            # BUG-UNION-COLUMNS-UNICODE-FIX: NFKC-normalize payload before
+                            # regex to handle fullwidth Unicode WAF bypass payloads (ＵＮＩＯＮ
+                            # ＳＥＬＥＣＴ).  Character positions are preserved 1:1 so slicing
+                            # of the original payload at match offsets is still valid.
+                            _u_payload_norm = _u_unicodedata.normalize('NFKC', _u_payload)
                             _um_det = _re.search(
                                 r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|$)',
-                                _u_payload, _re.I | _re.S)
+                                _u_payload_norm, _re.I | _re.S)
                             if _um_det:
                                 # BUG-UNION-NAIVE-SPLIT-FIX: use depth-aware splitter so
                                 # CONCAT_WS(',','e',''),1,2 counts as 3 columns, not 7.
@@ -49257,12 +49263,17 @@ class Enumerator:
                 # (1 request/char) and falling back to slow blind extraction (40-60
                 # requests/char).  Fix: attempt the raw payload first; on miss, strip
                 # all C-style and versioned inline comments and retry on the clean form.
+                # BUG-UNION-FASTPATH-FULLWIDTH-UNICODE-FIX: WAF bypass payloads may use
+                # fullwidth Unicode (ＵＮＩＯＮ ＳＥＬＥＣＴ).  NFKC-normalize for
+                # regex search only; positions are 1:1 so offsets are still valid.
+                import unicodedata as _fp_unicodedata
+                _det_payload_norm_fp = _fp_unicodedata.normalize('NFKC', _det_payload)
                 _um = _re.search(
                     r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:--|#|$)',
-                    _det_payload, _re.I | _re.S)
+                    _det_payload_norm_fp, _re.I | _re.S)
                 if _um is None:
                     # Strip /* ... */ and /*!NNN...*/ comment fragments, then retry
-                    _det_payload_clean = _re.sub(r'/\*[^*]*\*/', ' ', _det_payload)
+                    _det_payload_clean = _re.sub(r'/\*[^*]*\*/', ' ', _det_payload_norm_fp)
                     _det_payload_clean = _re.sub(r'\s{2,}', ' ', _det_payload_clean).strip()
                     _um = _re.search(
                         r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:--|#|$)',
@@ -63596,23 +63607,32 @@ class Scanner:
                             # BUG-SERIAL-CEILING-WAF-COUNTER-FIX: _over_cond uses _len_tpl with `>`
                             # or BETWEEN operator. If WAF blocks ALL comparison probes uniformly,
                             # _eval_confirm returns True regardless of actual string length →
-                            # incorrect cap to 32. Counter-probe: check length > -1 (always
-                            # SQL-false: lengths are ≥ 0). WAF-uniform blocking → counter also True.
-                            _serial_counter_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", str(-1))
+                            # incorrect cap to 32. Counter-probe: check length >= 99999 (always
+                            # SQL-false for real strings). WAF-uniform blocking → counter returns
+                            # True (WAF response treated as True); genuine oracle → False.
+                            # NOTE: must use an always-SQL-False value (99999) so that with an
+                            # inverted oracle, the inversion produces True (≡ "WAF uniform") when
+                            # the WAF blocks uniformly, rather than always-SQL-True (-1) which
+                            # an inverted oracle flips to False and bypasses the WAF-uniform guard.
+                            _serial_counter_cond = _len_tpl.replace("[QUERY]", query).replace("{mid}", "99999")
                             _serial_counter_r = await _eval(_serial_counter_cond)
                             if _serial_counter_r is True:
                                 LOG.warning(
                                     "[Inference] %s: serial ceiling probe True but counter-probe "
-                                    "(len>-1) also True — WAF uniformly blocking length comparison "
+                                    "(len>=99999) also True — WAF uniformly blocking length comparison "
                                     "operator; ceiling probe unreliable — keeping length=%d",
                                     label, _length)
                                 # Don't cap: WAF-uniform → ceiling probe is noise.
                             else:
-                                # Oracle claims length > max_len → definitely stuck at ceiling
+                                # Oracle claims length > max_len → string genuinely exceeds the
+                                # ceiling we probed to. Keep max_len as the extraction limit so
+                                # at least partial data is recovered; do NOT cap to 32 which would
+                                # truncate any value longer than that (e.g. a 40-char username).
                                 LOG.warning("[Inference] %s: length=%d hit max_len ceiling and "
-                                            "oracle confirms beyond-ceiling → oracle unreliable, "
-                                            "capping at 32", label, _length)
-                                _length = 32  # reasonable cap for db/user/version values
+                                            "oracle confirms beyond-ceiling → string exceeds "
+                                            "ceiling; capping extraction at max_len=%d",
+                                            label, _length, max_len)
+                                _length = max_len  # keep ceiling; partial extraction is better than truncation
                         else:
                             # Oracle says NOT beyond max_len → real boundary, keep max_len
                             LOG.info("[Inference] %s: length=%d equals max_len but oracle "
@@ -67354,12 +67374,19 @@ class Scanner:
                 # so all uses are replaced with module-level `_re` (no imports needed).
 
                 # Step 1: Find UNION SELECT start (handles ALL, DISTINCT, and bare UNION SELECT)
+                # BUG-UNION-EXTRACT-FULLWIDTH-UNICODE-FIX: WAF bypass payloads may use fullwidth
+                # Unicode (ＵＮＩＯＮ ＳＥＬＥＣＴ). NFKC-normalize for regex search only;
+                # positions are preserved 1:1 (fullwidth chars are single code points, same as
+                # their ASCII equivalents), so slicing the original _base_payload at the same
+                # offsets correctly keeps the bypass encoding in non-searched regions.
+                import unicodedata as _ue_unicodedata
+                _base_payload_norm = _ue_unicodedata.normalize('NFKC', _base_payload)
                 _union_re_pat = _re.search(
                     r'UNION\s+(?:ALL\s+|DISTINCT\s+)?SELECT\s+',
-                    _base_payload, _re.I)
+                    _base_payload_norm, _re.I)
                 if not _union_re_pat:
                     # Try comment-stripped form (mutation may have fragmented UNION keyword)
-                    _bp_stripped_ue = _re.sub(r'/\*[^*]*\*/', ' ', _base_payload)
+                    _bp_stripped_ue = _re.sub(r'/\*[^*]*\*/', ' ', _base_payload_norm)
                     _bp_stripped_ue = _re.sub(r'\s+', ' ', _bp_stripped_ue).strip()
                     _union_re_pat = _re.search(
                         r'UNION\s+(?:ALL\s+|DISTINCT\s+)?SELECT\s+',
@@ -67387,13 +67414,16 @@ class Scanner:
                 # this causes extraction to inject at the wrong column.
                 # Fix: add a secondary regex without the comment requirement. When it matches,
                 # apply the same _default_inject_col targeting as the primary path.
+                # BUG-UNION-EXTRACT-FULLWIDTH-UNICODE-FIX (Step 2): Use normalized payload
+                # for regex matching; slice from original payload using the same offsets
+                # (NFKC fullwidth→ASCII mapping is 1:1 character count so offsets are identical).
                 _union_col_m = _re.search(
                     r'(UNION\s+(?:ALL\s+|DISTINCT\s+)?SELECT\s+)(.*?)(\s*(?:--|#|/\*))',
-                    _base_payload, _re.I | _re.S)
+                    _base_payload_norm, _re.I | _re.S)
                 modified_payload = _base_payload  # initialise before conditional
                 if _union_col_m:
                     _before_col  = _base_payload[:_union_col_m.start(2)]
-                    _col_section = _union_col_m.group(2)
+                    _col_section = _base_payload_norm[_union_col_m.start(2):_union_col_m.end(2)]
                     _after_col   = _base_payload[_union_col_m.end(2):]
                     # BUG-UNION-NAIVE-SPLIT-FIX: depth-aware split prevents splitting
                     # inside SQL function arguments (CONCAT_WS, JSON_ARRAY, LPAD, etc.)
@@ -67406,11 +67436,11 @@ class Scanner:
                     # payloads with no trailing comment still respect _default_inject_col.
                     _union_col_m2 = _re.search(
                         r'(UNION\s+(?:ALL\s+|DISTINCT\s+)?SELECT\s+)([\w\s,()\'".*]+?)(\s*)$',
-                        _base_payload, _re.I | _re.S)
+                        _base_payload_norm, _re.I | _re.S)
                     if _union_col_m2:
                         try:
                             _before_col2  = _base_payload[:_union_col_m2.start(2)]
-                            _col_section2 = _union_col_m2.group(2)
+                            _col_section2 = _base_payload_norm[_union_col_m2.start(2):_union_col_m2.end(2)]
                             _after_col2   = _base_payload[_union_col_m2.end(2):]
                             # BUG-UNION-NAIVE-SPLIT-FIX: depth-aware split for fallback path
                             _cols_split2  = [c.strip() for c in _split_sql_cols(_col_section2)]
@@ -67429,7 +67459,7 @@ class Scanner:
                     modified_payload = _re.sub(
                         r'(UNION\s+(?:ALL\s+|DISTINCT\s+)?SELECT\s+)(?:NULL|\d+|[A-Za-z_]\w*\s*\([^)]*\))',
                         r'\g<1>' + query_expr,
-                        _base_payload,
+                        _base_payload_norm,
                         flags=_re.I,
                         count=1
                     )
@@ -113676,11 +113706,17 @@ class TechniqueCascadeEngine:
                 # column → but target expects N → SQL error → no reflection → PCV fails.
                 # Fix: try the match on the original payload first, then on a
                 # comment-stripped version so fragmented keywords are still found.
-                _det_pay_stripped_cols = _re.sub(r'/\*[^*]*\*+(?:[^*/][^*]*\*+)*/', ' ', _det_pay)
+                # BUG-PCV-UNION-FULLWIDTH-UNICODE-FIX: WAF bypass payloads may use
+                # fullwidth Unicode (ＵＮＩＯＮ ＳＥＬＥＣＴ).  NFKC-normalize before
+                # regex; fullwidth→ASCII is 1:1 so match offsets are identical in
+                # both the normalized and original strings.
+                import unicodedata as _pcv_unicodedata
+                _det_pay_norm = _pcv_unicodedata.normalize('NFKC', _det_pay)
+                _det_pay_stripped_cols = _re.sub(r'/\*[^*]*\*+(?:[^*/][^*]*\*+)*/', ' ', _det_pay_norm)
                 _det_pay_stripped_cols = _re.sub(r'\s+', ' ', _det_pay_stripped_cols).strip()
                 _sm = _re.search(
                     r'UNION\s+(?:ALL\s+|DISTINCT\s+)?SELECT\s+(.*?)(?:\s*--|\s*#)',
-                    _det_pay, _re.I | _re.S)
+                    _det_pay_norm, _re.I | _re.S)
                 if not _sm:
                     # Fallback: try on comment-stripped form
                     _sm = _re.search(
@@ -113692,11 +113728,13 @@ class TechniqueCascadeEngine:
                 # string vs integer context is respected when building the sentinel payload.
                 # BUG-REQ7-UNION-PREFIX-PCV FIX: Same mutation-fragmentation issue as
                 # in _extract_str — try comment-stripped fallback when exact match fails.
-                _union_pos = _re.search(r'\bUNION\b', _det_pay, _re.I)
+                # BUG-PCV-UNION-FULLWIDTH-UNICODE-FIX: search on normalized form; positions
+                # are 1:1 so _det_pay[:_union_pos.start()] correctly slices the original.
+                _union_pos = _re.search(r'\bUNION\b', _det_pay_norm, _re.I)
                 if not _union_pos:
-                    _union_pos = _re.search(r'\bUN(?:/\*[^*]*\*/)*ION\b', _det_pay, _re.I)
+                    _union_pos = _re.search(r'\bUN(?:/\*[^*]*\*/)*ION\b', _det_pay_norm, _re.I)
                 if not _union_pos:
-                    _det_pay_stripped = _re.sub(r'/\*[^*]*\*/', ' ', _det_pay)  # BUG-FIX-1C: __re was undefined
+                    _det_pay_stripped = _re.sub(r'/\*[^*]*\*/', ' ', _det_pay_norm)
                     _union_pos_s = _re.search(r'\bUNION\b', _det_pay_stripped, _re.I)
                     _pay_prefix = (_det_pay_stripped[:_union_pos_s.start()].rstrip() or "' ") if _union_pos_s else "' "
                 else:
@@ -126998,11 +127036,16 @@ class TechniqueCascadeEngine:
                     # count from the detection payload here (same logic as regular U at
                     # line ~41791) so extraction can proceed without re-scanning columns.
                     try:
+                        import unicodedata as _unicodedata
+                        # BUG-UH-UNION-COLUMNS-UNICODE-FIX: WAF bypass payloads may use fullwidth
+                        # Unicode (ＵＮＩＯＮ ＳＥＬＥＣＴ).  NFKC-normalize before regex so
+                        # column count is parsed correctly regardless of bypass encoding.
+                        _payload_norm = _unicodedata.normalize('NFKC', payload)
                         _uh_um = _re.search(
                             r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|/\*|$)',
-                            payload, _re.I | _re.S)
+                            _payload_norm, _re.I | _re.S)
                         if _uh_um is None:
-                            _uh_pay_clean = _re.sub(r'/\*[^*]*\*/', ' ', payload)
+                            _uh_pay_clean = _re.sub(r'/\*[^*]*\*/', ' ', _payload_norm)
                             _uh_um = _re.search(
                                 r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|$)',
                                 _uh_pay_clean, _re.I | _re.S)
@@ -127064,12 +127107,16 @@ class TechniqueCascadeEngine:
                                 except Exception:
                                     pass
                                 # BUG-UH-UNION-COLUMNS FIX: same column-count parse as union_body path above
+                                # BUG-UH-ERROR-UNION-COLUMNS-UNICODE-FIX: apply NFKC normalization
+                                # for fullwidth Unicode payloads (same fix as union_body path).
                                 try:
+                                    import unicodedata as _uh_e_unicodedata
+                                    _uh_e_pay_norm = _uh_e_unicodedata.normalize('NFKC', payload)
                                     _uh_e_um = _re.search(
                                         r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|/\*|$)',
-                                        payload, _re.I | _re.S)
+                                        _uh_e_pay_norm, _re.I | _re.S)
                                     if _uh_e_um is None:
-                                        _uh_e_pay_c = _re.sub(r'/\*[^*]*\*/', ' ', payload)
+                                        _uh_e_pay_c = _re.sub(r'/\*[^*]*\*/', ' ', _uh_e_pay_norm)
                                         _uh_e_um = _re.search(
                                             r'UNION\s+(?:ALL\s+)?SELECT\s+(.*?)(?:\s*--|#|$)',
                                             _uh_e_pay_c, _re.I | _re.S)
