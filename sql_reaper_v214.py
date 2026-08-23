@@ -32556,6 +32556,20 @@ class GlobalRequestGate:
                                       f"unresponsive, killing scan permanently", flush=True)
                         else:
                             self._cb_rapid_trips = 0
+                        # BUG-CB-429-MAX-TRIPS FIX (CRITICAL): The 429 CB-opening block was
+                        # missing _circuit_trip_count += 1 and the _MAX_CB_TRIPS hard cap.
+                        # The rapid-re-trip guard (3 trips in 360s) provides partial protection
+                        # but fails when recovery between CB cycles takes > 360s — each new
+                        # 429 storm would reset _cb_rapid_trips to 0, allowing the CB to cycle
+                        # indefinitely.  Fix: apply the same _MAX_CB_TRIPS = 8 hard cap as the
+                        # 403 and timeout (elif error) CB-opening paths.
+                        self._circuit_trip_count += 1
+                        _MAX_CB_TRIPS = 8
+                        if self._circuit_trip_count >= _MAX_CB_TRIPS:
+                            self.kill()
+                            print(f"[!] [Gate] CB trip #{self._circuit_trip_count} — "
+                                  f"max ({_MAX_CB_TRIPS}) reached (429 storm), target permanently "
+                                  f"unreachable, killing scan", flush=True)
 
 
             elif status_code == 403:
@@ -147844,14 +147858,46 @@ class MultiStrategyExtractor:
                 # and is not accessible from this MSE method scope. The critical checks
                 # are inlined here: supplementary-plane detection (any ord > 0xFFFF) and
                 # high-density non-printable-ASCII detection (>60% of chars outside U+0020–U+007E).
+                # BUG-MSE-GARBAGE-INCOMPLETE FIX: The original inline check only covered
+                # supplementary-plane and high-BMP artifacts (non-Latin unicode chars like
+                # 'ᙩӫ?' from bisection entering the BMP non-Latin range). It missed two
+                # additional garbage patterns that MSE's binary search can produce when the
+                # oracle is systematically wrong:
+                # (1) Repeated-printable-ASCII pattern: a consistently-False oracle drives
+                #     the binary search to the lowest code point (chr(32) = space) for every
+                #     position. chr(32) is inside printable ASCII [0x20,0x7E] so
+                #     _pfx_non_ascii=0 → the non-ASCII check never fires. After 3+ spaces,
+                #     '   ' (all same char = chr(32)) passes through undetected.
+                # (2) Low-alphanumeric pattern: oracle that consistently converges to
+                #     special/punctuation chars (e.g. '!' = chr(33), always False → chr(33)
+                #     for every position) produces '!!!!!!!!'. _alnum=0 < len*0.4 → garbage,
+                #     but the non-ASCII check doesn't catch it (chr(33) is printable ASCII).
+                # Fix: add the same two structural checks that _is_garbage uses:
+                #   - most_common_char > 60% of string → repeated char (oracle bias)
+                #   - alnum_count < 40% of string → special-char-dominant string (oracle bias)
+                # These don't need Counter (expensive import) — we inline them directly.
                 _pfx_supp = any(ord(c) > 0xFFFF for c in prefix)
                 _pfx_non_ascii = sum(1 for c in prefix if ord(c) > 0x7E or ord(c) < 0x20)
-                if _pfx_supp or _pfx_non_ascii > len(prefix) * 0.6:
+                _pfx_alnum = sum(1 for c in prefix if c.isalnum())
+                _pfx_char_counts: dict = {}
+                for _pc in prefix:
+                    _pfx_char_counts[_pc] = _pfx_char_counts.get(_pc, 0) + 1
+                _pfx_max_count = max(_pfx_char_counts.values()) if _pfx_char_counts else 0
+                _pfx_garbage = (
+                    _pfx_supp
+                    or _pfx_non_ascii > len(prefix) * 0.6
+                    or (len(prefix) >= 2 and _pfx_alnum < len(prefix) * 0.4)
+                    or (len(prefix) >= 2 and _pfx_max_count > len(prefix) * 0.6)
+                )
+                if _pfx_garbage:
                     LOG.warning("[MSE] %s: garbage detected at pos=%d (%r) — oracle "
-                                "producing BMP non-Latin or supplementary-plane characters; "
-                                "aborting extraction to prevent garbage from propagating to "
-                                "r7 results (supp=%s, non_ascii=%d/%d)",
-                                _label, pos, prefix, _pfx_supp, _pfx_non_ascii, len(prefix))
+                                "producing BMP non-Latin, supplementary-plane, low-alnum "
+                                "or repeated-char artifacts; aborting extraction "
+                                "(supp=%s, non_ascii=%d/%d, alnum=%d/%d, max_char=%d/%d)",
+                                _label, pos, prefix, _pfx_supp,
+                                _pfx_non_ascii, len(prefix),
+                                _pfx_alnum, len(prefix),
+                                _pfx_max_count, len(prefix))
                     print(f"[MSE] {_label}: garbage at pos={pos} ({prefix[:12]!r}) — "
                           f"aborting extraction (oracle broken)", flush=True)
                     return ""
