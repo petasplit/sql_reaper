@@ -61999,6 +61999,14 @@ class Scanner:
                 ch = chr(lo)
                 result += ch
                 LOG.info("[Inference-regex] %s pos=%d char=%r result=%r", label, pos, ch, result)
+                # BUG-REGEX-GARBAGE-FIX: detect accumulated garbage early.  Under WAF-uniform
+                # True the regex range search converges to chr(32)=' ' for every position,
+                # producing an all-space string up to max_len before the caller's post-check.
+                # _is_garbage Check 2 (single char > 60%) fires after 5 chars.
+                if len(result) >= 5 and _is_garbage(result):
+                    LOG.warning("[Inference-regex] %s pos=%d garbage detected (%r) — "
+                                "oracle WAF-contaminated; aborting", label, pos, result)
+                    return ""
             return result
         # Uses ASCII(SUBSTR(q,pos,1))-N=0 pattern. WAFs that block ASCII(x)=N
         # often allow ASCII(x)-N=0 because subtraction isn't a comparison.
@@ -68822,6 +68830,14 @@ class Scanner:
                 #               → chr(32)=' ' appended correctly.                   ✓
                 # No disambiguation probe needed — lo=0 init alone is sufficient.
                 lo, hi = 0, _de_str_char_hi  # BUG-DIRECT-EXTRACT-SPACE-TRUNCATION FIX: was 32
+                # BUG-DIRECT-BISECT-WAF-UNIFORM-FIX: track consecutive True results per position.
+                # Mirrors the identical guards in _extract_string (inference path).  When WAF
+                # blocks ALL comparison-operator SQL for this expression uniformly (returns
+                # 403/True for every probe), _eval_d returns True on each iteration → lo
+                # races from 0 to _de_str_char_hi producing garbage BMP chars.  Observed in
+                # production log.txt as MSE pos=1 'ᙩ', pos=2 'ӫ' (lines 350-355).
+                _bisect_consec_true = 0
+                _bisect_waf_uniform = False
                 while lo < hi:
                     # BUG-V164-DIRECT-EXTRACT-FIXED-PIVOT FIX (MEDIUM, all 5 DBMSes;
                     # _run_enumeration_inner direct-extract binary search; E/EH/B/S techniques):
@@ -68833,18 +68849,51 @@ class Scanner:
                     r = await _eval_d(cond)
                     if r is None:
                         return prefix
-                    if r: lo = mid + 1
-                    else: hi = mid
+                    if r:
+                        lo = mid + 1
+                        _bisect_consec_true += 1
+                        # BUG-DIRECT-BISECT-WAF-UNIFORM-FIX: abort before entering BMP garbage.
+                        # After 3+ consecutive True results with lo past printable ASCII, the
+                        # oracle is WAF-biased.  Hand off immediately — no fallback here since
+                        # the same WAF that blocks comparison ops would block _eval_d too.
+                        if _bisect_consec_true >= 3 and lo > 127:
+                            LOG.warning("[Direct] pos=%d WAF-uniform suspected: lo=%d after %d "
+                                        "consecutive True results — aborting bisection to avoid "
+                                        "garbage BMP chars", pos, lo, _bisect_consec_true)
+                            _bisect_waf_uniform = True
+                            break
+                        # BUG-DIRECT-BISECT-SMP-ABSOLUTE-GUARD FIX: intermittent WAF may reset
+                        # _bisect_consec_true via occasional False probes while still driving lo
+                        # into the supplementary Unicode plane.  Any lo > U+FFFF is definitively
+                        # wrong for database identifiers, usernames, version strings.
+                        elif lo > 0xFFFF:
+                            LOG.warning("[Direct] pos=%d bisection entered supplementary Unicode "
+                                        "plane (lo=%d > U+FFFF) — WAF-contaminated oracle, "
+                                        "aborting", pos, lo)
+                            _bisect_waf_uniform = True
+                            break
+                    else:
+                        hi = mid
+                        _bisect_consec_true = 0  # BUG-DIRECT-BISECT-WAF-UNIFORM-FIX: reset on False
                     # Small delay for rate limiting only; CDN reactive retry in
                     # _send_d_timed handles CDN-warm probes automatically.
                     await asyncio.sleep(0.2)
                 # EOS guard: lo=0 (from lo_init=0) means no character at this position.
                 # lo > _de_str_char_hi is a safety net for any unexpected convergence.
-                if lo < 32 or lo > _de_str_char_hi: break
+                # BUG-DIRECT-BISECT-WAF-UNIFORM-FIX: break on WAF-uniform detection too.
+                if _bisect_waf_uniform or lo < 32 or lo > _de_str_char_hi: break
                 # No secondary disambiguation needed: lo=0 at EOS is caught above,
                 # lo=32 is a genuine space character (not confused with EOS).
                 prefix += chr(lo)
                 LOG.info("[Direct] pos=%d char=%r result=%r", pos, chr(lo), prefix)
+                # BUG-DIRECT-BISECT-GARBAGE-FIX: abort early on accumulating garbage chars.
+                # Mirrors the identical check in _extract_string (inference path, line 65317).
+                # Prevents wasting hundreds of HTTP probes when oracle is WAF-contaminated
+                # (e.g. WAF-uniform True after the 3-consec guard is bypassed by jitter).
+                if len(prefix) >= 2 and _is_garbage(prefix):
+                    LOG.warning("[Direct] pos=%d garbage detected (%r) — oracle WAF-contaminated "
+                                "or inverted; aborting extraction", pos, prefix)
+                    return ""
             return prefix
 
         _dbms = getattr(cfg, "forced_dbms", None) or getattr(cfg, "dbms", None) or "MySQL"
@@ -148241,6 +148290,12 @@ class MultiStrategyExtractor:
                 else:
                     lo, hi = 32, ord('0') - 1  # low special
         # Phase 2: Standard binary search within narrowed range
+        # BUG-MSE-CBS-WAF-UNIFORM-FIX: second-line guard in case the pre-extraction
+        # WAF-uniform check (lines 147994-148023) was evaded.  Tracks consecutive True
+        # results in Phase 2; aborts to return None (caller falls through to the
+        # per-char garbage check at line 148149) when oracle is WAF-uniform.
+        _cbs_consec_true = 0
+        _cbs_waf_uniform = False
         while lo < hi:
             # BUG-V164-INFERENCE-ADDITIONAL-BISECT-FIXED-PIVOTS FIX:
             # Fixed pivot in AdaptiveFrequencyExtractor Phase 2 binary search.
@@ -148266,9 +148321,23 @@ class MultiStrategyExtractor:
 
             if is_true:
                 lo = mid + 1
+                _cbs_consec_true += 1
+                # BUG-MSE-CBS-WAF-UNIFORM-FIX: abort if oracle is WAF-uniform True.
+                # After 3+ consecutive True results with lo > 127, the oracle is biased.
+                # Return None so the caller falls through to the per-char garbage check.
+                if _cbs_consec_true >= 3 and lo > 127:
+                    LOG.warning("[MSE] CBS Phase 2 WAF-uniform suspected: lo=%d after %d "
+                                "consecutive True — falling back to None (garbage guard "
+                                "at caller level will abort)", lo, _cbs_consec_true)
+                    _cbs_waf_uniform = True
+                    break
             else:
                 hi = mid
+                _cbs_consec_true = 0  # BUG-MSE-CBS-WAF-UNIFORM-FIX: reset on any False
             await asyncio.sleep(0.06)
+
+        if _cbs_waf_uniform:
+            return None  # caller's garbage check fires after appending this None-converted char
 
         if lo < 32:
             return None
