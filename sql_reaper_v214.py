@@ -32713,6 +32713,16 @@ class GlobalRequestGate:
                             print(f"[!] [Gate] CB trip #{self._circuit_trip_count} — "
                                   f"max ({_MAX_CB_TRIPS}) reached, target permanently unreachable, "
                                   f"killing scan", flush=True)
+                    else:
+                        # BUG-CB-COUNTER-CAP-WHILE-OPEN FIX: circuit is already open;
+                        # cap _consecutive_fail at the threshold so in-flight request
+                        # failures (which completed after the CB opened) cannot inflate
+                        # the counter unboundedly. Without this cap, every timed-out
+                        # in-flight request increments _consecutive_fail even though the
+                        # CB is already open and can't be re-opened, producing the
+                        # ever-growing "CIRCUIT BREAKER OPEN N consecutive errors" count
+                        # seen in log1.txt (200 → 201 → ... → 400+).
+                        self._consecutive_fail = _cb_threshold
                 elif self._consecutive_fail >= 3:
                     old = self._delay
                     self._delay = min(self._max_delay, self._delay * 2.0 + 0.5)
@@ -32974,6 +32984,12 @@ class AdaptiveRateController:
                             print(f"[!] [RateCtrl] CB trip #{self._circuit_trip_count} — "
                                   f"max ({_ARC_MAX_CB_TRIPS}) reached, target permanently unreachable, "
                                   f"halting scan", flush=True)
+                    else:
+                        # BUG-ARC-CB-COUNTER-CAP-WHILE-OPEN FIX: mirror the GRG fix above.
+                        # When the circuit is already open, cap _consecutive_fail at the
+                        # threshold to prevent unbounded counter growth from in-flight
+                        # requests completing with errors after the circuit opened.
+                        self._consecutive_fail = 10
                 elif self._consecutive_fail >= 3:
                     old_delay = self._delay
                     self._delay = min(self._max_delay, self._delay * 2.0 + 0.5)
@@ -59399,54 +59415,73 @@ class Scanner:
             # 3s sleep cannot be explained by CDN jitter.  Marginal signals must be re-tested.
             _inv_margin_ratio = abs(_margin) / _min_viable_margin  # 1.0× = just at threshold
             if _inv_margin_ratio < 1.5:
-                # Marginal inverted signal — verify with a second calibration pair.
+                # Marginal inverted signal — verify with TWO additional calibration pairs.
+                # RC-1-V2 FIX: A single verification pair is insufficient when the margin
+                # ratio is barely above 1.0 (e.g. 1.004×). CDN jitter probability ≈15%
+                # per pair; with one verification pair there is a ~15% chance of wrongly
+                # confirming the inversion. With TWO independent verification pairs, the
+                # probability of both showing CDN jitter simultaneously drops to ~2.25%.
+                # Require BOTH verification pairs to show negative margin ≥ 50% threshold
+                # before committing to polarity inversion.
                 LOG.info(
                     "[Inference] RC-1: Marginal inverted oracle (margin=%.0fms, %.2f× threshold) "
-                    "— taking verification pair before committing to polarity inversion",
+                    "— taking TWO verification pairs before committing to polarity inversion",
                     _margin, _inv_margin_ratio)
-                await asyncio.sleep(max(0.5, _delay * 0.25))  # short CDN-warm cooldown
-                _rc1_vt_fp, _rc1_vt_ms = await _send_payload(_cal_true_cond)
-                await asyncio.sleep(_delay * 0.5)             # half-sleep gap between probes
-                _rc1_vf_fp, _rc1_vf_ms = await _send_payload(_cal_false_cond)
-                _rc1_v_margin = _rc1_vt_ms - _rc1_vf_ms
-                LOG.info(
-                    "[Inference] RC-1: Verification pair TRUE=%.0fms FALSE=%.0fms margin=%.0fms",
-                    _rc1_vt_ms, _rc1_vf_ms, _rc1_v_margin)
-                # Confirmation threshold: verification pair must also show negative margin with
-                # at least 50% of _min_viable_margin.  A CDN-jitter false positive will produce
-                # a near-zero or positive margin on re-probe (CDN serves cached TRUE probe fast
-                # on the first try but not consistently on a second cold probe seconds later).
                 _rc1_confirm_threshold = -(_min_viable_margin * 0.5)
-                if _rc1_v_margin > _rc1_confirm_threshold:
-                    # Verification pair does NOT confirm inversion: the second pair shows the
-                    # margin is inconsistent — this is CDN jitter, not a real inverted oracle.
+                _rc1_verified_count = 0
+                _rc1_vt_ms_sum = 0.0
+                _rc1_vf_ms_sum = 0.0
+                for _rc1_pair_idx in range(2):
+                    await asyncio.sleep(max(0.5, _delay * 0.25))  # short CDN-warm cooldown
+                    _rc1_vt_fp, _rc1_vt_ms = await _send_payload(_cal_true_cond)
+                    await asyncio.sleep(_delay * 0.5)             # half-sleep gap between probes
+                    _rc1_vf_fp, _rc1_vf_ms = await _send_payload(_cal_false_cond)
+                    _rc1_v_margin = _rc1_vt_ms - _rc1_vf_ms
+                    LOG.info(
+                        "[Inference] RC-1: Verification pair %d TRUE=%.0fms FALSE=%.0fms margin=%.0fms",
+                        _rc1_pair_idx + 1, _rc1_vt_ms, _rc1_vf_ms, _rc1_v_margin)
+                    if _rc1_v_margin <= _rc1_confirm_threshold:
+                        _rc1_verified_count += 1
+                        _rc1_vt_ms_sum += _rc1_vt_ms
+                        _rc1_vf_ms_sum += _rc1_vf_ms
+                    else:
+                        # This verification pair does NOT confirm inversion — stop early.
+                        LOG.warning(
+                            "[Inference] RC-1: Verification pair %d failed to confirm "
+                            "(v_margin=%.0fms > %.0fms threshold) — aborting verification",
+                            _rc1_pair_idx + 1, _rc1_v_margin, _rc1_confirm_threshold)
+                        break
+                if _rc1_verified_count < 2:
+                    # Fewer than 2 consecutive verification pairs confirmed inversion:
+                    # the marginal signal is CDN jitter, not a real inverted oracle.
                     # Disable the timing oracle entirely to prevent garbage extraction.
                     _oracle_inverted = False
                     _timing_oracle_reliable = False
                     LOG.warning(
-                        "[Inference] RC-1: Inverted oracle UNCONFIRMED by verification pair "
-                        "(v_margin=%.0fms > %.0fms confirm threshold) — CDN jitter false "
-                        "positive; disabling timing oracle to prevent garbage extraction",
-                        _rc1_v_margin, _rc1_confirm_threshold)
+                        "[Inference] RC-1: Inverted oracle UNCONFIRMED (only %d/2 verification "
+                        "pairs confirmed) — CDN jitter false positive; disabling timing oracle "
+                        "to prevent garbage extraction", _rc1_verified_count)
                     print(
                         f"[!] [Inference] RC-1: Marginal inverted oracle not confirmed "
-                        f"(v_margin={_rc1_v_margin:.0f}ms) — CDN jitter false positive, "
+                        f"({_rc1_verified_count}/2 pairs) — CDN jitter false positive, "
                         "timing oracle disabled",
                         flush=True)
                 else:
-                    # Verification confirms inversion.  Average both calibration pairs to
-                    # produce a more accurate threshold than a single-pair measurement.
+                    # Both verification pairs confirm inversion.  Average all three calibration
+                    # pairs (original + 2 verification) for a more accurate threshold.
                     _oracle_inverted = True
                     _rc1_orig_ms_t = ms_true
                     _rc1_orig_ms_f = ms_false
-                    ms_true  = (ms_true  + _rc1_vt_ms) / 2.0
-                    ms_false = (ms_false + _rc1_vf_ms) / 2.0
+                    ms_true  = (ms_true  + _rc1_vt_ms_sum / 2.0) / 2.0
+                    ms_false = (ms_false + _rc1_vf_ms_sum / 2.0) / 2.0
                     _margin  = ms_true - ms_false
                     _thresh  = (ms_true + ms_false) / 2.0
                     LOG.info(
-                        "[Inference] RC-1: Inverted oracle CONFIRMED (orig=%.0fms, v=%.0fms, "
-                        "avg=%.0fms, new_thresh=%.0fms)",
-                        _rc1_orig_ms_t - _rc1_orig_ms_f, _rc1_v_margin, _margin, _thresh)
+                        "[Inference] RC-1: Inverted oracle CONFIRMED by 2/2 verification pairs "
+                        "(orig=%.0fms, avg_v=%.0fms→%.0fms, new_thresh=%.0fms)",
+                        _rc1_orig_ms_t - _rc1_orig_ms_f,
+                        _rc1_vt_ms_sum / 2.0 - _rc1_vf_ms_sum / 2.0,
+                        _margin, _thresh)
             else:
                 # Strong inverted signal (≥ 1.5× _min_viable_margin): cannot be CDN jitter.
                 _oracle_inverted = True
@@ -100719,14 +100754,44 @@ class ZKBooleanExtractor:
         if times:
             median_rtt = sorted(times)[len(times)//2]
             self._baseline_rtt = times
-            # Ensure t_sec gives at least MIN_SNR median RTT
-            required_sleep_ms = median_rtt * self.MIN_SNR
-            required_sleep_s  = max(self.t_sec, required_sleep_ms / 1000.0)
-            if required_sleep_s > self.t_sec:
-                LOG.info("ZK calibration: auto-adjust t_sec "
-                         f"{self.t_sec:.2f} → {required_sleep_s:.2f}s "
-                         f"(baseline_rtt={median_rtt:.0f}ms)")
-                self.t_sec = required_sleep_s
+            # BUG-ZK-CALIB-BASELINE-INFLATED FIX (HIGH): When a null-condition probe takes
+            # longer than one full sleep cycle (median_rtt > t_sec*1000), the baseline is
+            # corrupted — a WAF connection-hold, CDN slow-read, or near-timeout request
+            # inflated the median.  In the observed case: 5 calibration probes returned
+            # median_rtt=14768ms while t_sec=5s.  MIN_SNR=2.5 then computes
+            # required_sleep_ms=36920ms → t_sec auto-adjusted to 36.92s.  With 36.92s
+            # sleep + 14.77s round-trip = ~51.7s per bit × 7 bits × 30 chars ≈ 3 hours
+            # for one field.  Root cause: null probes close to the 15s HTTP timeout did not
+            # raise exceptions (server returned a response just before the deadline) so they
+            # were not skipped by the `except Exception: pass` guard.
+            # Fix 1: guard — skip auto-adjustment when median_rtt > t_sec*1000 (baseline
+            # exceeds a full sleep, rendering MIN_SNR scaling meaningless).
+            # Fix 2: cap — always bound auto-adjusted t_sec at 30s (the HTTP request timeout)
+            # so extraction cannot exceed a few minutes per character regardless of jitter.
+            _MAX_AUTO_T_SEC = 30.0
+            if median_rtt > self.t_sec * 1000:
+                # Baseline is corrupted: the null-probe took longer than a full sleep.
+                # Do NOT auto-adjust — any scaling of a corrupt baseline makes it worse.
+                LOG.warning(
+                    "ZK calibration: baseline_rtt=%.0fms > t_sec*1000=%.0fms — null-probe "
+                    "baseline is corrupted (WAF hold or near-timeout request included in "
+                    "median). Skipping auto-adjustment to avoid inflated sleep times; "
+                    "using configured t_sec=%.2fs.",
+                    median_rtt, self.t_sec * 1000, self.t_sec)
+                print(
+                    f"[!] [ZKCal] baseline_rtt={median_rtt:.0f}ms exceeds sleep window "
+                    f"({self.t_sec:.2f}s×1000={self.t_sec*1000:.0f}ms) — baseline "
+                    f"likely corrupted by WAF hold; skipping auto-adjust of t_sec.",
+                    flush=True)
+            else:
+                # Ensure t_sec gives at least MIN_SNR median RTT, capped at 30s
+                required_sleep_ms = median_rtt * self.MIN_SNR
+                required_sleep_s  = min(_MAX_AUTO_T_SEC, max(self.t_sec, required_sleep_ms / 1000.0))
+                if required_sleep_s > self.t_sec:
+                    LOG.info("ZK calibration: auto-adjust t_sec "
+                             f"{self.t_sec:.2f} → {required_sleep_s:.2f}s "
+                             f"(baseline_rtt={median_rtt:.0f}ms, capped at {_MAX_AUTO_T_SEC:.0f}s)")
+                    self.t_sec = required_sleep_s
             # Recalibrate SQLite blob for new t_sec
             if median_rtt > 0:
                 # BUG-SQLITE-BLOB-OVERSIZE FIX (calibrate): was max(50_000_000, t_sec*200M).
@@ -147267,6 +147332,7 @@ class MultiStrategyExtractor:
                 continue
             try:
                 _fn = self._oracle_fns[name]
+                _orig_fn_inv = None  # BUG-MSE-DOUBLE-INVERSION FIX: track if flip shim installed
                 # Round 1: basic boolean
                 r1 = await asyncio.wait_for(_fn(_mse_val_true), timeout=20)
                 await asyncio.sleep(0.2)
@@ -147490,7 +147556,30 @@ class MultiStrategyExtractor:
                     # all-high or all-low codepoints (garbage). Drop it instead.
                     print(f"[MSE]   {name} basic OK but real condition gives same result (true{r3},false{r4})  oracle non-functional, dropping", flush=True)
                 else:
-                    print(f"[MSE]  {name} real validation FAILED (true{r3},false{r4})", flush=True)
+                    # r3=False, r4=True — Round 2 appears inverted.
+                    # BUG-MSE-DOUBLE-INVERSION FIX (HIGH): When _r1_invert=True caused a
+                    # polarity-flip shim to be installed, the flip shim doubles the inversion:
+                    #   raw_oracle(real_true)  = True  (flip → r3=False)
+                    #   raw_oracle(real_false) = False (flip → r4=True)
+                    # The raw oracle IS correct for real conditions; the Round-1 inversion
+                    # was a CDN jitter artifact (CDN-warm vs CDN-cold body-size mismatch).
+                    # Two inversions cancel: restore the ORIGINAL oracle and accept it.
+                    # Guard with hasattr(_orig_fn_inv) because _orig_fn_inv is only defined
+                    # when _r1_invert was True and the flip shim was installed.
+                    if _r1_invert and _orig_fn_inv is not None:
+                        # The raw oracle (before flip) gives True/False for real_true/real_false
+                        # correctly. The apparent Round-1 inversion was CDN jitter, not a real
+                        # polarity flip. Restore original oracle.
+                        self._oracle_fns[name] = _orig_fn_inv
+                        _validated.append(name)
+                        print(
+                            f"[MSE]  {name} double-inversion detected (round-1 inverted from "
+                            f"CDN jitter, round-2 also inverted after flip shim = double cancel) "
+                            f"— restoring original oracle and accepting (real: true→{r3}, "
+                            f"false→{r4} with shim; raw oracle correct)",
+                            flush=True)
+                    else:
+                        print(f"[MSE]  {name} real validation FAILED (true{r3},false{r4})", flush=True)
             except Exception as e:
                 print(f"[MSE]  {name} validation error: {e}", flush=True)
 
