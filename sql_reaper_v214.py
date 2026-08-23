@@ -65247,6 +65247,7 @@ class Scanner:
                 # call _fallback_bitshift directly. _skip_bisect flag prevents the
                 # post-bisection fallback block from calling bitshift a second time.
                 _skip_bisect = False
+                _bisect_converged = False  # BUG-BISECT-FP-ALLSAME FIX: track clean bisection convergence
                 if _use_bitwise_fallback:
                     _skip_bisect = True
                     _bf_direct = await _fallback_bitshift(query, pos)
@@ -65395,6 +65396,7 @@ class Scanner:
                         ch = _fb_ch
                 else:
                     ch = chr(lo)
+                    _bisect_converged = True  # BUG-BISECT-FP-ALLSAME FIX: bisection converged cleanly
 
                 result += ch
                 # BUG-BISECT-FALLBACK-GARBAGE-CHECK FIX (CRITICAL): The bitwise path
@@ -65411,12 +65413,30 @@ class Scanner:
                 # on garbage detection.  This saves up to 30 mins of wasted extraction
                 # when the oracle is compromised or WAF-limited.
                 if len(result) >= 2 and _is_garbage(result):
-                    LOG.warning(
-                        "[Inference] %s: garbage detected in bisect/fallback path (%r) "
-                        "at pos=%d — WAF may be uniformly signaling comparison operators "
-                        "or oracle is inverted; aborting extraction",
-                        label, result, pos)
-                    return ""
+                    # BUG-BISECT-FP-ALLSAME FIX (MEDIUM): When bisection correctly converges
+                    # (lo=hi, all-same 2-char result like "aa"), the oracle was working —
+                    # the all-same check is a false positive for DB names that start with
+                    # repeated chars (e.g. "aardvark" → positions 1-2 both correctly bisect
+                    # to 'a'=97, producing result="aa" from clean oracle convergence).
+                    # The all-same 2-char check is only meaningful when the char came via
+                    # FALLBACK (bisection was interrupted by WAF-uniform blocking, then
+                    # equality/bitshift also returned garbage). Skip the abort when both chars
+                    # came from clean bisection convergence and the only failing check is the
+                    # 2-char all-same heuristic. All other garbage checks (supplementary-plane,
+                    # non-printable, Check2+ for 3+ chars) remain active regardless.
+                    _is_short_bisect_fp = (
+                        _bisect_converged            # current char from clean bisection
+                        and len(result) == 2         # exactly 2 chars accumulated
+                        and len(set(result)) == 1    # all-same (only failing check)
+                        and all(0x20 <= ord(c) <= 0x7E for c in result)  # printable ASCII
+                    )
+                    if not _is_short_bisect_fp:
+                        LOG.warning(
+                            "[Inference] %s: garbage detected in bisect/fallback path (%r) "
+                            "at pos=%d — WAF may be uniformly signaling comparison operators "
+                            "or oracle is inverted; aborting extraction",
+                            label, result, pos)
+                        return ""
                 # BUG-V62-CONSECUTIVE-FAILS-RESETS FIX: _consecutive_fails only reset
                 # inside the bisection while loop when a probe succeeds. When the bisection
                 # breaks due to None (CDN/WAF) and fallback_bitshift/bisect correctly
