@@ -59384,12 +59384,81 @@ class Scanner:
         if (_timing_oracle_reliable and not _boolean_oracle
                 and _margin <= -_min_viable_margin):
             # _eval_cache is defined later at line ~59975; no entries yet so no clear needed.
-            _oracle_inverted = True
-            print(f"[!] [Inference] Inverted timing oracle detected (margin={_margin:.0f}ms): "
-                  "TRUE→fast, FALSE→slow — activating polarity inversion",
-                  flush=True)
-            LOG.info("[Inference] Inverted timing oracle: margin=%.0fms, _oracle_inverted=True "
-                     "(extraction will flip all oracle results)", _margin)
+            # RC-1-FIX: Single-sample calibration can produce a false-positive inverted oracle
+            # when CDN jitter causes a CDN-cold FALSE probe to be slower than a CDN-warm TRUE
+            # probe by just enough to exceed the minimum viable margin.  With delay=3s and
+            # _min_viable_margin=2400ms, a margin of -2411ms (only 11ms above threshold) from
+            # a single pair is indistinguishable from CDN noise.  Inversion is catastrophic:
+            # it flips the polarity of EVERY extracted bit — bisection races to the Unicode
+            # ceiling (lo→1,114,111) before the WAF-uniform guard catches it, and fallback
+            # methods also produce garbage until _is_garbage() fires.
+            #
+            # Fix: when the margin is marginal (between 1.0× and 1.5× of _min_viable_margin),
+            # take ONE additional verification pair before committing to inversion.  Strong
+            # inverted signals (≥ 1.5×) are confirmed immediately — a -9000ms margin from a
+            # 3s sleep cannot be explained by CDN jitter.  Marginal signals must be re-tested.
+            _inv_margin_ratio = abs(_margin) / _min_viable_margin  # 1.0× = just at threshold
+            if _inv_margin_ratio < 1.5:
+                # Marginal inverted signal — verify with a second calibration pair.
+                LOG.info(
+                    "[Inference] RC-1: Marginal inverted oracle (margin=%.0fms, %.2f× threshold) "
+                    "— taking verification pair before committing to polarity inversion",
+                    _margin, _inv_margin_ratio)
+                await asyncio.sleep(max(0.5, _delay * 0.25))  # short CDN-warm cooldown
+                _rc1_vt_fp, _rc1_vt_ms = await _send_payload(_cal_true_cond)
+                await asyncio.sleep(_delay * 0.5)             # half-sleep gap between probes
+                _rc1_vf_fp, _rc1_vf_ms = await _send_payload(_cal_false_cond)
+                _rc1_v_margin = _rc1_vt_ms - _rc1_vf_ms
+                LOG.info(
+                    "[Inference] RC-1: Verification pair TRUE=%.0fms FALSE=%.0fms margin=%.0fms",
+                    _rc1_vt_ms, _rc1_vf_ms, _rc1_v_margin)
+                # Confirmation threshold: verification pair must also show negative margin with
+                # at least 50% of _min_viable_margin.  A CDN-jitter false positive will produce
+                # a near-zero or positive margin on re-probe (CDN serves cached TRUE probe fast
+                # on the first try but not consistently on a second cold probe seconds later).
+                _rc1_confirm_threshold = -(_min_viable_margin * 0.5)
+                if _rc1_v_margin > _rc1_confirm_threshold:
+                    # Verification pair does NOT confirm inversion: the second pair shows the
+                    # margin is inconsistent — this is CDN jitter, not a real inverted oracle.
+                    # Disable the timing oracle entirely to prevent garbage extraction.
+                    _oracle_inverted = False
+                    _timing_oracle_reliable = False
+                    LOG.warning(
+                        "[Inference] RC-1: Inverted oracle UNCONFIRMED by verification pair "
+                        "(v_margin=%.0fms > %.0fms confirm threshold) — CDN jitter false "
+                        "positive; disabling timing oracle to prevent garbage extraction",
+                        _rc1_v_margin, _rc1_confirm_threshold)
+                    print(
+                        f"[!] [Inference] RC-1: Marginal inverted oracle not confirmed "
+                        f"(v_margin={_rc1_v_margin:.0f}ms) — CDN jitter false positive, "
+                        "timing oracle disabled",
+                        flush=True)
+                else:
+                    # Verification confirms inversion.  Average both calibration pairs to
+                    # produce a more accurate threshold than a single-pair measurement.
+                    _oracle_inverted = True
+                    _rc1_orig_ms_t = ms_true
+                    _rc1_orig_ms_f = ms_false
+                    ms_true  = (ms_true  + _rc1_vt_ms) / 2.0
+                    ms_false = (ms_false + _rc1_vf_ms) / 2.0
+                    _margin  = ms_true - ms_false
+                    _thresh  = (ms_true + ms_false) / 2.0
+                    LOG.info(
+                        "[Inference] RC-1: Inverted oracle CONFIRMED (orig=%.0fms, v=%.0fms, "
+                        "avg=%.0fms, new_thresh=%.0fms)",
+                        _rc1_orig_ms_t - _rc1_orig_ms_f, _rc1_v_margin, _margin, _thresh)
+            else:
+                # Strong inverted signal (≥ 1.5× _min_viable_margin): cannot be CDN jitter.
+                _oracle_inverted = True
+                LOG.info(
+                    "[Inference] RC-1: Strong inverted oracle (%.2f× threshold) — "
+                    "no verification needed", _inv_margin_ratio)
+            if _oracle_inverted:
+                print(f"[!] [Inference] Inverted timing oracle detected (margin={_margin:.0f}ms): "
+                      "TRUE→fast, FALSE→slow — activating polarity inversion",
+                      flush=True)
+                LOG.info("[Inference] Inverted timing oracle: margin=%.0fms, _oracle_inverted=True "
+                         "(extraction will flip all oracle results)", _margin)
         if _timing_oracle_reliable and not _boolean_oracle:
             # BUG-CDN-STEP-DELAY-PRIMARY-CAL FIX: CDN-lock detection was only in floor cal.
             # When primary calibration passes (margin ≥ 80ms), _cdn_step_delay stays 0.0
