@@ -31311,10 +31311,10 @@ class TamperLib:
             '5': ['3+2', '10-5', '4+1', '6-1'],
             '10': ['5+5', '20-10', '8+2'],
         }
-        p = re.sub(r'\bSLEEP\s*\(([\d.]+)\)',
+        p = re.sub(r'\bSLEEP\s*\((0[xX][0-9a-fA-F]+|[\d.]+)\)',
                    lambda m: f"SLEEP({random.choice(_exprs.get(m.group(1),[m.group(1)]))})",
                    p, flags=_re.IGNORECASE)
-        p = re.sub(r'\bpg_sleep\s*\(([\d.]+)\)',
+        p = re.sub(r'\bpg_sleep\s*\((0[xX][0-9a-fA-F]+|[\d.]+)\)',
                    lambda m: f"pg_sleep({random.choice(_exprs.get(m.group(1),[m.group(1)]))})",
                    p, flags=_re.IGNORECASE)
         p = re.sub(r'\bWAITFOR\s+DELAY\s+\'\d+:\d+:([\d.]+)\'',
@@ -58422,8 +58422,8 @@ class Scanner:
             for c in _payload_for_sleep
         )
         _det_sleep_m = _re.search(
-            r"pg_sleep\s*\(\s*([\d.]+)\s*\)"
-            r"|SLEEP\s*\(\s*([\d.]+)\s*\)"
+            r"pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)"
+            r"|SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)"
             r"|WAITFOR\s+DELAY\s+['\"](\d+):(\d+):([\d.]+)['\"]"
             r"|BENCHMARK\s*\(\s*(\d+)",
             _payload_for_sleep, _re.IGNORECASE)
@@ -58449,7 +58449,10 @@ class Scanner:
                 _det_sleep_val = max(1.0, min(10.0, _bench_iters / 10_000_000.0))
             else:
                 _matched_sl = next((g for g in (_g[0], _g[1]) if g is not None), None)
-                _det_sleep_val = float(_matched_sl) if _matched_sl else 0.5
+                if _matched_sl:
+                    _det_sleep_val = float(int(_matched_sl, 16)) if _matched_sl[:2].lower() == '0x' else float(_matched_sl)
+                else:
+                    _det_sleep_val = 0.5
             # Use the confirmed SQL sleep value directly — do NOT max() it with
             # config.delay, which is the HTTP request pacing (time between requests)
             # not the SQL sleep duration.  Mixing them raises 0.1s to 0.5s which
@@ -59401,14 +59404,16 @@ class Scanner:
                 _template_pre_adaptive = _template
                 _new_delay = _adaptive_min_sleep
                 # 1. pg_sleep(N) — PostgreSQL / CockroachDB / YugabyteDB / Redshift
+                def _sl_nonzero(v):
+                    return (float(int(v, 16)) if v[:2].lower() == '0x' else float(v)) > 0
                 _template = _re.sub(
-                    r'(?i)pg_sleep\s*\(\s*([\d.]+)\s*\)',
-                    lambda _m: f"pg_sleep({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    r'(?i)pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                    lambda _m: f"pg_sleep({_new_delay:.2f})" if _sl_nonzero(_m.group(1)) else _m.group(0),
                     _template)
                 # 2. SLEEP(N) — MySQL / MariaDB / TiDB / H2
                 _template = _re.sub(
-                    r'(?i)\bSLEEP\s*\(\s*([\d.]+)\s*\)',
-                    lambda _m: f"SLEEP({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    r'(?i)\bSLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                    lambda _m: f"SLEEP({_new_delay:.2f})" if _sl_nonzero(_m.group(1)) else _m.group(0),
                     _template)
                 # 3. WAITFOR DELAY 'hh:mm:ss' — MSSQL / Sybase
                 _wf_ad_sec = max(1, int(round(_new_delay)))
@@ -59420,13 +59425,13 @@ class Scanner:
                     _template)
                 # 4. DBMS_SESSION.SLEEP(N) — Oracle 12c+
                 _template = _re.sub(
-                    r'(?i)DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)\s*\)',
-                    lambda _m: f"DBMS_SESSION.SLEEP({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    r'(?i)DBMS_SESSION\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                    lambda _m: f"DBMS_SESSION.SLEEP({_new_delay:.2f})" if _sl_nonzero(_m.group(1)) else _m.group(0),
                     _template)
                 # 5. DBMS_LOCK.SLEEP(N) — Oracle (legacy)
                 _template = _re.sub(
-                    r'(?i)DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)\s*\)',
-                    lambda _m: f"DBMS_LOCK.SLEEP({_new_delay:.2f})" if float(_m.group(1)) > 0 else _m.group(0),
+                    r'(?i)DBMS_LOCK\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                    lambda _m: f"DBMS_LOCK.SLEEP({_new_delay:.2f})" if _sl_nonzero(_m.group(1)) else _m.group(0),
                     _template)
                 # 6. ARITHMETIC FORM (BUG-F5-ARITH-TEMPLATE FIX): stacked-query
                 # PostgreSQL uses pg_sleep(N*([INFERENCE])::int) — built at lines
@@ -59693,14 +59698,16 @@ class Scanner:
                     # Fix: apply separate substitutions for each timing function family.
                     #
                     # 1. pg_sleep(N) — PostgreSQL / CockroachDB
+                    def _sl_nonzero_r(v):
+                        return (float(int(v, 16)) if v[:2].lower() == '0x' else float(v)) > 0
                     _template = _re.sub(
-                        r'(?i)pg_sleep\s*\(\s*([\d.]+)\s*\)',
-                        lambda _m: f"pg_sleep({_delay})" if float(_m.group(1)) > 0 else _m.group(0),
+                        r'(?i)pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                        lambda _m: f"pg_sleep({_delay})" if _sl_nonzero_r(_m.group(1)) else _m.group(0),
                         _template)
                     # 2. SLEEP(N) — MySQL / MariaDB / H2
                     _template = _re.sub(
-                        r'(?i)\bSLEEP\s*\(\s*([\d.]+)\s*\)',
-                        lambda _m: f"SLEEP({_delay})" if float(_m.group(1)) > 0 else _m.group(0),
+                        r'(?i)\bSLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                        lambda _m: f"SLEEP({_delay})" if _sl_nonzero_r(_m.group(1)) else _m.group(0),
                         _template)
                     # 3. WAITFOR DELAY '0:mm:ss' — MSSQL / Sybase
                     # WAITFOR DELAY uses 'hh:mm:ss' format with INTEGER seconds only.
@@ -59717,13 +59724,13 @@ class Scanner:
                         _template)
                     # 4. DBMS_SESSION.SLEEP(N) — Oracle 12c+ (public, no priv needed)
                     _template = _re.sub(
-                        r'(?i)DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)\s*\)',
-                        lambda _m: f"DBMS_SESSION.SLEEP({_delay})" if float(_m.group(1)) > 0 else _m.group(0),
+                        r'(?i)DBMS_SESSION\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                        lambda _m: f"DBMS_SESSION.SLEEP({_delay})" if _sl_nonzero_r(_m.group(1)) else _m.group(0),
                         _template)
                     # 5. DBMS_LOCK.SLEEP(N) — Oracle (requires EXECUTE ON DBMS_LOCK)
                     _template = _re.sub(
-                        r'(?i)DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)\s*\)',
-                        lambda _m: f"DBMS_LOCK.SLEEP({_delay})" if float(_m.group(1)) > 0 else _m.group(0),
+                        r'(?i)DBMS_LOCK\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)',
+                        lambda _m: f"DBMS_LOCK.SLEEP({_delay})" if _sl_nonzero_r(_m.group(1)) else _m.group(0),
                         _template)
                     LOG.info("[Inference] Retrying calibration with 0.3s floor sleep "
                              "(template updated for all DBMSes: pg_sleep/SLEEP/WAITFOR/"
@@ -69801,7 +69808,7 @@ class Scanner:
                 _det_payload_for_thresh = getattr(getattr(enum, 'result', None), 'payload', '') or ''
                 if _det_payload_for_thresh:
                     _sleep_m_enum = _re.search(
-                        r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*([\d.]+)',
+                        r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                         _det_payload_for_thresh, _re.IGNORECASE)
                     if not _sleep_m_enum:
                         _sleep_m_enum = _re.search(
@@ -69818,7 +69825,8 @@ class Scanner:
                                               + int(_sleep_m_enum.group(2)) * 60
                                               + float(_sleep_m_enum.group(3)))
                             else:
-                                _sleep_s_e = float(_sleep_m_enum.group(1))
+                                _enum_v = _sleep_m_enum.group(1)
+                                _sleep_s_e = float(int(_enum_v, 16)) if _enum_v[:2].lower() == '0x' else float(_enum_v)
                             _cfg_for_thresh._pcv_timing_threshold = max(150.0, _sleep_s_e * 1000 * 0.65)
                             LOG.debug("[_run_enumeration] Set _pcv_timing_threshold="
                                       f"{_cfg_for_thresh._pcv_timing_threshold:.0f}ms "
@@ -96869,10 +96877,11 @@ class ScannerV10(ScannerV9):
                     _xcat_pay_stripped = _re.sub(r'/\*[^*]*\*/', ' ', _det_payload_upper)
                     _xcat_pay_stripped = _re.sub(r'\s+', ' ', _xcat_pay_stripped).strip()
                     _xcat_sleep_m = _re.search(
-                        r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)',
+                        r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                         _xcat_pay_stripped)
                     if _xcat_sleep_m:
-                        _xcat_sleep_sec = float(_xcat_sleep_m.group(1))
+                        _xcat_v = _xcat_sleep_m.group(1)
+                        _xcat_sleep_sec = float(int(_xcat_v, 16)) if _xcat_v[:2].lower() == '0x' else float(_xcat_v)
                         if _xcat_sleep_sec > 0.0:
                             # Match the same formula used in detect_time() at ~line 18179:
                             # threshold_ms = actual_sleep_ms * 0.65
@@ -97227,7 +97236,7 @@ class ScannerV10(ScannerV9):
                     # which is below 3750ms → Check B ALWAYS fails. Fix: always update from payload.
                     _det_pay_ts = (getattr(_det_for_pcv, 'payload', '') or '')
                     _sleep_m_ts = _re.search(
-                        r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*([\d.]+)',
+                        r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                         _det_pay_ts, _re.IGNORECASE)
                     if not _sleep_m_ts:
                         # FIX-RECV-RE (REQ 3): Robust RECEIVE_MESSAGE pattern handles
@@ -97289,7 +97298,8 @@ class ScannerV10(ScannerV9):
                                                  + int(_sleep_m_ts.group(2)) * 60
                                                  + float(_sleep_m_ts.group(3)))
                             else:
-                                _sleep_sec_ts = float(_sleep_m_ts.group(1))
+                                _ts_v = _sleep_m_ts.group(1)
+                                _sleep_sec_ts = float(int(_ts_v, 16)) if _ts_v[:2].lower() == '0x' else float(_ts_v)
                             # Use 65% of actual sleep as threshold (not 75% of config.time_sec)
                             # so Check B's DOUBLE probe (2× sleep) easily exceeds threshold
                             # BUG-3B-FIX: Only update threshold when the new value is SMALLER than
@@ -97487,7 +97497,7 @@ class ScannerV10(ScannerV9):
             # timeouts; their Check B double-probe = 2-6s. 2s < 3750ms -> Check B ALWAYS
             # failed for 1-2s Oracle DBMS_PIPE payloads on this code path.
             _sleep_m_ts2 = _re.search(
-                r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*([\d.]+)',
+                r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                 _det_pay_ts2, _re.IGNORECASE)
             if not _sleep_m_ts2:
                 _sleep_m_ts2 = _re.search(
@@ -97504,7 +97514,8 @@ class ScannerV10(ScannerV9):
                                           + int(_sleep_m_ts2.group(2)) * 60
                                           + float(_sleep_m_ts2.group(3)))
                     else:
-                        _sleep_sec_ts2 = float(_sleep_m_ts2.group(1))
+                        _ts2_v = _sleep_m_ts2.group(1)
+                        _sleep_sec_ts2 = float(int(_ts2_v, 16)) if _ts2_v[:2].lower() == '0x' else float(_ts2_v)
                     # BUG-3B-FIX: Apply same conservative-update rule as E/S/T path.
                     # Only update when new threshold is smaller (tighter) or not yet set.
                     # BUG-THRESHOLD-CONTAMINATION FIX (Req 3): Store threshold per-DBMS to
@@ -97874,10 +97885,12 @@ class ScannerV10(ScannerV9):
                         if kw not in pl: continue
                         if kw in ("SLEEP(", "PG_SLEEP(", "BENCHMARK("):
                             _m = _re.search(
-                                r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', pl)
+                                r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', pl)
                             if _m:
                                 try:
-                                    if float(_m.group(1)) <= 0.0:
+                                    _v = _m.group(1)
+                                    _vf = float(int(_v, 16)) if _v[:2].lower() == '0x' else float(_v)
+                                    if _vf <= 0.0:
                                         continue  # SLEEP(0) — WAF no-op, skip timing routing
                                 except (ValueError, TypeError):
                                     pass
@@ -99956,7 +99969,7 @@ class ServerlessFunctionDetector:
             _sla_base = _sla_payloads[0]
             _sla_t_int = max(1, int(t))
             payload = _re.sub(
-                r'(SLEEP\s*\(\s*)[\d.]+(\s*\))',
+                r'(SLEEP\s*\(\s*)(?:0[xX][0-9a-fA-F]+|[\d.]+)(\s*\))',
                 lambda m: f"{m.group(1)}{int(t)}{m.group(2)}",
                 _sla_base, count=1, flags=_re.IGNORECASE)
             if payload == _sla_base:  # SLEEP not found — try pg_sleep / WAITFOR / DBMS_LOCK
@@ -104853,10 +104866,12 @@ class ScannerV11(ScannerV10):
                         _sg_sleep_nonzero = True
                         if _sg_has_sleep_kw:
                             import re as _sg_re
-                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', _sg_pl)
+                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', _sg_pl)
                             if _sg_m:
                                 try:
-                                    if float(_sg_m.group(1)) <= 0.0:
+                                    _sg_v = _sg_m.group(1)
+                                    _sg_vf = float(int(_sg_v, 16)) if _sg_v[:2].lower() == '0x' else float(_sg_v)
+                                    if _sg_vf <= 0.0:
                                         _sg_sleep_nonzero = False
                                 except (ValueError, TypeError):
                                     pass
@@ -105242,16 +105257,20 @@ class ScannerV11(ScannerV10):
                         # Numeric safety: extracted value is a float used only as
                         # asyncio.sleep() argument; never placed in SQL comparison operands.
                         _sl_m11 = _re.search(
-                            r'pg_sleep\s*\(\s*([\d.]+)'
-                            r'|SLEEP\s*\(\s*([\d.]+)'
+                            r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                            r'|SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                             # BUG-V11-DELAY-MSSQL-WAITFOR-REGEX FIX: Old r"..." had \\d (literal-backslash+digit
                             # in regex). Non-raw string: \\s->\ s (whitespace), \\d->\d (digit) in regex.
                             r"|WAITFOR\s+DELAY\s+['\x22]\d+:\d+:([\d.]+)"
-                            r'|DBMS_PIPE\.RECEIVE_MESSAGE\s*\([^,]+,\s*([\d.]+)\)'
-                            r'|DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)\)'
-                            r'|DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)\)',
+                            r'|DBMS_PIPE\.RECEIVE_MESSAGE\s*\([^,]+,\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)'
+                            r'|DBMS_SESSION\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)'
+                            r'|DBMS_LOCK\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)',
                             _det_pl, _re.I)
-                        _delay11 = float(next((g for g in _sl_m11.groups() if g is not None), "0.1")) if _sl_m11 else 0.1
+                        if _sl_m11:
+                            _raw11 = next((g for g in _sl_m11.groups() if g is not None), None)
+                            _delay11 = (float(int(_raw11, 16)) if _raw11[:2].lower() == '0x' else float(_raw11)) if _raw11 else 0.1
+                        else:
+                            _delay11 = 0.1
                         _param11 = getattr(self_._result, "param", "")
                         _dbms11 = getattr(self_._result, "dbms", "PostgreSQL") or "PostgreSQL"
                         # DBMS-correct char/length functions — was only PostgreSQL+MySQL
@@ -109843,10 +109862,12 @@ class ScannerV12(ScannerV11):
                         _sg_sleep_nonzero = True
                         if _sg_has_sleep_kw:
                             import re as _sg_re
-                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', _sg_pl)
+                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', _sg_pl)
                             if _sg_m:
                                 try:
-                                    if float(_sg_m.group(1)) <= 0.0:
+                                    _sg_v = _sg_m.group(1)
+                                    _sg_vf = float(int(_sg_v, 16)) if _sg_v[:2].lower() == '0x' else float(_sg_v)
+                                    if _sg_vf <= 0.0:
                                         _sg_sleep_nonzero = False
                                 except (ValueError, TypeError):
                                     pass
@@ -113362,7 +113383,7 @@ class TechniqueCascadeEngine:
                 if _det_pay_pcvg:
                     # BUG-INLINE-RE-IMPORT-FIX: use module-level _re
                     _sleep_m_pcvg = _re.search(
-                        r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*([\d.]+)',
+                        r'(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_LOCK\.SLEEP|DBMS_SESSION\.SLEEP)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                         _det_pay_pcvg, _re.IGNORECASE)
                     if not _sleep_m_pcvg:
                         _sleep_m_pcvg = _re.search(
@@ -113470,7 +113491,8 @@ class TechniqueCascadeEngine:
                                 pass
                     if _sleep_m_pcvg:
                         try:
-                            _sleep_sec_pcvg = float(_sleep_m_pcvg.group(1))
+                            _pcvg_v = _sleep_m_pcvg.group(1)
+                            _sleep_sec_pcvg = float(int(_pcvg_v, 16)) if _pcvg_v[:2].lower() == '0x' else float(_pcvg_v)
                             # BUG-3B-FIX: conservative-update — only tighten, never loosen
                             # BUG-THRESHOLD-CONTAMINATION FIX (Req 3): Use per-DBMS map
                             _pcvg_det_dbms = (getattr(_det_obj, 'dbms', '') or '').upper()
@@ -114920,7 +114942,7 @@ class TechniqueCascadeEngine:
                 # detection payloads with short timeouts (1s) produce 2000ms double-probe
                 # which is BELOW 3250ms → Check B ALWAYS fails for 1s Oracle DBMS_PIPE hits.
                 _s_sleep_m = _re.search(
-                    r'(?:SLEEP|PG_SLEEP)\s*\(\s*([\d.]+)\s*\)'
+                    r'(?:SLEEP|PG_SLEEP)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)'
                     r'|WAITFOR\s+DELAY\s*\'\d+:\d+:([\d.]+)\'',
                     _s_det_pay, _re.I)
                 if not _s_sleep_m:
@@ -114931,7 +114953,7 @@ class TechniqueCascadeEngine:
                 if not _s_sleep_m:
                     # BUG-3B-DBMSLOCK-FIX: Check DBMS_LOCK.SLEEP / DBMS_SESSION.SLEEP
                     _s_sleep_m = _re.search(
-                        r'(?:DBMS_LOCK|DBMS_SESSION)\.SLEEP\s*\(\s*([\d.]+)',
+                        r'(?:DBMS_LOCK|DBMS_SESSION)\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                         _s_det_pay, _re.I)
                 # BUG-R3-B FIX: Handle GENERATE_SERIES(1,N) separately BEFORE using
                 # _s_sleep_m to derive _s_val.  GENERATE_SERIES row-count N is NOT a
@@ -114945,7 +114967,8 @@ class TechniqueCascadeEngine:
                 if _gs_match_s:
                     _s_val = 2.0  # Fixed: GS(1,N) ~= 2s execution; half/double = 1s/4s probes
                 elif _s_sleep_m:
-                    _s_val = float(_s_sleep_m.group(1) or _s_sleep_m.group(2) or 0)
+                    _s_raw = _s_sleep_m.group(1) or _s_sleep_m.group(2) or '0'
+                    _s_val = float(int(_s_raw, 16)) if _s_raw[:2].lower() == '0x' else float(_s_raw)
                 else:
                     _s_val = float(getattr(getattr(self, 'config', None), 'time_sec', 3) or 3)
 
@@ -114967,7 +114990,7 @@ class TechniqueCascadeEngine:
                     """
                     # BUG-INLINE-RE-IMPORT-FIX: use module-level _re (line 534)
                     p = _re.sub(
-                        r'((?:SLEEP|PG_SLEEP)\s*\(\s*)[\d.]+(\s*\))',
+                        r'((?:SLEEP|PG_SLEEP)\s*\(\s*)(?:0[xX][0-9a-fA-F]+|[\d.]+)(\s*\))',
                         lambda m: f"{m.group(1)}{new_val:.1f}{m.group(2)}", pay,
                         count=1, flags=_re.I)
                     # BUG-WAITFOR-INT-FIX: Use integer seconds for WAITFOR DELAY >= 1s
@@ -115002,7 +115025,7 @@ class TechniqueCascadeEngine:
                         count=1, flags=_re.I)
                     # BUG-3B-DBMSLOCK-FIX: Also substitute DBMS_LOCK.SLEEP / DBMS_SESSION.SLEEP
                     p = _re.sub(
-                        r'((?:DBMS_LOCK|DBMS_SESSION)\.SLEEP\s*\(\s*)[\d.]+(\s*\))',
+                        r'((?:DBMS_LOCK|DBMS_SESSION)\.SLEEP\s*\(\s*)(?:0[xX][0-9a-fA-F]+|[\d.]+)(\s*\))',
                         lambda m: f"{m.group(1)}{new_val:.1f}{m.group(2)}", p,
                         count=1, flags=_re.I)
                     return p
@@ -115602,10 +115625,12 @@ class TechniqueCascadeEngine:
                         if kw not in pl: continue
                         if kw in ("SLEEP(", "PG_SLEEP(", "BENCHMARK("):
                             _m = _re.search(
-                                r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', pl)
+                                r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', pl)
                             if _m:
                                 try:
-                                    if float(_m.group(1)) <= 0.0:
+                                    _v = _m.group(1)
+                                    _vf = float(int(_v, 16)) if _v[:2].lower() == '0x' else float(_v)
+                                    if _vf <= 0.0:
                                         continue
                                 except (ValueError, TypeError):
                                     pass
@@ -120484,7 +120509,7 @@ class TechniqueCascadeEngine:
             # CRITICAL FIX: Regex must capture DECIMAL sleep values like 0.1, not just integers!
             # Old regex r'SLEEP\s*\(\s*(\d+)' captures '0' from 'SLEEP(0.1)' — WRONG
             # New regex r'SLEEP\s*\(\s*([\d.]+)' captures '0.1' — CORRECT
-            _sleep_match = _re.search(r'SLEEP\s*\(\s*([\d.]+)', _det_payload, _re.IGNORECASE)
+            _sleep_match = _re.search(r'SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', _det_payload, _re.IGNORECASE)
             if not _sleep_match:
                 # BUG-6-FIX (Req 3/MSSQL): Certified MSSQL_TIMEBASED_PAYLOADS use the
                 # canonical hh:mm:ss format '00:00:N' (two-digit fields).  The old regex
@@ -120528,7 +120553,7 @@ class TechniqueCascadeEngine:
                             raise IndexError(f"_WaitforMatch has only group 0 and 1, got {n}")
                     _sleep_match = _WaitforMatch(_wf_total)
             if not _sleep_match:
-                _sleep_match = _re.search(r'pg_sleep\s*\(\s*([\d.]+)', _det_payload, _re.IGNORECASE)
+                _sleep_match = _re.search(r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', _det_payload, _re.IGNORECASE)
             if not _sleep_match:
                 _sleep_match = _re.search(r'BENCHMARK\s*\(\s*(\d+)', _det_payload, _re.IGNORECASE)
             if not _sleep_match:
@@ -120552,10 +120577,10 @@ class TechniqueCascadeEngine:
                 # was silently skipped for every Oracle DBMS_SESSION.SLEEP detection payload,
                 # forcing fallback to canary pairs only and losing the strongest proof.
                 _sleep_match = _re.search(
-                    r'DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)', _det_payload, _re.IGNORECASE)
+                    r'DBMS_SESSION\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', _det_payload, _re.IGNORECASE)
             if not _sleep_match:
                 _sleep_match = _re.search(
-                    r'DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)', _det_payload, _re.IGNORECASE)
+                    r'DBMS_LOCK\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', _det_payload, _re.IGNORECASE)
             if not _sleep_match:
                 # Oracle DBMS_PIPE.RECEIVE_MESSAGE - seconds parameter
                 _sleep_match = _re.search(
@@ -120621,8 +120646,8 @@ class TechniqueCascadeEngine:
                 # Old: int("0.1") = error, int("0") = 0 (from regex capturing only first digit)
                 # New: float("0.1") = 0.1 (correct)
                 try:
-                    _orig_val = float(_orig_sleep)
-                except ValueError:
+                    _orig_val = float(int(_orig_sleep, 16)) if _orig_sleep[:2].lower() == '0x' else float(_orig_sleep)
+                except (ValueError, TypeError):
                     _orig_val = int(_orig_sleep) if _orig_sleep.isdigit() else 1.0
                 # BUG-CHECK-B-SLEEP0 FIX: Skip proportional block when _orig_val == 0.
                 # SLEEP(0) returns 0ms so there is no timing signal to scale.  With _orig_val=0:
@@ -120647,8 +120672,8 @@ class TechniqueCascadeEngine:
             if _sleep_match:  # second gate: only proceed with valid match
                 _orig_sleep = _sleep_match.group(1)
                 try:
-                    _orig_val = float(_orig_sleep)
-                except ValueError:
+                    _orig_val = float(int(_orig_sleep, 16)) if _orig_sleep[:2].lower() == '0x' else float(_orig_sleep)
+                except (ValueError, TypeError):
                     _orig_val = int(_orig_sleep) if _orig_sleep.isdigit() else 1.0
                 # Test 1: same payload with DOUBLE sleep  should take ~2 longer
                 # BUG-R3A FIX: BENCHMARK/RANDOMBLOB/GENERATE_SERIES expect INTEGER args.
@@ -124726,15 +124751,18 @@ class TechniqueCascadeEngine:
                     # time_sec=1.0) would never be reached, silently dropping real hits.
                     # BUG-INLINE-RE-IMPORT-FIX: use module-level _re
                     _sl_m = _re.search(
-                        r'pg_sleep\s*\(\s*([\d.]+)'
-                        r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                        r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                        r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                         r'|WAITFOR\s+DELAY\s+[\'"]\d+:\d+:([\d.]+)'
-                        r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*([\d.]+)'
+                        r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                         r'|RANDOMBLOB\s*\(\s*(\d+)',
                         payload, _re.I)
                     if _sl_m:
                         _raw = next((g for g in _sl_m.groups() if g is not None), None)
-                        _sl_v = float(_raw) if _raw else t
+                        if _raw:
+                            _sl_v = float(int(_raw, 16)) if _raw[:2].lower() == '0x' else float(_raw)
+                        else:
+                            _sl_v = t
                         # RANDOMBLOB argument is byte count, not seconds — convert.
                         # BUG-RANDOMBLOB-DIVISOR FIX (v25.1): Previous divisor (100_000_000) was
                         # calibrated against a stale 50MB cap comment, but _SQLITE_BOMB_MAX_BLOB
@@ -127684,15 +127712,15 @@ class TechniqueCascadeEngine:
             # so it's always "elevated" and never "HIT".
             # BUG-INLINE-RE-IMPORT-FIX: use module-level _re
             _tc_sl = _re.search(
-                r'pg_sleep\s*\(\s*([\d.]+)'
-                r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                 r'|WAITFOR\s+DELAY\s+[\'"]\d+:\d+:([\d.]+)'
-                r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*([\d.]+)',
+                r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                 payload, _re.I)
             if _tc_sl:
                 _tc_raw = next((g for g in _tc_sl.groups() if g is not None), None)
                 if _tc_raw:
-                    _tc_sl_v = float(_tc_raw)
+                    _tc_sl_v = float(int(_tc_raw, 16)) if _tc_raw[:2].lower() == '0x' else float(_tc_raw)
                     _tc_mean = baseline.get("mean_timing", 200) if isinstance(baseline, dict) else 200
                     _tc_std  = max(baseline.get("std_timing", 50) if isinstance(baseline, dict) else 50, 50)
                     # JITTER-AWARE THRESHOLD: if the payload sleep is shorter than
@@ -128334,13 +128362,16 @@ class TechniqueCascadeEngine:
                             # unnecessary false-condition HTTP probes to the target.
                             try:
                                 _cdnl_slp_m = _re.search(
-                                    r'pg_sleep\s*\(\s*([\d.]+)'
-                                    r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                                    r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                                    r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                                     r'|WAITFOR\s+DELAY\s+[\'\"](\d+):(\d+):([\d.]+)[\'\"]'
-                                    r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*([\d.]+)',
+                                    r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                                     payload, _re.I)
                                 _cdnl_raw = next((g for g in _cdnl_slp_m.groups() if g), None) if _cdnl_slp_m else None
-                                _cdnl_sleep_sec = float(_cdnl_raw) if _cdnl_raw else float(getattr(self.config, 'time_sec', 1) or 1)
+                                if _cdnl_raw:
+                                    _cdnl_sleep_sec = float(int(_cdnl_raw, 16)) if _cdnl_raw[:2].lower() == '0x' else float(_cdnl_raw)
+                                else:
+                                    _cdnl_sleep_sec = float(getattr(self.config, 'time_sec', 1) or 1)
                             except Exception:
                                 _cdnl_sleep_sec = float(getattr(self.config, 'time_sec', 1) or 1)
                             _cdnl_sleep_ms = _cdnl_sleep_sec * 1000
@@ -128411,13 +128442,16 @@ class TechniqueCascadeEngine:
                                 # explicit sleep argument).
                                 try:
                                     _ds_m = _re.search(
-                                        r'pg_sleep\s*\(\s*([\d.]+)'
-                                        r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                                        r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                                        r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                                         r'|WAITFOR\s+DELAY\s+[\'\"]\d+:\d+:([\d.]+)'
-                                        r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*([\d.]+)',
+                                        r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                                         payload, _re.I)
                                     _ds_raw = next((g for g in _ds_m.groups() if g), None) if _ds_m else None
-                                    _detection_sleep_sec = float(_ds_raw) if _ds_raw else float(getattr(self.config, 'time_sec', 1) or 1)
+                                    if _ds_raw:
+                                        _detection_sleep_sec = float(int(_ds_raw, 16)) if _ds_raw[:2].lower() == '0x' else float(_ds_raw)
+                                    else:
+                                        _detection_sleep_sec = float(getattr(self.config, 'time_sec', 1) or 1)
                                 except Exception:
                                     _detection_sleep_sec = float(getattr(self.config, 'time_sec', 1) or 1)
                                 _expected_delta = (_detection_sleep_sec or 0.1) * 1000  # e.g., 100ms
@@ -129057,8 +129091,8 @@ class TechniqueCascadeEngine:
             # Per-payload threshold override — same as T/TH blocks
             # BUG-INLINE-RE-IMPORT-FIX: use module-level _re
             _hq_sl = _re.search(
-                r'pg_sleep\s*\(\s*([\d.]+)'
-                r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                 r'|WAITFOR\s+DELAY\s+[\'"]\d+:\d+:([\d.]+)'
                 r'|GENERATE_SERIES\s*\(1\s*,\s*(\d+)'
                 r'|RANDOMBLOB\s*\(\s*(\d+)',
@@ -129066,7 +129100,7 @@ class TechniqueCascadeEngine:
             if _hq_sl:
                 _hq_raw = next((g for g in _hq_sl.groups() if g is not None), None)
                 if _hq_raw:
-                    _hq_sl_v = float(_hq_raw)
+                    _hq_sl_v = float(int(_hq_raw, 16)) if _hq_raw[:2].lower() == '0x' else float(_hq_raw)
                     _hq_mean_b = baseline.get("mean_timing", 200) if isinstance(baseline, dict) else 200
                     _hq_std_b  = max(baseline.get("std_timing", 50) if isinstance(baseline, dict) else 50, 50)
                     # GENERATE_SERIES / RANDOMBLOB: large numbers are iteration counts
@@ -129467,15 +129501,15 @@ class TechniqueCascadeEngine:
                 # Per-payload threshold override — same logic as T technique block
                 # BUG-INLINE-RE-IMPORT-FIX: use module-level _re
                 _th_sl = _re.search(
-                    r'pg_sleep\s*\(\s*([\d.]+)'
-                    r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                    r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                    r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                     r'|WAITFOR\s+DELAY\s+[\'"]\d+:\d+:([\d.]+)'
-                    r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*([\d.]+)',
+                    r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                     payload, _re.I)
                 if _th_sl:
                     _th_raw = next((g for g in _th_sl.groups() if g is not None), None)
                     if _th_raw:
-                        _th_sl_v = float(_th_raw)
+                        _th_sl_v = float(int(_th_raw, 16)) if _th_raw[:2].lower() == '0x' else float(_th_raw)
                         _th_std = max(baseline.get("std_timing", 50)
                                       if isinstance(baseline, dict) else 50, 50)
                         time_threshold = _th_mean + max(_th_sl_v * 1000 * 0.75,
@@ -129850,15 +129884,16 @@ class TechniqueCascadeEngine:
             # FIX: Override time_threshold with 0.75 coefficient (same as T handler).
             # Default _payload_threshold uses 0.50 which is too loose for BT confirmation.
             _bt_sl = _re.search(
-                r'pg_sleep\s*\(\s*([\d.]+)'
-                r'|(?<!\w)SLEEP\s*\(\s*([\d.]+)'
+                r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
+                r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                 r'|WAITFOR\s+DELAY\s+[\'"]\d+:\d+:([\d.]+)'
-                r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*([\d.]+)',
+                r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
                 payload, _re.I)
             if _bt_sl:
                 _bt_raw = next((g for g in _bt_sl.groups() if g is not None), None)
                 if _bt_raw:
-                    time_threshold = _bt_mean + max(float(_bt_raw) * 1000 * 0.75, _bt_std * 3.0)
+                    _bt_raw_f = float(int(_bt_raw, 16)) if _bt_raw[:2].lower() == '0x' else float(_bt_raw)
+                    time_threshold = _bt_mean + max(_bt_raw_f * 1000 * 0.75, _bt_std * 3.0)
             _bt_waf_fast = (_waf_blocked and fp.elapsed_ms < _bt_mean * 1.3)
             _bt_verdict = (" HIT" if fp.elapsed_ms >= time_threshold else
                           " WAF-blocked" if _bt_waf_fast else
@@ -132234,18 +132269,18 @@ class TechniqueCascadeEngine:
         _gsp_norm = _re.sub(r'/\*[^*]*\*+(?:[^*/][^*]*\*+)*/', ' ', true_payload)
         _gsp_norm = _re.sub(r'\s+', ' ', _gsp_norm).strip()
         _gen_sleep_patterns = [
-            # MySQL/MariaDB/SQLite SLEEP(N) → SLEEP(0)
-            (r'\bSLEEP\s*\(\s*[\d.]+\s*\)', 'SLEEP(0)'),
-            # PostgreSQL pg_sleep(N) → pg_sleep(0)
-            (r'\bpg_sleep\s*\(\s*[\d.]+\s*\)', 'pg_sleep(0)'),
+            # MySQL/MariaDB/SQLite SLEEP(N) → SLEEP(0) — hex literals (0xa) also matched
+            (r'\bSLEEP\s*\(\s*(?:0[xX][0-9a-fA-F]+|[\d.]+)\s*\)', 'SLEEP(0)'),
+            # PostgreSQL pg_sleep(N) → pg_sleep(0) — hex literals also matched
+            (r'\bpg_sleep\s*\(\s*(?:0[xX][0-9a-fA-F]+|[\d.]+)\s*\)', 'pg_sleep(0)'),
             # MSSQL WAITFOR DELAY 'h:m:s' → WAITFOR DELAY '00:00:00'
             (r"WAITFOR\s+DELAY\s*'[\d:.]+'", "WAITFOR DELAY '00:00:00'"),
-            # Oracle DBMS_LOCK.SLEEP(N) → DBMS_LOCK.SLEEP(0)
-            (r'\bDBMS_LOCK\.SLEEP\s*\(\s*[\d.]+\s*\)', 'DBMS_LOCK.SLEEP(0)'),
-            # Oracle DBMS_SESSION.SLEEP(N) → DBMS_SESSION.SLEEP(0)
-            (r'\bDBMS_SESSION\.SLEEP\s*\(\s*[\d.]+\s*\)', 'DBMS_SESSION.SLEEP(0)'),
+            # Oracle DBMS_LOCK.SLEEP(N) → DBMS_LOCK.SLEEP(0) — hex literals also matched
+            (r'\bDBMS_LOCK\.SLEEP\s*\(\s*(?:0[xX][0-9a-fA-F]+|[\d.]+)\s*\)', 'DBMS_LOCK.SLEEP(0)'),
+            # Oracle DBMS_SESSION.SLEEP(N) → DBMS_SESSION.SLEEP(0) — hex literals also matched
+            (r'\bDBMS_SESSION\.SLEEP\s*\(\s*(?:0[xX][0-9a-fA-F]+|[\d.]+)\s*\)', 'DBMS_SESSION.SLEEP(0)'),
             # Oracle DBMS_PIPE.RECEIVE_MESSAGE('x',N) → DBMS_PIPE.RECEIVE_MESSAGE('x',0)
-            (r"\bDBMS_PIPE\.RECEIVE_MESSAGE\s*\('([^']*)',\s*[\d.]+\s*\)",
+            (r"\bDBMS_PIPE\.RECEIVE_MESSAGE\s*\('([^']*)',\s*(?:0[xX][0-9a-fA-F]+|[\d.]+)\s*\)",
              r"DBMS_PIPE.RECEIVE_MESSAGE('\1',0)"),
             # MySQL BENCHMARK(N,expr) → BENCHMARK(0,expr)
             (r'\bBENCHMARK\s*\(\s*\d+\s*,', 'BENCHMARK(0,'),
@@ -136643,9 +136678,9 @@ class ResponseDeduplicator:
         """
         p = payload
         # Normalize timing values
-        p = re.sub(r"\bSLEEP\s*\(\s*[\d.]+\s*\)", "SLEEP(N)", p, flags=re.I)
+        p = re.sub(r"\bSLEEP\s*\(\s*(?:0[xX][0-9a-fA-F]+|[\d.]+)\s*\)", "SLEEP(N)", p, flags=re.I)
         p = re.sub(r"WAITFOR\s+DELAY\s+'[^']*'", "WAITFOR DELAY T", p, flags=re.I)
-        p = re.sub(r"\bpg_sleep\s*\(\s*[\d.]+\s*\)", "pg_sleep(N)", p, flags=re.I)
+        p = re.sub(r"\bpg_sleep\s*\(\s*(?:0[xX][0-9a-fA-F]+|[\d.]+)\s*\)", "pg_sleep(N)", p, flags=re.I)
         p = re.sub(r"\bBENCHMARK\s*\(\s*\d+,", "BENCHMARK(N,", p, flags=re.I)
         # Normalize comments
         p = re.sub(r"/\*(?!!).*?\*/", "/**/", p, flags=re.S)
@@ -140833,10 +140868,12 @@ class ScannerV14(ScannerV13):
                         _sg_sleep_nonzero = True
                         if _sg_has_sleep_kw:
                             import re as _sg_re
-                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*([\d.]+)', _sg_pl)
+                            _sg_m = _sg_re.search(r'(?:SLEEP|PG_SLEEP|BENCHMARK)\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)', _sg_pl)
                             if _sg_m:
                                 try:
-                                    if float(_sg_m.group(1)) <= 0.0:
+                                    _sg_v = _sg_m.group(1)
+                                    _sg_vf = float(int(_sg_v, 16)) if _sg_v[:2].lower() == '0x' else float(_sg_v)
+                                    if _sg_vf <= 0.0:
                                         _sg_sleep_nonzero = False
                                 except (ValueError, TypeError):
                                     pass
@@ -155438,12 +155475,13 @@ class ScannerV15(ScannerV14):
         if result and not hasattr(result, "confirmed_sleep_sec"):
             _p3 = getattr(result, "payload", "") or ""
             _m3 = _re.search(
-                r"pg_sleep\s*\(\s*([\d.]+)|SLEEP\s*\(\s*([\d.]+)"
+                r"pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)|SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
                 r"|WAITFOR\s+DELAY\s+['\"]\d+:\d+:([\d.]+)",
                 _p3, _re.I)
             if _m3:
                 _g3 = next((g for g in _m3.groups() if g), None)
-                if _g3: result.confirmed_sleep_sec = float(_g3)
+                if _g3:
+                    result.confirmed_sleep_sec = float(int(_g3, 16)) if _g3[:2].lower() == '0x' else float(_g3)
         scan_url = entry.get("url",   cfg.url)
         scan_meth= entry.get("method",cfg.method)
         data_fmt = entry.get("data_fmt","form")
@@ -159523,22 +159561,25 @@ class ExtractionOrchestrator:
         # block larger sleeps even when a small sleep passed through detection.
         _det_pl = getattr(self.result, "payload", "") or ""
         _sl_m = _re.search(
-            r"pg_sleep\s*\(\s*([\d.]+)"
-            r"|SLEEP\s*\(\s*([\d.]+)"
+            r"pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
+            r"|SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
             r"|WAITFOR\s+DELAY\s+['\"]\d+:\d+:([\d.]+)"
             # BUG-ORCH-SL-DBMSPIPE FIX (MEDIUM, Oracle): DBMS_PIPE.RECEIVE_MESSAGE is the
             # primary Oracle timing payload used by many detection modules, but its sleep
             # value (second argument) was not captured by _sl_m. DBMS_SESSION.SLEEP and
             # DBMS_LOCK.SLEEP accidentally work via the bare SLEEP\s*\( pattern, but
             # DBMS_PIPE requires RECEIVE_MESSAGE\s*\([^,]+,\s*([\d.]+)\) to get arg2.
-            r"|DBMS_PIPE\.RECEIVE_MESSAGE\s*\([^,]+,\s*([\d.]+)\)"
-            r"|DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)\)"
-            r"|DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)\)"
+            r"|DBMS_PIPE\.RECEIVE_MESSAGE\s*\([^,]+,\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)"
+            r"|DBMS_SESSION\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)"
+            r"|DBMS_LOCK\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)"
             r"|BENCHMARK\s*\(\s*(\d+)",
             _det_pl, _re.IGNORECASE)
         if _sl_m:
             _g = next((g for g in _sl_m.groups() if g is not None), None)
-            _raw_sleep = float(_g) if _g else _saved_time_sec
+            if _g:
+                _raw_sleep = float(int(_g, 16)) if _g[:2].lower() == '0x' else float(_g)
+            else:
+                _raw_sleep = _saved_time_sec
         else:
             _raw_sleep = _saved_time_sec
         # JITTER-FLOOR FIX: the detection payload may have used a very short sleep
@@ -182805,14 +182846,14 @@ class PoCVerifier:
         # Parse expected sleep duration from payload for threshold calculation
         _sleep_sec = getattr(self.config, "time_sec", 2.0)
         _sl_m = re.search(
-            r"SLEEP\s*\(\s*([\d.]+)|pg_sleep\s*\(\s*([\d.]+)"
+            r"SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)|pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
             r"|WAITFOR\s+DELAY\s+['\"]0:0:([\d.]+)['\"]"
-            r"|DBMS_PIPE\.\w+\s*\([^,]+,\s*([\d.]+)\)",
+            r"|DBMS_PIPE\.\w+\s*\([^,]+,\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)",
             _pl, re.I)
         if _sl_m:
             _raw = next(g for g in _sl_m.groups() if g is not None)
             try:
-                _sleep_sec = float(_raw)
+                _sleep_sec = float(int(_raw, 16)) if _raw[:2].lower() == '0x' else float(_raw)
             except (ValueError, TypeError):
                 pass
         # Require at least 60% of the expected delay to account for network jitter
@@ -182977,14 +183018,14 @@ class PoCVerifier:
         # Extract expected sleep seconds from payload if present
         _sleep_sec = getattr(self.config, "time_sec", 2.0)
         _sl_m = re.search(
-            r"SLEEP\s*\(\s*([\d.]+)|pg_sleep\s*\(\s*([\d.]+)"
+            r"SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)|pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
             r"|WAITFOR\s+DELAY\s+['\"]0:0:([\d.]+)['\"]"
-            r"|DBMS_PIPE\.\w+\s*\([^,]+,\s*([\d.]+)\)",
+            r"|DBMS_PIPE\.\w+\s*\([^,]+,\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)",
             _pl, re.I)
         if _sl_m:
             _raw = next(g for g in _sl_m.groups() if g is not None)
             try:
-                _sleep_sec = float(_raw)
+                _sleep_sec = float(int(_raw, 16)) if _raw[:2].lower() == '0x' else float(_raw)
             except (ValueError, TypeError):
                 pass
         _timing_thresh_ms = max((_sleep_sec * 1000) * 0.60, 800)
@@ -183090,12 +183131,12 @@ class PoCVerifier:
         # config.time_sec. This is the only correct approach for oracle-based timings.
         _det_pl = result.payload or ""
         _sl_m = _re.search(
-            r"pg_sleep\s*\(\s*([\d.]+)"
-            r"|SLEEP\s*\(\s*([\d.]+)"
+            r"pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
+            r"|SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
             r"|WAITFOR\s+DELAY\s+['\"\d:]+:(\d+)"
-            r"|DBMS_PIPE\.RECEIVE_MESSAGE\s*\([^,]+,\s*([\d.]+)\)"
-            r"|DBMS_SESSION\.SLEEP\s*\(\s*([\d.]+)\)"
-            r"|DBMS_LOCK\.SLEEP\s*\(\s*([\d.]+)\)",
+            r"|DBMS_PIPE\.RECEIVE_MESSAGE\s*\([^,]+,\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)"
+            r"|DBMS_SESSION\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)"
+            r"|DBMS_LOCK\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)",
             _det_pl, _re.IGNORECASE)
         _is_heavy_computation = (
             ("information_schema" in _det_pl.lower() or "generate_series" in _det_pl.lower()
@@ -183104,7 +183145,7 @@ class PoCVerifier:
         )
         if _sl_m:
             _g = next((g for g in _sl_m.groups() if g is not None), None)
-            _parsed_sleep = float(_g) if _g else self.config.time_sec
+            _parsed_sleep = (float(int(_g, 16)) if _g[:2].lower() == '0x' else float(_g)) if _g else self.config.time_sec
         else:
             _parsed_sleep = self.config.time_sec
 
