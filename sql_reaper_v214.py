@@ -41761,6 +41761,10 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                         _dna_e_fp = await _send_injected(engine, method, url, data, data_fmt,
                                                           param, original + _dna_e_pay, tamper_chain)
                         # FIX BUG #4: Validate _dna_e_fp before accessing .body
+                        # BUG-DNA-WAF-FP FIX: WAF block pages contain SQL-like strings that
+                        # match SQL_ERROR_PATTERNS. Skip when WAF blocked the probe.
+                        if WAFBlockDiscriminator.single_waf_blocked(_dna_e_fp):
+                            continue
                         if _validate_response(_dna_e_fp, "detect_error.dna_shuffle", allow_empty=False):
                             _dna_e_body = _safe_decode_body(_dna_e_fp, encoding="utf-8", errors="replace", func_name="detect_error.dna_shuffle").lower()
                             _dna_e_bl_body = _baseline_body if isinstance(_baseline_body, str) else ''
@@ -41779,11 +41783,31 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                             # Fix: use re.search(p, body, re.I) for both the match check
                             # and the baseline exclusion check, matching the behaviour of
                             # the primary error detection loop at L40604-40709.
-                            if any(re.search(p, _dna_e_body, re.I) for p in _dna_e_pats
-                                   if not re.search(p, _dna_e_bl_body, re.I)):
+                            _dna_e_matched_pat = next(
+                                (p for p in _dna_e_pats
+                                 if re.search(p, _dna_e_body, re.I)
+                                 and not re.search(p, _dna_e_bl_body, re.I)),
+                                None)
+                            if _dna_e_matched_pat:
+                                # BUG-DNA-SINGLE-PROBE FIX: DNA shuffle previously confirmed
+                                # from a single probe. Require 2/2 confirmation to eliminate
+                                # transient server error FPs (rate-limit pages, debug output).
+                                _dna_e_confirmed = False
+                                try:
+                                    _dna_e_fp2 = await _send_injected(engine, method, url, data, data_fmt,
+                                                                       param, original + _dna_e_pay, tamper_chain)
+                                    if (not WAFBlockDiscriminator.single_waf_blocked(_dna_e_fp2)
+                                            and _validate_response(_dna_e_fp2, "dna_confirm", allow_empty=False)):
+                                        _dna_e_body2 = _safe_decode_body(_dna_e_fp2, func_name="dna_confirm").lower()
+                                        if re.search(_dna_e_matched_pat, _dna_e_body2, re.I):
+                                            _dna_e_confirmed = True
+                                except Exception:
+                                    pass
+                                if not _dna_e_confirmed:
+                                    continue
                                 _dna_e_det = DetectionResult(param=param, technique='E',
                                     payload=_dna_e_pay, dbms=_dna_e_dbms, confidence=0.73,
-                                    notes=f'dna_shuffle_error:{_dna_e_lbl}')
+                                    notes=f'dna_shuffle_error:{_dna_e_lbl} confirmed=2/2')
                                 try:
                                     _dna_e_det.exact_sent_payload = DetectionResult.compute_exact_payload(
                                         original + _dna_e_pay, tamper_chain)
@@ -52545,6 +52569,9 @@ class GraphQLDetector:
                 payload = _gql_e_mutator.mutate_all(payload, technique="E")  # FIX-R6: 20 mutation layers, correct technique
                 val=str(original_val)+payload
                 fp=await self._send_var(url,body,var_name,val,tamper_chain)
+                # BUG-GQL-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    continue
                 resp=_safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                 for dbms,patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
@@ -52559,6 +52586,8 @@ class GraphQLDetector:
                             try:
                                 _gql_conf_fp = await self._send_var(url, body, var_name,
                                     str(original_val) + payload, tamper_chain)
+                                if WAFBlockDiscriminator.single_waf_blocked(_gql_conf_fp):
+                                    continue
                                 _gql_conf_resp = _safe_decode_body(_gql_conf_fp,
                                     encoding="utf-8", errors="replace", func_name="gql_error_confirm")
                                 if not re.search(pat, _gql_conf_resp, re.I):
@@ -53123,6 +53152,9 @@ class JWTInjector:
                     ep=dict(jwt_p); ep[claim]=orig_val+_je_p
                     etok=encode_jwt_none(dict(jwt_h),ep)
                     ef=await self._send_jwt(method,url,data,headers,hn,etok)
+                    # BUG-JWT-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
+                    if WAFBlockDiscriminator.single_waf_blocked(ef):
+                        continue
                     body=_safe_decode_body(ef, func_name="jwt_error_check")
                     for dbms,patterns in SQL_ERROR_PATTERNS.items():
                         for pat in patterns:
@@ -53131,6 +53163,7 @@ class JWTInjector:
                                 if _jwt_bl_body and re.search(pat,_jwt_bl_body,re.I): continue
                                 try:
                                     ef2=await self._send_jwt(method,url,data,headers,hn,etok)
+                                    if WAFBlockDiscriminator.single_waf_blocked(ef2): continue
                                     body2=_safe_decode_body(ef2, func_name="jwt_error_confirm").lower()
                                     if not re.search(pat,body2,re.I): continue
                                 except Exception: continue
@@ -53220,6 +53253,9 @@ class JWTInjector:
             mh=dict(jwt_h); mh["kid"]=payload
             tok=encode_jwt_none(mh,dict(jwt_p))
             fp=await self._send_jwt(method,url,data,headers,hn,tok)
+            # BUG-JWT-KID-WAF-FP FIX: skip WAF-blocked probes
+            if WAFBlockDiscriminator.single_waf_blocked(fp):
+                continue
             body=_safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
             for dbms,patterns in SQL_ERROR_PATTERNS.items():
                 for pat in patterns:
@@ -53227,6 +53263,7 @@ class JWTInjector:
                         if _kid_bl_body and re.search(pat,_kid_bl_body,re.I): continue
                         try:
                             fp2=await self._send_jwt(method,url,data,headers,hn,tok)
+                            if WAFBlockDiscriminator.single_waf_blocked(fp2): continue
                             body2=_safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="kid_confirm").lower()
                             if not re.search(pat,body2,re.I): continue
                         except Exception: continue
@@ -53492,12 +53529,40 @@ class _HTTPHeaderInjectorV1:
                                     _bl_body_lower = "" # Fallback
                         except Exception:
                             pass
-                        for dbms,patterns in SQL_ERROR_PATTERNS.items():
+                        # BUG-HDR-ERR-WAF-FP FIX: WAF block pages can contain SQL-like
+                        # strings ("SQL injection detected", "blocked — sql syntax") that
+                        # match SQL_ERROR_PATTERNS and produce guaranteed false positives.
+                        # Skip error pattern analysis entirely when the probe was WAF-blocked.
+                        if WAFBlockDiscriminator.single_waf_blocked(fp):
+                            LOG.debug(f"[HeaderInject] WAF blocked error probe for {header_name!r} — skip")
+                        else:
+                          for dbms,patterns in SQL_ERROR_PATTERNS.items():
                             for pat in patterns:
                                 if re.search(pat,body,re.I):
                                     # BUG-HDR-ERR-BASELINE FIX: Reject if pattern already in baseline
                                     if _bl_body_lower and re.search(pat, _bl_body_lower, re.I):
                                         LOG.debug(f"[HeaderInject] Error pattern {pat!r} in baseline — skip FP")
+                                        continue
+                                    # BUG-HDR-ERR-CONFIRM FIX: Single probe is insufficient — error
+                                    # patterns can appear transiently (rate-limit pages, 503 flaps,
+                                    # load-balancer error pages). Require a 2/2 confirmation probe:
+                                    # resend the same payload and verify the pattern is reproduced.
+                                    # This mirrors detect_error()'s 2/3 confirmation + clean probe
+                                    # chain and the cross-category header error fix already applied.
+                                    _hdr_err_confirmed = False
+                                    try:
+                                        await _apply_request_delay(self.config, None, False)
+                                        _hdr_fp2 = await self.engine.send(method, url, data=data, headers=h)
+                                        if not WAFBlockDiscriminator.single_waf_blocked(_hdr_fp2):
+                                            _hdr_body2 = _safe_decode_body(_hdr_fp2, encoding="utf-8",
+                                                                            errors="replace",
+                                                                            func_name="extraction")
+                                            if re.search(pat, _hdr_body2, re.I):
+                                                _hdr_err_confirmed = True
+                                    except Exception as _hdr_conf_e:
+                                        LOG.debug("[HeaderInject] Confirm probe error: %s", _hdr_conf_e)
+                                    if not _hdr_err_confirmed:
+                                        LOG.debug(f"[HeaderInject] Error pattern {pat!r} not confirmed on 2nd probe — skip FP")
                                         continue
                                     r=DetectionResult(param=f"header:{header_name}",technique="E",
                                                       payload=_hiv1_p,dbms=dbms,confidence=0.90,
@@ -53739,13 +53804,42 @@ class _HTTPHeaderInjectorV1:
                                 fs_e = _sim_to_baseline(ff_e, baseline)
                                 delta_e = ts_e - fs_e
                                 if ts_e > 0.75 and delta_e > 0.30:
-                                    r_enc = DetectionResult(
-                                        param=f"header:{header_name}", technique="B",
-                                        payload=_hb_enc_true, dbms=_hb_scan_dbms,
-                                        confidence=min(1.0, 0.65 + delta_e),
-                                        notes=f"http_header_bool_encoded header={header_name!r} dbms={_hb_scan_dbms}")
-                                    results.append(r_enc)
-                                    LOG.info(f"Header SQLi (boolean+encoding) detected: {header_name!r} delta={delta_e:.3f}")
+                                    # BUG-HDR-BOOL-ENC-FP FIX: URL-encoded boolean-header had no
+                                    # repetition+negation FP guard (unlike the plain-payload path at
+                                    # line ~17404 which runs both guards). A single differential probe
+                                    # is vulnerable to CDN cache-miss noise, server GC pauses, and
+                                    # dynamic pages that serve different content on alternate requests.
+                                    # Apply the same repetition+negation guards here for consistency.
+                                    _hb_enc_fp_ok = True
+                                    try:
+                                        h_rep_enc = dict(base_headers); h_rep_enc[header_name] = _hb_enc_true
+                                        tf_rep_enc = await self.engine.send(method, url, data=data, headers=h_rep_enc)
+                                        ts_rep_enc = _sim_to_baseline(tf_rep_enc, baseline)
+                                        if ts_rep_enc < 0.70:
+                                            _hb_enc_fp_ok = False
+                                            LOG.debug("[HdrBool-Enc-FPG] repetition failed "
+                                                      f"(ts_rep={ts_rep_enc:.3f}) header={header_name!r}")
+                                    except Exception:
+                                        _hb_enc_fp_ok = False
+                                    if _hb_enc_fp_ok:
+                                        try:
+                                            h_neg_enc = dict(base_headers); h_neg_enc[header_name] = _hb_enc_false
+                                            ff_neg_enc = await self.engine.send(method, url, data=data, headers=h_neg_enc)
+                                            fs_neg_enc = _sim_to_baseline(ff_neg_enc, baseline)
+                                            if abs(ts_e - fs_neg_enc) < 0.15:
+                                                _hb_enc_fp_ok = False
+                                                LOG.debug("[HdrBool-Enc-FPG] negation failed "
+                                                          f"(neg_diff={abs(ts_e-fs_neg_enc):.3f}) header={header_name!r}")
+                                        except Exception:
+                                            _hb_enc_fp_ok = False
+                                    if _hb_enc_fp_ok:
+                                        r_enc = DetectionResult(
+                                            param=f"header:{header_name}", technique="B",
+                                            payload=_hb_enc_true, dbms=_hb_scan_dbms,
+                                            confidence=min(1.0, 0.65 + delta_e),
+                                            notes=f"http_header_bool_encoded header={header_name!r} dbms={_hb_scan_dbms} fpg=rep+neg")
+                                        results.append(r_enc)
+                                        LOG.info(f"Header SQLi (boolean+encoding) FPG-PASS: {header_name!r} delta={delta_e:.3f}")
                             except Exception as _enc_e:
                                 LOG.debug(f"[HdrBool-Enc] encoding variant error: {_enc_e}")
                     except Exception as _sqr_e:
@@ -53951,15 +54045,55 @@ class _HTTPHeaderInjectorV1:
                                 _hx_body = _safe_decode_body(tf)
                             except (UnicodeDecodeError, AttributeError, TypeError):
                                 _hx_body = "" # Fallback
-                            for dbms, pats in SQL_ERROR_PATTERNS.items():
-                                for pat in pats:
-                                    if re.search(pat, _hx_body, re.I):
-                                        r = DetectionResult(
-                                            param=f"header:{header_name}", technique="E",
-                                            payload=_hx_p, dbms=_hx_scan_dbms,
-                                            confidence=0.88,
-                                            notes=f"header_crosscat_{_hx_cat} header={header_name!r}")
-                                        results.append(r)
+                            # BUG-HDR-XCAT-ERROR-FP FIX: Cross-category header error detection
+                            # previously confirmed on ANY SQL error pattern match without:
+                            # (a) checking if the pattern is already in the clean baseline
+                            # (b) checking for WAF block (WAF pages can contain SQL-related text)
+                            # (c) multi-probe confirmation (transient server errors, debug pages)
+                            # (d) clean probe (non-injection-specific errors fire on every request)
+                            # This made ANY header that reflects SQL debug info in the app
+                            # (e.g. ORMs with error pages showing "SQL syntax") a guaranteed FP.
+                            # Fix: mirror detect_error's guards — baseline check + WAF skip +
+                            # require pattern to be absent from a WAF-unblocked clean probe.
+                            if not WAFBlockDiscriminator.single_waf_blocked(tf):
+                                for dbms, pats in SQL_ERROR_PATTERNS.items():
+                                    _hx_err_matched = None
+                                    for pat in pats:
+                                        if re.search(pat, _hx_body, re.I):
+                                            # Guard: skip if the same pattern is in the baseline
+                                            _bl_body_lower_hx = ""
+                                            try:
+                                                _bl_fp_hx = _safe_baseline_sample(baseline, 0)
+                                                if _bl_fp_hx and getattr(_bl_fp_hx, "body", None):
+                                                    _bl_body_lower_hx = _safe_decode_body(_bl_fp_hx).lower()
+                                            except Exception:
+                                                pass
+                                            if _bl_body_lower_hx and re.search(pat, _bl_body_lower_hx, re.I):
+                                                LOG.debug(f"[HdrXcatErr-FPG] pattern in baseline: {pat[:40]!r} — skip")
+                                                continue
+                                            _hx_err_matched = pat
+                                            break
+                                    if _hx_err_matched:
+                                        # Multi-probe: send a clean probe (original, no payload) and
+                                        # verify the error is absent — proves injection-specificity.
+                                        _hxe_clean_ok = True
+                                        try:
+                                            _hxe_clean_fp = await self.engine.send(
+                                                method, url, data=data, headers=base_headers)
+                                            if (_hxe_clean_fp and not WAFBlockDiscriminator.single_waf_blocked(_hxe_clean_fp)):
+                                                _hxe_clean_body = _safe_decode_body(_hxe_clean_fp).lower()
+                                                if re.search(_hx_err_matched, _hxe_clean_body, re.I):
+                                                    _hxe_clean_ok = False
+                                                    LOG.debug(f"[HdrXcatErr-FPG] error in clean probe — page content FP")
+                                        except Exception:
+                                            pass  # clean probe failed — fail-open
+                                        if _hxe_clean_ok:
+                                            r = DetectionResult(
+                                                param=f"header:{header_name}", technique="E",
+                                                payload=_hx_p, dbms=_hx_scan_dbms,
+                                                confidence=0.88,
+                                                notes=f"header_crosscat_{_hx_cat} header={header_name!r} fpg=baseline+clean")
+                                            results.append(r)
                                         break
                             # Boolean check
                             _ts = _sim_to_baseline(tf, baseline)
@@ -74889,16 +75023,47 @@ class ScannerV4(Scanner):
             try:
                 fp = await _send_injected(engine, method, url, data, data_fmt,
                                           param, orig + payload, tamper)
+                # BUG-EVOLVED-WAF-FP FIX: WAF block pages contain SQL-like strings
+                # ("SQL injection detected") that match SQL_ERROR_PATTERNS and produce
+                # guaranteed FPs. Also: no baseline check and no confirmation probe means
+                # a transient 500 page with SQL debug text would confirm injection.
+                # Fix: skip WAF-blocked probes; require baseline check + 2/2 confirmation.
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    self.evolution.record_feedback(payload, False)
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                # Fetch baseline body for comparison (use a plain send with no payload)
+                _evol_bl_body = ""
+                try:
+                    _evol_bl_fp = await _send_injected(engine, method, url, data, data_fmt,
+                                                        param, orig, [])
+                    if _evol_bl_fp and not WAFBlockDiscriminator.single_waf_blocked(_evol_bl_fp):
+                        _evol_bl_body = _safe_decode_body(_evol_bl_fp, func_name="evol_baseline").lower()
+                except Exception:
+                    pass
                 # Check for SQL errors
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
                         if re.search(pat, body, re.I):
+                            # Baseline guard: skip if pattern already in uninjected response
+                            if _evol_bl_body and re.search(pat, _evol_bl_body, re.I):
+                                continue
+                            # 2/2 confirmation: send again and verify pattern reproduces
+                            try:
+                                _evol_fp2 = await _send_injected(engine, method, url, data, data_fmt,
+                                                                   param, orig + payload, tamper)
+                                if WAFBlockDiscriminator.single_waf_blocked(_evol_fp2):
+                                    continue
+                                _evol_body2 = _safe_decode_body(_evol_fp2, func_name="evol_confirm").lower()
+                                if not re.search(pat, _evol_body2, re.I):
+                                    continue
+                            except Exception:
+                                continue
                             self.evolution.record_feedback(payload, True)
                             _det_ex = DetectionResult(param=param, technique="E",
                                                    payload=payload, dbms=dbms,
                                                    confidence=0.80,
-                                                   notes="evolved_payload")
+                                                   notes="evolved_payload confirmed=2/2")
                             try:
                                 # FIX-EVOLVED-VARNAMES: Use 'orig' and 'tamper' (the
                                 # correct parameter names for this method), not the
@@ -83100,10 +83265,39 @@ class ScannerV6(ScannerV5):
                 try:
                     fp = await _send_injected(engine, method, url, data, data_fmt,
                                               param, orig + variant, tamper)
+                    # BUG-EXTENDERR-WAF-FP FIX: WAF block pages contain SQL-like strings
+                    # that match SQL_ERROR_PATTERNS. No baseline check or 2/2 confirmation
+                    # means a WAF block on any variant is a guaranteed FP.
+                    # Fix: WAF skip + baseline check + 2/2 confirmation.
+                    if WAFBlockDiscriminator.single_waf_blocked(fp):
+                        continue
                     body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                    # Fetch baseline body once per payload group (first variant only)
+                    _ee_bl_body = ""
+                    try:
+                        _ee_bl_fp = await _send_injected(engine, method, url, data, data_fmt,
+                                                          param, orig, [])
+                        if _ee_bl_fp and not WAFBlockDiscriminator.single_waf_blocked(_ee_bl_fp):
+                            _ee_bl_body = _safe_decode_body(_ee_bl_fp, func_name="ee_baseline").lower()
+                    except Exception:
+                        pass
                     for dbms, patterns in SQL_ERROR_PATTERNS.items():
                         for pat in patterns:
                             if re.search(pat, body, re.I):
+                                # Baseline guard: skip if pattern already in uninjected response
+                                if _ee_bl_body and re.search(pat, _ee_bl_body, re.I):
+                                    continue
+                                # 2/2 confirmation: resend and verify pattern reproduces
+                                try:
+                                    _ee_fp2 = await _send_injected(engine, method, url, data, data_fmt,
+                                                                     param, orig + variant, tamper)
+                                    if WAFBlockDiscriminator.single_waf_blocked(_ee_fp2):
+                                        continue
+                                    _ee_body2 = _safe_decode_body(_ee_fp2, func_name="ee_confirm").lower()
+                                    if not re.search(pat, _ee_body2, re.I):
+                                        continue
+                                except Exception:
+                                    continue
                                 # FIX: was bypass={bool} which put "True"/"False" as bypass ID,
                                 # so _extract_bypass_id returned "True" and tamper propagation
                                 # silently failed. Use _infer_bypass_tamper to get the real ID.
@@ -83113,7 +83307,7 @@ class ScannerV6(ScannerV5):
                                     param=param, technique="E",
                                     payload=variant, dbms=dbms,
                                     confidence=0.92,
-                                    notes=f"extended_error bypass={_ext_bypass_id}")
+                                    notes=f"extended_error bypass={_ext_bypass_id} confirmed=2/2")
                                 try:
                                     # BUG-EXTENDERROR-VARNAME FIX: was 'original'/'tamper_chain' (NameError)
                                     _det_ex.exact_sent_payload = DetectionResult.compute_exact_payload(
@@ -86272,13 +86466,42 @@ class ScannerV7(ScannerV6):
                                   param, orig, variant, tamper):
         try:
             fp   = await _send_injected(engine, method, url, data, data_fmt, param, orig+variant, tamper)
+            # BUG-V7ERRPAYLOAD-WAF-FP FIX: WAF block pages contain SQL-like strings
+            # ("SQL injection detected") that match SQL_ERROR_PATTERNS — no WAF check
+            # here was a guaranteed FP source on WAF-protected targets.
+            # Also: no baseline check and no 2/2 confirmation.
+            # Fix: WAF skip + baseline check + 2/2 confirmation.
+            if WAFBlockDiscriminator.single_waf_blocked(fp):
+                return None
             body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+            # Baseline body for FP guard (uninjected clean response)
+            _tep_bl_body = ""
+            try:
+                _tep_bl_fp = await _send_injected(engine, method, url, data, data_fmt, param, orig, [])
+                if _tep_bl_fp and not WAFBlockDiscriminator.single_waf_blocked(_tep_bl_fp):
+                    _tep_bl_body = _safe_decode_body(_tep_bl_fp, func_name="tep_baseline").lower()
+            except Exception:
+                pass
             for dbms, patterns in SQL_ERROR_PATTERNS.items():
                 for pat in patterns:
                     if re.search(pat, body, re.I):
+                        # Baseline guard: skip if pattern already in uninjected response
+                        if _tep_bl_body and re.search(pat, _tep_bl_body, re.I):
+                            continue
+                        # 2/2 confirmation: resend and verify pattern reproduces
+                        try:
+                            _tep_fp2 = await _send_injected(engine, method, url, data, data_fmt,
+                                                              param, orig + variant, tamper)
+                            if WAFBlockDiscriminator.single_waf_blocked(_tep_fp2):
+                                continue
+                            _tep_body2 = _safe_decode_body(_tep_fp2, func_name="tep_confirm").lower()
+                            if not re.search(pat, _tep_body2, re.I):
+                                continue
+                        except Exception:
+                            continue
                         _det_ex = DetectionResult(param=param, technique="E",
                             payload=variant, dbms=dbms, confidence=0.92,
-                            notes="v7_error_bypass")
+                            notes="v7_error_bypass confirmed=2/2")
                         try:
                             # BUG-ERRPAYLOAD-VARNAME FIX: was 'original'/'tamper_chain' (NameError)
                             _det_ex.exact_sent_payload = DetectionResult.compute_exact_payload(
@@ -94292,6 +94515,8 @@ class WebSocketInjector:
                         try:
                             await ws.send(injected_msg)
                             resp = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                            _ws_e_matched_pat  = None
+                            _ws_e_matched_dbms = None
                             for dbms,patterns in SQL_ERROR_PATTERNS.items():
                                 for pat in patterns:
                                     if re.search(pat, str(resp), re.I):
@@ -94301,14 +94526,30 @@ class WebSocketInjector:
                                         # would confirm injection for every single probe.
                                         if baseline_resp and re.search(pat, str(baseline_resp), re.I):
                                             continue  # pattern in baseline — FP
-                                        r = DetectionResult(
-                                            param=f"ws:{target_field or 'message'}",
-                                            technique="E", payload=payload,
-                                            dbms=_ws_ed, confidence=0.91,
-                                            notes=f"websocket_error url={ws_url} confirmed_vs_baseline=True")
-                                        results.append(r)
-                                        LOG.info(f"WebSocket SQLi (error): {r}")
+                                        _ws_e_matched_dbms = dbms
+                                        _ws_e_matched_pat  = pat
                                         break
+                                if _ws_e_matched_pat:
+                                    break
+                            if _ws_e_matched_pat:
+                                # BUG-WS-ERR-SINGLE-PROBE FIX: 2/2 confirmation over WebSocket
+                                _ws_e_confirmed = False
+                                try:
+                                    _ws_e_injected2 = await self._inject_msg(clean_msg, target_field, payload)
+                                    await ws.send(_ws_e_injected2)
+                                    _ws_e_resp2 = str(await asyncio.wait_for(ws.recv(), timeout=5.0))
+                                    if re.search(_ws_e_matched_pat, _ws_e_resp2, re.I):
+                                        _ws_e_confirmed = True
+                                except Exception as _ws_e_conf_ex:
+                                    LOG.debug("WS error confirm2 failed: %s", _ws_e_conf_ex)
+                                if _ws_e_confirmed:
+                                    r = DetectionResult(
+                                        param=f"ws:{target_field or 'message'}",
+                                        technique="E", payload=payload,
+                                        dbms=_ws_e_matched_dbms, confidence=0.91,
+                                        notes=f"websocket_error url={ws_url} confirmed_vs_baseline=True confirmed=2/2")
+                                    results.append(r)
+                                    LOG.info(f"WebSocket SQLi (error): {r}")
                         except Exception as e:
                             LOG.debug(f"  WS error probe: {e}")
 
@@ -94570,6 +94811,10 @@ class GRPCWebInjector:
                             method, url, data=inj_body,
                             headers={"Content-Type": "application/grpc-web+proto",
                                      "X-Grpc-Web": "1"})
+                        # BUG-GRPC-WAF-FP FIX: WAF block pages contain SQL-like strings
+                        # that match SQL_ERROR_PATTERNS. Skip WAF-blocked probes.
+                        if WAFBlockDiscriminator.single_waf_blocked(fp):
+                            continue
                         resp = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                         # BUG-GRPC-ERROR-SINGLE-PROBE FIX: base_body was captured but
                         # never checked against error patterns. A gRPC debug service that
@@ -94586,6 +94831,8 @@ class GRPCWebInjector:
                                             method, url, data=inj_body,
                                             headers={"Content-Type": "application/grpc-web+proto",
                                                      "X-Grpc-Web": "1"})
+                                        if WAFBlockDiscriminator.single_waf_blocked(fp2g):
+                                            continue
                                         resp2g = _safe_decode_body(fp2g, encoding="utf-8", errors="replace", func_name="grpc_confirm")
                                         if not re.search(pat, resp2g, re.I):
                                             continue
@@ -94689,6 +94936,8 @@ class GraphQLSubscriptionInjector:
                             resp = await self._subscribe(ws, "probe", subscription_query,
                                                           inj_vars)
                             if resp:
+                                _gqls_matched_dbms = None
+                                _gqls_matched_pat  = None
                                 for dbms,patterns in SQL_ERROR_PATTERNS.items():
                                     for pat in patterns:
                                         if re.search(pat, str(resp), re.I):
@@ -94699,14 +94948,32 @@ class GraphQLSubscriptionInjector:
                                             # for every payload. Fix: check baseline_resp first.
                                             if baseline_resp and re.search(pat, str(baseline_resp), re.I):
                                                 continue  # pattern in baseline — FP
-                                            r = DetectionResult(
-                                                param=f"gql_sub:{var_name}",
-                                                technique="E", payload=payload,
-                                                dbms=_gqls_ed, confidence=0.89,
-                                                notes=f"graphql_subscription ws={ws_url} confirmed_vs_baseline=True")
-                                            results.append(r)
-                                            LOG.info(f"GraphQL subscription SQLi: var={var_name!r}")
+                                            _gqls_matched_dbms = dbms
+                                            _gqls_matched_pat  = pat
                                             break
+                                    if _gqls_matched_pat:
+                                        break
+                                if _gqls_matched_pat:
+                                    # BUG-GQLSUB-SINGLE-PROBE FIX: 2/2 confirmation over WS
+                                    _gqls_confirmed = False
+                                    try:
+                                        _gqls_inj_vars2 = dict(variables)
+                                        _gqls_inj_vars2[var_name] = str(orig_val) + payload
+                                        _gqls_resp2 = await self._subscribe(ws, "confirm",
+                                            subscription_query, _gqls_inj_vars2)
+                                        if _gqls_resp2 and re.search(_gqls_matched_pat,
+                                                str(_gqls_resp2), re.I):
+                                            _gqls_confirmed = True
+                                    except Exception as _gqls_conf_ex:
+                                        LOG.debug("GQL sub confirm2 failed: %s", _gqls_conf_ex)
+                                    if _gqls_confirmed:
+                                        r = DetectionResult(
+                                            param=f"gql_sub:{var_name}",
+                                            technique="E", payload=payload,
+                                            dbms=_gqls_matched_dbms, confidence=0.89,
+                                            notes=f"graphql_subscription ws={ws_url} confirmed_vs_baseline=True confirmed=2/2")
+                                        results.append(r)
+                                        LOG.info(f"GraphQL subscription SQLi: var={var_name!r}")
 
         except Exception as e:
             LOG.debug(f"GQL subscription error: {e}")
@@ -106055,6 +106322,12 @@ class HTTPHeaderInjector:
                 hdrs = dict(base_headers)
                 hdrs[header_name] = _err_payload
                 fp   = await self.engine.send(method, url, headers=hdrs, data=data)
+                # BUG-PROBEHDR-ERR-WAF-FP FIX: WAF block pages contain SQL-like
+                # strings ("SQL injection detected") that match SQL_ERROR_PATTERNS.
+                # Skip error analysis entirely when the probe was WAF-blocked.
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    LOG.debug(f"  Header error probe WAF-blocked for {header_name!r} — skip")
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
@@ -106066,6 +106339,9 @@ class HTTPHeaderInjector:
                             # Confirm with second probe to eliminate flaky matches
                             try:
                                 fp2 = await self.engine.send(method, url, headers=hdrs, data=data)
+                                if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                    LOG.debug("  Header error confirm probe WAF-blocked — skipping")
+                                    continue
                                 body2 = _safe_decode_body(fp2).lower()
                                 if not re.search(pat, body2, re.I):
                                     LOG.debug("  Header error not reproduced on 2nd probe — skipping")
@@ -106424,6 +106700,11 @@ class HTTPHeaderInjector:
                     new_cookie_str = "; ".join(f"{k}={v}" for k, v in new_cookies.items())
                     hdrs = dict(base_headers); hdrs["Cookie"] = new_cookie_str
                     fp   = await self.engine.send(method, url, headers=hdrs, data=data)
+                    # BUG-COOKIE-ERR-WAF-FP FIX: WAF block pages can contain SQL-like strings
+                    # that match SQL_ERROR_PATTERNS. Skip when WAF blocked the probe.
+                    if WAFBlockDiscriminator.single_waf_blocked(fp):
+                        LOG.debug(f"Cookie value error probe WAF-blocked for {cookie_name!r} — skip")
+                        continue
                     body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
                     for dbms, patterns in SQL_ERROR_PATTERNS.items():
                         for pat in patterns:
@@ -106440,6 +106721,9 @@ class HTTPHeaderInjector:
                                     continue
                                 # Confirmation probe
                                 fp2 = await self.engine.send(method, url, headers=hdrs, data=data)
+                                if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                    LOG.debug("Cookie value confirm probe WAF-blocked — skipping")
+                                    continue
                                 body2 = _safe_decode_body(fp2, encoding="utf-8", errors='replace', func_name='extraction_fp2').lower()
                                 if not re.search(pat, body2, re.I):
                                     LOG.debug("Cookie injection not reproduced on 2nd probe")
@@ -106480,6 +106764,11 @@ class HTTPHeaderInjector:
                 new_cookie    = f"{cookie_str}; {injected_name}=1"
                 hdrs = dict(base_headers); hdrs["Cookie"] = new_cookie
                 fp   = await self.engine.send(method, url, headers=hdrs, data=data)
+                # BUG-COOKIE-NAME-WAF-FP FIX: WAF block pages can contain SQL-like strings
+                # that match SQL_ERROR_PATTERNS. Skip when WAF blocked the probe.
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    LOG.debug(f"Cookie name error probe WAF-blocked — skip")
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                 # BUG-COOKIE-NAME-SINGLE-PROBE FIX: Single probe with no baseline check
                 # and no confirmation probe confirmed injection from one pattern match.
@@ -106496,6 +106785,9 @@ class HTTPHeaderInjector:
                             # Confirmation probe: must reproduce on second request
                             try:
                                 fp2 = await self.engine.send(method, url, headers=hdrs, data=data)
+                                if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                    LOG.debug("Cookie name confirm probe WAF-blocked — skipping")
+                                    continue
                                 body2 = _safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="cookie_name_confirm").lower()
                                 if not re.search(pat, body2, re.I):
                                     LOG.debug("Cookie name error not reproduced on 2nd probe — skipping")
@@ -106657,6 +106949,10 @@ class URLPathInjector:
                     try:
                         test_url = self.build_url_with_segment(url, seg_idx, ep)
                         fp       = await self.engine.send(method, test_url, headers=headers)
+                        # BUG-PATH-ERR-WAF-FP FIX: WAF block pages contain SQL-like strings
+                        # that match SQL_ERROR_PATTERNS. Skip when WAF blocked the probe.
+                        if WAFBlockDiscriminator.single_waf_blocked(fp):
+                            continue
                         body     = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                         # RCA-1 FIX: Use a flag to break the outer DBMS loop after the
                         # first matching DBMS so MySQL and MariaDB (which share identical
@@ -106676,6 +106972,8 @@ class URLPathInjector:
                                         continue
                                     try:
                                         fp2 = await self.engine.send(method, test_url, headers=headers)
+                                        if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                            continue
                                         body2 = _safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="path_confirm").lower()
                                         if not re.search(pat, body2, re.I):
                                             LOG.debug("Path error not reproduced on 2nd probe")
@@ -106824,6 +107122,9 @@ class ParameterNameInjector:
                 safe_url= urlunparse(parsed._replace(query=safe_qs))
 
                 fp_inj  = await self.engine.send(method, inj_url, headers=headers)
+                # BUG-PARAMNAME-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
+                if WAFBlockDiscriminator.single_waf_blocked(fp_inj):
+                    continue
                 fp_safe = await self.engine.send(method, safe_url, headers=headers)
 
                 body_inj = _safe_decode_body(fp_inj, encoding="utf-8", errors='replace', func_name='extraction_fp_inj')
@@ -106841,6 +107142,8 @@ class ParameterNameInjector:
                             # Confirmation probe
                             try:
                                 fp_conf = await self.engine.send(method, inj_url, headers=headers)
+                                if WAFBlockDiscriminator.single_waf_blocked(fp_conf):
+                                    continue
                                 body_conf = _safe_decode_body(fp_conf, encoding="utf-8", errors="replace", func_name="paramname_confirm").lower()
                                 if not re.search(pat, body_conf, re.I):
                                     LOG.debug("Param name error not reproduced on 2nd probe")
@@ -106980,13 +107283,31 @@ class DeepJSONInjector:
             return []
 
         for path, original_val, leaf_type in leaves:
-            payloads = (
-                ["' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION(),0x7e))--",
-                 "' AND 1=1-- -"]
-                if leaf_type == "string" else
-                ["1 AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION(),0x7e))--",
-                 "1 AND 1=1--"]
-            )
+            # BUG-DEEPJSON-HARDCODED-PAYLOADS FIX: Replace hardcoded generic payloads
+            # (EXTRACTVALUE/1=1) with CERTIFIED_PAYLOAD_DATABASE payloads (Req 1:
+            # certified-only mode). The hardcoded variants were MySQL-specific non-certified
+            # generics that do not appear in the database and bypass the certification gate.
+            # Fix: fetch Error + Boolean certified payloads for the detected DBMS (default
+            # MySQL). For string leaf types, certified payloads are used as-is (they start
+            # with the injection delimiter). For numeric leaves, strip the leading quote so
+            # the payload is valid in a numeric SQL context.
+            _dj_probe_dbms = (getattr(self.config, '_detected_dbms', None) or
+                              getattr(self.config, 'forced_dbms', None) or 'MySQL')
+            _dj_err_pls = get_dbms_payloads(_dj_probe_dbms, 'Error', 1) or []
+            _dj_bool_pls = get_dbms_payloads(_dj_probe_dbms, 'Boolean', 1) or []
+            if leaf_type == "string":
+                payloads = (
+                    ([_dj_err_pls[0]] if _dj_err_pls else []) +
+                    ([_dj_bool_pls[0]] if _dj_bool_pls else [])
+                )
+            else:
+                # Numeric context: strip leading quote so SQL is valid without string delimiter
+                payloads = (
+                    ([_dj_err_pls[0].lstrip("'\"") or _dj_err_pls[0]] if _dj_err_pls else []) +
+                    ([_dj_bool_pls[0].lstrip("'\"") or _dj_bool_pls[0]] if _dj_bool_pls else [])
+                )
+            if not payloads:
+                continue  # No certified payloads available — skip leaf
 
             for payload in payloads[:2]:
                 try:
@@ -106998,6 +107319,12 @@ class DeepJSONInjector:
                     fp = await self.engine.send(method, url, data=inj_body,
                                                 headers={**headers,
                                                          "Content-Type":"application/json"})
+                    # BUG-DEEPJSON-WAF-NO-SKIP FIX: WAF block pages can contain SQL-like
+                    # patterns (e.g., "SQL injection detected", "request blocked — sql") that
+                    # match SQL_ERROR_PATTERNS and produce guaranteed false positives. Skip
+                    # error pattern analysis when the WAF blocked the probe.
+                    if WAFBlockDiscriminator.single_waf_blocked(fp):
+                        continue
                     body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
 
                     # BUG-DEEPJSON-ERROR-SINGLE-PROBE FIX: Single probe, no baseline
@@ -107012,6 +107339,8 @@ class DeepJSONInjector:
                                 try:
                                     fp2 = await self.engine.send(method, url, data=inj_body,
                                                                   headers={**headers, "Content-Type": "application/json"})
+                                    if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                        continue
                                     body2 = _safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="deepjson_confirm").lower()
                                     if not re.search(pat, body2, re.I):
                                         LOG.debug("Deep JSON error not reproduced on 2nd probe")
@@ -107212,6 +107541,10 @@ class SOAPXMLInjector:
                         "POST", endpoint_url, data=soap_body,
                         headers={"Content-Type": "text/xml; charset=utf-8",
                                  "SOAPAction": f'"{operation}"'})
+                    # BUG-SOAP-WAF-FP FIX: WAF block pages contain SQL-like strings
+                    # that match SQL_ERROR_PATTERNS. Skip WAF-blocked probes.
+                    if WAFBlockDiscriminator.single_waf_blocked(fp):
+                        continue
                     body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
 
                     for dbms, patterns in SQL_ERROR_PATTERNS.items():
@@ -107223,6 +107556,8 @@ class SOAPXMLInjector:
                                 try:
                                     fp2 = await self.engine.send("POST", endpoint_url, data=soap_body,
                                         headers={"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{operation}"'})
+                                    if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                        continue
                                     body2 = _safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="soap_confirm").lower()
                                     if not re.search(pat, body2, re.I):
                                         LOG.debug("SOAP error not reproduced on 2nd probe")
@@ -107248,6 +107583,10 @@ class SOAPXMLInjector:
                 fp = await self.engine.send(
                     "POST", endpoint_url, data=xmlrpc_body,
                     headers={"Content-Type": "text/xml"})
+                # BUG-XMLRPC-WAF-FP FIX: WAF block pages contain SQL-like strings
+                # that match SQL_ERROR_PATTERNS. Skip WAF-blocked probes.
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
@@ -107257,6 +107596,8 @@ class SOAPXMLInjector:
                                 continue
                             try:
                                 fp2 = await self.engine.send("POST", endpoint_url, data=xmlrpc_body, headers={"Content-Type": "text/xml"})
+                                if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                    continue
                                 body2 = _safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="xmlrpc_confirm").lower()
                                 if not re.search(pat, body2, re.I):
                                     LOG.debug("XML-RPC error not reproduced on 2nd probe")
@@ -107570,6 +107911,10 @@ class OAuthOIDCInjector:
                                 data=body_data,
                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
 
+                        # BUG-OAUTH-WAF-FP FIX: WAF block pages contain SQL-like strings
+                        # that match SQL_ERROR_PATTERNS. Skip WAF-blocked probes.
+                        if WAFBlockDiscriminator.single_waf_blocked(fp):
+                            continue
                         body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                         for dbms, patterns in SQL_ERROR_PATTERNS.items():
                             for pat in patterns:
@@ -107582,6 +107927,8 @@ class OAuthOIDCInjector:
                                             fp2 = await self.engine.send("GET", test_url)
                                         else:
                                             fp2 = await self.engine.send("POST", endpoint, data=body_data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                                        if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                            continue
                                         body2 = _safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="oauth_confirm").lower()
                                         if not re.search(pat, body2, re.I):
                                             LOG.debug("OAuth error not reproduced on 2nd probe")
@@ -108543,6 +108890,10 @@ class InsertInjectionExtractor:
             try:
                 fp   = await _send_injected(engine, method, url, data, data_fmt,
                                             param, payload, tamper_chain)
+                # BUG-INSERT-WAF-FP FIX: WAF block pages contain SQL-like strings
+                # that match SQL_ERROR_PATTERNS. Skip WAF-blocked probes.
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
@@ -108552,6 +108903,8 @@ class InsertInjectionExtractor:
                             try:
                                 fp2 = await _send_injected(engine, method, url, data, data_fmt,
                                                             param, payload, tamper_chain)
+                                if WAFBlockDiscriminator.single_waf_blocked(fp2):
+                                    continue
                                 body2 = _safe_decode_body(fp2, encoding="utf-8", errors="replace",
                                     func_name="insert_confirm").lower()
                                 if not re.search(pat, body2, re.I):
@@ -108617,6 +108970,9 @@ class SpecialContextDetector:
             try:
                 fp   = await _send_injected(self.engine, method, url, data,
                                              data_fmt, param, payload, tamper_chain)
+                # BUG-TZ-WAF-FP FIX: skip WAF-blocked probes to avoid SQL_ERROR_PATTERNS FP
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
@@ -108624,6 +108980,7 @@ class SpecialContextDetector:
                             if _tz_bl_body and re.search(pat, _tz_bl_body, re.I): continue
                             try:
                                 fp2=await _send_injected(self.engine, method, url, data, data_fmt, param, payload, tamper_chain)
+                                if WAFBlockDiscriminator.single_waf_blocked(fp2): continue
                                 body2=_safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="tz_confirm")
                                 if not re.search(pat, body2, re.I): continue
                             except Exception: continue
@@ -108657,6 +109014,9 @@ class SpecialContextDetector:
             try:
                 fp   = await _send_injected(self.engine, method, url, data,
                                              data_fmt, param, payload, tamper_chain)
+                # BUG-COL-WAF-FP FIX: skip WAF-blocked probes to avoid SQL_ERROR_PATTERNS FP
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
@@ -108664,6 +109024,7 @@ class SpecialContextDetector:
                             if _col_bl_body and re.search(pat, _col_bl_body, re.I): continue
                             try:
                                 fp2=await _send_injected(self.engine, method, url, data, data_fmt, param, payload, tamper_chain)
+                                if WAFBlockDiscriminator.single_waf_blocked(fp2): continue
                                 body2=_safe_decode_body(fp2, encoding="utf-8", errors="replace", func_name="col_confirm")
                                 if not re.search(pat, body2, re.I): continue
                             except Exception: continue
@@ -108781,25 +109142,51 @@ class SecondOrderFlowTracker:
                                       payload, tamper_chain)
                 # Trigger retrieval
                 fp   = await self.engine.send("GET", read_url)
+                # BUG-S2F-WAF-FP FIX: WAF block on retrieval response → skip
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
 
                 # Check for SQL errors in retrieval response
+                _s2f_matched_dbms = None
+                _s2f_matched_pat  = None
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
                         if re.search(pat, body, re.I):
                             if _s2f_bl_body and re.search(pat, _s2f_bl_body, re.I):
                                 continue  # pattern was already in baseline — not injection-caused
-                            _det_ex = DetectionResult(
-                                param=f"2nd:{write_param}{read_url}",
-                                technique="E", payload=payload,
-                                dbms=dbms, confidence=0.88,
-                                notes=f"second_order write={write_url!r} read={read_url!r} baseline_checked=True")
-                            try:
-                                _det_ex.exact_sent_payload = DetectionResult.compute_exact_payload(
-                                    write_original + payload, tamper_chain)
-                            except Exception:
-                                pass
-                            return _det_ex
+                            _s2f_matched_dbms = dbms
+                            _s2f_matched_pat  = pat
+                            break
+                    if _s2f_matched_pat:
+                        break
+                if not _s2f_matched_pat:
+                    continue
+                # BUG-S2F-SINGLE-PROBE FIX: 2/2 confirmation — re-trigger and re-check
+                _s2f_confirmed = False
+                try:
+                    _s2f_fp2 = await self.engine.send("GET", read_url)
+                    if (not WAFBlockDiscriminator.single_waf_blocked(_s2f_fp2)
+                            and _validate_response(_s2f_fp2, allow_empty=True)):
+                        _s2f_body2 = _safe_decode_body(_s2f_fp2, encoding="utf-8",
+                            errors="replace", func_name="s2flow_confirm").lower()
+                        if re.search(_s2f_matched_pat, _s2f_body2, re.I):
+                            _s2f_confirmed = True
+                except Exception:
+                    pass
+                if not _s2f_confirmed:
+                    continue
+                _det_ex = DetectionResult(
+                    param=f"2nd:{write_param}{read_url}",
+                    technique="E", payload=payload,
+                    dbms=_s2f_matched_dbms, confidence=0.88,
+                    notes=f"second_order write={write_url!r} read={read_url!r} baseline_checked=True confirmed=2/2")
+                try:
+                    _det_ex.exact_sent_payload = DetectionResult.compute_exact_payload(
+                        write_original + payload, tamper_chain)
+                except Exception:
+                    pass
+                return _det_ex
             except Exception as _sqr_e:
                 LOG.debug("Suppressed in test_second_order: %s", _sqr_e)
         return None
@@ -130850,8 +131237,10 @@ class TechniqueCascadeEngine:
                         _ctx_body_str = "" # Fallback
 
                     _ctx_baseline_body = (getattr(_s0, "text", "") or _ctx_body_str)
+                # BUG-CTX-WAF-FP FIX: WAF block pages contain SQL-like strings — skip error check
                 _ctx_err_found = False
-                for err_dbms, patterns in SQL_ERROR_PATTERNS.items():
+                if not WAFBlockDiscriminator.single_waf_blocked(fp_t):
+                  for err_dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
                         if re.search(pat, body_t, re.I):
                             if _ctx_baseline_body and re.search(pat, _ctx_baseline_body, re.I):
@@ -130865,7 +131254,9 @@ class TechniqueCascadeEngine:
                                 _ctx_efp = await _send_injected(self.engine, method, url, data,
                                     data_fmt, param, original + true_sfx, self.tamper_chain)
                                 self._total_reqs += 1
-                                _ctx_eb = _safe_decode_body(_ctx_efp, encoding="utf-8", errors="replace", func_name="extraction") if _ctx_efp.body else ""
+                                _ctx_eb = (_safe_decode_body(_ctx_efp, encoding="utf-8", errors="replace", func_name="extraction")
+                                    if (_ctx_efp and _ctx_efp.body
+                                        and not WAFBlockDiscriminator.single_waf_blocked(_ctx_efp)) else "")
                                 if re.search(pat, _ctx_eb, re.I): _ctx_econf += 1
                             # Clean probe
                             _ctx_eclean = True
@@ -131370,8 +131761,12 @@ class TechniqueCascadeEngine:
                 _ws_fp = await _send_injected(self.engine, method, url, data,
                     data_fmt, param, original + templates[0], self.tamper_chain,
                     extra_headers=_ws_hdrs)
-                if _ws_fp and _ws_fp.status_code not in (400, 426):
-                    _ws_body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                if (_ws_fp and _ws_fp.status_code not in (400, 426)
+                        and not WAFBlockDiscriminator.single_waf_blocked(_ws_fp)):
+                    # BUG-WS-UPGRADE-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
+                    # BUG-WS-UPGRADE-FP-BODY FIX: was _safe_decode_body(fp,...) — stale outer fp;
+                    # must use _ws_fp (the WS-upgrade injected response).
+                    _ws_body = _safe_decode_body(_ws_fp, encoding="utf-8", errors="replace", func_name="extraction")
                     for _ep, _pats in SQL_ERROR_PATTERNS.items():
                         for _p in _pats:
                             if re.search(_p, _ws_body, re.I):
@@ -131387,7 +131782,8 @@ class TechniqueCascadeEngine:
                                     # BUG-FIX-3: Safe decode operation
                                     _ws2b = ""
                                     try:
-                                        _ws2b = _safe_decode_body(_ws2) if _ws2 and _ws2.body else ""
+                                        if not WAFBlockDiscriminator.single_waf_blocked(_ws2):
+                                            _ws2b = _safe_decode_body(_ws2) if _ws2 and _ws2.body else ""
                                     except (UnicodeDecodeError, AttributeError, TypeError):
                                         _ws2b = "" # Fallback
                                     if re.search(_p, _ws2b, re.I): _wsc += 1
@@ -131435,22 +131831,53 @@ class TechniqueCascadeEngine:
                 _gfp = await _send_injected(self.engine, method, url, data,
                     data_fmt, param, original + _garbage_payload,
                     self.tamper_chain, extra_headers=_garbage_hdrs)
-                if _gfp:
+                if _gfp and not WAFBlockDiscriminator.single_waf_blocked(_gfp):
+                    # BUG-GARBAGE-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
                     _gbody = _safe_decode_body(_gfp, encoding="utf-8", errors="replace", func_name="extraction")
+                    # Baseline: error must not be in clean (unpadded) response
+                    _gbl_body = ""
+                    try:
+                        _gbl_fp = await _send_injected(self.engine, method, url, data,
+                            data_fmt, param, original, self.tamper_chain)
+                        if _gbl_fp and not WAFBlockDiscriminator.single_waf_blocked(_gbl_fp):
+                            _gbl_body = _safe_decode_body(_gbl_fp, encoding="utf-8",
+                                errors="replace", func_name="garbage_baseline").lower()
+                    except Exception:
+                        pass
+                    _gb_matched_ep = None; _gb_matched_p = None
                     for _ep, _pats in SQL_ERROR_PATTERNS.items():
                         for _p in _pats:
                             if re.search(_p, _gbody, re.I):
-                                _det_ey = DetectionResult(
-                                    param=param, technique="E",
-                                    payload=_garbage_payload, dbms=_ep,
-                                    confidence=0.78,
-                                    notes="garbage_data_buffer_overflow bypass=garbage_pad")
-                                try:
-                                    _det_ey.exact_sent_payload = DetectionResult.compute_exact_payload(
-                                        original + _garbage_payload, self.tamper_chain)
-                                except Exception:
-                                    pass
-                                return _det_ey
+                                if _gbl_body and re.search(_p, _gbl_body, re.I):
+                                    continue  # in baseline — FP
+                                _gb_matched_ep = _ep; _gb_matched_p = _p; break
+                        if _gb_matched_p: break
+                    if _gb_matched_p:
+                        # 2/2 confirmation
+                        _gb_confirmed = False
+                        try:
+                            _gfp2 = await _send_injected(self.engine, method, url, data,
+                                data_fmt, param, original + _garbage_payload,
+                                self.tamper_chain, extra_headers=_garbage_hdrs)
+                            if (_gfp2 and not WAFBlockDiscriminator.single_waf_blocked(_gfp2)):
+                                _gb2b = _safe_decode_body(_gfp2, encoding="utf-8",
+                                    errors="replace", func_name="garbage_confirm")
+                                if re.search(_gb_matched_p, _gb2b, re.I):
+                                    _gb_confirmed = True
+                        except Exception:
+                            pass
+                        if _gb_confirmed:
+                            _det_ey = DetectionResult(
+                                param=param, technique="E",
+                                payload=_garbage_payload, dbms=_gb_matched_ep,
+                                confidence=0.78,
+                                notes="garbage_data_buffer_overflow bypass=garbage_pad confirmed=2/2")
+                            try:
+                                _det_ey.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                    original + _garbage_payload, self.tamper_chain)
+                            except Exception:
+                                pass
+                            return _det_ey
             except Exception:
                 pass
 
@@ -131465,7 +131892,8 @@ class TechniqueCascadeEngine:
                         data_fmt, param, original, self.tamper_chain,
                         extra_headers=_hv)
                     self._total_reqs += 1
-                    if _hfp:
+                    if _hfp and not WAFBlockDiscriminator.single_waf_blocked(_hfp):
+                        # BUG-HOST-HDR-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
                         _hbody = _safe_decode_body(_hfp, encoding="utf-8", errors="replace", func_name="extraction")
                         # Baseline: get clean response to prevent static error page FP
                         try:
@@ -131473,24 +131901,42 @@ class TechniqueCascadeEngine:
                             _hbl_body = _safe_decode_body(_hbl_fp, encoding="utf-8", errors="replace", func_name="extraction") if _hbl_fp and _hbl_fp.body else ""
                         except Exception:
                             _hbl_body = ""
+                        _hh_matched_ep = None; _hh_matched_p = None
                         for _ep, _pats in SQL_ERROR_PATTERNS.items():
                             for _p in _pats:
                                 if re.search(_p, _hbody, re.I):
                                     if _hbl_body and re.search(_p, _hbl_body, re.I):
                                         continue  # pattern in baseline — FP
-                                    _hdr_name = list(_hv.keys())[0]
-                                    _det_ey = DetectionResult(
-                                        param=f"header:{_hdr_name}",
-                                        technique="E",
-                                        payload=list(_hv.values())[0][:80],
-                                        dbms=_ep, confidence=0.82,
-                                        notes=f"host_header_injection via {_hdr_name}")
-                                    try:
-                                        _det_ey.exact_sent_payload = DetectionResult.compute_exact_payload(
-                                            original + list, self.tamper_chain)
-                                    except Exception:
-                                        pass
-                                    return _det_ey
+                                    _hh_matched_ep = _ep; _hh_matched_p = _p; break
+                            if _hh_matched_p: break
+                        if _hh_matched_p:
+                            # BUG-HOST-HDR-SINGLE-PROBE FIX: 2/2 confirmation
+                            _hh_confirmed = False
+                            try:
+                                _hfp2 = await _send_injected(self.engine, method, url, data,
+                                    data_fmt, param, original, self.tamper_chain,
+                                    extra_headers=_hv)
+                                if (_hfp2 and not WAFBlockDiscriminator.single_waf_blocked(_hfp2)):
+                                    _hbody2 = _safe_decode_body(_hfp2, encoding="utf-8",
+                                        errors="replace", func_name="hosthdr_confirm")
+                                    if re.search(_hh_matched_p, _hbody2, re.I):
+                                        _hh_confirmed = True
+                            except Exception:
+                                pass
+                            if _hh_confirmed:
+                                _hdr_name = list(_hv.keys())[0]
+                                _det_ey = DetectionResult(
+                                    param=f"header:{_hdr_name}",
+                                    technique="E",
+                                    payload=list(_hv.values())[0][:80],
+                                    dbms=_hh_matched_ep, confidence=0.82,
+                                    notes=f"host_header_injection via {_hdr_name} confirmed=2/2")
+                                try:
+                                    _det_ey.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                        original + list, self.tamper_chain)
+                                except Exception:
+                                    pass
+                                return _det_ey
             except Exception:
                 pass
 
@@ -131708,7 +132154,9 @@ class TechniqueCascadeEngine:
                         data_fmt, param, original + templates[0], self.tamper_chain,
                         extra_headers=_cn_hdrs)
                     self._total_reqs += 1
-                    if _cn_fp and _get_safe_status_code(_cn_fp) < 400:
+                    if (_cn_fp and _get_safe_status_code(_cn_fp) < 400
+                            and not WAFBlockDiscriminator.single_waf_blocked(_cn_fp)):
+                        # BUG-CN-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
                         # BUG-V61-CN-BODY-SOURCE FIX (HIGH, Req 3/12/13):
                         # Was: _safe_decode_body(fp, ...) — reads `fp`, the ORIGINAL detection
                         # probe response, not the content-negotiation probe `_cn_fp`.
@@ -131721,26 +132169,57 @@ class TechniqueCascadeEngine:
                         # (where the CN response has errors but the original does not).
                         # Fix: read from _cn_fp (the actual content-negotiation probe response).
                         _cn_body = _safe_decode_body(_cn_fp, encoding="utf-8", errors="replace", func_name="cn_injection_check")
+                        # Baseline check: pattern must not be in uninjected response
+                        _cn_bl_body = ""
+                        try:
+                            _cn_bl_fp = await _send_injected(self.engine, method, url, data,
+                                data_fmt, param, original, self.tamper_chain,
+                                extra_headers=_cn_hdrs)
+                            if _cn_bl_fp and not WAFBlockDiscriminator.single_waf_blocked(_cn_bl_fp):
+                                _cn_bl_body = _safe_decode_body(_cn_bl_fp, encoding="utf-8",
+                                    errors="replace", func_name="cn_baseline").lower()
+                        except Exception:
+                            pass
+                        _cn_matched_ep = None; _cn_matched_p = None
                         for _ep, _pats in SQL_ERROR_PATTERNS.items():
                             for _p in _pats:
                                 if re.search(_p, _cn_body, re.I):
-                                    _det_ey = DetectionResult(
-                                        param=param, technique="E",
-                                        payload=templates[0], dbms=_ep,
-                                        confidence=0.80,
-                                        notes=f"content_negotiation accept={_cnv.get('Accept','')} bypass=content_negotiation")
-                                    try:
-                                        # BUG-V61-CN-TEMPLATES-CONCAT FIX (MEDIUM, Req 15):
-                                        # Was: original + templates — TypeError: str + list.
-                                        # `templates` is a list of payload strings; concatenating
-                                        # a str with a list raises TypeError, silently swallowed
-                                        # by `except Exception: pass`, leaving exact_sent_payload
-                                        # unset. Fix: use templates[0] (first/base payload string).
-                                        _det_ey.exact_sent_payload = DetectionResult.compute_exact_payload(
-                                            original + templates[0], self.tamper_chain)
-                                    except Exception:
-                                        pass
-                                    return _det_ey
+                                    if _cn_bl_body and re.search(_p, _cn_bl_body, re.I):
+                                        continue  # in baseline — FP
+                                    _cn_matched_ep = _ep; _cn_matched_p = _p; break
+                            if _cn_matched_p: break
+                        if _cn_matched_p:
+                            # 2/2 confirmation
+                            _cn_confirmed = False
+                            try:
+                                _cn_fp2 = await _send_injected(self.engine, method, url, data,
+                                    data_fmt, param, original + templates[0], self.tamper_chain,
+                                    extra_headers=_cn_hdrs)
+                                if (_cn_fp2 and not WAFBlockDiscriminator.single_waf_blocked(_cn_fp2)):
+                                    _cn_body2 = _safe_decode_body(_cn_fp2, encoding="utf-8",
+                                        errors="replace", func_name="cn_confirm")
+                                    if re.search(_cn_matched_p, _cn_body2, re.I):
+                                        _cn_confirmed = True
+                            except Exception:
+                                pass
+                            if _cn_confirmed:
+                                _det_ey = DetectionResult(
+                                    param=param, technique="E",
+                                    payload=templates[0], dbms=_cn_matched_ep,
+                                    confidence=0.80,
+                                    notes=f"content_negotiation accept={_cnv.get('Accept','')} bypass=content_negotiation confirmed=2/2")
+                                try:
+                                    # BUG-V61-CN-TEMPLATES-CONCAT FIX (MEDIUM, Req 15):
+                                    # Was: original + templates — TypeError: str + list.
+                                    # `templates` is a list of payload strings; concatenating
+                                    # a str with a list raises TypeError, silently swallowed
+                                    # by `except Exception: pass`, leaving exact_sent_payload
+                                    # unset. Fix: use templates[0] (first/base payload string).
+                                    _det_ey.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                        original + templates[0], self.tamper_chain)
+                                except Exception:
+                                    pass
+                                return _det_ey
             except Exception:
                 pass
 
@@ -132627,11 +133106,25 @@ class UniversalScanOrchestrator:
                         if _src == "cookie":
                             _jwt_hdrs["Cookie"] = _cookie.replace(_tok, _modified_jwt)
                         _fp = await self.engine.send(method, url, extra_headers=_jwt_hdrs)
+                        # BUG-JWT-CLAIMINJECTION-WAF-FP FIX: skip WAF-blocked probes
+                        if WAFBlockDiscriminator.single_waf_blocked(_fp):
+                            continue
                         _body = _safe_decode_body(_fp, encoding="utf-8", errors="replace", func_name="extraction")
+                        # Baseline: check clean JWT response for patterns
+                        _jwt_bl_body = ""
+                        try:
+                            _jwt_bl_fp = await self.engine.send(method, url)
+                            if _jwt_bl_fp and not WAFBlockDiscriminator.single_waf_blocked(_jwt_bl_fp):
+                                _jwt_bl_body = _safe_decode_body(_jwt_bl_fp, encoding="utf-8",
+                                    errors="replace", func_name="jwt_claim_baseline").lower()
+                        except Exception:
+                            pass
                         # Check for SQL errors indicating injection worked
                         for _edb, _pats in SQL_ERROR_PATTERNS.items():
                             for _p in _pats:
                                 if _re.search(_p, _body, _re.I):
+                                    if _jwt_bl_body and _re.search(_p, _jwt_bl_body, _re.I):
+                                        continue  # in baseline — FP
                                     print(f"    [JWT] SQL error in claim={_claim}  verifying")
                                     _jwtc = 1
                                     for _ in range(2):
@@ -132641,7 +133134,8 @@ class UniversalScanOrchestrator:
                                         # BUG-FIX-3: Safe decode operation
                                         _jwt2b = ""
                                         try:
-                                            _jwt2b = _safe_decode_body(_jwt2) if _jwt2 and _jwt2.body else ""
+                                            if not WAFBlockDiscriminator.single_waf_blocked(_jwt2):
+                                                _jwt2b = _safe_decode_body(_jwt2) if _jwt2 and _jwt2.body else ""
                                         except (UnicodeDecodeError, AttributeError, TypeError):
                                             _jwt2b = "" # Fallback
                                         if _re.search(_p, _jwt2b, _re.I): _jwtc += 1
@@ -137519,7 +138013,9 @@ class ScannerV14(ScannerV13):
                                         "GET", _base_ep.url,
                                         extra_headers=dict(_surf_data))
                             
-                                if _validate_response(_surf_fp, "response_body_check"):
+                                if (_validate_response(_surf_fp, "response_body_check")
+                                        and not WAFBlockDiscriminator.single_waf_blocked(_surf_fp)):
+                                    # BUG-SURFACE-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
                                     # BUG-SURFACE-FP-1 FIX: was _safe_decode_body(fp, ...) — `fp` is NOT
                                     # defined in this scope (or is a stale variable from an outer scope).
                                     # Must decode _surf_fp (the injected-header/cookie/path response).
@@ -137552,7 +138048,8 @@ class ScannerV14(ScannerV13):
                                                         elif _surf_type == "method_override":
                                                             _sv_fp = await engine.send("GET", _base_ep.url,
                                                                 extra_headers=dict(_surf_data))
-                                                        if _validate_response(_sv_fp, "response_body_check"):
+                                                        if (_validate_response(_sv_fp, "response_body_check")
+                                                                and not WAFBlockDiscriminator.single_waf_blocked(_sv_fp)):
                                                             if _get_safe_status_code(_sv_fp) == 429:
                                                                 _surf_429_neutral += 1
                                                             else:
@@ -138147,7 +138644,9 @@ class ScannerV14(ScannerV13):
                                         _jp_fp = await engine.send(
                                             _ep.method, _ep.url, data=json.dumps(_inj_json),
                                             extra_headers={"Content-Type": "application/json"})
-                                        if _validate_response(_jp_fp, "response_body_check"):
+                                        if (_validate_response(_jp_fp, "response_body_check")
+                                                and not WAFBlockDiscriminator.single_waf_blocked(_jp_fp)):
+                                            # BUG-SURFACE-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
                                             # BUG-SURFACE-FP-3 FIX: was _safe_decode_body(fp, ...) — must use _jp_fp
                                             # (the JSON-injected response), not stale outer-scope fp.
                                             # Using wrong fp means error pattern check is on wrong response body
@@ -138165,7 +138664,8 @@ class ScannerV14(ScannerV13):
                                                         # BUG-FIX-3: Safe decode operation
                                                         _jp2b = ""
                                                         try:
-                                                            _jp2b = _safe_decode_body(_jp2) if _jp2 and _jp2.body else ""
+                                                            if (not WAFBlockDiscriminator.single_waf_blocked(_jp2)):
+                                                                _jp2b = _safe_decode_body(_jp2) if _jp2 and _jp2.body else ""
                                                         except (UnicodeDecodeError, AttributeError, TypeError):
                                                             _jp2b = "" # Fallback
                                                         _jpc = await engine.send(_ep.method, _ep.url,
@@ -138598,7 +139098,9 @@ class ScannerV14(ScannerV13):
                                         _gql_fp = await engine.send(
                                             "POST", _ep.url, data=json.dumps(_gql_test),
                                             extra_headers={"Content-Type": "application/json"})
-                                        if _validate_response(_gql_fp, "response_body_check"):
+                                        if (_validate_response(_gql_fp, "response_body_check")
+                                                and not WAFBlockDiscriminator.single_waf_blocked(_gql_fp)):
+                                            # BUG-SURFACE-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
                                             # BUG-SURFACE-FP-4 FIX: was _safe_decode_body(fp, ...) — must use _gql_fp
                                             # (the GraphQL-injected response), not stale outer-scope fp.
                                             _gql_body = _safe_decode_body(_gql_fp, encoding="utf-8", errors="replace", func_name="extraction")
@@ -138613,7 +139115,8 @@ class ScannerV14(ScannerV13):
                                                 # BUG-FIX-3: Safe decode operation
                                                 _gql2b = ""
                                                 try:
-                                                    _gql2b = _safe_decode_body(_gql2) if _gql2 and _gql2.body else ""
+                                                    if not WAFBlockDiscriminator.single_waf_blocked(_gql2):
+                                                        _gql2b = _safe_decode_body(_gql2) if _gql2 and _gql2.body else ""
                                                 except (UnicodeDecodeError, AttributeError, TypeError):
                                                     _gql2b = "" # Fallback
                                                 _gqlc = await engine.send("POST", _ep.url,
@@ -139012,7 +139515,9 @@ class ScannerV14(ScannerV13):
                                     _xml_fp = await engine.send(
                                         _ep.method, _ep.url, data=_inj_xml,
                                         extra_headers={"Content-Type": "text/xml"})
-                                    if _validate_response(_xml_fp, "response_body_check"):
+                                    if (_validate_response(_xml_fp, "response_body_check")
+                                            and not WAFBlockDiscriminator.single_waf_blocked(_xml_fp)):
+                                        # BUG-SURFACE-WAF-FP FIX: WAF block pages contain SQL-like strings — skip
                                         # BUG-SURFACE-FP-5 FIX: was _safe_decode_body(fp, ...) — must use _xml_fp
                                         # (the XML-injected response), not stale outer-scope fp.
                                         _xml_body = _safe_decode_body(_xml_fp, encoding="utf-8", errors="replace", func_name="extraction")
@@ -139024,7 +139529,9 @@ class ScannerV14(ScannerV13):
                                             await asyncio.sleep(1.0)
                                             _xml_fp2 = await engine.send(_ep.method, _ep.url, data=_inj_xml,
                                                 extra_headers={"Content-Type": "text/xml"})
-                                            _xml_b2 = _safe_decode_body(_xml_fp2, encoding="utf-8", errors='replace', func_name='extraction__xml_fp2') if _xml_fp2 and _xml_fp2.body else ""
+                                            _xml_b2 = (_safe_decode_body(_xml_fp2, encoding="utf-8", errors='replace', func_name='extraction__xml_fp2')
+                                                if (_xml_fp2 and _xml_fp2.body
+                                                    and not WAFBlockDiscriminator.single_waf_blocked(_xml_fp2)) else "")
                                             _xml_clean = await engine.send(_ep.method, _ep.url, data=_ep.data,
                                                 extra_headers={"Content-Type": "text/xml"})
                                             # BUG-FIX-3: Safe decode operation
@@ -152285,10 +152792,21 @@ class ExtractionBypassFinder:
                             # Fix: also reject if Phase 2 false is > 3x Phase 1 structural false
                             # baseline OR > 3x base_ms, whichever is larger.
                             _p2_false_rate_limit = _ew_false > max(_elapsed_false * 3.0, self.base_ms * 3.0)
-                            if _ew_false >= thresh or _p2_false_rate_limit:
+                            # BUG-EBF-P2-HALF-THRESH FIX: Even when the false probe is below
+                            # thresh and below 3× the Phase-1 baseline, if it already exceeds
+                            # half the threshold there is insufficient headroom for the oracle to
+                            # be reliable during actual extraction (server jitter or incipient
+                            # rate-limiting can push it over thresh in as few as 1-2 probes →
+                            # oracle always-True → max-codepoint garbage).
+                            # Require the false probe to be < 50% of thresh so the true (sleep)
+                            # responses land well above thresh while false responses land well below.
+                            _p2_false_half_thresh = _ew_false > thresh * 0.50
+                            if _ew_false >= thresh or _p2_false_rate_limit or _p2_false_half_thresh:
                                 _rl_note = (f" [rate-limit baseline: {_ew_false:.0f}ms "
                                             f"> 3x_p1_false={_elapsed_false*3.0:.0f}ms]"
-                                            if _p2_false_rate_limit and _ew_false < thresh else "")
+                                            if _p2_false_rate_limit and _ew_false < thresh else
+                                            f" [half-thresh: {_ew_false:.0f}ms > thresh*0.5={thresh*0.5:.0f}ms]"
+                                            if _p2_false_half_thresh and _ew_false < thresh else "")
                                 print(f"[-] [EBF] {_wrap!r} tag={_tag!r} FALSE probe also "
                                       f"slow ({_ew_false:.0f}ms vs thresh={thresh:.0f}ms{_rl_note})  "
                                       f"rate-limit FP, skipping")
@@ -153614,6 +154132,35 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                                 f"WAF blocks extraction conditions (canary={_canary_ms:.0f}ms) "
                                 " falling through to EBF")
         if _std_cal_ok:
+            # BUG-STD-CAL-CONDITIONALITY FIX: Strategy-0 (standard form) only probed a TRUE
+            # condition during calibration. A non-conditional oracle — unconditional heavy
+            # query, rate-limited server, or WAF that strips the CASE/IF branch — also passes
+            # the TRUE probe. Without verifying the FALSE branch the oracle may be always-True
+            # from the first probe, causing binary-search to converge to max-codepoint →
+            # 100% garbage output (identical root cause as BUG-STRAT-NONCOND-ORACLE FIX in
+            # the strategy loop, which ALREADY checks false-conditionality for strategies 1..N
+            # but was missing for strategy 0).
+            # Fix: send one additional FALSE-condition probe; require margin ≥ 150ms.
+            # If margin < 150ms: reset _std_cal_ok and fall through to strategies 1..N.
+            try:
+                _std_false_ms = await _calibrate_probe(timing_payload("1e0=0e0"), tamper_chain)
+                _std_margin = _std_ms - _std_false_ms
+                if _std_margin < 150:
+                    print(f"[!] [TBExtract] Standard calibration non-conditional oracle: "
+                          f"true={_std_ms:.0f}ms false={_std_false_ms:.0f}ms "
+                          f"margin={_std_margin:.0f}ms<150ms — rate-limited or unconditional; "
+                          "falling through to detection-payload strategies", flush=True)
+                    LOG.warning("[TBExtract] Standard cal non-conditional: margin=%.0fms<150ms "
+                                "(true=%.0fms false=%.0fms)", _std_margin, _std_ms, _std_false_ms)
+                    timing_thresh = min(_base_time, 2000) + t * 700  # reset to default
+                    _std_cal_ok = False
+                else:
+                    LOG.info("[TBExtract] Standard cal conditionality OK: margin=%.0fms "
+                             "(true=%.0fms false=%.0fms thresh=%.0fms)",
+                             _std_margin, _std_ms, _std_false_ms, timing_thresh)
+            except Exception as _scc_e:
+                LOG.debug("[TBExtract] Standard cal conditionality check error (non-fatal): %s", _scc_e)
+        if _std_cal_ok:
             pass  # proceed to extraction with standard template
         elif _det_payload_raw:
             # Strategies 1..N from SQLPayloadTransformer.all_strategies()
@@ -154163,6 +154710,62 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
     # Initialized once here; incremented inside the inner while loop so every probe
     # (across all character positions) gets a unique request_num → unique comment variant.
     _tbe_req_count = 0
+
+    # BUG-PRE-EXTRACT-ORACLE-HEALTH FIX (CRITICAL): After calibration (standard or EBF),
+    # verify the timing oracle is still conditional before starting the character-by-character
+    # binary-search loop. Rate-limiting can develop BETWEEN calibration and extraction:
+    # calibration uses 1-3 probes over ~5s, but extraction sends 100-500 probes over minutes.
+    # When rate-limiting causes ALL responses (both true and false-condition probes) to
+    # exceed the timing threshold, the oracle is always-True → every binary-search step
+    # evaluates True → lo converges to max-codepoint (1,114,111) → every character extracted
+    # as a high-codepoint control character → 100% non-printable garbage output.
+    # The garbage guard catches this AFTER all extraction probes are wasted. This check
+    # catches it BEFORE, aborting immediately with 0 wasted probes.
+    # Uses _send_injected directly (not _calibrate_probe) to be available regardless of
+    # whether _skip_calibration was True (calibration from cache, so _calibrate_probe is
+    # not defined in the current scope).
+    if _cal_succeeded:
+        try:
+            _pex_false_cond = "1e0=0e0"
+            if _ebf_mode[0] and _ebf_payload_fn_ref[0] is not None:
+                _pex_false_pl = _ebf_payload_fn_ref[0](_pex_false_cond)
+                _pex_false_tc = list(_ebf_tc_ref[0])
+            else:
+                _pex_false_pl = timing_payload(_pex_false_cond)
+                _pex_false_tc = list(tamper_chain) if tamper_chain else []
+            await asyncio.sleep(0.3)  # brief pause before check to let any rate-limit settle
+            _pex_t0 = time.monotonic()
+            try:
+                await _send_injected(
+                    engine, method, url, data, data_fmt,
+                    result.param if hasattr(result, "param") else "",
+                    original + _pex_false_pl, _pex_false_tc)
+            except Exception:
+                pass
+            _pex_false_ms = (time.monotonic() - _pex_t0) * 1000
+            if _pex_false_ms >= timing_thresh:
+                # False-condition probe exceeded threshold → oracle already always-True.
+                # Invalidate calibration cache so next call re-calibrates from scratch.
+                print(f"[!] [TBExtract] PRE-EXTRACTION ORACLE CHECK FAILED: "
+                      f"false-condition probe ({_pex_false_ms:.0f}ms) >= thresh ({timing_thresh:.0f}ms) "
+                      "— oracle is always-True (server rate-limiting or non-conditional bypass). "
+                      "Aborting extraction and invalidating calibration cache.", flush=True)
+                LOG.warning("[TBExtract] Pre-extraction oracle ALWAYS-TRUE: "
+                            "false_ms=%.0fms >= thresh=%.0fms (base=%.0fms sleep=%ss)",
+                            _pex_false_ms, timing_thresh, _base_time, t)
+                if _cal_key in _TB_CALIBRATION_CACHE:
+                    del _TB_CALIBRATION_CACHE[_cal_key]
+                if _cal_key in _TB_EBF_CACHE:
+                    del _TB_EBF_CACHE[_cal_key]
+                if _ext_delay is not None:
+                    config.delay = _orig_delay
+                return ""
+            else:
+                LOG.debug("[TBExtract] Pre-extraction oracle check PASSED: "
+                          "false_ms=%.0fms < thresh=%.0fms (margin=%.0fms)",
+                          _pex_false_ms, timing_thresh, timing_thresh - _pex_false_ms)
+        except Exception as _pex_err:
+            LOG.debug("[TBExtract] Pre-extraction oracle check error (non-fatal): %s", _pex_err)
 
     for pos in range(1, 65):
         # BUG-MSSQL-ASCII-TIMEBASED FIX (Req 10): Use full Unicode range (0-65535) when
@@ -183306,6 +183909,9 @@ class PoCVerifier:
             try:
                 fp = await _send_injected(self.engine, method, url, data, data_fmt,
                                           result.param, original + result.payload, tamper)
+                # BUG-POCVERIFY-WAF-FP FIX: WAF block → error-pattern match from block page, not SQLi
+                if WAFBlockDiscriminator.single_waf_blocked(fp):
+                    continue
                 body = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                 for dbms, patterns in SQL_ERROR_PATTERNS.items():
                     if any(re.search(p, body, re.I) for p in patterns):
