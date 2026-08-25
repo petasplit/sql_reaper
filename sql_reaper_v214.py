@@ -52669,11 +52669,19 @@ class GraphQLDetector:
                 if true_sfx == false_sfx: continue
                 tf=await self._send_var(url,body,var_name,str(original_val)+true_sfx,tamper_chain)
                 ff=await self._send_var(url,body,var_name,str(original_val)+false_sfx,tamper_chain)
+                # BUG-GQL-BOOL-WAF-FP FIX: A WAF that selectively blocks the false-condition
+                # payload returns a short WAF page (fs≈0) while true-condition passes (ts≈1.0)
+                # → delta≈1.0 → always triggers a false positive regardless of injection.
+                # Fix: skip when either probe is WAF-blocked before computing delta.
+                if WAFBlockDiscriminator.single_waf_blocked(tf) or WAFBlockDiscriminator.single_waf_blocked(ff):
+                    continue
                 ts=_sim_to_baseline(tf,base); fs=_sim_to_baseline(ff,base); delta=ts-fs
                 # FIX-R3: raised thresholds + require second confirmation probe
                 if ts>0.80 and delta>0.25:
                     tf2=await self._send_var(url,body,var_name,str(original_val)+true_sfx,tamper_chain)
                     ff2=await self._send_var(url,body,var_name,str(original_val)+false_sfx,tamper_chain)
+                    if WAFBlockDiscriminator.single_waf_blocked(tf2) or WAFBlockDiscriminator.single_waf_blocked(ff2):
+                        continue
                     ts2=_sim_to_baseline(tf2,base); fs2=_sim_to_baseline(ff2,base); delta2=ts2-fs2
                     if delta2>0.20:
                         # FIX-R4: stop all probe loops on confirmed boolean detection
@@ -107367,7 +107375,7 @@ class DeepJSONInjector:
                                                                 headers={**headers, "Content-Type": "application/json"})
                                 norm_c2 = ResponseNormaliser.normalise(_extract_body_safe(fp_c2)) if _validate_response(fp_c2, allow_empty=True) else b""
                                 sim2 = SimHasher.body_similarity(norm_base, norm_c2)
-                                if sim2 < 0.50:
+                                if sim2 < 0.50 and not WAFBlockDiscriminator.single_waf_blocked(fp_c2):
                                     results.append(DetectionResult(
                                         param=f"json:{path}",
                                         technique="B", payload=payload,
@@ -126696,7 +126704,7 @@ class TechniqueCascadeEngine:
             # The boolean body-diff may miss these because error output can look similar to baseline.
             # Fix: check SQL_ERROR_PATTERNS BEFORE boolean comparison; return E-type result if hit.
             _xcat_body_str = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction") if (fp and fp.body) else ""
-            if _xcat_body_str and SQL_ERROR_PATTERNS:
+            if _xcat_body_str and SQL_ERROR_PATTERNS and not _waf_blocked:
                 _xcat_bl_body = ""
                 if baseline:
                     try:
@@ -130075,7 +130083,7 @@ class TechniqueCascadeEngine:
             print(f"    [IN-inline] [{dbms}] req#{self._total_reqs} "
                   f"err={_has_err} status={fp.status_code} "
                   f"{' ERROR found' if _has_err else ' no error'}")
-            if _has_err:
+            if _has_err and not _waf_blocked:
                 # Multi-probe: verify error is consistent
                 # BUG-IN-429-NEUTRAL FIX: When initial probe returns 429 with SQL error
                 # (server leaks error inside rate-limit response), confirmation probes also
@@ -130185,7 +130193,7 @@ class TechniqueCascadeEngine:
                            " same")
             print(f"    [UE-hybrid] [{dbms}] req#{self._total_reqs} "
                   f"sim={sim:.3f} err={_has_err} body_chg={_body_changed} {_ue_verdict}")
-            if _has_err:
+            if _has_err and not _waf_blocked:
                 # Multi-probe + clean for UE error
                 # BUG-UE-429-NEUTRAL FIX: Same as BUG-IN-429-NEUTRAL — initial 429+error
                 # followed by 429-neutral confirmations prevents detection. Relax threshold
@@ -130597,7 +130605,7 @@ class TechniqueCascadeEngine:
             _so_elapsed = fp.elapsed_ms
             _so_threshold = time_threshold * 0.7
             # Timing signal
-            if _so_elapsed >= _so_threshold and _so_elapsed > 500:
+            if _so_elapsed >= _so_threshold and _so_elapsed > 500 and not _waf_blocked:
                 _det_so_t = DetectionResult(
                     param=param, technique="SO",
                     payload=payload, dbms=dbms, confidence=0.75,
