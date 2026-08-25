@@ -40898,7 +40898,9 @@ async def detect_boolean(engine,config,method,url,data,data_fmt,
             if _SCAN_STOPPED[0] and not _PCV_IN_PROGRESS[0] and not _EXTRACTION_ACTIVE[0]:
                 return None
             if not _validate_response(fp_true, func_name="waf_block_check"): return None  # BUG-FIX-SYNTAX: continue→return None (not inside loop)
-            if fp_true and fp_false and not WAFBlockDiscriminator.is_waf_block(fp_true):
+            if (fp_true and fp_false
+                    and not WAFBlockDiscriminator.is_waf_block(fp_true)
+                    and not WAFBlockDiscriminator.is_waf_block(fp_false)):  # BUG-FP-1-FIX
                 # FIX-BUG-4: Comprehensive validation of fp_true and fp_false before accessing .body
                 if not _validate_response(fp_true, allow_empty=False, func_name="cross_category_bool_true"):
                     return None
@@ -58405,8 +58407,15 @@ class Scanner:
         # into function names (e.g. pg_SL\ufeffEEP) breaking the sleep regex → falls back
         # to 0.5s → calibration expects 500ms signal but actual injection gives e.g. 200ms
         # → oracle always unreliable.  Strip common zero-width/BOM chars first.
+        # BUG-SLEEP-REGEX-URLENCODE-FIX: exact_sent_payload preserves wire format, so
+        # URL-encoding tampers (percentencode_selective etc.) may encode the SLEEP
+        # keyword (SL%45EP, %53LEEP).  Double-unquote so the sleep regex can match.
+        try:
+            _payload_for_sleep = unquote(unquote(_payload_raw))
+        except Exception:
+            _payload_for_sleep = _payload_raw
         _payload_for_sleep = _re.sub(
-            r'[\u00ad\u200b\u200c\u200d\u2060\ufeff\uffa0]', '', _payload_raw)
+            r'[\u00ad\u200b\u200c\u200d\u2060\ufeff\uffa0]', '', _payload_for_sleep)
         # BUG-SLEEP-REGEX-COMMENT-BYPASS-FIX: tampers like versioned_nested wrap SLEEP in
         # /*!50000SLEEP(3)*/ and comment_content/keywordsplit split it as SL/*x*/EEP(t).
         # Must expand versioned-comment content BEFORE stripping regular comments, otherwise
@@ -68595,15 +68604,21 @@ class Scanner:
         # Covers pg_sleep(N), SLEEP(N), SLEEP(SQRT(N)) for MySQL/MariaDB/PostgreSQL.
         # Also covers WAITFOR DELAY '0:0:N' for MSSQL/Sybase (Oracle uses dbms_lock.sleep).
         _sleep_arg_m = _re.search(
-            r'(?:pg_sleep|SLEEP|sleep)\s*\(\s*(?:SQRT\s*\(\s*)?(\d+(?:\.\d+)?)',
+            r'(?:pg_sleep|SLEEP|sleep)\s*\(\s*(?:SQRT\s*\(\s*)?(0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?)',
             _payload, _re.I)
         _waitfor_arg_m = _re.search(
-            r"WAITFOR\s+DELAY\s+'0:0:(\d+(?:\.\d+)?)'", _payload, _re.I)
+            r"WAITFOR\s+DELAY\s+'(\d+):(\d+):(\d+(?:\.\d+)?)'", _payload, _re.I)
         _cal_expected_sleep_ms = None
         if _sleep_arg_m:
-            _cal_expected_sleep_ms = float(_sleep_arg_m.group(1)) * 1000.0
+            _g1_cal = _sleep_arg_m.group(1)
+            # BUG-CAL-HEX-SLEEP-FIX: previous regex only matched decimal; SLEEP(0x2)
+            # captured '0' -> _cal_expected_sleep_ms=0.0 -> WAF-block detection disabled
+            # even when the timing oracle is non-functional (ms_t << expected).
+            _cal_expected_sleep_ms = (int(_g1_cal, 16) if _g1_cal[:2].lower() == '0x' else float(_g1_cal)) * 1000.0
         elif _waitfor_arg_m:
-            _cal_expected_sleep_ms = float(_waitfor_arg_m.group(1)) * 1000.0
+            # BUG-CAL-WAITFOR-HMS-FIX: old regex only captured seconds from '0:0:N'.
+            # Now captures H:M:S for full WAITFOR DELAY coverage.
+            _cal_expected_sleep_ms = (int(_waitfor_arg_m.group(1)) * 3600 + int(_waitfor_arg_m.group(2)) * 60 + float(_waitfor_arg_m.group(3))) * 1000.0
         # BUG-DIRECT-HQ-SKIP FIX (CRITICAL, PostgreSQL/MySQL/MSSQL/Oracle, HQ technique,
         # all surfaces, all HTTP methods):
         # When detection is via HQ (Heavy Query / generate_series CTE), the payload
@@ -115860,7 +115875,8 @@ class TechniqueCascadeEngine:
                 any(k in (_early_b_payload or '').upper() for k in (
                     'SLEEP(', 'PG_SLEEP(', 'WAITFOR', 'BENCHMARK(',
                     'DBMS_PIPE.RECEIVE_MESSAGE', 'DBMS_LOCK.SLEEP',
-                    'DBMS_SESSION.SLEEP', 'GENERATE_SERIES('))
+                    'DBMS_SESSION.SLEEP', 'GENERATE_SERIES(',
+                    'RANDOMBLOB(', 'ZEROBLOB(', 'DBMS_UTILITY.GET_TIME'))  # BUG-FP-5-FIX
             )
             # Shortcut B: timing multi-probe (4+ SLEEP probes all slow, clean probe fast)
             # COMPREHENSIVE FALSE POSITIVE FIX:
@@ -130851,6 +130867,10 @@ class TechniqueCascadeEngine:
                     if _ctx_err_found: break
 
                 # Boolean differential check with multi-probe 5/6
+                # BUG-FP-2-FIX: skip similarity if either probe is WAF-blocked
+                if WAFBlockDiscriminator.is_waf_block(fp_t) or WAFBlockDiscriminator.is_waf_block(fp_f):
+                    LOG.debug("[CTX-bool] %s: fp_t or fp_f WAF-blocked -- skipping boolean diff", ctx_name)
+                    continue
                 norm_t = ResponseNormaliser.normalise(_extract_body_safe(fp_t)) if _validate_response(fp_t, allow_empty=True) else b""
                 norm_f = ResponseNormaliser.normalise(_extract_body_safe(fp_f)) if _validate_response(fp_f, allow_empty=True) else b""
                 sim_t  = SimHasher.body_similarity(norm_b, norm_t)
@@ -130860,8 +130880,8 @@ class TechniqueCascadeEngine:
                 # BUG-CTXBOOL-REVERSED-POLARITY FIX: CDN-cached baseline causes
                 # reversed-polarity: TRUE bypasses WAF (real body, sim_t≈0.5),
                 # FALSE is WAF-blocked (empty, sim_f≈1.0). gap=-0.5 is missed.
-                _std_polarity = (sim_t >= 1.0 and delta > bool_thresh)
-                _rev_polarity = (sim_f >= 1.0 and (-delta) > bool_thresh)
+                _std_polarity = (sim_t > 0.72 and delta > bool_thresh)  # BUG-FP-6-FIX: was >= 1.0
+                _rev_polarity = (sim_f > 0.72 and (-delta) > bool_thresh)  # BUG-FP-6-FIX: was >= 1.0
                 _ctx_confirmed = _std_polarity or _rev_polarity
                 _rev_label = "  [reversed-polarity]" if (_rev_polarity and not _std_polarity) else ""
                 print(f"    [CTX-bool] {ctx_name}: sim_t={sim_t:.3f} sim_f={sim_f:.3f} "
@@ -130899,7 +130919,13 @@ class TechniqueCascadeEngine:
                     # Evidence: log showed gap=0.000, 0.000, 0.500 (exactly 2×) accepted as
                     # "strong", skipping multi-probe that would have caught the false positive.
                     # Requiring > 2× AND >= 0.60 ensures only genuinely large gaps skip.
-                    _strong_gap = abs(delta) > bool_thresh * 2.0 and abs(delta) >= 0.60  # RC1-FP
+                    # BUG-FP-3-FIX: WAF-induced delta=1.0 satisfies > 2x threshold;
+                    # only allow strong-gap bypass when neither probe is WAF-blocked.
+                    _waf_induced = (WAFBlockDiscriminator.is_waf_block(fp_t) or
+                                    WAFBlockDiscriminator.is_waf_block(fp_f))
+                    _strong_gap = (not _waf_induced and
+                                   abs(delta) > bool_thresh * 2.0 and
+                                   abs(delta) >= 0.60)  # RC1-FP + BUG-FP-3-FIX
 
                     if _strong_gap:
                         # BUG-MULTIPROBE-HIGHJTTER-WRONG-FLAG FIX: The previous condition
@@ -130948,7 +130974,10 @@ class TechniqueCascadeEngine:
                             _ctx_mpf = await _send_injected(self.engine, method, url, data,
                                 data_fmt, param, original + false_sfx, self.tamper_chain)
                             self._total_reqs += 2
-                            _ctx_st = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpt)) if _validate_response(_ctx_mpt, allow_empty=True) else b"")
+                            # BUG-FP-4-FIX: WAF-blocked probe produces synthetic delta; skip iteration
+                        if WAFBlockDiscriminator.is_waf_block(_ctx_mpt) or WAFBlockDiscriminator.is_waf_block(_ctx_mpf):
+                            continue
+                        _ctx_st = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpt)) if _validate_response(_ctx_mpt, allow_empty=True) else b"")
                             _ctx_sf = SimHasher.body_similarity(norm_b, ResponseNormaliser.normalise(_extract_body_safe(_ctx_mpf)) if _validate_response(_ctx_mpf, allow_empty=True) else b"")
                             _ctx_gap = _ctx_st - _ctx_sf
                             if abs(_ctx_gap) > bool_thresh: _ctx_bconf += 1  # FIX: abs() for reversed-polarity
