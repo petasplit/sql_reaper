@@ -1,10 +1,52 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v221 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v220 base + 2 additional fixes. v221 adds a positive-control discriminator     ║
-║  probe to Check C (valid SQL → non-error vs error SQL → 500 = semantic DB eval) ║
-║  and fixes the sql_universal status set to include WAF 4xx codes (403/406/429). ║
+║  SQLReaper v222 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v221 base + 2 additional fixes. v222 closes the sentinel=None UH FP gap and   ║
+║  tightens the sql_universal canary exclusion to block WAF-blocked canary FPs.   ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v221 → v222) — 2 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V222-SENTINEL-NONE-UH-FP (HIGH; UH/U/UE technique; all DBMSes; all    ║
+║      surfaces; all cascade paths; when sentinel probe throws an exception):      ║
+║      The PCV sentinel guard at _post_confirm_verify_locked checked                ║
+║      `_sentinel_pass is False` to block body-size-only UH confirmation when the ║
+║      sentinel token was not reflected. However when the sentinel HTTP probe      ║
+║      itself throws an exception (network error, scan stopped mid-flight, rate-   ║
+║      limit timeout), the except-branch at line 118294 silently catches it and   ║
+║      `_sentinel_pass` stays None — the initial value. The guard predicate        ║
+║      `_sentinel_pass is False` evaluates to False for None, so the guard never  ║
+║      fires. If Check A (body canary) then produces a strong gap (e.g. CDN cache ║
+║      variation or WAF-challenge-page vs normal-page producing a body-size        ║
+║      difference), the code falls through to the body-size confirmation path at  ║
+║      line 120930-120962 and confirms a false positive.                           ║
+║      Root cause: None (sentinel never ran) was not treated as "not confirmed"   ║
+║      — only False (sentinel ran and failed) was blocked.                          ║
+║      Fix: change `_sentinel_pass is False` → `_sentinel_pass is not True` so   ║
+║      the guard fires for both False (ran, not reflected) and None (never ran).  ║
+║      Only a reflected sentinel (True) is safe for body-size UH confirmation.    ║
+║      Affects: all UH/U/UE detections, all surfaces (header/cookie/JSON/BG/GET/  ║
+║      POST), all DBMSes, all HTTP techniques, all cascade paths routing through  ║
+║      _post_confirm_verify_locked Check A body-canary confirmation.               ║
+║                                                                                    ║
+║  [✓] BUG-V222-SQL-UNIVERSAL-CANARY-WAF-FP (MEDIUM; Check C http500_x2_sql_     ║
+║      universal fallback; all techniques; all DBMSes; WAF targets where both     ║
+║      SQL boolean probes AND non-SQL canary are blocked by WAF with 4xx):        ║
+║      The _sql_universal check verified `_can_status not in (400, 500, 502, 503)`║
+║      to ensure the non-SQL canary did not also trigger an error response.       ║
+║      However WAF-blocked canary returns 403 (Forbidden), and 403 ∉ (400, 500,  ║
+║      502, 503), so the exclusion did not fire. When SQL boolean probes return   ║
+║      403/500 AND the non-SQL canary also returns 403 (WAF blocks both), the     ║
+║      sql_universal pattern fires even though the server is not discriminating   ║
+║      SQL from non-SQL — it is the WAF blocking both based on some other         ║
+║      criterion (special characters, encoding). This is a false positive.        ║
+║      Fix: extend the canary exclusion set to (400, 403, 406, 429, 500, 502,    ║
+║      503) so 403/406/429 WAF-blocked canaries also reject sql_universal.        ║
+║      Note: the sql_universal _btrue/_bfalse status sets already include         ║
+║      (400, 403, 406, 429, 500, 502, 503) from the v221 fix — this fix makes   ║
+║      the canary exclusion symmetric, preventing WAF-blocks-all FPs.             ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v220 → v221) — 2 BUGS FIXED                           ║
@@ -119647,7 +119689,7 @@ class TechniqueCascadeEngine:
                             and _btrue_status in (400, 403, 406, 429, 500, 502, 503)
                             and _bfalse_status in (400, 403, 406, 429, 500, 502, 503)
                             and _status_500_count >= 2
-                            and _can_status not in (400, 500, 502, 503)):
+                            and _can_status not in (400, 403, 406, 429, 500, 502, 503)):
                         _sql_universal = True
                         print(f"[*]     Check C HTTP-500 + SQL-universal pattern: "
                               f"{_status_500_count} error payloads → 500, boolean probes also → "
@@ -120923,8 +120965,11 @@ class TechniqueCascadeEngine:
                     return False, 0, _details
                 else:
                     # Block body-size-only confirmation for UNION when sentinel
-                    # explicitly failed (CDN cache variation confirmed as source).
-                    if tech in ("U", "UE", "UH") and _sentinel_pass is False:
+                    # did not succeed — either explicitly failed (False) or never
+                    # ran due to a probe exception (None).  Either state means we
+                    # cannot rule out CDN cache variation as the source of the
+                    # body-size signal; only a reflected sentinel (True) is safe.
+                    if tech in ("U", "UE", "UH") and _sentinel_pass is not True:
                         print(f"[*]   [PCV] UNION body-size BLOCKED: sentinel '{_sentinel_val}'"
                               " not reflected — CDN cache noise, not real injection", flush=True)
                     else:
