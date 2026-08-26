@@ -1,10 +1,50 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v223 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v222 base + 3 additional fixes. v223 closes three sentinel guard gaps in PCV   ║
-║  confirmation paths for U/UE/UH techniques (A+D, D-standalone, detection-replay)║
-║  that allowed false-positive confirmation when sentinel was not reflected.       ║
+║  SQLReaper v224 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v223 base + 3 additional fixes. v224 closes three more sentinel guard gaps in  ║
+║  PCV for U/UE/UH: A+C dual-check, D status-oracle, and WAF-oracle replay paths  ║
+║  could confirm UH without sentinel reflected. All UH FP cascade paths now closed.║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v223 → v224) — 3 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V224-AC-DUAL-SENTINEL-MISSING (HIGH; U/UE/UH technique; all DBMSes;    ║
+║      all surfaces; all cascade paths routing through _post_confirm_verify_locked):║
+║      The A+C dual-check path (Check A body canary + Check C error fingerprint,  ║
+║      added for non-timing techniques at the bottom of _post_confirm_verify_locked)║
+║      had no sentinel guard for UNION techniques.  The individual sentinel guards ║
+║      at line ~121011 (_a_strong body-size path) and ~121167 (Check C confirmation)║
+║      block their immediate return but do NOT reset _a_strong or _c_pass.  Both  ║
+║      variables retain their computed values and can jointly satisfy the A+C path  ║
+║      condition (`_a_pass and _c_pass and (_a_strong or _d_pass)`), confirming UH ║
+║      without a reflected sentinel.  This is a false positive: body canary + error ║
+║      fingerprint proves SQL evaluation but NOT UNION header reflection.           ║
+║      Fix: add `and (tech not in ("U","UE","UH") or _sentinel_pass is True)` to  ║
+║      the A+C dual-check condition so UH requires sentinel before confirming here.║
+║                                                                                    ║
+║  [✓] BUG-V224-D-STATUS-ORACLE-SENTINEL-MISSING (HIGH; U/UE/UH; all DBMSes; all ║
+║      surfaces; all cascade paths; when Check D detects SQL-conditional HTTP       ║
+║      routing changes — status-oracle / waf-status-oracle divergence):            ║
+║      The D status-oracle path (`_d_status_oracle or _d_status_waf_oracle ...`)  ║
+║      confirms injection when Check D probes return different HTTP status codes   ║
+║      based on the SQL truth condition.  For U/UE/UH without a reflected sentinel,║
+║      SQL-conditional WAF blocking or error routing can change status codes without║
+║      the injected UNION SELECT output appearing anywhere in the response.         ║
+║      Fix: add `and (tech not in ("U","UE","UH") or _sentinel_pass is True)` to  ║
+║      the status-oracle condition.                                                  ║
+║                                                                                    ║
+║  [✓] BUG-V224-WAFORACLE-REPLAY-SENTINEL-MISSING (MEDIUM; U/UE/UH; all DBMSes; ║
+║      all surfaces; True=4xx oracle targets where detection replay reproduces the  ║
+║      True-oracle status without sentinel verification):                            ║
+║      The WAF-oracle detection replay path (`_det_waf_oracle_replay_eligible`)    ║
+║      confirms when the exact detection payload reproduces the True=4xx oracle    ║
+║      status and the False payload returns 2xx.  For U/UE/UH without a sentinel,  ║
+║      error-based injection at the same parameter can satisfy these status-code   ║
+║      conditions without the UNION output being reflected.                         ║
+║      Fix: add `and (tech not in ("U","UE","UH") or _sentinel_pass is True)` to  ║
+║      the `_det_waf_oracle_replay_eligible` computation.                           ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v222 → v223) — 3 BUGS FIXED                           ║
@@ -123825,9 +123865,17 @@ class TechniqueCascadeEngine:
         # significant, not just marginally above threshold) OR require Check D (header
         # diff) to also pass. This prevents a dynamic page with fluctuating body size
         # AND intermittent error messages from generating a false positive.
+        # BUG-V224-AC-DUAL-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH), the
+        # individual sentinel guards at lines ~121011 (A-strong) and ~121167 (Check C)
+        # block their respective confirmation returns but do NOT reset _a_strong or
+        # _c_pass.  Both variables retain their computed values and can satisfy this
+        # A+C dual-check, confirming UH without sentinel — a false positive: body
+        # canary + error fingerprint proves SQL evaluation but NOT UNION header reflection.
+        # Fix: require sentinel for U/UE/UH on this path as well.
         if (not _timing_only_tech
                 and tech not in ("T", "TH", "HQ", "BT", "S", "DS")
-                and _a_pass and _c_pass):
+                and _a_pass and _c_pass
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             # Double check: require strong A OR Check D as additional evidence
             _d_pass_pcv = _d_pass  # Check D result (set earlier in function)
             if _a_strong or _d_pass_pcv:
@@ -124103,10 +124151,17 @@ class TechniqueCascadeEngine:
         # status codes for the same path) and is direct evidence of SQL-conditional routing.
         # Safety: requires non-timing technique to prevent timing-induced status code changes
         # from being misclassified (SLEEP can cause 504 on some servers).
+        # BUG-V224-D-STATUS-ORACLE-SENTINEL-GUARD FIX: Status-oracle divergence (SQL-
+        # conditional HTTP routing) proves boolean SQL evaluation but NOT UNION output
+        # reflection in response headers.  For U/UE/UH without a reflected sentinel,
+        # confirming via status-oracle alone is a false positive: error/WAF routing
+        # can change status codes without the injected UNION SELECT appearing anywhere.
+        # Fix: require sentinel for U/UE/UH on the D status-oracle confirmation path.
         if (_d_pass and (_d_status_oracle or _d_status_oracle_reversed
                          or _d_status_waf_oracle or _d_status_waf_oracle_reversed)
                 and not _timing_only_tech
-                and tech not in ("S", "HQ", "T", "BT", "TH", "DS")):
+                and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             if _d_status_oracle:
                 _so_type = "status-oracle"
             elif _d_status_oracle_reversed:
@@ -124170,6 +124225,13 @@ class TechniqueCascadeEngine:
             # — it's evidence that the URL path doesn't exist.  Require an explicit 2xx response
             # (200–299) for the false probe to confirm SQL-conditional WAF discrimination.
             and 200 <= getattr(fp_false, 'status_code', 0) < 300
+            # BUG-V224-WAFORACLE-REPLAY-SENTINEL-GUARD FIX: WAF-oracle detection replay
+            # (True=4xx oracle status reproduced by detection payload) proves SQL-conditional
+            # WAF blocking but NOT UNION output reflection.  For U/UE/UH without a reflected
+            # sentinel, the True-oracle status change can arise from error-based injection
+            # at the same parameter without the UNION SELECT output appearing anywhere.
+            # Fix: require sentinel for U/UE/UH on this WAF-oracle replay path.
+            and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)
         )
         if _det_waf_oracle_replay_eligible:
             _det_false_sts = getattr(fp_false, 'status_code', 0)
