@@ -1,11 +1,60 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v218 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v217 base + 2 additional bugs fixed. v218 hardens Check C HTTP-500 fallback   ║
-║  with a boolean SQL differential probe (issues #2/#3) and updates the PCV       ║
-║  corroboration gate to recognise the stronger http500_x2_bool_confirmed signal  ║
-║  produced when that probe succeeds.                                              ║
+║  SQLReaper v219 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v218 base + 4 additional bugs fixed. v219 closes two systemic false-positive   ║
+║  paths: (1) Check A WAF-status-oracle-only confirmation, and (2) Check C        ║
+║  http500_x2 missing DBMS-specific conditional error probes.                     ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v218 → v219) — 4 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V219-CHKA-WAF-STATUS-ORACLE-FP (CRITICAL; Check A; all techniques;    ║
+║      all DBMSes; all surfaces with WAF True=4xx oracle): When the calibration   ║
+║      target returns HTTP 403 for a True SQL condition (Cloudflare WAF blocking  ║
+║      injected SQL), _pcv_bool_true_is_4xx=True activates the status-oracle path  ║
+║      in Check A.  Every SQL canary where the WAF blocks the true side (403) and  ║
+║      passes the false side (200) appends a synthetic gap=1.0 pair with           ║
+║      "+status(403vs200)" in the name.  Two such pairs from different name         ║
+║      families ("tautology-num+status" vs "LENGTH ") satisfy the 2-family         ║
+║      requirement and their gap=1.0 bypasses the RC2-FP ≤0.60 guard, confirming  ║
+║      injection without any body SimHash evidence.  The DB never evaluates SQL;  ║
+║      the WAF's keyword filter alone drives the divergence.                        ║
+║      Symptom: log req#39201 confirmed via "tautology-num+status(403vs200)+      ║
+║      LENGTH (structural fallback)+status(403vs200) gap=1.000" — a pure WAF FP.  ║
+║      Fix (early-exit path): add `elif all("+status(" in p[1] for p in           ║
+║      _passing_pairs) and not any("(derived)" in p[1] for p in _passing_pairs):  ║
+║      pass` before the `else: return True` to keep accumulating when every pair  ║
+║      is status-oracle-only and none is payload-derived.                          ║
+║      Fix (final path): add `_all_status_oracle = all("+status(" in p[1] for p   ║
+║      in _passing_pairs); if _all_status_oracle and _all_non_derived: return     ║
+║      False` to reject when no body-based or derived evidence exists.             ║
+║                                                                                    ║
+║  [✓] BUG-V219-CHKC-MISSING-COND-PROBE (HIGH; Check C http500_x2 path; all      ║
+║      techniques; all DBMSes; WAF targets where generic boolean probes are        ║
+║      blocked): After the generic AND 1=1/AND 1=2 boolean probe returns           ║
+║      identical status codes (WAF blocks both SQL payloads identically), v218     ║
+║      falls through to return the weak http500_x2 signal requiring corroboration  ║
+║      from Check A or Check D.  On WAF targets those also fail (A: status-oracle  ║
+║      FP guard now blocks it; D: headers stripped), so the overall PCV is         ║
+║      REJECTED even for genuine injections.                                        ║
+║      Fix: after the boolean probe fails, send DBMS-specific conditional error    ║
+║      probes that embed the boolean inside a DB CASE expression:                  ║
+║        Oracle: AND (SELECT CASE WHEN (1=1) THEN CAST('abc' AS NUMBER)           ║
+║                ELSE 0 END FROM DUAL)=0-- -  → true branch → ORA-01722 → 500    ║
+║        MSSQL:  AND (SELECT CASE WHEN (1=1) THEN CAST('abc' AS INT) ELSE 0       ║
+║                END)=0-- -  → true branch → conversion error → 500               ║
+║        MySQL/PostgreSQL: equivalent CAST patterns.                               ║
+║      If true-probe status ≠ false-probe status → DB evaluated the CASE          ║
+║      expression → upgrade to http500_x2_cond_confirmed (self-corroborating).    ║
+║                                                                                    ║
+║  [✓] BUG-V219-CHKC-COND-CORROBORATION (HIGH; PCV corroboration gate; all        ║
+║      non-E/EH techniques): http500_x2_cond_confirmed was not in the             ║
+║      _c_needs_corroboration exclusion set alongside http500_x2_bool_confirmed,   ║
+║      so the new conditional-error-probe upgrade path would still require Check A  ║
+║      or D corroboration — defeating the self-corroborating promotion.            ║
+║      Fix: extend the exclusion to include "http500_x2_cond_confirmed".           ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v217 → v218) — 2 BUGS FIXED                           ║
@@ -118570,6 +118619,11 @@ class TechniqueCascadeEngine:
                         )
                         if _both_non_derived and _best[0] <= 0.60:
                             pass  # RC2-FP: keep accumulating — require derived pair or gap>0.60
+                        elif all("+status(" in p[1] for p in _passing_pairs) and not any("(derived)" in p[1] for p in _passing_pairs):
+                            pass  # WAF-STATUS-ORACLE-FP: all pairs from WAF status divergence, no
+                                  # body SimHash gap and no derived pair — WAF keyword blocking can
+                                  # produce selective 403/200 without any SQL execution in the DB.
+                                  # Keep accumulating; require a body-based or derived pair.
                         else:
                             return True, _best[0], f"{_passing_pairs[-2][1]}+{_passing_pairs[-1][1]}", _any_strong
                     # Same family — keep accumulating, don't confirm yet
@@ -118613,6 +118667,18 @@ class TechniqueCascadeEngine:
                         return False, _best[0], (
                             f"{_passing_pairs[0][1]}(non-derived-insufficient,"
                             f"gap={_best[0]:.3f},need>0.60-or-derived-pair)"
+                        ), False
+                    # WAF-STATUS-ORACLE-FP guard: if EVERY passing pair came from WAF status
+                    # divergence (gap=1.0 synthetically assigned, no body SimHash measurement)
+                    # and none is a payload-derived pair, the confirmation is purely from WAF
+                    # blocking SQL keywords in the true canary — the DB may never evaluate any
+                    # SQL condition.  Require at least one body-based or derived pair before
+                    # confirming injection.
+                    _all_status_oracle = all("+status(" in p[1] for p in _passing_pairs)
+                    if _all_status_oracle and _all_non_derived:
+                        return False, _best[0], (
+                            f"{_passing_pairs[0][1]}(all-status-oracle-no-body-gap,"
+                            f"gap={_best[0]:.3f},need-body-SimHash-or-derived-pair)"
                         ), False
                     return True, _best[0], "+".join([p[1] for p in _passing_pairs[:2]]), _any_strong
                 # All pairs from same family — still insufficient
@@ -119268,6 +119334,53 @@ class TechniqueCascadeEngine:
                 if _bool_confirmed:
                     return True, "http500_x2_bool_confirmed", "http_500_bool_differential", \
                            f" (HTTP 500 on {_status_500_count} error payloads + boolean SQL differential, absent from baseline {_bl_status})"
+                # BUG-HTTP500-COND-PROBE FIX (Issues #2/#3 cont.): generic AND 1=1/AND 1=2
+                # booleans fail on WAF targets because the WAF blocks identical SQL keywords in
+                # both probes.  Try DBMS-specific conditional error payloads that embed the
+                # boolean condition INSIDE a DB-evaluated expression: the true branch forces a
+                # DB type-cast error (→500) while the false branch evaluates to a safe literal
+                # (→200).  A status difference proves DB-side SQL evaluation, not just WAF
+                # keyword matching.  Upgrade to http500_x2_cond_confirmed (self-corroborating).
+                _cond_confirmed = False
+                try:
+                    _dbms_upper = (dbms or "").upper()
+                    # Build DBMS-specific true/false conditional error probes
+                    if "ORACLE" in _dbms_upper or _dbms_upper == "ORA":
+                        _cond_true_p  = " AND (SELECT CASE WHEN (1=1) THEN CAST('abc' AS NUMBER) ELSE 0 END FROM DUAL)=0-- -"
+                        _cond_false_p = " AND (SELECT CASE WHEN (1=2) THEN CAST('abc' AS NUMBER) ELSE 0 END FROM DUAL)=0-- -"
+                    elif "MSSQL" in _dbms_upper or "SQL SERVER" in _dbms_upper:
+                        _cond_true_p  = " AND (SELECT CASE WHEN (1=1) THEN CAST('abc' AS INT) ELSE 0 END)=0-- -"
+                        _cond_false_p = " AND (SELECT CASE WHEN (1=2) THEN CAST('abc' AS INT) ELSE 0 END)=0-- -"
+                    elif "MYSQL" in _dbms_upper or "MARIADB" in _dbms_upper:
+                        _cond_true_p  = " AND (SELECT CASE WHEN (1=1) THEN CAST('abc' AS SIGNED) ELSE 0 END)=0-- -"
+                        _cond_false_p = " AND (SELECT CASE WHEN (1=2) THEN CAST('abc' AS SIGNED) ELSE 0 END)=0-- -"
+                    elif "POSTGRES" in _dbms_upper or "PGSQL" in _dbms_upper or "PG" == _dbms_upper:
+                        _cond_true_p  = " AND (SELECT CASE WHEN (1=1) THEN CAST('abc' AS INTEGER) ELSE 0 END)=0-- -"
+                        _cond_false_p = " AND (SELECT CASE WHEN (1=2) THEN CAST('abc' AS INTEGER) ELSE 0 END)=0-- -"
+                    else:
+                        # Generic fallback: ANSI CAST — works for most DBMSes
+                        _cond_true_p  = " AND (CASE WHEN (1=1) THEN CAST('abc' AS INTEGER) ELSE 0 END)=0-- -"
+                        _cond_false_p = " AND (CASE WHEN (1=2) THEN CAST('abc' AS INTEGER) ELSE 0 END)=0-- -"
+                    _ctrue_fp,  _, _ctrue_status,  _ = await _pcv_send(_cond_true_p)
+                    _cfalse_fp, _, _cfalse_status, _ = await _pcv_send(_cond_false_p)
+                    if _ctrue_fp is not None and _cfalse_fp is not None:
+                        if _ctrue_status != _cfalse_status:
+                            _cond_confirmed = True
+                            print(f"[*]     Check C HTTP-500 + conditional error probe: "
+                                  f"{_status_500_count} error payloads → 500, conditional probe "
+                                  f"true={_ctrue_status} false={_cfalse_status} → "
+                                  f"DB-evaluated SQL condition PROVED (DBMS={dbms})",
+                                  flush=True)
+                        else:
+                            print(f"[*]     Check C HTTP-500 conditional probe: "
+                                  f"true={_ctrue_status} false={_cfalse_status} — identical; "
+                                  "no DB-side conditional evaluation proved",
+                                  flush=True)
+                except Exception:
+                    pass
+                if _cond_confirmed:
+                    return True, "http500_x2_cond_confirmed", "http_500_cond_error_probe", \
+                           f" (HTTP 500 on {_status_500_count} error payloads + DBMS conditional error probe {_ctrue_status}vs{_cfalse_status}, absent from baseline {_bl_status})"
                 print(f"[*]     Check C HTTP-500 fallback: {_status_500_count} error payloads → 500 "
                       f"(baseline={_bl_status}) — accepting as error signal (no DBMS text visible)"
                       " [canary=non-500, so 500 is SQL-selective]",
@@ -120552,7 +120665,8 @@ class TechniqueCascadeEngine:
                 # For http500_x2 (without boolean confirmation): retain corroboration
                 # requirement since the signal may be WAF/input-validation noise.
                 _c_needs_corroboration = (tech not in ("E", "EH")
-                                          and _c_method != "http500_x2_bool_confirmed")
+                                          and _c_method not in ("http500_x2_bool_confirmed",
+                                                                 "http500_x2_cond_confirmed"))
                 _c_has_corroboration = _a_pass or _d_pass
                 if _c_needs_corroboration and not _c_has_corroboration:
                     print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
