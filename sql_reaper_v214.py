@@ -121103,7 +121103,23 @@ class TechniqueCascadeEngine:
                                                                  "http500_x2_sql_universal",
                                                                  "http500_x2_valid_discriminator"))
                 _c_has_corroboration = _a_pass or _d_pass
-                if _c_needs_corroboration and not _c_has_corroboration:
+                # BUG-UH-CHECKC-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH),
+                # Check C proving SQL reaches the DB (via error-payload 500s) does NOT
+                # prove UNION output is reflected in the response.  A UNION injection
+                # requires the injected SELECT output to appear in headers or body —
+                # only a reflected sentinel (7e7f7e7f7e7f) can confirm that.
+                # All http500_x2* upgrade signals (waf_asymmetric, cond_confirmed, etc.)
+                # demonstrate that the DB evaluates SQL; none demonstrate UNION reflection.
+                # They therefore cannot be self-corroborating for UNION: the sentinel
+                # absence means we cannot distinguish "error-based injection exists" from
+                # "UNION output appears in response".  Block Check C confirmation for
+                # U/UE/UH when the sentinel was not reflected.
+                if tech in ("U", "UE", "UH") and _sentinel_pass is not True:
+                    print(f"[*]   [PCV] Check C {_c_method} BLOCKED for UNION tech={tech}: "
+                          "sentinel not reflected — error-payload 500s prove SQL evaluation "
+                          "but NOT UNION output reflection; cannot confirm UH without sentinel; "
+                          "consider E/EH technique if error patterns visible", flush=True)
+                elif _c_needs_corroboration and not _c_has_corroboration:
                     print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
                           f"tech={tech} — no Check A body signal and no header diff; "
                           "may be application debug page output, not injection", flush=True)
@@ -139090,9 +139106,19 @@ class ScannerV14(ScannerV13):
                                                             # 1 match alone is too permissive — baseline subtraction catches most
                                                             # static content but 2 different payloads triggering same/different
                                                             # error patterns provides much stronger injection evidence.
-                                                            if len(_pcv_c_matches) >= 2 or (len(_pcv_c_matches) >= 1 and _pcv_c_any_500):
+                                                            # BUG-INLINE-CHECKC-WEAK-LABEL FIX: Differentiate 2+ match (strong) from
+                                                            # 1+500 (weak). Weak signal requires Check A corroboration to confirm;
+                                                            # pairing it with only dynamic-header Check D is a FP risk
+                                                            # (500 body changes content-length without SQL injection).
+                                                            _pcv_c_is_weak = False
+                                                            if len(_pcv_c_matches) >= 2:
                                                                 _pcv_checks_passed.append(f"C(error:{_pcv_c_matches[0][0]})")
-                                                                print(f"[+]   [PCV] Check C: PASS  error fingerprint '{_pcv_c_matches[0][1][:30]}'", flush=True)
+                                                                print(f"[+]   [PCV] Check C: PASS  2+ error patterns (strong) '{_pcv_c_matches[0][1][:30]}'", flush=True)
+                                                            elif len(_pcv_c_matches) >= 1 and _pcv_c_any_500:
+                                                                _pcv_c_is_weak = True
+                                                                _pcv_checks_passed.append(f"C(weak_http500:{_pcv_c_matches[0][0]})")
+                                                                print(f"[+]   [PCV] Check C: WEAK PASS  1 error pattern + HTTP 500 "
+                                                                      f"'{_pcv_c_matches[0][1][:30]}' (corroboration required)", flush=True)
                                                             else:
                                                                 print("[!]   [PCV] Check C: FAIL  no DBMS error fingerprint", flush=True)
                                                             
@@ -139217,8 +139243,20 @@ class ScannerV14(ScannerV13):
                                                                 _pcv_confirmed = True
                                                                 print(f"[+] [Surface] FULL PCV PASS  strong body canary (gap={_pcv_a_passes[0][0]:.3f})", flush=True)
                                                             elif len(_pcv_checks_passed) >= 2:
-                                                                _pcv_confirmed = True
-                                                                print(f"[+] [Surface] FULL PCV PASS  {len(_pcv_checks_passed)} checks passed: {', '.join(_pcv_checks_passed)}", flush=True)
+                                                                # BUG-INLINE-CHECKC-WEAK-GUARD FIX: weak Check C (1+500) paired only with
+                                                                # dynamic-header Check D is a FP risk — an HTTP 500 error response has a
+                                                                # different body size than 200, causing content-length/etag to change
+                                                                # without any SQL injection. Require Check A (body canary) OR 3+ checks
+                                                                # when the only passing Check C is the weak 1+500 path.
+                                                                _c_only_weak = (_pcv_c_is_weak and
+                                                                                not any(c.startswith("A(") or c.startswith("E(") for c in _pcv_checks_passed))
+                                                                if _c_only_weak:
+                                                                    print(f"[!] [Surface] FULL PCV BLOCKED  weak Check C (1 error+HTTP500) + "
+                                                                          f"no body canary: header diff alone insufficient to rule out "
+                                                                          f"WAF-selective 500 FP ({_pcv_checks_passed})", flush=True)
+                                                                else:
+                                                                    _pcv_confirmed = True
+                                                                    print(f"[+] [Surface] FULL PCV PASS  {len(_pcv_checks_passed)} checks passed: {', '.join(_pcv_checks_passed)}", flush=True)
                                                             else:
                                                                 print(f"[!] [Surface] FULL PCV FAIL  insufficient evidence ({len(_pcv_checks_passed)} checks: {_pcv_checks_passed})", flush=True)
                                                             
@@ -139599,13 +139637,21 @@ class ScannerV14(ScannerV13):
                                                                                 break
                                                                 
                                                                 # BUG-INLINE-PCVC-SINGLE-MATCH FIX: Require 2 matches OR 1+HTTP500
-                                                                if len(_pcv_c_matches) >= 2 or (len(_pcv_c_matches) >= 1 and _pcv_c_any_500):
+                                                                # BUG-INLINE-CHECKC-WEAK-LABEL FIX: Differentiate strong (2+ matches) from
+                                                                # weak (1 match + HTTP 500) to prevent FP via C(weak)+D(dynamic headers).
+                                                                _pcv_c_is_weak = False
+                                                                if len(_pcv_c_matches) >= 2:
                                                                     _pcv_checks_passed.append(f"C(error:{_pcv_c_matches[0][0]})")
-                                                                    print("[+]   [PCV] Check C: PASS  error fingerprint", flush=True)
+                                                                    print(f"[+]   [PCV] Check C: PASS  2+ error patterns (strong) '{_pcv_c_matches[0][1][:30]}'", flush=True)
+                                                                elif len(_pcv_c_matches) >= 1 and _pcv_c_any_500:
+                                                                    _pcv_c_is_weak = True
+                                                                    _pcv_checks_passed.append(f"C(weak_http500:{_pcv_c_matches[0][0]})")
+                                                                    print(f"[+]   [PCV] Check C: WEAK PASS  1 error pattern + HTTP 500 "
+                                                                          f"'{_pcv_c_matches[0][1][:30]}' (corroboration required)", flush=True)
                                                                 else:
                                                                     print("[!]   [PCV] Check C: FAIL  no DBMS error", flush=True)
-                                                                
-                                                                #  CHECK D: Header Diff 
+
+                                                                #  CHECK D: Header Diff
                                                                 # BUG-CHECK-D-INLINE-4HEADERS FIX: Expanded header list + lowered threshold
                                                                 print("[*]   [PCV] Check D: Header diff verification...", flush=True)
                                                                 _pcv_d_count = 0
@@ -139678,8 +139724,16 @@ class ScannerV14(ScannerV13):
                                                                     _pcv_confirmed = True
                                                                     print("[+] [Surface] JSON FULL PCV PASS  strong body canary", flush=True)
                                                                 elif len(_pcv_checks_passed) >= 2:
-                                                                    _pcv_confirmed = True
-                                                                    print(f"[+] [Surface] JSON FULL PCV PASS  {len(_pcv_checks_passed)} checks: {', '.join(_pcv_checks_passed)}", flush=True)
+                                                                    # BUG-INLINE-CHECKC-WEAK-GUARD FIX: weak C (1+500) + D only is FP risk.
+                                                                    _c_only_weak_j = (_pcv_c_is_weak and
+                                                                                      not any(c.startswith("A(") or c.startswith("E(") for c in _pcv_checks_passed))
+                                                                    if _c_only_weak_j:
+                                                                        print(f"[!] [Surface] JSON FULL PCV BLOCKED  weak Check C (1 error+HTTP500) + "
+                                                                              f"no body canary: insufficient to rule out WAF-selective 500 FP "
+                                                                              f"({_pcv_checks_passed})", flush=True)
+                                                                    else:
+                                                                        _pcv_confirmed = True
+                                                                        print(f"[+] [Surface] JSON FULL PCV PASS  {len(_pcv_checks_passed)} checks: {', '.join(_pcv_checks_passed)}", flush=True)
                                                                 else:
                                                                     print(f"[!] [Surface] JSON FULL PCV FAIL  insufficient evidence ({len(_pcv_checks_passed)} checks)", flush=True)
                                                                 
@@ -140031,13 +140085,20 @@ class ScannerV14(ScannerV13):
                                                                         break
                                                         
                                                         # BUG-INLINE-PCVC-SINGLE-MATCH FIX: Require 2 matches OR 1+HTTP500
-                                                        if len(_pcv_c_matches) >= 2 or (len(_pcv_c_matches) >= 1 and _pcv_c_any_500):
+                                                        # BUG-INLINE-CHECKC-WEAK-LABEL FIX: Differentiate strong/weak paths.
+                                                        _pcv_c_is_weak = False
+                                                        if len(_pcv_c_matches) >= 2:
                                                             _pcv_checks_passed.append(f"C(error:{_pcv_c_matches[0][0]})")
-                                                            print("[+]   [PCV] Check C: PASS  error fingerprint", flush=True)
+                                                            print(f"[+]   [PCV] Check C: PASS  2+ error patterns (strong) '{_pcv_c_matches[0][1][:30]}'", flush=True)
+                                                        elif len(_pcv_c_matches) >= 1 and _pcv_c_any_500:
+                                                            _pcv_c_is_weak = True
+                                                            _pcv_checks_passed.append(f"C(weak_http500:{_pcv_c_matches[0][0]})")
+                                                            print(f"[+]   [PCV] Check C: WEAK PASS  1 error pattern + HTTP 500 "
+                                                                  f"'{_pcv_c_matches[0][1][:30]}' (corroboration required)", flush=True)
                                                         else:
                                                             print("[!]   [PCV] Check C: FAIL  no DBMS error", flush=True)
-                                                        
-                                                        #  CHECK D: Header Diff 
+
+                                                        #  CHECK D: Header Diff
                                                         # BUG-CHECK-D-INLINE-4HEADERS FIX: Expanded header list + lowered threshold
                                                         print("[*]   [PCV] Check D: Header diff verification...", flush=True)
                                                         _pcv_d_count = 0
@@ -140115,8 +140176,16 @@ class ScannerV14(ScannerV13):
                                                             _pcv_confirmed = True
                                                             print("[+] [Surface] GraphQL FULL PCV PASS  strong body canary", flush=True)
                                                         elif len(_pcv_checks_passed) >= 2:
-                                                            _pcv_confirmed = True
-                                                            print(f"[+] [Surface] GraphQL FULL PCV PASS  {len(_pcv_checks_passed)} checks: {', '.join(_pcv_checks_passed)}", flush=True)
+                                                            # BUG-INLINE-CHECKC-WEAK-GUARD FIX: weak C (1+500) + D only is FP risk.
+                                                            _c_only_weak_gql = (_pcv_c_is_weak and
+                                                                                not any(c.startswith("A(") or c.startswith("E(") for c in _pcv_checks_passed))
+                                                            if _c_only_weak_gql:
+                                                                print(f"[!] [Surface] GraphQL FULL PCV BLOCKED  weak Check C (1 error+HTTP500) + "
+                                                                      f"no body canary: insufficient to rule out WAF-selective 500 FP "
+                                                                      f"({_pcv_checks_passed})", flush=True)
+                                                            else:
+                                                                _pcv_confirmed = True
+                                                                print(f"[+] [Surface] GraphQL FULL PCV PASS  {len(_pcv_checks_passed)} checks: {', '.join(_pcv_checks_passed)}", flush=True)
                                                         else:
                                                             print(f"[!] [Surface] GraphQL FULL PCV FAIL  insufficient evidence ({len(_pcv_checks_passed)} checks)", flush=True)
                                                         
@@ -140440,13 +140509,20 @@ class ScannerV14(ScannerV13):
                                                                     break
                                                     
                                                     # BUG-INLINE-PCVC-SINGLE-MATCH FIX: Require 2 matches OR 1+HTTP500
-                                                    if len(_pcv_c_matches) >= 2 or (len(_pcv_c_matches) >= 1 and _pcv_c_any_500):
+                                                    # BUG-INLINE-CHECKC-WEAK-LABEL FIX: Differentiate strong/weak paths.
+                                                    _pcv_c_is_weak = False
+                                                    if len(_pcv_c_matches) >= 2:
                                                         _pcv_checks_passed.append(f"C(error:{_pcv_c_matches[0][0]})")
-                                                        print("[+]   [PCV] Check C: PASS  error fingerprint", flush=True)
+                                                        print(f"[+]   [PCV] Check C: PASS  2+ error patterns (strong) '{_pcv_c_matches[0][1][:30]}'", flush=True)
+                                                    elif len(_pcv_c_matches) >= 1 and _pcv_c_any_500:
+                                                        _pcv_c_is_weak = True
+                                                        _pcv_checks_passed.append(f"C(weak_http500:{_pcv_c_matches[0][0]})")
+                                                        print(f"[+]   [PCV] Check C: WEAK PASS  1 error pattern + HTTP 500 "
+                                                              f"'{_pcv_c_matches[0][1][:30]}' (corroboration required)", flush=True)
                                                     else:
                                                         print("[!]   [PCV] Check C: FAIL  no DBMS error", flush=True)
-                                                    
-                                                    #  CHECK D: Header Diff 
+
+                                                    #  CHECK D: Header Diff
                                                     # BUG-CHECK-D-INLINE-4HEADERS FIX: Expanded header list + lowered threshold
                                                     print("[*]   [PCV] Check D: Header diff verification...", flush=True)
                                                     _pcv_d_count = 0
@@ -140518,8 +140594,16 @@ class ScannerV14(ScannerV13):
                                                         _pcv_confirmed = True
                                                         print("[+] [Surface] XML FULL PCV PASS  strong body canary", flush=True)
                                                     elif len(_pcv_checks_passed) >= 2:
-                                                        _pcv_confirmed = True
-                                                        print(f"[+] [Surface] XML FULL PCV PASS  {len(_pcv_checks_passed)} checks: {', '.join(_pcv_checks_passed)}", flush=True)
+                                                        # BUG-INLINE-CHECKC-WEAK-GUARD FIX: weak C (1+500) + D only is FP risk.
+                                                        _c_only_weak_xml = (_pcv_c_is_weak and
+                                                                            not any(c.startswith("A(") or c.startswith("E(") for c in _pcv_checks_passed))
+                                                        if _c_only_weak_xml:
+                                                            print(f"[!] [Surface] XML FULL PCV BLOCKED  weak Check C (1 error+HTTP500) + "
+                                                                  f"no body canary: insufficient to rule out WAF-selective 500 FP "
+                                                                  f"({_pcv_checks_passed})", flush=True)
+                                                        else:
+                                                            _pcv_confirmed = True
+                                                            print(f"[+] [Surface] XML FULL PCV PASS  {len(_pcv_checks_passed)} checks: {', '.join(_pcv_checks_passed)}", flush=True)
                                                     else:
                                                         print(f"[!] [Surface] XML FULL PCV FAIL  insufficient evidence ({len(_pcv_checks_passed)} checks)", flush=True)
                                                     
