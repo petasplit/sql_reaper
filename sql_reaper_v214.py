@@ -1,6 +1,64 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
+║  SQLReaper v218 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v217 base + 2 additional bugs fixed. v218 hardens Check C HTTP-500 fallback   ║
+║  with a boolean SQL differential probe (issues #2/#3) and updates the PCV       ║
+║  corroboration gate to recognise the stronger http500_x2_bool_confirmed signal  ║
+║  produced when that probe succeeds.                                              ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v217 → v218) — 2 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V218-HTTP500-BOOL-PROBE: Check C HTTP-500 fallback accepted            ║
+║      http500_x2 whenever N≥2 DBMS-specific error payloads returned HTTP 500     ║
+║      and a random non-SQL canary did not.  That random-canary selectivity check  ║
+║      proves the 500s are SQL-pattern-selective but NOT that SQL is actually      ║
+║      being evaluated by the database — a WAF doing keyword blocking or an       ║
+║      input-validation layer can produce identically selective 500s without any  ║
+║      DB involvement.  The log message "no DBMS text visible" confirms this       ║
+║      ambiguity: the application suppressed all DBMS error output, so Check C    ║
+║      could not discriminate injection from WAF/validation blocking.              ║
+║      Symptom: UH detection at req#22624 (Oracle/Cloudflare) cycled through      ║
+║      http500_x2 signals repeatedly; each was rejected for lacking corroboration  ║
+║      (Check A: LENGTH-num-single-pair-insufficient; Check D: 0 diffs); the      ║
+║      system eventually confirmed via a completely independent Check A signal.    ║
+║      HIGH; Check C http500_x2 fallback; all techniques; all DBMSes; all         ║
+║      surfaces where the application uses custom error pages.                     ║
+║      Fix: after the random-canary gate, send a boolean conditional pair          ║
+║      (" AND 1=1-- -" vs " AND 1=2-- -") via the same _pcv_send closure (which  ║
+║      automatically routes to the correct injection surface — header, cookie,    ║
+║      JSON, bg, etc.).  Compare status codes and body similarity (threshold       ║
+║      0.85).  If they differ → SQL conditions are being differentially evaluated  ║
+║      by the DB → return "http500_x2_bool_confirmed" (upgraded, self-            ║
+║      corroborating signal).  If they are identical → 500s are from WAF/input-  ║
+║      validation only, no SQL execution proved → return "http500_x2" (unchanged  ║
+║      weak signal, retains corroboration requirement for non-E/EH techniques).  ║
+║                                                                                    ║
+║  [✓] BUG-V218-HTTP500-BOOL-CORROBORATION: The PCV corroboration gate at         ║
+║      _c_needs_corroboration = tech not in ("E", "EH") treated                   ║
+║      http500_x2_bool_confirmed identically to http500_x2, requiring Check A or  ║
+║      Check D to independently pass before confirming non-E/EH techniques.       ║
+║      When the application suppresses all body/header variance (fixed-layout     ║
+║      error pages, header-stripping proxies), neither Check A nor Check D can    ║
+║      pass — making http500_x2_bool_confirmed effectively dead for those targets  ║
+║      even though the boolean differential already provides equivalent evidence.  ║
+║      Symptom: same UH Oracle/Cloudflare case — http500_x2 with 7 error payloads ║
+║      → 500 was always rejected for tech=UH with "REQUIRES corroboration".       ║
+║      HIGH; PCV corroboration decision; all non-E/EH techniques; all DBMSes;    ║
+║      targets with uniform error-page responses.                                  ║
+║      Fix: `_c_needs_corroboration = tech not in ("E", "EH") and                ║
+║      _c_method != "http500_x2_bool_confirmed"`.  When the boolean differential  ║
+║      probe already proved SQL conditional evaluation, no additional Check A/D   ║
+║      corroboration is required — the boolean probe IS the corroboration.  The   ║
+║      http500_x2 path (without boolean confirmation) retains the corroboration   ║
+║      requirement to prevent WAF-keyword-blocking FPs on non-E/EH techniques.   ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v216 → v217) — 7 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
 ║  SQLReaper v217 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 15, 2026)         ║
 ║  v216 base + 7 additional bugs fixed. v217 fixes the timing threshold NameError ║
 ║  in the bitwise path, WAF-block blindness in body-size and bitwise oracles,    ║
@@ -119165,6 +119223,51 @@ class TechniqueCascadeEngine:
                     # and the canary send fails for any reason (network error, scan stop).
                     # Correct behaviour: treat a failed canary as indeterminate and reject.
                     return False, "", "", ""
+                # BUG-HTTP500-BOOL-PROBE FIX (Issues #2/#3): Random-canary selectivity
+                # proves the 500s are SQL-pattern-selective, NOT that SQL is actually
+                # being evaluated by the database.  WAF keyword blocking or input
+                # validation can produce selective 500s without any DB involvement.
+                # Add a second signal: send a boolean conditional pair to verify that
+                # the DB is differentially evaluating SQL conditions.
+                # Probe A (true condition):  ' AND 1=1-- -   → DB evaluates TRUE
+                # Probe B (false condition): ' AND 1=2-- -   → DB evaluates FALSE
+                # If status or body differ between A and B, SQL is being conditionally
+                # evaluated → upgrade to http500_x2_bool_confirmed (self-corroborating).
+                # If A and B are identical → 500s are from WAF/input-validation only,
+                # no SQL execution proved → retain http500_x2 (requires corroboration).
+                _bool_confirmed = False
+                try:
+                    _btrue_fp, _btrue_sim, _btrue_status, _ = await _pcv_send(" AND 1=1-- -")
+                    _bfalse_fp, _bfalse_sim, _bfalse_status, _ = await _pcv_send(" AND 1=2-- -")
+                    if _btrue_fp is not None and _bfalse_fp is not None:
+                        _bool_status_diff = (_btrue_status != _bfalse_status)
+                        # Body similarity between the two probes (not vs baseline):
+                        # low sim → bodies differ → SQL condition evaluation proved
+                        _btrue_norm = (ResponseNormaliser.normalise(_extract_body_safe(_btrue_fp))
+                                       if _validate_response(_btrue_fp, allow_empty=True) else b"")
+                        _bfalse_norm = (ResponseNormaliser.normalise(_extract_body_safe(_bfalse_fp))
+                                        if _validate_response(_bfalse_fp, allow_empty=True) else b"")
+                        _bool_body_sim = SimHasher.body_similarity(_btrue_norm, _bfalse_norm)
+                        _bool_body_diff = _bool_body_sim < 0.85
+                        _bool_confirmed = _bool_status_diff or _bool_body_diff
+                        if _bool_confirmed:
+                            print(f"[*]     Check C HTTP-500 + boolean differential: "
+                                  f"{_status_500_count} error payloads → 500, boolean probe "
+                                  f"status={_btrue_status}vs{_bfalse_status} "
+                                  f"body_sim={_bool_body_sim:.3f} → SQL condition evaluation PROVED",
+                                  flush=True)
+                        else:
+                            print(f"[*]     Check C HTTP-500 fallback: {_status_500_count} error payloads → 500 "
+                                  f"(baseline={_bl_status}) — no DBMS text visible, boolean probe identical "
+                                  f"(status={_btrue_status}vs{_bfalse_status}, sim={_bool_body_sim:.3f}) "
+                                  "→ may be WAF/input-validation 500, NOT SQL execution; "
+                                  "accepting as weak signal (requires corroboration for non-E/EH)",
+                                  flush=True)
+                except Exception:
+                    pass
+                if _bool_confirmed:
+                    return True, "http500_x2_bool_confirmed", "http_500_bool_differential", \
+                           f" (HTTP 500 on {_status_500_count} error payloads + boolean SQL differential, absent from baseline {_bl_status})"
                 print(f"[*]     Check C HTTP-500 fallback: {_status_500_count} error payloads → 500 "
                       f"(baseline={_bl_status}) — accepting as error signal (no DBMS text visible)"
                       " [canary=non-500, so 500 is SQL-selective]",
@@ -120438,7 +120541,18 @@ class TechniqueCascadeEngine:
                 # cases require at least one independent signal: Check A body diff
                 # or Check D header diff. This prevents FPs from Django/Rails/Laravel
                 # debug pages that include SQL error text in generic server errors.
-                _c_needs_corroboration = tech not in ("E", "EH")
+                # BUG-HTTP500-BOOL-CORROBORATION FIX (Issue #3): When Check C passed via
+                # http500_x2_bool_confirmed, the boolean differential probe itself already
+                # proved that SQL conditions are being differentially evaluated by the DB.
+                # That probe IS independent corroboration — equivalent to a lightweight
+                # Check A body oracle.  Requiring an additional Check A or Check D on top
+                # of a confirmed boolean differential is redundant and causes valid
+                # detections to be rejected when the application suppresses all body/header
+                # variance (e.g. fixed-layout error pages, header-stripping proxies).
+                # For http500_x2 (without boolean confirmation): retain corroboration
+                # requirement since the signal may be WAF/input-validation noise.
+                _c_needs_corroboration = (tech not in ("E", "EH")
+                                          and _c_method != "http500_x2_bool_confirmed")
                 _c_has_corroboration = _a_pass or _d_pass
                 if _c_needs_corroboration and not _c_has_corroboration:
                     print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
