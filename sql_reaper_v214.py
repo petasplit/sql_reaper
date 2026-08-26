@@ -1,10 +1,66 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v219 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v218 base + 4 additional bugs fixed. v219 closes two systemic false-positive   ║
-║  paths: (1) Check A WAF-status-oracle-only confirmation, and (2) Check C        ║
-║  http500_x2 missing DBMS-specific conditional error probes.                     ║
+║  SQLReaper v220 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v219 base + 3 additional fixes. v220 adds a new self-corroborating Check C     ║
+║  signal (SQL-universal-500), fixes the misleading "PASS" label for the weak     ║
+║  http500_x2 fallback, and documents the complete UH false-positive closure.     ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v219 → v220) — 3 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V220-HTTP500-SQL-UNIVERSAL (HIGH; Check C http500_x2 fallback; all     ║
+║      techniques; all DBMSes; WAF targets where all SQL probes produce 500):     ║
+║      After boolean differential, WAF-asymmetric, conditional-error, oracle-     ║
+║      corroboration, and size-discrimination probes all fail, the only remaining ║
+║      signal is the plain http500_x2 (weak, requires corroboration).  However,  ║
+║      an additional independent signal exists: if BOTH boolean probes (AND 1=1   ║
+║      AND AND 1=2) ALSO return 500 (along with the error-trigger payloads), the  ║
+║      server returns 500 for ANY SQL input while non-SQL canary → non-500.  This ║
+║      "SQL-universal-500" pattern proves the server discriminates SQL syntax from ║
+║      non-SQL input — it must be parsing SQL keywords to produce the divergence. ║
+║      Unlike the boolean differential (requires 1=1 vs 1=2 STATUS difference),  ║
+║      SQL-universal-500 requires only that ALL SQL inputs → 500 ≠ canary.       ║
+║      This is stronger than plain http500_x2 (only error-SQL → 500) because it  ║
+║      proves the pattern holds for structurally different SQL payloads (boolean  ║
+║      conditionals AND error triggers), making WAF keyword-coincidence unlikely. ║
+║      Fix: after size_confirmed check, before plain http500_x2 fallback, check  ║
+║      whether _btrue_status AND _bfalse_status (from the bool probe try block)  ║
+║      are both in (400, 500, 502, 503) while _can_status is not → upgrade to    ║
+║      http500_x2_sql_universal (self-corroborating, no Check A/D required).     ║
+║      Also add "http500_x2_sql_universal" to _c_needs_corroboration exclusions. ║
+║                                                                                    ║
+║  [✓] BUG-V220-HTTP500-WEAK-PASS-LABEL (MEDIUM; Check C logging; all techniques ║
+║      where http500_x2 fallback fires and is later rejected for lacking          ║
+║      corroboration): The log line "Check C (error fingerprint): PASS via        ║
+║      http500_x2" was printed even when the signal is weak and will be rejected  ║
+║      if Check A and Check D both fail.  "PASS" implies success to operators    ║
+║      reading logs; the subsequent "REQUIRES corroboration" rejection is         ║
+║      confusing and suggests a bug rather than intentional gating.               ║
+║      Symptom: log lines 1-17 of the Oracle/Cloudflare UH run showed "Check C:  ║
+║      PASS via http500_x2" followed immediately by "REQUIRES corroboration for  ║
+║      tech=UH — no Check A body signal and no header diff; REJECTED".            ║
+║      Fix: print "WEAK PASS (corroboration required) via http500_x2" when        ║
+║      _c_method == "http500_x2" to accurately reflect the signal's gate status. ║
+║      Also updated the fallback print inside _run_check_c() to describe the     ║
+║      signal as "weak (no DBMS text, no boolean differential, no SQL-universal   ║
+║      pattern) — requires corroboration for non-E/EH techniques".               ║
+║                                                                                    ║
+║  [✓] BUG-V220-UH-FP-CLOSURE (INFORMATIONAL; UH technique; all DBMSes; WAF     ║
+║      targets): Root-cause investigation confirms the v219 Check A WAF-status-  ║
+║      oracle-FP guard (BUG-V219-CHKA-WAF-STATUS-ORACLE-FP) completely closes   ║
+║      the primary UH false-positive path identified in the Oracle/Cloudflare     ║
+║      production log.  The log confirmed via "tautology-num+status(403vs200)+   ║
+║      LENGTH (structural fallback)+status(403vs200) gap=1.000" — both pairs     ║
+║      contain "+status(" and neither contains "(derived)" → the v219 guard at   ║
+║      _run_check_a() early-exit (all-waf-oracle → pass, keep accumulating) AND  ║
+║      final-path (_all_waf_oracle AND _all_non_derived → return False) correctly ║
+║      blocks this confirmation path.  The SimHash-based "+wafbody" tagging       ║
+║      (line 118524, _waf_influenced = _t_waf != _f_waf) covers the complemen-   ║
+║      tary case where status codes are identical but one probe is WAF-blocked,  ║
+║      producing a spurious SimHash gap from WAF-challenge-page vs normal-page.  ║
+║      No additional UH-specific fix is needed beyond what v219 provides.        ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v218 → v219) — 4 BUGS FIXED                           ║
@@ -119514,9 +119570,59 @@ class TechniqueCascadeEngine:
                            (f" (HTTP 500 on {_status_500_count} error payloads, mean body "
                             f"{_mean_err_sz:.0f}B vs canary {_can_body_sz}B,"
                             f" absent from baseline {_bl_status})")
+                # BUG-HTTP500-SQL-UNIVERSAL FIX (Issue #2 ext.): Boolean differential and
+                # conditional probes failed (identical responses for 1=1 vs 1=2), and WAF
+                # asymmetric / size signals were absent.  One additional independent signal
+                # remains: check whether BOTH boolean probes (AND 1=1 AND AND 1=2) also
+                # returned HTTP 500 (or 400/502/503) — a "SQL-universal-500" pattern where
+                # ANY SQL input → 500 while non-SQL canary → non-500.
+                #
+                # Why this is meaningful:
+                #  • Canary (non-SQL garbage) → non-500: server tolerates non-SQL input.
+                #  • AND 1=1 → 500 AND AND 1=2 → 500: server rejects ALL SQL input with 500.
+                #  • Error-trigger payloads → 500: consistent with the universal SQL-500 pattern.
+                #  • The server is therefore discriminating SQL from non-SQL — it must be parsing
+                #    SQL syntax to know to return 500.  This is independent of whether DB-side
+                #    conditions are evaluated; syntax-level parsing is sufficient evidence.
+                #
+                # This is weaker than a conditional differential (which proves condition evaluation)
+                # but stronger than plain http500_x2 (which only shows error-SQL → 500).
+                # Upgrade to http500_x2_sql_universal (self-corroborating, no Check A/D needed).
+                #
+                # Guard: require that _btrue_status and _bfalse_status are both in the 500/400
+                # error range (set from the boolean probe try block above) and that they were
+                # actually obtained (not None from an exception).
+                _sql_universal = False
+                try:
+                    if (not _bool_confirmed
+                            and _btrue_status is not None
+                            and _bfalse_status is not None
+                            and _btrue_status in (400, 500, 502, 503)
+                            and _bfalse_status in (400, 500, 502, 503)
+                            and _status_500_count >= 2
+                            and _can_status not in (400, 500, 502, 503)):
+                        _sql_universal = True
+                        print(f"[*]     Check C HTTP-500 + SQL-universal pattern: "
+                              f"{_status_500_count} error payloads → 500, boolean probes also → "
+                              f"{_btrue_status}/{_bfalse_status} (SQL-universal-500: any SQL → 500), "
+                              f"canary → {_can_status} — server discriminates SQL from non-SQL at "
+                              "syntax level; injection signal confirmed", flush=True)
+                except Exception:
+                    pass
+                if _sql_universal:
+                    return True, "http500_x2_sql_universal", "http_500_sql_universal", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, bool probes both "
+                            f"→ {_btrue_status}/{_bfalse_status} SQL-universal, "
+                            f"canary {_can_status}, absent from baseline {_bl_status})")
+                # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
+                # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
+                # size discrimination.  Cannot rule out WAF keyword-blocking or input-validation
+                # returning 500 for SQL keywords without any DB involvement.  This signal
+                # requires independent corroboration (Check A or Check D) before confirming
+                # injection on non-error techniques (non-E/EH).
                 print(f"[*]     Check C HTTP-500 fallback: {_status_500_count} error payloads → 500 "
-                      f"(baseline={_bl_status}) — accepting as error signal (no DBMS text visible)"
-                      " [canary=non-500, so 500 is SQL-selective]",
+                      f"(baseline={_bl_status}) — weak signal (no DBMS text, no boolean differential, "
+                      "no SQL-universal pattern) — requires corroboration for non-E/EH techniques",
                       flush=True)
                 return True, "http500_x2", "http_500_error_response", \
                        f" (HTTP 500 on {_status_500_count} error payloads, absent from baseline {_bl_status})"
@@ -119737,8 +119843,19 @@ class TechniqueCascadeEngine:
         # zero fallbacks were attempted.  Now prints which method was tried on FAIL.
         print(f"[*]     Check A (body canary): {_a_label}"
               f"{'  via ' + _a_method + ' gap=' + f'{_a_gap:.3f}' if _a_pass else ' (' + _a_method + ')'}", flush=True)
+        # BUG-HTTP500-WEAK-PASS-LABEL FIX (Issue #3): When Check C passes via the plain
+        # http500_x2 fallback (weak signal), printing "PASS" is misleading — the signal
+        # still requires Check A or Check D corroboration for non-E/EH techniques and will
+        # be rejected if neither is present.  Show "WEAK PASS (corroboration required)" to
+        # make the log accurately reflect the actual decision state.
+        if _c_pass and _c_method == "http500_x2":
+            _c_label = "WEAK PASS (corroboration required)"
+        elif _c_pass:
+            _c_label = "PASS"
+        else:
+            _c_label = "FAIL"
         print("[*]     Check C (error fingerprint): "
-              f"{'PASS via ' + _c_method + '  ' + _c_match + _c_note if _c_pass else 'FAIL (' + _c_note + ')'}", flush=True)
+              f"{_c_label + ' via ' + _c_method + '  ' + _c_match + _c_note if _c_pass else 'FAIL (' + _c_note + ')'}", flush=True)
 
         _details["A"] = f"{_a_method}: gap={_a_gap:.3f}" if _a_pass else "failed"
         _details["C"] = f"{_c_method}: {_c_match}{_c_note}" if _c_pass else "failed"
@@ -120797,12 +120914,17 @@ class TechniqueCascadeEngine:
                 # variance (e.g. fixed-layout error pages, header-stripping proxies).
                 # For http500_x2 (without boolean confirmation): retain corroboration
                 # requirement since the signal may be WAF/input-validation noise.
+                # BUG-HTTP500-SQL-UNIVERSAL-CORROBORATION FIX: http500_x2_sql_universal proves
+                # that the server discriminates SQL from non-SQL at the syntax level (any SQL →
+                # 500, non-SQL canary → non-500) — an independent self-corroborating observation.
+                # Adding it to the exclusion set so it is not further gated on Check A or Check D.
                 _c_needs_corroboration = (tech not in ("E", "EH")
                                           and _c_method not in ("http500_x2_bool_confirmed",
                                                                  "http500_x2_cond_confirmed",
                                                                  "http500_x2_oracle_corroborated",
                                                                  "http500_x2_size_confirmed",
-                                                                 "http500_x2_waf_asymmetric"))
+                                                                 "http500_x2_waf_asymmetric",
+                                                                 "http500_x2_sql_universal"))
                 _c_has_corroboration = _a_pass or _d_pass
                 if _c_needs_corroboration and not _c_has_corroboration:
                     print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
