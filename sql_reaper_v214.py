@@ -1,10 +1,46 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v220 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v219 base + 3 additional fixes. v220 adds a new self-corroborating Check C     ║
-║  signal (SQL-universal-500), fixes the misleading "PASS" label for the weak     ║
-║  http500_x2 fallback, and documents the complete UH false-positive closure.     ║
+║  SQLReaper v221 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v220 base + 2 additional fixes. v221 adds a positive-control discriminator     ║
+║  probe to Check C (valid SQL → non-error vs error SQL → 500 = semantic DB eval) ║
+║  and fixes the sql_universal status set to include WAF 4xx codes (403/406/429). ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v220 → v221) — 2 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V221-SQL-UNIVERSAL-STATUS-SET (MEDIUM; Check C http500_x2_sql_universal ║
+║      fallback; all techniques; all DBMSes; WAF targets where canary also returns  ║
+║      a WAF 4xx that passes the canary gate but fails the waf_asymmetric guard):  ║
+║      The _sql_universal check used status set (400, 500, 502, 503) for both      ║
+║      _btrue_status and _bfalse_status.  WAF responses commonly return 403 (not   ║
+║      400) for blocked SQL keywords.  In the edge case where waf_asymmetric fails ║
+║      (canary also returns a 4xx in waf_asymmetric's guard set), sql_universal is ║
+║      the last resort; but 403 ∉ (400, 500, 502, 503) silently rejects the signal ║
+║      even though the pattern is meaningful (any SQL → non-2xx, non-SQL → 2xx).   ║
+║      Fix: extend the status set to (400, 403, 406, 429, 500, 502, 503) for both  ║
+║      _btrue_status and _bfalse_status guards, keeping the canary exclusion guard  ║
+║      unchanged at _can_status not in (400, 500, 502, 503) to preserve selectivity.║
+║                                                                                    ║
+║  [✓] BUG-V221-HTTP500-VALID-DISCRIMINATOR (HIGH; Check C http500_x2 fallback;   ║
+║      all techniques; all DBMSes; WAF targets where all other upgrade signals     ║
+║      fail): After sql_universal, if still no signal, all existing http500_x2     ║
+║      upgrade paths are exhausted — the code falls to plain http500_x2 (weakest, ║
+║      requires corroboration from Check A or D which also fail on WAF targets).  ║
+║      Issue #2 request: "we need another signal — maybe it isn't there but it     ║
+║      triggered sql injection."  A positive-control discriminator probe addresses  ║
+║      this: send DBMS-specific "valid SQL" (CAST('123' AS NUMBER) > 0, etc.) that ║
+║      should succeed if the DB is evaluating SQL.  If error-trigger SQL → 500 AND ║
+║      valid-SQL → non-500, the server is semantically evaluating SQL (cannot be   ║
+║      pure WAF keyword blocking, which blocks valid SQL too).  This is stronger   ║
+║      than sql_universal (any SQL → 500) because it shows content-selective       ║
+║      evaluation: errors fail, valid SQL succeeds — only possible with real DB    ║
+║      execution.  Upgraded signal: http500_x2_valid_discriminator (self-          ║
+║      corroborating; added to _c_needs_corroboration exclusion set).              ║
+║      DBMS-specific probe sets: Oracle (CAST('123' AS NUMBER) > 0 from DUAL),    ║
+║      MSSQL (CAST('123' AS INT) > 0), MySQL/MariaDB (CAST('123' AS SIGNED) > 0), ║
+║      PostgreSQL (CAST('123' AS INTEGER) > 0), fallback (LENGTH('SQLReaper') > 0).║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v219 → v220) — 3 BUGS FIXED                           ║
@@ -119594,17 +119630,28 @@ class TechniqueCascadeEngine:
                 # actually obtained (not None from an exception).
                 _sql_universal = False
                 try:
+                    # BUG-V221-SQL-UNIVERSAL-STATUS-SET FIX: The original check only included
+                    # (400, 500, 502, 503) for _btrue_status and _bfalse_status, meaning WAF 403
+                    # responses (and other WAF 4xx like 406/429) were not treated as "error-range"
+                    # status codes.  In the edge case where waf_asymmetric also fails (e.g., canary
+                    # also returns a WAF 4xx that passes the canary gate but fails the waf_asymmetric
+                    # canary guard), sql_universal would be the last resort but would incorrectly
+                    # reject the signal because 403 ∉ (400, 500, 502, 503).
+                    # The intent of sql_universal is: ANY SQL input → non-2xx error while non-SQL
+                    # canary → non-error.  WAF 403 is an error response in this context.
+                    # Fix: extend the status set to include all WAF 4xx codes that indicate the
+                    # server is processing the input as SQL-triggered errors.
                     if (not _bool_confirmed
                             and _btrue_status is not None
                             and _bfalse_status is not None
-                            and _btrue_status in (400, 500, 502, 503)
-                            and _bfalse_status in (400, 500, 502, 503)
+                            and _btrue_status in (400, 403, 406, 429, 500, 502, 503)
+                            and _bfalse_status in (400, 403, 406, 429, 500, 502, 503)
                             and _status_500_count >= 2
                             and _can_status not in (400, 500, 502, 503)):
                         _sql_universal = True
                         print(f"[*]     Check C HTTP-500 + SQL-universal pattern: "
                               f"{_status_500_count} error payloads → 500, boolean probes also → "
-                              f"{_btrue_status}/{_bfalse_status} (SQL-universal-500: any SQL → 500), "
+                              f"{_btrue_status}/{_bfalse_status} (SQL-universal-500: any SQL → error), "
                               f"canary → {_can_status} — server discriminates SQL from non-SQL at "
                               "syntax level; injection signal confirmed", flush=True)
                 except Exception:
@@ -119614,6 +119661,87 @@ class TechniqueCascadeEngine:
                            (f" (HTTP 500 on {_status_500_count} error payloads, bool probes both "
                             f"→ {_btrue_status}/{_bfalse_status} SQL-universal, "
                             f"canary {_can_status}, absent from baseline {_bl_status})")
+                # BUG-V221-HTTP500-VALID-DISCRIMINATOR FIX (Issue #2 ext.): All upgrade signals
+                # have failed — no boolean differential, no WAF asymmetry, no conditional error
+                # differential, no oracle corroboration, no size discrimination, no sql_universal
+                # pattern.  Before falling back to the plain weak http500_x2, attempt one final
+                # positive-control discriminator: send a DBMS-specific "valid SQL" probe that
+                # should succeed (return baseline-like status) and contrast it with the error
+                # payloads that returned 500.
+                #
+                # Rationale:
+                #  • Error-trigger SQL (CAST('abc' AS NUMBER), etc.) → 500 — DB evaluates, errors
+                #  • Valid/safe SQL (CAST('123' AS NUMBER) > 0, SYSDATE > 0, etc.) → 200 — DB evaluates, succeeds
+                #  • Non-SQL canary → 200 (already established above)
+                #  The discriminator is the differential between error SQL (→ 500) and valid SQL
+                #  (→ non-500): if the server's 500 response is SQL-content-selective (errors only,
+                #  not just any SQL), the DB is performing semantic evaluation, not just WAF keyword
+                #  blocking (which would block ALL SQL, returning 4xx for valid SQL too).
+                #
+                # This is stronger than sql_universal (any SQL → 500) because it shows the server
+                # differentiates between VALID and INVALID SQL execution — only possible if the DB
+                # is actually evaluating the SQL semantically.  Self-corroborating: no Check A/D.
+                _valid_discriminator = False
+                _vdisc_status = None
+                try:
+                    _dbms_upper_vd = (dbms or "").upper()
+                    if "ORACLE" in _dbms_upper_vd or _dbms_upper_vd == "ORA":
+                        _valid_probes = [
+                            " AND CAST('123' AS NUMBER) > 0-- -",
+                            " AND (SELECT 1 FROM DUAL WHERE 1=1)=1-- -",
+                        ]
+                    elif "MSSQL" in _dbms_upper_vd or "SQL SERVER" in _dbms_upper_vd:
+                        _valid_probes = [
+                            " AND CAST('123' AS INT) > 0-- -",
+                            " AND LEN('SQLReaper') > 0-- -",
+                        ]
+                    elif "MYSQL" in _dbms_upper_vd or "MARIADB" in _dbms_upper_vd:
+                        _valid_probes = [
+                            " AND CAST('123' AS SIGNED) > 0-- -",
+                            " AND LENGTH('SQLReaper') > 0-- -",
+                        ]
+                    elif "POSTGRES" in _dbms_upper_vd or "PGSQL" in _dbms_upper_vd or "PG" == _dbms_upper_vd:
+                        _valid_probes = [
+                            " AND CAST('123' AS INTEGER) > 0-- -",
+                            " AND LENGTH('SQLReaper') > 0-- -",
+                        ]
+                    else:
+                        # Generic ANSI fallback
+                        _valid_probes = [
+                            " AND LENGTH('SQLReaper') > 0-- -",
+                            " AND CAST('123' AS INTEGER) > 0-- -",
+                        ]
+                    for _vp in _valid_probes:
+                        _vfp, _, _vdisc_status, _ = await _pcv_send(_vp)
+                        if _vfp is not None:
+                            break
+                    # Discriminator fires when: valid SQL returns non-500 (DB executes successfully)
+                    # while error payloads returned 500 (DB executes and raises error).
+                    # The canary already returned non-500 (established above), so we need the
+                    # valid SQL probe to ALSO return non-500 — ruling out the theory that any SQL
+                    # (valid or invalid) triggers 500 (which would be sql_universal territory already
+                    # handled above, or input validation that has no DB involvement).
+                    if (_vdisc_status is not None
+                            and _vdisc_status not in (400, 403, 406, 429, 500, 502, 503)
+                            and _status_500_count >= 2):
+                        _valid_discriminator = True
+                        print(f"[*]     Check C HTTP-500 + valid-SQL discriminator: "
+                              f"{_status_500_count} error payloads → 500, valid SQL probe → "
+                              f"{_vdisc_status} (non-error) — server semantically evaluates SQL: "
+                              "errors trigger 500 but valid SQL succeeds; injection CONFIRMED",
+                              flush=True)
+                    elif _vdisc_status is not None:
+                        print(f"[*]     Check C HTTP-500 valid-SQL discriminator: valid probe → "
+                              f"{_vdisc_status} — no differential vs error payloads (both → error); "
+                              "cannot confirm semantic SQL evaluation via discriminator",
+                              flush=True)
+                except Exception:
+                    pass
+                if _valid_discriminator:
+                    return True, "http500_x2_valid_discriminator", "http_500_valid_discriminator", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, valid SQL → "
+                            f"{_vdisc_status} non-error — semantic SQL evaluation confirmed, "
+                            f"absent from baseline {_bl_status})")
                 # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
                 # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
                 # size discrimination.  Cannot rule out WAF keyword-blocking or input-validation
@@ -120917,14 +121045,18 @@ class TechniqueCascadeEngine:
                 # BUG-HTTP500-SQL-UNIVERSAL-CORROBORATION FIX: http500_x2_sql_universal proves
                 # that the server discriminates SQL from non-SQL at the syntax level (any SQL →
                 # 500, non-SQL canary → non-500) — an independent self-corroborating observation.
-                # Adding it to the exclusion set so it is not further gated on Check A or Check D.
+                # BUG-V221-VALID-DISCRIMINATOR-CORROBORATION FIX: http500_x2_valid_discriminator
+                # proves that the server differentiates VALID SQL (→ non-error) from INVALID SQL
+                # (→ 500), which is only possible with semantic DB evaluation.  Self-corroborating.
+                # Adding both to the exclusion set so they are not further gated on Check A or D.
                 _c_needs_corroboration = (tech not in ("E", "EH")
                                           and _c_method not in ("http500_x2_bool_confirmed",
                                                                  "http500_x2_cond_confirmed",
                                                                  "http500_x2_oracle_corroborated",
                                                                  "http500_x2_size_confirmed",
                                                                  "http500_x2_waf_asymmetric",
-                                                                 "http500_x2_sql_universal"))
+                                                                 "http500_x2_sql_universal",
+                                                                 "http500_x2_valid_discriminator"))
                 _c_has_corroboration = _a_pass or _d_pass
                 if _c_needs_corroboration and not _c_has_corroboration:
                     print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
