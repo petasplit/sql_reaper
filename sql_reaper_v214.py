@@ -118386,7 +118386,17 @@ class TechniqueCascadeEngine:
                 # Fix: apply the suffix-strip regex iteratively until the name is stable, so
                 # "SUBSTR-DUAL-str" → "SUBSTR-DUAL" → "SUBSTR" = "SUBSTR-DUAL" → "SUBSTR".
                 # All context variants of the same SQL function then normalize to one name.
-                b = n.split("(")[0].split("+size")[0]
+                # BUG-NORM-FAMILY-WAFORACLE-SUFFIX FIX: "+status(NNNvsMMM)" and "+wafbody"
+                # suffixes are appended to canary names when the status-oracle or WAF-body
+                # paths fire.  split("(")[0] gives "tautology-num+status" (retains "+status")
+                # and the iterative regex strips "-num" / "-DUAL" etc. but NOT "+status".
+                # Result: "tautology-num+status" ≠ "tautology" → treated as DIFFERENT families,
+                # allowing a WAF-oracle pair and a genuine pair (or two WAF-oracle pairs from
+                # different tautology variants) to jointly satisfy the 2-family requirement
+                # and confirm injection without any real SQL-execution body evidence.
+                # Fix: strip "+status" and "+wafbody" AFTER split("(") so both "tautology-num"
+                # and "tautology-num+status(403vs200)" normalize to "tautology".
+                b = n.split("(")[0].split("+size")[0].split("+status")[0].split("+wafbody")[0]
                 prev = None
                 while prev != b:
                     prev = b
@@ -118649,6 +118659,14 @@ class TechniqueCascadeEngine:
             # the body difference is dramatic but only one canary family fires.
             if len(_passing_pairs) == 1:
                 _g, _n, _s = _passing_pairs[0]
+                # WAF-ORACLE-FP guard (single pair): a "+status(" or "+wafbody" single pair
+                # carries gap=1.0 (synthetically assigned) and _s=True, so the old ≥0.80
+                # threshold accepted it unconditionally as "single-pair-strong-gap".
+                # This is a pure WAF-behavior signal — no body SimHash evidence, no DB query
+                # evaluation proved.  Block it explicitly: single WAF-oracle pairs can never
+                # confirm injection regardless of their synthetic gap value.
+                if "+status(" in _n or "+wafbody" in _n:
+                    return False, _g, f"{_n}(single-waf-oracle-insufficient,need-genuine-body-gap)", False
                 if _g >= 0.80:
                     # FIX-REQ3-SINGLESTRONG: Very strong single pair → accept, but not standalone-strong.
                     # Raising threshold from 0.60→0.80: dynamic pages (CDN A/B, personalization) can
@@ -119326,6 +119344,8 @@ class TechniqueCascadeEngine:
                 # If A and B are identical → 500s are from WAF/input-validation only,
                 # no SQL execution proved → retain http500_x2 (requires corroboration).
                 _bool_confirmed = False
+                _btrue_status = None   # pre-init so WAF-asymmetric check below can read them
+                _bfalse_status = None  # even if the try block raises before assignment
                 try:
                     _btrue_fp, _btrue_sim, _btrue_status, _ = await _pcv_send(" AND 1=1-- -")
                     _bfalse_fp, _bfalse_sim, _bfalse_status, _ = await _pcv_send(" AND 1=2-- -")
@@ -119358,6 +119378,41 @@ class TechniqueCascadeEngine:
                 if _bool_confirmed:
                     return True, "http500_x2_bool_confirmed", "http_500_bool_differential", \
                            f" (HTTP 500 on {_status_500_count} error payloads + boolean SQL differential, absent from baseline {_bl_status})"
+                # BUG-HTTP500-WAF-ASYMMETRIC FIX (Issues #2/#3 ext.): Both boolean probes
+                # were WAF-blocked (identical 4xx status, identical bodies → _bool_confirmed=False)
+                # but the error-trigger payloads produced HTTP 500 (server-processed).
+                # This WAF asymmetry is itself strong injection evidence:
+                #  • Error-trigger SQL (CAST('abc' AS INT), UPDATEXML, etc.) → WAF lets through
+                #    → backend DB evaluates → type/syntax error → HTTP 500
+                #  • Boolean SQL (AND 1=1-- -) → WAF blocks → 4xx
+                # The WAF distinguishes SQL _content types_, proving SQL is being parsed.
+                # If the server weren't evaluating SQL, error-trigger payloads would be blocked
+                # at the same WAF layer as boolean ones (they'd also return 4xx, not 500).
+                # Require: bool probes both returned 4xx (WAF-blocked) AND error payloads
+                # returned 500 (server-processed) AND canary returned non-500/non-4xx.
+                # This triple asymmetry is self-corroborating: upgrade to waf_asymmetric.
+                _waf_asymmetric = False
+                try:
+                    if (not _bool_confirmed
+                            and _btrue_status is not None
+                            and _bfalse_status is not None
+                            and _btrue_status in (400, 403, 406, 429)
+                            and _bfalse_status in (400, 403, 406, 429)
+                            and _status_500_count >= 2
+                            and _can_status not in (400, 403, 406, 429, 500, 502, 503)):
+                        _waf_asymmetric = True
+                        print(f"[*]     Check C HTTP-500 + WAF asymmetry: {_status_500_count} "
+                              f"error payloads → 500 (server-processed), boolean probes → "
+                              f"{_btrue_status}/{_bfalse_status} (WAF-blocked), "
+                              f"canary → {_can_status} — WAF content-type selectivity proves "
+                              "SQL reaches DB backend", flush=True)
+                except Exception:
+                    pass
+                if _waf_asymmetric:
+                    return True, "http500_x2_waf_asymmetric", "http_500_waf_asymmetric", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, bool probes "
+                            f"WAF-blocked {_btrue_status}/{_bfalse_status}, "
+                            f"canary {_can_status}, absent from baseline {_bl_status})")
                 # BUG-HTTP500-COND-PROBE FIX (Issues #2/#3 cont.): generic AND 1=1/AND 1=2
                 # booleans fail on WAF targets because the WAF blocks identical SQL keywords in
                 # both probes.  Try DBMS-specific conditional error payloads that embed the
@@ -120746,7 +120801,8 @@ class TechniqueCascadeEngine:
                                           and _c_method not in ("http500_x2_bool_confirmed",
                                                                  "http500_x2_cond_confirmed",
                                                                  "http500_x2_oracle_corroborated",
-                                                                 "http500_x2_size_confirmed"))
+                                                                 "http500_x2_size_confirmed",
+                                                                 "http500_x2_waf_asymmetric"))
                 _c_has_corroboration = _a_pass or _d_pass
                 if _c_needs_corroboration and not _c_has_corroboration:
                     print(f"[*]   [PCV] Check C ({_c_method}) REQUIRES corroboration for "
