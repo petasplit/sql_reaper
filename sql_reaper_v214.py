@@ -1,9 +1,48 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v222 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v221 base + 2 additional fixes. v222 closes the sentinel=None UH FP gap and   ║
-║  tightens the sql_universal canary exclusion to block WAF-blocked canary FPs.   ║
+║  SQLReaper v223 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
+║  v222 base + 3 additional fixes. v223 closes three sentinel guard gaps in PCV   ║
+║  confirmation paths for U/UE/UH techniques (A+D, D-standalone, detection-replay)║
+║  that allowed false-positive confirmation when sentinel was not reflected.       ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v222 → v223) — 3 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V223-UH-AD-SENTINEL-MISSING (HIGH; U/UE/UH technique; all DBMSes;      ║
+║      all surfaces incl. headers, cookies, JSON, BG; all cascade paths):          ║
+║      The `if _d_pass and _a_pass` confirmation path (Check A body canary +       ║
+║      Check D header diff) had no sentinel guard for UNION techniques.  When       ║
+║      Check A passes with a weak gap (two-pair confirmation, _a_pass=True but      ║
+║      _a_strong=False) and Check D also passes (e.g. content-length diff from      ║
+║      CDN variation or WAF-challenge size change), the code entered this path and  ║
+║      confirmed injection without checking whether the sentinel was reflected.     ║
+║      The _a_strong branch at line 120972 has a sentinel guard, but the weak-gap   ║
+║      A+D path bypasses _a_strong entirely, so the guard never fired.  Result:    ║
+║      CDN cache size jitter (Check D content-length diff) + page variation (Check ║
+║      A body gap) jointly satisfied A+D on non-injectable UH endpoints → FP.      ║
+║      Fix: add a sentinel guard block before the A+D path and require               ║
+║      `tech not in ("U","UE","UH") or _sentinel_pass is True` in the condition.   ║
+║                                                                                    ║
+║  [✓] BUG-V223-UH-D-STANDALONE-SENTINEL-MISSING (HIGH; U/UE/UH technique; all    ║
+║      DBMSes; all surfaces; all cascade paths; when all Check A canaries are       ║
+║      WAF-blocked):                                                                 ║
+║      The Check D standalone confirmation path (fires when _check_a_all_waf_      ║
+║      blocked=True and _a_pass=False) had no sentinel guard for UNION techniques.  ║
+║      A SQL-selective content-length change (error-trigger SQL → different size    ║
+║      than non-SQL canary) would confirm UH injection even though UNION output     ║
+║      was never observed in the response.  Fix: add sentinel guard to condition.   ║
+║                                                                                    ║
+║  [✓] BUG-V223-UH-DETREPLAY-SENTINEL-MISSING (HIGH; U/UE/UH technique; all       ║
+║      DBMSes; all surfaces; all cascade paths; when all Check A canaries are       ║
+║      WAF-blocked and exact detection payload is available):                        ║
+║      The detection-payload replay path (fires when _check_a_all_waf_blocked=True  ║
+║      and the exact bypass payload can be re-sent) had no sentinel guard for UNION ║
+║      techniques.  UH detection is based on body size increase from UNION SELECT;  ║
+║      replaying the same payload reproduces the same size change without proving   ║
+║      the injected SELECT output appears in the response.  Fix: add sentinel guard ║
+║      to condition: `tech not in ("U","UE","UH") or _sentinel_pass is True`.      ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v221 → v222) — 2 BUGS FIXED                           ║
@@ -121141,7 +121180,23 @@ class TechniqueCascadeEngine:
                     _SCAN_STOPPED[0] = True
                     return True, 2 if _a_pass else 1, _details
 
-        if _d_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS"):
+        # BUG-UH-AD-SENTINEL-MISSING FIX: For UNION techniques (U/UE/UH), body canary
+        # gap (Check A) plus header diff (Check D) proves SQL reaches the DB but does NOT
+        # prove UNION output is reflected in the response.  Only a reflected sentinel
+        # (SQLRX+hex) confirms UH/U/UE reflection.  Without this guard, CDN size jitter
+        # and page variation can jointly satisfy A+D on a non-injectable endpoint — false
+        # positive.  The _a_strong branch already has a sentinel guard at line ~120972;
+        # this guard covers the weak-gap A+D path that bypasses _a_strong entirely.
+        if (_d_pass and _a_pass
+                and tech in ("U", "UE", "UH") and _sentinel_pass is not True
+                and tech not in ("S", "HQ", "T", "BT", "TH", "DS")):
+            print(f"[*]   [PCV] Check A+D BLOCKED for UNION tech={tech}: "
+                  "sentinel not reflected — body canary + header diff prove SQL evaluation "
+                  "but NOT UNION output reflection; cannot confirm without sentinel",
+                  flush=True)
+        if (_d_pass and _a_pass
+                and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             if _is_error_page:
                 # BUG-CHECKD-ERRORPAGE-STRONG-A FIX: The old guard required _d_count >= 2 on
                 # error pages, rejecting 1-diff confirmations.  When Check A has a strong gap
@@ -121238,7 +121293,13 @@ class TechniqueCascadeEngine:
                 and _check_a_all_waf_blocked
                 and not _d_probes_both_waf_blocked
                 and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
-                and not _is_error_page):
+                and not _is_error_page
+                # BUG-UH-D-STANDALONE-SENTINEL-MISSING FIX: header diff proves SQL
+                # conditionally changes response, but NOT that UNION output is reflected.
+                # Only a reflected sentinel can confirm U/UE/UH.  Without this guard,
+                # any SQL-selective content-length change confirms a UNION technique as
+                # injected even though no UNION output appeared in the response.
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             print(f"[*]   [PCV] Result: CONFIRMED  header diff ({_d_count}) standalone "
                   "(all Check A canaries WAF-blocked — content-length diffs prove SQL conditional branch, "
                   f"body gap inapplicable [tech={tech} dbms={dbms}])", flush=True)
@@ -121363,7 +121424,14 @@ class TechniqueCascadeEngine:
                 and not _a_pass
                 and tech not in ("S", "HQ", "T", "BT", "TH", "DS", "SO")
                 and not _timing_only_tech
-                and _use_exact_payload):
+                and _use_exact_payload
+                # BUG-UH-DETREPLAY-SENTINEL-MISSING FIX: detection-payload replay showing
+                # a body change proves WAF bypass reached the DB, but NOT that UNION output
+                # is reflected.  U/UE/UH detection is based on response body size increase
+                # from UNION SELECT; replay reproduces that same size change without proving
+                # the injected SELECT output appears in the response body.  Block replay
+                # confirmation for UNION techniques unless the sentinel was reflected.
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             _det_bypass_ok = (
                 _det_fp is not None
                 and (
