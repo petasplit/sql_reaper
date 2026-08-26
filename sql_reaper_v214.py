@@ -121094,14 +121094,25 @@ class TechniqueCascadeEngine:
                 # proves that the server differentiates VALID SQL (→ non-error) from INVALID SQL
                 # (→ 500), which is only possible with semantic DB evaluation.  Self-corroborating.
                 # Adding both to the exclusion set so they are not further gated on Check A or D.
-                _c_needs_corroboration = (tech not in ("E", "EH")
-                                          and _c_method not in ("http500_x2_bool_confirmed",
-                                                                 "http500_x2_cond_confirmed",
-                                                                 "http500_x2_oracle_corroborated",
-                                                                 "http500_x2_size_confirmed",
-                                                                 "http500_x2_waf_asymmetric",
-                                                                 "http500_x2_sql_universal",
-                                                                 "http500_x2_valid_discriminator"))
+                # BUG-HTTP500-PLAIN-ALWAYS-NEEDS-CORROBORATION FIX: The original condition
+                # `tech not in ("E", "EH")` was False for error-based techniques, which
+                # short-circuited the entire AND to False — meaning E/EH + plain http500_x2
+                # (no DBMS text, no boolean differential, no SQL-universal pattern) was
+                # confirmed with NO corroboration required.  Plain http500_x2 is the weakest
+                # possible signal: ANY application bug or WAF rate-limit can produce 500s.
+                # Fix: plain http500_x2 ALWAYS needs corroboration regardless of technique.
+                # The "or" with `tech not in ("E","EH")` preserves the original intent for
+                # non-error techniques while adding the new blanket http500_x2 requirement.
+                _c_needs_corroboration = (
+                    (_c_method == "http500_x2"  # weakest: no DBMS text, no SQL-eval proof → always corroborate
+                     or tech not in ("E", "EH"))
+                    and _c_method not in ("http500_x2_bool_confirmed",
+                                          "http500_x2_cond_confirmed",
+                                          "http500_x2_oracle_corroborated",
+                                          "http500_x2_size_confirmed",
+                                          "http500_x2_waf_asymmetric",
+                                          "http500_x2_sql_universal",
+                                          "http500_x2_valid_discriminator"))
                 _c_has_corroboration = _a_pass or _d_pass
                 # BUG-UH-CHECKC-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH),
                 # Check C proving SQL reaches the DB (via error-payload 500s) does NOT
@@ -128661,9 +128672,16 @@ class TechniqueCascadeEngine:
             # appears in the response body regardless of whether the injection was via URL or header.
             norm_probe_uh = ResponseNormaliser.normalise(_extract_body_safe(fp)) if _validate_response(fp, allow_empty=True) else b""
             sim_uh = SimHasher.body_similarity(norm_base, norm_probe_uh)
-            _uh_bl = max(baseline.get("mean_length", 0), 50)
+            # BUG-UH-FLOOR-THRESHOLD FIX: Old floor was 50B — trivially passed by any
+            # non-empty response (317B response vs 50B floor = 55B/57.5B thresholds).
+            # Raised to 400B: when no baseline data exists (mean_length=0), a size-based
+            # UH detection requires the response to be at least 520B (400*1.3), ruling
+            # out small WAF/CDN error pages that happen to differ from an empty baseline.
+            _uh_bl = max(baseline.get("mean_length", 0), 400)
             _uh_status_ok = _get_safe_status_code(fp) == baseline.get("modal_status", 200)
-            _uh_body_bigger = fp.content_length > _uh_bl * 1.1
+            # BUG-UH-MULTIPLIER-FIX: Old multiplier 1.1 (10% larger) is within CDN and
+            # dynamic-page variation noise; raised to 1.3 (30% larger required).
+            _uh_body_bigger = fp.content_length > _uh_bl * 1.3
             _uh_diff = 1.0 - sim_uh
             _uh_col_err = bool(re.search(
                 r"different.*number.*columns|column.*doesn.t.*match|"                r"The used SELECT statements have a different number",
@@ -128679,11 +128697,11 @@ class TechniqueCascadeEngine:
                 # Confirm with a 2nd probe to eliminate single-request CDN variation
                 _uh_confirm = await self._safe_confirm(method, url, data, data_fmt,
                     param, original, self.tamper_chain, extra_headers=_extra_hdrs)
-                # BUG-UH-UNION-THRESHOLD FIX: Was 1.05 (5% body size increase). Dynamic pages
-                # and CDN-cold vs CDN-warm responses can easily produce 5% size variation without
-                # injection. Fix: raise to 1.15 (15% larger body required). UNION injection
-                # typically adds entire rows of data, producing much larger than 15% increases.
-                if _uh_confirm and (_uh_confirm.content_length > _uh_bl * 1.15):
+                # BUG-UH-UNION-THRESHOLD FIX: Was 1.05→1.15; raised further to 1.3 to match
+                # the detection threshold (30% increase required).  Confirmation and detection
+                # must use the same multiplier so a candidate cannot pass detection but fail
+                # confirmation, or vice-versa, due to threshold inconsistency.
+                if _uh_confirm and (_uh_confirm.content_length > _uh_bl * 1.3):
                     _det_uh = DetectionResult(
                         param=param, technique="UH",
                         payload=payload, dbms=dbms,
