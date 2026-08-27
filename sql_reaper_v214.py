@@ -115112,10 +115112,16 @@ class TechniqueCascadeEngine:
                     # Body-only check always fails → genuine UH injections rejected (FN).
                     # Fix: when det.technique=="UH", also check response header values for
                     # the sentinel string, mirroring the fix in _post_confirm_verify_locked.
+                    # BUG-SENTINEL-SURFACE-JSON/XML/PATH/BG FIX (inline PCV): Extend the
+                    # header check to all non-body surfaces (json, xml, path, bg) where the
+                    # application may reflect UNION output into response headers regardless
+                    # of the technique.
                     _det_tech_uh_ipc = (getattr(det, 'technique', '') or '') if det else ''
+                    _det_fmt_uh_ipc = (getattr(det, 'data_fmt', '') or data_fmt or '') if det else data_fmt or ''
                     _sfp_sentinel_hdr_ipc = None
                     if (_sfp and _validate_response(_sfp, "_sfp_sentinel_check")
-                            and _det_tech_uh_ipc == "UH"
+                            and (_det_tech_uh_ipc == "UH"
+                                 or _det_fmt_uh_ipc in ("header", "cookie", "json", "xml", "path", "bg"))
                             and _SENTINEL.encode() not in _sfp.body):
                         try:
                             for _hk_ipc, _hv_ipc in (getattr(_sfp, 'headers', {}) or {}).items():
@@ -118477,13 +118483,14 @@ class TechniqueCascadeEngine:
                         # → every sentinel-guarded path blocked → genuine UH is a
                         # permanent false-negative after v219-v224 FP guards.
                         # Fix: for tech="UH", check response header values for the sentinel.
-                        # BUG-SENTINEL-SURFACE-HEADER/COOKIE FIX: Extend header check to ANY
-                        # technique when data_fmt is "header" or "cookie" — the application
-                        # may reflect union output into response headers or Set-Cookie values
-                        # regardless of the technique classification (U/UE/UH).  The existing
-                        # _sentinel_in_headers helper already scans ALL response headers
-                        # including Set-Cookie, so the same code path handles both surfaces.
-                        if tech == "UH" or data_fmt in ("header", "cookie"):
+                        # BUG-SENTINEL-SURFACE-HEADER/COOKIE/JSON/XML FIX: Extend header
+                        # check to ANY technique when data_fmt is "header", "cookie",
+                        # "json", "xml", "path", or "bg" — the application may reflect
+                        # UNION output into response headers or Set-Cookie values regardless
+                        # of the technique classification (U/UE/UH).  The existing
+                        # _sentinel_in_headers helper scans ALL response headers including
+                        # Set-Cookie, so the same code path handles all surfaces.
+                        if tech == "UH" or data_fmt in ("header", "cookie", "json", "xml", "path", "bg"):
                             _uh_hdr_key = _sentinel_in_headers(_sfp)
                             if _uh_hdr_key is None:
                                 # Sentinel absent from body AND headers — try numeric probe headers
@@ -118513,7 +118520,7 @@ class TechniqueCascadeEngine:
                             print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected"
                                   "  body-size signal is CDN cache variation / surface "
                                   f"(tech={tech}, data_fmt={data_fmt})", flush=True)
-                elif (tech == "UH" or data_fmt in ("header", "cookie")) and _sfp and not WAFBlockDiscriminator.is_waf_block(_sfp):
+                elif (tech == "UH" or data_fmt in ("header", "cookie", "json", "xml", "path", "bg")) and _sfp and not WAFBlockDiscriminator.is_waf_block(_sfp):
                     # BUG-V225-UH-SENTINEL-HEADER-FIX: Body was empty or absent (redirect /
                     # header-only response).  For UH and header/cookie surfaces, check response
                     # headers directly.  Set-Cookie and custom response headers may carry the
@@ -119554,7 +119561,7 @@ class TechniqueCascadeEngine:
             # "header" and "cookie" surfaces may also reflect DBMS errors in response headers
             # or Set-Cookie values rather than (or in addition to) the response body.
             _is_header_cookie_surface = (
-                data_fmt in ("header", "cookie")
+                data_fmt in ("header", "cookie", "json", "xml", "path", "bg")
                 or tech in ("EH", "BH", "TH", "UH")
             )
             _bl_headers_str = ""
@@ -120067,6 +120074,67 @@ class TechniqueCascadeEngine:
                                (f" (HTTP 500 on {_status_500_count} error payloads, "
                                 f"DBMS error pattern '{_hdr_err_pattern[:30]}' in response headers, "
                                 f"absent from baseline {_bl_status})")
+                # BUG-HTTP500-HDR-STRUCTURAL FIX: When DBMS text, boolean differential,
+                # conditional probe, WAF asymmetry, oracle corroboration, size discrimination,
+                # sql_universal, valid_discriminator and hdr_error all fail, check for
+                # structural differences between error response headers and the canary
+                # response headers.  If error payloads produce responses that carry extra
+                # header keys entirely absent from the canary (e.g. X-Error, X-Exception,
+                # X-Debug, X-Trace-Id, Retry-After) this proves the server is generating
+                # structurally different responses for SQL-error-triggering input — the
+                # server must be processing the SQL to know to include those headers.
+                # This is a SQL-selective structural signal independent of DBMS text.
+                # Upgrade to http500_x2_hdr_structural (self-corroborating).
+                _hdr_structural_confirmed = False
+                _hdr_structural_note = ""
+                try:
+                    if _can_fp is not None and _error_fps:
+                        _can_hdrs_set = set(
+                            k.lower()
+                            for k in (dict(getattr(_can_fp, 'headers', {}) or {})).keys()
+                        )
+                        _err_only_hdrs = set()
+                        for _efp_s in _error_fps:
+                            try:
+                                _efp_s_keys = set(
+                                    k.lower()
+                                    for k in (dict(getattr(_efp_s, 'headers', {}) or {})).keys()
+                                )
+                                _err_only_hdrs |= (_efp_s_keys - _can_hdrs_set)
+                            except Exception:
+                                pass
+                        # First check: error-indicator named headers (strongest signal)
+                        _error_indicator_kw = ("error", "exception", "debug", "x-err", "x-exc",
+                                               "x-debug", "retry-after", "x-trace", "x-transaction",
+                                               "x-cf-err", "x-amz-error", "x-b3-")
+                        _error_indicator_hdrs = {
+                            h for h in _err_only_hdrs
+                            if any(kw in h for kw in _error_indicator_kw)
+                        }
+                        if _error_indicator_hdrs:
+                            _hdr_structural_confirmed = True
+                            _hdr_structural_note = ",".join(sorted(_error_indicator_hdrs)[:3])
+                            print(f"[*]     Check C HTTP-500 + structural header signal: "
+                                  f"{_status_500_count} error payloads → 500, error-indicator "
+                                  f"headers present in error responses but not in canary "
+                                  f"({_hdr_structural_note}) — SQL-selective structural "
+                                  "response difference", flush=True)
+                        elif len(_err_only_hdrs) >= 3:
+                            # 3+ extra headers beyond canary is a strong structural difference
+                            _hdr_structural_confirmed = True
+                            _hdr_structural_note = ",".join(sorted(_err_only_hdrs)[:3])
+                            print(f"[*]     Check C HTTP-500 + structural header signal: "
+                                  f"{_status_500_count} error payloads → 500, "
+                                  f"{len(_err_only_hdrs)} extra response headers vs canary "
+                                  f"({_hdr_structural_note}) — SQL-selective structural "
+                                  "response difference", flush=True)
+                except Exception:
+                    pass
+                if _hdr_structural_confirmed:
+                    return True, "http500_x2_hdr_structural", "http_500_header_structural", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, "
+                            f"structural header difference vs canary: {_hdr_structural_note}, "
+                            f"absent from baseline {_bl_status})")
                 # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
                 # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
                 # size discrimination.  Cannot rule out WAF keyword-blocking or input-validation
@@ -121400,7 +121468,11 @@ class TechniqueCascadeEngine:
                                           # http500_x2_hdr_error proves DBMS error text is present
                                           # in response headers — self-corroborating (no extra
                                           # Check A or D needed to confirm DBMS is executing SQL).
-                                          "http500_x2_hdr_error"))
+                                          "http500_x2_hdr_error",
+                                          # http500_x2_hdr_structural: error responses carry extra
+                                          # header keys absent from the non-SQL canary — structural
+                                          # SQL-selective difference; self-corroborating.
+                                          "http500_x2_hdr_structural"))
                 _c_has_corroboration = _a_pass or _d_pass
                 # BUG-UH-CHECKC-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH),
                 # Check C proving SQL reaches the DB (via error-payload 500s) does NOT
