@@ -118477,7 +118477,13 @@ class TechniqueCascadeEngine:
                         # → every sentinel-guarded path blocked → genuine UH is a
                         # permanent false-negative after v219-v224 FP guards.
                         # Fix: for tech="UH", check response header values for the sentinel.
-                        if tech == "UH":
+                        # BUG-SENTINEL-SURFACE-HEADER/COOKIE FIX: Extend header check to ANY
+                        # technique when data_fmt is "header" or "cookie" — the application
+                        # may reflect union output into response headers or Set-Cookie values
+                        # regardless of the technique classification (U/UE/UH).  The existing
+                        # _sentinel_in_headers helper already scans ALL response headers
+                        # including Set-Cookie, so the same code path handles both surfaces.
+                        if tech == "UH" or data_fmt in ("header", "cookie"):
                             _uh_hdr_key = _sentinel_in_headers(_sfp)
                             if _uh_hdr_key is None:
                                 # Sentinel absent from body AND headers — try numeric probe headers
@@ -118505,10 +118511,13 @@ class TechniqueCascadeEngine:
                         else:
                             _sentinel_pass = False
                             print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected"
-                                  "  body-size signal is CDN cache variation", flush=True)
-                elif tech == "UH" and _sfp and not WAFBlockDiscriminator.is_waf_block(_sfp):
+                                  "  body-size signal is CDN cache variation / surface "
+                                  f"(tech={tech}, data_fmt={data_fmt})", flush=True)
+                elif (tech == "UH" or data_fmt in ("header", "cookie")) and _sfp and not WAFBlockDiscriminator.is_waf_block(_sfp):
                     # BUG-V225-UH-SENTINEL-HEADER-FIX: Body was empty or absent (redirect /
-                    # header-only response).  For UH, check response headers directly.
+                    # header-only response).  For UH and header/cookie surfaces, check response
+                    # headers directly.  Set-Cookie and custom response headers may carry the
+                    # sentinel when the response body is empty or suppressed.
                     _uh_hdr_key2 = _sentinel_in_headers(_sfp)
                     if _uh_hdr_key2 is None:
                         try:
@@ -119535,6 +119544,28 @@ class TechniqueCascadeEngine:
             _any_status_500 = False
             _status_500_count = 0
             _error_body_sizes = []  # Body sizes of 500-returning error payloads (for size discrimination)
+            # BUG-CHECKC-NO-HDR-FPS FIX: Retain fingerprints of 500-producing error payloads
+            # so that the http500_x2_hdr_error upgrade path can scan their response headers
+            # for DBMS error text that was suppressed from the response body.
+            _error_fps = []  # Fingerprints of 500/4xx-returning error payloads
+            # BUG-CHECKC-BODY-ONLY FIX: Detect header/cookie injection surfaces upfront so
+            # the scan loop can check response headers in addition to the response body.
+            # EH/BH/TH/UH techniques all route output through response headers; data_fmt
+            # "header" and "cookie" surfaces may also reflect DBMS errors in response headers
+            # or Set-Cookie values rather than (or in addition to) the response body.
+            _is_header_cookie_surface = (
+                data_fmt in ("header", "cookie")
+                or tech in ("EH", "BH", "TH", "UH")
+            )
+            _bl_headers_str = ""
+            if _is_header_cookie_surface:
+                try:
+                    _bl_hdrs = dict(getattr(_bl_fp, 'headers', {}) or {})
+                    _bl_headers_str = " ".join(
+                        f"{_k}:{_v}" for _k, _v in _bl_hdrs.items()
+                    ).lower()
+                except Exception:
+                    _bl_headers_str = ""
             
             for _cp, _c_name in _c_fallbacks:
                 _cfp, _, _c_status, _ = await _pcv_send(_cp)
@@ -119546,6 +119577,8 @@ class TechniqueCascadeEngine:
                         _status_500_count += 1
                         if _cfp is not None:
                             _error_body_sizes.append(len(_extract_body_safe(_cfp)))
+                            # BUG-CHECKC-NO-HDR-FPS FIX: Retain fingerprint for header scan
+                            _error_fps.append(_cfp)
 
                     # BUG-CHECKC-NO-WAF-DETECTION FIX (MEDIUM, all DBMSes on WAF-protected
                     # targets, Check C error canary loop):
@@ -119581,6 +119614,23 @@ class TechniqueCascadeEngine:
 
                     if _new_matches:
                         _all_c_matches.append((_c_name, _new_matches[0], _c_status))
+                    elif _is_header_cookie_surface:
+                        # BUG-CHECKC-BODY-ONLY FIX: For header/cookie surfaces and header-output
+                        # techniques (EH/BH/TH/UH), DBMS error text may appear in response
+                        # headers (X-Error, X-Debug, X-Exception, Set-Cookie) rather than the
+                        # body.  Scan response headers with baseline subtraction when body scan
+                        # produced no matches.
+                        try:
+                            _c_hdrs = dict(getattr(_cfp, 'headers', {}) or {})
+                            _cheaders_str = " ".join(
+                                f"{_k}:{_v}" for _k, _v in _c_hdrs.items()
+                            ).lower()
+                            for p in _err_patterns:
+                                if p in _cheaders_str and p not in _bl_headers_str:
+                                    _all_c_matches.append((_c_name + "_hdr", p, _c_status))
+                                    break
+                        except Exception:
+                            pass
             
             # Decision: require 2 DIFFERENT error patterns from 2 different payloads
             # OR 2 payloads producing the SAME pattern (baseline-subtracted so not static)
@@ -119983,6 +120033,40 @@ class TechniqueCascadeEngine:
                            (f" (HTTP 500 on {_status_500_count} error payloads, valid SQL → "
                             f"{_vdisc_status} non-error — semantic SQL evaluation confirmed, "
                             f"absent from baseline {_bl_status})")
+                # BUG-HTTP500-NO-HEADER-SCAN FIX: When DBMS error text is suppressed from the
+                # response body but appears in response headers (X-Error, X-Debug, X-Exception,
+                # Set-Cookie) for header/cookie injection surfaces, upgrade to the stronger
+                # http500_x2_hdr_error signal which carries its own confirmation (DBMS error
+                # text proved present, just in headers rather than body) — self-corroborating.
+                if _is_header_cookie_surface and _error_fps:
+                    _hdr_err_found = False
+                    _hdr_err_pattern = ""
+                    _hdr_err_name = ""
+                    for _efp in _error_fps:
+                        try:
+                            _efp_hdrs = dict(getattr(_efp, 'headers', {}) or {})
+                            _ehdr_str = " ".join(
+                                f"{_k}:{_v}" for _k, _v in _efp_hdrs.items()
+                            ).lower()
+                            for p in _err_patterns:
+                                if p in _ehdr_str and p not in _bl_headers_str:
+                                    _hdr_err_found = True
+                                    _hdr_err_pattern = p
+                                    break
+                        except Exception:
+                            pass
+                        if _hdr_err_found:
+                            break
+                    if _hdr_err_found:
+                        print(f"[*]     Check C HTTP-500 + response-header DBMS error: "
+                              f"{_status_500_count} error payloads → 500, DBMS error pattern "
+                              f"'{_hdr_err_pattern[:30]}' found in response headers "
+                              f"(absent from baseline) — injection CONFIRMED via header error",
+                              flush=True)
+                        return True, "http500_x2_hdr_error", "http_500_header_error_response", \
+                               (f" (HTTP 500 on {_status_500_count} error payloads, "
+                                f"DBMS error pattern '{_hdr_err_pattern[:30]}' in response headers, "
+                                f"absent from baseline {_bl_status})")
                 # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
                 # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
                 # size discrimination.  Cannot rule out WAF keyword-blocking or input-validation
@@ -121311,7 +121395,12 @@ class TechniqueCascadeEngine:
                                           "http500_x2_size_confirmed",
                                           "http500_x2_waf_asymmetric",
                                           "http500_x2_sql_universal",
-                                          "http500_x2_valid_discriminator"))
+                                          "http500_x2_valid_discriminator",
+                                          # BUG-CORROBORATION-MISSING-HDR-METHOD FIX:
+                                          # http500_x2_hdr_error proves DBMS error text is present
+                                          # in response headers — self-corroborating (no extra
+                                          # Check A or D needed to confirm DBMS is executing SQL).
+                                          "http500_x2_hdr_error"))
                 _c_has_corroboration = _a_pass or _d_pass
                 # BUG-UH-CHECKC-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH),
                 # Check C proving SQL reaches the DB (via error-payload 500s) does NOT
@@ -139610,7 +139699,19 @@ class ScannerV14(ScannerV13):
                                                                 _sv_clean_body = _safe_decode_body(_sv_clean).lower() if _sv_clean and _sv_clean.body else ""
                                                             except (UnicodeDecodeError, AttributeError, TypeError):
                                                                 _sv_clean_body = "" # Fallback
-                                                            
+                                                            # BUG-CHECKC-INLINE-BODY-ONLY FIX: For header/cookie surfaces, DBMS error
+                                                            # text may appear in response headers (X-Error, X-Debug, Set-Cookie) rather
+                                                            # than the body. Build a baseline headers string for differential scanning.
+                                                            _sv_clean_hdrs_str = ""
+                                                            if _surf_type in ("header", "cookie"):
+                                                                try:
+                                                                    _sv_clean_hdrs = dict(getattr(_sv_clean, 'headers', {}) or {})
+                                                                    _sv_clean_hdrs_str = " ".join(
+                                                                        f"{_k}:{_v}" for _k, _v in _sv_clean_hdrs.items()
+                                                                    ).lower()
+                                                                except Exception:
+                                                                    _sv_clean_hdrs_str = ""
+
                                                             for _cp, _cname in _pcv_c_fallbacks:
                                                                 _pcv_fp_c = None
                                                                 if _surf_type == "header":
@@ -139622,16 +139723,32 @@ class ScannerV14(ScannerV13):
                                                                 elif _surf_type == "path":
                                                                     _pcv_fp_c = await engine.send(_base_ep.method,
                                                                         PathSegmentInjector.inject_segment(_base_ep.url, _surf_data.get("_seg_idx", 0), _cp))
-                                                                
+
                                                                 if _validate_response(_pcv_fp_c, "response_body_check"):
                                                                     _pcv_c_body = _safe_decode_body(_pcv_fp_c, encoding="utf-8", errors='replace', func_name='extraction__pcv_fp_c').lower()
                                                                     # BUG-INLINE-PCVC-SINGLE-MATCH FIX: Track HTTP 500 status for 1+500 path
                                                                     if _get_safe_status_code(_pcv_fp_c) == 500:
                                                                         _pcv_c_any_500 = True
+                                                                    _pcv_c_body_matched = False
                                                                     for _ep in _err_patterns:
                                                                         if _ep in _pcv_c_body and _ep not in _sv_clean_body:
                                                                             _pcv_c_matches.append((_cname, _ep))
+                                                                            _pcv_c_body_matched = True
                                                                             break
+                                                                    # BUG-CHECKC-INLINE-BODY-ONLY FIX: When body scan found no match,
+                                                                    # also scan response headers for header/cookie injection surfaces.
+                                                                    if not _pcv_c_body_matched and _surf_type in ("header", "cookie"):
+                                                                        try:
+                                                                            _pcv_c_fp_hdrs = dict(getattr(_pcv_fp_c, 'headers', {}) or {})
+                                                                            _pcv_c_hdrs_str = " ".join(
+                                                                                f"{_k}:{_v}" for _k, _v in _pcv_c_fp_hdrs.items()
+                                                                            ).lower()
+                                                                            for _ep in _err_patterns:
+                                                                                if _ep in _pcv_c_hdrs_str and _ep not in _sv_clean_hdrs_str:
+                                                                                    _pcv_c_matches.append((_cname + "_hdr", _ep))
+                                                                                    break
+                                                                        except Exception:
+                                                                            pass
                                                             
                                                             # BUG-INLINE-PCVC-SINGLE-MATCH FIX: Require 2 error matches OR 1+HTTP500,
                                                             # consistent with main _run_check_c() which uses same threshold.
