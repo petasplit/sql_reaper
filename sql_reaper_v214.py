@@ -42353,11 +42353,29 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                     # BUG-SENTINEL-CASE-FIX: Check both exact and lowercase sentinel bytes
                     # for servers that lowercase response bodies (e.g. templating engines
                     # that apply tolower() on reflected values before HTML encoding).
+                    # BUG-SENTINEL-HEADER-SURFACE-FIX: For header/cookie/json/xml/path/bg
+                    # surfaces the application may reflect UNION output into response headers
+                    # (X-Custom, Set-Cookie, etc.) rather than the response body.  Add a
+                    # header scan so _u1_sentinel_hit fires when the sentinel appears there,
+                    # enabling single-probe confirmation instead of falling through to the
+                    # slower (and noisier) multi-probe body-diff path.
                     _u1_sentinel_hit = (
                         (SENTINEL.encode() in _u1_resp_body or
                          SENTINEL.lower().encode() in _u1_resp_body)
                         if _u1_resp_body else False
                     )
+                    if not _u1_sentinel_hit and data_fmt in ("header", "cookie", "json", "xml", "path", "bg"):
+                        try:
+                            _u1_resp_hdrs = dict(getattr(fp_u, 'headers', {}) or {})
+                            for _u1_hv in _u1_resp_hdrs.values():
+                                _u1_hv_str = (_u1_hv if isinstance(_u1_hv, str)
+                                              else (_u1_hv.decode('utf-8', 'replace')
+                                                    if isinstance(_u1_hv, bytes) else str(_u1_hv)))
+                                if SENTINEL in _u1_hv_str or SENTINEL.lower() in _u1_hv_str.lower():
+                                    _u1_sentinel_hit = True
+                                    break
+                        except Exception:
+                            pass
                     _u1_bl_absent    = not _u1_bl_body
                     # BUG-UNION-EMPTY-BASELINE FIX: When baseline is absent (_u1_bl_absent=True),
                     # the old code used (_u1_len_delta >= 50) which is ALWAYS True for any real
@@ -42569,11 +42587,25 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                                       _get_safe_status_code(fp_wu) == 200)
                     # BUG-UNION-EMPTY-BASELINE FIX: Same guard as Phase 0 above.
                     # BUG-SENTINEL-CASE-FIX: Case-insensitive fallback (same as Phase 0 fix).
+                    # BUG-SENTINEL-HEADER-SURFACE-FIX (cross-cat): Mirror the Phase 0 fix —
+                    # for header/cookie/json/xml/path/bg surfaces also scan response headers.
                     _uwc_sentinel_hit = (
                         (SENTINEL.encode() in _uwc_resp_body or
                          SENTINEL.lower().encode() in _uwc_resp_body)
                         if _uwc_resp_body else False
                     )
+                    if not _uwc_sentinel_hit and data_fmt in ("header", "cookie", "json", "xml", "path", "bg"):
+                        try:
+                            _uwc_resp_hdrs = dict(getattr(fp_wu, 'headers', {}) or {})
+                            for _uwc_hv in _uwc_resp_hdrs.values():
+                                _uwc_hv_str = (_uwc_hv if isinstance(_uwc_hv, str)
+                                               else (_uwc_hv.decode('utf-8', 'replace')
+                                                     if isinstance(_uwc_hv, bytes) else str(_uwc_hv)))
+                                if SENTINEL in _uwc_hv_str or SENTINEL.lower() in _uwc_hv_str.lower():
+                                    _uwc_sentinel_hit = True
+                                    break
+                        except Exception:
+                            pass
                     _uwc_bl_absent    = not _uwc_bl_body
                     # BUG-UNION-CROSS-CAT-EMPTY-BASELINE FIX: Same as the primary loop:
                     # when _uwc_bl_body is empty, _uwc_no_bl_cond fires for any response > 50B.
@@ -119709,10 +119741,19 @@ class TechniqueCascadeEngine:
                     # responses from a WAF or upstream server also indicate the canary
                     # (non-SQL garbage payload) alone triggers the error gate, meaning
                     # the error is from parameter validation, NOT SQL injection.
-                    if _can_status in (400, 500, 502, 503):
+                    # BUG-CHECKC-CANARY-GATE-WAF-FIX: Original gate only checked (400,500,502,503).
+                    # If the WAF returns 403/406/429 for the non-SQL garbage canary, that means
+                    # ANY extra string added to the parameter triggers a WAF block — the error
+                    # signals (500s/WAF-blocks) from SQL error payloads are therefore NOT
+                    # selective to SQL.  Accepting them as an injection signal in this case is a
+                    # false positive: the WAF blocks ALL modifications indiscriminately.
+                    # Fix: extend the rejection set to include all WAF-block-like status codes.
+                    # This is symmetric with the _can_status exclusion already present in the
+                    # waf_asymmetric check at line ~119792 which already uses the full set.
+                    if _can_status in (400, 403, 406, 429, 500, 502, 503):
                         print(f"[*]     Check C HTTP-{_can_status} REJECTED: canary (non-SQL)"
-                              f" also caused {_can_status} → parameter validation failure (e.g."
-                              " __VIEWSTATE MAC), NOT SQL injection", flush=True)
+                              f" also caused {_can_status} → parameter validation failure or"
+                              " WAF blocks all modifications (not SQL-selective)", flush=True)
                         return False, "", "", ""
                 except Exception:
                     # BUG-PCV-C-500-CANARY-EXCEPTION FIX: Swallowing any exception here
