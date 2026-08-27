@@ -1,13 +1,38 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v225 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 26, 2026)         ║
-║  v224 base + 1 critical fix. v225 fixes the UH sentinel false-negative: the     ║
-║  sentinel probe in _post_confirm_verify_locked checked only the response body,   ║
-║  but for UH (Union-Header injection) the UNION SELECT output appears in          ║
-║  response headers. This caused _sentinel_pass=False for ALL genuine UH           ║
-║  injections, blocking every sentinel-guarded confirmation path and making real   ║
-║  UH injection permanently unconfirmable after v219-v224 FP guards were added.   ║
+║  SQLReaper v226 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 27, 2026)         ║
+║  v225 base + 1 critical fix. v226 fixes the missing sentinel guard on the        ║
+║  E+D dual-check path: Check E (DBMS-SQL consistency) + Check D (header diff)    ║
+║  could confirm U/UE/UH without requiring sentinel reflection in headers.         ║
+║  WAF-added/removed headers (X-Cache, X-Forwarded-For) satisfy _d_count>=1,      ║
+║  and DBMS-SQL consistency (Check E) proves SQL execution but NOT that UNION      ║
+║  output appeared in response headers. This FP path bypassed all v219-v224       ║
+║  sentinel guards.                                                                  ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v225 → v226) — 1 BUG FIXED                            ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V226-ED-SENTINEL-MISSING (HIGH; U/UE/UH technique; all DBMSes; all    ║
+║      surfaces; all cascade paths routing through _post_confirm_verify_locked;    ║
+║      when Check E passes and Check D has >= 1 header diff):                      ║
+║      The E+D dual-check path (Check E DBMS-SQL consistency + Check D >=1        ║
+║      header diff) had no sentinel guard for UNION techniques. Check E proves     ║
+║      that the DBMS executed injected SQL (response body is consistent with the   ║
+║      expected DBMS-specific SQL result), and Check D proves that at least one    ║
+║      response header changed between true/false probes. Together they are        ║
+║      sufficient for boolean techniques (B/BH/IN/NV etc.) but NOT for UNION      ║
+║      techniques — for UNION techniques (U/UE/UH) the critical question is        ║
+║      whether the UNION SELECT output appeared in response headers (UH) or body  ║
+║      (U/UE). WAF-added/removed headers (X-Cache, X-RateLimit, CF-Ray) can       ║
+║      satisfy _d_count>=1 without any UNION output being reflected. A WAF that   ║
+║      adds headers when it sees SQL keywords satisfies both E (server processed   ║
+║      it) and D (header changed) — false positive.                                ║
+║      Fix: add `and (tech not in ("U","UE","UH") or _sentinel_pass is True)` to  ║
+║      the E+D dual-check condition, matching the guard already on D status-       ║
+║      oracle, WAF-oracle replay, A+D, A+C dual, D-standalone, detection-replay,  ║
+║      A-strong body-size, and Check C standalone.                                 ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v224 → v225) — 1 BUG FIXED                            ║
@@ -124417,10 +124442,21 @@ class TechniqueCascadeEngine:
         # returns immediately if direct_sim>=0.88 (before reaching here), so the only
         # time we reach this path with _check_a_all_waf_blocked=True is when direct_sim<0.88
         # and the code decided timing proof is needed — E+D at 0.80 must not override that.
+        # BUG-V226-ED-SENTINEL-MISSING FIX: E+D dual-check confirmed U/UE/UH without
+        # requiring sentinel reflection.  Check E (DBMS-SQL consistency) proves the
+        # server executed SQL, but for UNION techniques it does NOT prove that the
+        # UNION SELECT output appeared in response headers (UH) or body (U/UE).
+        # Check D header diffs can arise from WAF routing or CDN variance unrelated to
+        # UNION output reflection.  Without the sentinel guard a WAF that returns
+        # different headers for SQL vs non-SQL payloads (e.g. adds/removes X-Cache) can
+        # generate E+D dual-pass without any UNION output reaching the response.
+        # Fix: require sentinel for U/UE/UH — same guard applied to all other UNION
+        # confirmation paths (D status-oracle, WAF-oracle replay, corroboration gate).
         if (_e_pass and not _timing_only_tech
                 and tech not in ("T", "TH", "HQ", "BT", "S", "DS")
                 and _d_count >= 1
-                and not (_check_a_all_waf_blocked and not _a_pass)):
+                and not (_check_a_all_waf_blocked and not _a_pass)
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             print(f"[*]   [PCV] Result: CONFIRMED  Check E (DBMS-SQL consistency) + "
                   f"Check D ({_d_count} header diffs) dual-check passed "
                   f"[tech={tech} dbms={dbms}]", flush=True)
