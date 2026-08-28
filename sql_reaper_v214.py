@@ -119977,17 +119977,21 @@ class TechniqueCascadeEngine:
 
                     if _new_matches:
                         _all_c_matches.append((_c_name, _new_matches[0], _c_status))
-                    elif _is_header_cookie_surface:
-                        # BUG-CHECKC-BODY-ONLY FIX: For header/cookie surfaces and header-output
-                        # techniques (EH/BH/TH/UH), DBMS error text may appear in response
-                        # headers (X-Error, X-Debug, X-Exception, Set-Cookie) rather than the
-                        # body.  Scan response headers with baseline subtraction when body scan
-                        # produced no matches.
+                    else:
+                        # BUG-CHECKC-BODY-ONLY FIX (extended ALL surfaces): DBMS error text
+                        # may appear in response headers for ANY injection surface when debug
+                        # middleware (Django DEBUG, PHP display_errors, Ruby on Rails, generic
+                        # ORM error wrappers) surfaces exception text in X-Error, X-Debug,
+                        # X-Exception, X-Powered-By, or Set-Cookie response headers.
+                        # Previously restricted to _is_header_cookie_surface; now scans
+                        # response headers for all surfaces after a body-miss so that
+                        # body-parameter injections on apps with header-visible error traces
+                        # are not silently missed (Issue 3 root-cause fix).
+                        # BUG-CHECKC-SETCOOKIE-COLLAPSE FIX: dict() collapses
+                        # duplicate response headers to one value — a DBMS error
+                        # pattern in any but the last Set-Cookie is silently lost.
+                        # Iterate raw .items() so every value is scanned.
                         try:
-                            # BUG-CHECKC-SETCOOKIE-COLLAPSE FIX: dict() collapses
-                            # duplicate response headers to one value — a DBMS error
-                            # pattern in any but the last Set-Cookie is silently lost.
-                            # Iterate raw .items() so every value is scanned.
                             _c_raw_hdrs = getattr(_cfp, 'headers', None) or {}
                             _c_hdr_items = (list(_c_raw_hdrs.items())
                                             if hasattr(_c_raw_hdrs, 'items') else [])
@@ -120726,17 +120730,19 @@ class TechniqueCascadeEngine:
                             _fw_body_str = _safe_decode_body(
                                 _efp_fw, encoding="utf-8", errors='replace',
                                 func_name='check_c_fw').lower()
-                            # For non-body surfaces also scan response headers so that
-                            # driver error text surfaced in X-Error or Set-Cookie is caught.
-                            if _is_header_cookie_surface:
-                                try:
-                                    _fw_hdr_items = list(
-                                        (getattr(_efp_fw, 'headers', None) or {}).items())
-                                    _fw_body_str += " " + " ".join(
-                                        f"{_hk}:{_hv}"
-                                        for _hk, _hv in _fw_hdr_items).lower()
-                                except Exception:
-                                    pass
+                            # BUG-CHECKC-FW-HDR-ALL-SURFACES FIX (Issue 4): Always scan
+                            # response headers for ORM/driver error text — previously gated
+                            # on _is_header_cookie_surface, missing framework errors surfaced
+                            # in X-Error, X-Debug, X-Powered-By on body-parameter injections
+                            # when debug middleware writes exception info to response headers.
+                            try:
+                                _fw_hdr_items = list(
+                                    (getattr(_efp_fw, 'headers', None) or {}).items())
+                                _fw_body_str += " " + " ".join(
+                                    f"{_hk}:{_hv}"
+                                    for _hk, _hv in _fw_hdr_items).lower()
+                            except Exception:
+                                pass
                             for _fwp in _fw_err_patterns:
                                 if (_fwp in _fw_body_str
                                         and _fwp not in _bl_body_fw
@@ -120759,6 +120765,84 @@ class TechniqueCascadeEngine:
                            (f" (HTTP 500 on {_status_500_count} error payloads, "
                             f"framework DB error '{_fw_match}' in response, "
                             f"absent from baseline {_bl_status})")
+                # BUG-HTTP500-NO-DBMS-TEXT-SIGNAL FIX (Issue 2): When no DBMS text and no
+                # framework ORM text is visible in any error response, try one more structural
+                # signal: Content-Type discrimination.  If error-SQL payloads consistently
+                # return a DIFFERENT Content-Type header than the non-SQL canary, the server is
+                # rendering a different response class for SQL-bearing inputs — this is a
+                # SQL-selective structural difference that cannot arise from WAF keyword blocking
+                # alone (WAF blocks produce the same Content-Type as valid pass-through).
+                # Also compare response header count: if error responses consistently carry
+                # more or fewer headers than the canary (e.g. a debug middleware adds
+                # X-Exception/X-Powered-By on DB errors), that structural difference is
+                # SQL-selective evidence even when no text pattern matches.
+                # Upgraded signal: http500_x2_content_type_discriminator (self-corroborating).
+                _ct_disc_confirmed = False
+                _ct_disc_note = ""
+                if _status_500_count >= 2 and _err_fps and _can_fp is not None:
+                    try:
+                        def _get_ct(fp):
+                            """Return Content-Type value (lowercase, stripped) or ''."""
+                            try:
+                                raw_h = getattr(fp, 'headers', None) or {}
+                                if hasattr(raw_h, 'items'):
+                                    for _ck, _cv in raw_h.items():
+                                        if str(_ck).lower() == 'content-type':
+                                            return str(_cv).lower().split(';')[0].strip()
+                            except Exception:
+                                pass
+                            return ''
+                        def _hdr_count(fp):
+                            """Return number of response headers (de-duplicated keys)."""
+                            try:
+                                raw_h = getattr(fp, 'headers', None) or {}
+                                if hasattr(raw_h, 'items'):
+                                    return len(list(raw_h.items()))
+                            except Exception:
+                                pass
+                            return 0
+                        _can_ct = _get_ct(_can_fp)
+                        _can_hdr_count = _hdr_count(_can_fp)
+                        _ct_mismatches = 0
+                        _hdr_count_mismatches = 0
+                        _err_ct_seen = set()
+                        for _efp_ct in _err_fps[:4]:
+                            _ect = _get_ct(_efp_ct)
+                            if _ect:
+                                _err_ct_seen.add(_ect)
+                            if _can_ct and _ect and _ect != _can_ct:
+                                _ct_mismatches += 1
+                            _ehc = _hdr_count(_efp_ct)
+                            if _ehc > 0 and _can_hdr_count > 0 and abs(_ehc - _can_hdr_count) >= 2:
+                                _hdr_count_mismatches += 1
+                        # Require ≥2 error responses to agree on a different Content-Type
+                        # (or both to show ≥2 extra/fewer headers vs canary).
+                        if _ct_mismatches >= 2 and len(_err_ct_seen) == 1:
+                            _ct_disc_confirmed = True
+                            _ct_disc_note = (f"error→'{next(iter(_err_ct_seen))}' "
+                                             f"vs canary→'{_can_ct}'")
+                            print(f"[*]     Check C HTTP-500 + Content-Type discriminator: "
+                                  f"{_status_500_count} error payloads → 500 with "
+                                  f"Content-Type='{next(iter(_err_ct_seen))}' while "
+                                  f"non-SQL canary → '{_can_ct}' — SQL-selective response "
+                                  "class change (no DBMS text visible); upgraded to "
+                                  "http500_x2_content_type_discriminator", flush=True)
+                        elif _hdr_count_mismatches >= 2:
+                            _ct_disc_confirmed = True
+                            _ct_disc_note = f"header-count delta≥2 vs canary"
+                            print(f"[*]     Check C HTTP-500 + response-header-count "
+                                  f"discriminator: {_status_500_count} error payloads → 500 with "
+                                  f"≥2 extra/fewer headers vs non-SQL canary — SQL-selective "
+                                  "structural response difference (no DBMS text visible); "
+                                  "upgraded to http500_x2_content_type_discriminator", flush=True)
+                    except Exception:
+                        pass
+                if _ct_disc_confirmed:
+                    return True, "http500_x2_content_type_discriminator", \
+                           "http_500_content_type_discriminator", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, "
+                            f"structural response difference vs non-SQL canary: "
+                            f"{_ct_disc_note}, absent from baseline {_bl_status})")
                 # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
                 # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
                 # size discrimination.  Cannot rule out WAF keyword-blocking or input-validation
@@ -122139,7 +122223,18 @@ class TechniqueCascadeEngine:
                                           # response body/headers and absent from the baseline —
                                           # proves DB-layer query failure without DBMS-identifying
                                           # text; self-corroborating.
-                                          "http500_x2_framework_error"))
+                                          "http500_x2_framework_error")
+                                          # NOTE: http500_x2_content_type_discriminator is
+                                          # intentionally NOT in this whitelist.  For E/EH
+                                          # techniques, _c_needs_corroboration is already False
+                                          # because `tech not in ("E","EH")` is False (first
+                                          # condition short-circuits to False).  For non-E/EH
+                                          # techniques, CT-discrimination alone is not strong
+                                          # enough to confirm without Check A or D corroboration;
+                                          # retaining the corroboration requirement prevents FPs
+                                          # on dynamic pages that render different Content-Types
+                                          # for different parameter values regardless of SQL.
+                                          )
                 _c_has_corroboration = _a_pass or _d_pass
                 # BUG-UH-CHECKC-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH),
                 # Check C proving SQL reaches the DB (via error-payload 500s) does NOT
