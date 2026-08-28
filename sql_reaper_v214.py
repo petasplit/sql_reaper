@@ -119863,21 +119863,25 @@ class TechniqueCascadeEngine:
                 data_fmt in ("header", "cookie", "json", "xml", "path", "bg")
                 or tech in ("EH", "BH", "TH", "UH")
             )
+            # BUG-HTTP500-HDR-ERROR-BODY-SURF FIX: Always compute _bl_headers_str so
+            # the hdr_error upgrade path can do baseline-subtraction for ALL surfaces
+            # (not just _is_header_cookie_surface).  Previously it was only computed
+            # when _is_header_cookie_surface=True, leaving it as "" for body surfaces
+            # and causing all static baseline header patterns to be counted as matches.
             _bl_headers_str = ""
-            if _is_header_cookie_surface:
-                try:
-                    # BUG-CHECKC-SETCOOKIE-COLLAPSE FIX: dict() collapses duplicate
-                    # response headers (e.g. multiple Set-Cookie values) to one entry.
-                    # Iterate raw .items() to preserve every header value in the baseline
-                    # string so baseline-subtraction correctly masks all static values.
-                    _bl_raw_hdrs = getattr(_bl_fp, 'headers', None) or {}
-                    _bl_hdr_items = (list(_bl_raw_hdrs.items())
-                                     if hasattr(_bl_raw_hdrs, 'items') else [])
-                    _bl_headers_str = " ".join(
-                        f"{_k}:{_v}" for _k, _v in _bl_hdr_items
-                    ).lower()
-                except Exception:
-                    _bl_headers_str = ""
+            try:
+                # BUG-CHECKC-SETCOOKIE-COLLAPSE FIX: dict() collapses duplicate
+                # response headers (e.g. multiple Set-Cookie values) to one entry.
+                # Iterate raw .items() to preserve every header value in the baseline
+                # string so baseline-subtraction correctly masks all static values.
+                _bl_raw_hdrs = getattr(_bl_fp, 'headers', None) or {}
+                _bl_hdr_items = (list(_bl_raw_hdrs.items())
+                                 if hasattr(_bl_raw_hdrs, 'items') else [])
+                _bl_headers_str = " ".join(
+                    f"{_k}:{_v}" for _k, _v in _bl_hdr_items
+                ).lower()
+            except Exception:
+                _bl_headers_str = ""
             
             for _cp, _c_name in _c_fallbacks:
                 _cfp, _, _c_status, _ = await _pcv_send(_cp)
@@ -120083,12 +120087,66 @@ class TechniqueCascadeEngine:
                                   f"body_sim={_bool_body_sim:.3f} → SQL condition evaluation PROVED",
                                   flush=True)
                         else:
-                            print(f"[*]     Check C HTTP-500 fallback: {_status_500_count} error payloads → 500 "
-                                  f"(baseline={_bl_status}) — no DBMS text visible, boolean probe identical "
-                                  f"(status={_btrue_status}vs{_bfalse_status}, sim={_bool_body_sim:.3f}) "
-                                  "→ may be WAF/input-validation 500, NOT SQL execution; "
-                                  "accepting as weak signal (requires corroboration for non-E/EH)",
-                                  flush=True)
+                            # BUG-HTTP500-BOOL-STRCTX FIX: Numeric-context probes (" AND 1=1")
+                            # fail for string-context injection — both produce syntax errors
+                            # (→ 500) with identical bodies, giving _bool_confirmed=False even
+                            # when SQL is genuinely being evaluated.  Retry with string-context
+                            # probes ("' AND '1'='1'" / "' AND '1'='2'") and multiple tautology
+                            # variants that survive WAF keyword filters.  Also scan headers in
+                            # the differential: for header/cookie surfaces the boolean condition
+                            # result may appear in response headers, not in the body.
+                            _str_ctx_probes = [
+                                ("' AND '1'='1'-- -", "' AND '1'='2'-- -"),
+                                ("' AND 1=1-- -",     "' AND 1=2-- -"),
+                                ("') AND ('1'='1'-- -", "') AND ('1'='2'-- -"),
+                                ("' AND 'a'='a'-- -", "' AND 'a'='b'-- -"),
+                            ]
+                            for _str_true_p, _str_false_p in _str_ctx_probes:
+                                try:
+                                    _sbt_fp, _, _sbt_status, _ = await _pcv_send(_str_true_p)
+                                    _sbf_fp, _, _sbf_status, _ = await _pcv_send(_str_false_p)
+                                    if _sbt_fp is None or _sbf_fp is None:
+                                        continue
+                                    _sbt_status_diff = (_sbt_status != _sbf_status)
+                                    _sbt_norm = (ResponseNormaliser.normalise(_extract_body_safe(_sbt_fp))
+                                                 if _validate_response(_sbt_fp, allow_empty=True) else b"")
+                                    _sbf_norm = (ResponseNormaliser.normalise(_extract_body_safe(_sbf_fp))
+                                                 if _validate_response(_sbf_fp, allow_empty=True) else b"")
+                                    _sbt_body_sim = SimHasher.body_similarity(_sbt_norm, _sbf_norm)
+                                    _sbt_body_diff = _sbt_body_sim < 0.85
+                                    # Also check response-header differential for header/cookie surfaces
+                                    _sbt_hdr_diff = False
+                                    if _is_header_cookie_surface:
+                                        try:
+                                            _sbt_hdrs = " ".join(f"{_k}:{_v}" for _k, _v in
+                                                                  (list((getattr(_sbt_fp, 'headers', None) or {}).items()))).lower()
+                                            _sbf_hdrs = " ".join(f"{_k}:{_v}" for _k, _v in
+                                                                  (list((getattr(_sbf_fp, 'headers', None) or {}).items()))).lower()
+                                            _sbt_hdr_diff = _sbt_hdrs != _sbf_hdrs
+                                        except Exception:
+                                            pass
+                                    if _sbt_status_diff or _sbt_body_diff or _sbt_hdr_diff:
+                                        _bool_confirmed = True
+                                        _btrue_status = _sbt_status
+                                        _bfalse_status = _sbf_status
+                                        _btrue_fp = _sbt_fp
+                                        _bfalse_fp = _sbf_fp
+                                        print(f"[*]     Check C HTTP-500 + string-context boolean differential: "
+                                              f"{_status_500_count} error payloads → 500, str-ctx probe "
+                                              f"status={_sbt_status}vs{_sbf_status} "
+                                              f"body_sim={_sbt_body_sim:.3f} hdr_diff={_sbt_hdr_diff} "
+                                              "→ SQL condition evaluation PROVED (string context)",
+                                              flush=True)
+                                        break
+                                except Exception:
+                                    continue
+                            if not _bool_confirmed:
+                                print(f"[*]     Check C HTTP-500 fallback: {_status_500_count} error payloads → 500 "
+                                      f"(baseline={_bl_status}) — no DBMS text visible, boolean probe identical "
+                                      f"(status={_btrue_status}vs{_bfalse_status}, sim={_bool_body_sim:.3f}) "
+                                      "→ may be WAF/input-validation 500, NOT SQL execution; "
+                                      "accepting as weak signal (requires corroboration for non-E/EH)",
+                                      flush=True)
                 except Exception:
                     pass
                 if _bool_confirmed:
@@ -120371,7 +120429,14 @@ class TechniqueCascadeEngine:
                 # Set-Cookie) for header/cookie injection surfaces, upgrade to the stronger
                 # http500_x2_hdr_error signal which carries its own confirmation (DBMS error
                 # text proved present, just in headers rather than body) — self-corroborating.
-                if _is_header_cookie_surface and _error_fps:
+                # BUG-HTTP500-HDR-ERROR-BODY-SURF FIX: Removed _is_header_cookie_surface gate.
+                # Some applications expose DBMS error text in response headers (X-Error,
+                # X-Debug, X-Exception, X-Application-Error) even for body/URL-parameter
+                # injection — e.g. debug middleware or APM agents.  The _err_patterns list
+                # is highly DBMS-specific (ora-01722, mysql syntax error, etc.) so FP risk
+                # from unrelated headers is negligible.  Run for ALL surfaces so DBMS text
+                # in any response header confirms injection regardless of injection surface.
+                if _error_fps:
                     _hdr_err_found = False
                     _hdr_err_pattern = ""
                     _hdr_err_name = ""
