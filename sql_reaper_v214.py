@@ -1,6 +1,41 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
+║  SQLReaper v230 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 28, 2026)         ║
+║  v229 base + 1 fix. v230 closes the last boolean-differential header-miss gap   ║
+║  in Check C's http500 upgrade path for UH and non-body surfaces.                ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v229 → v230) — 1 BUG FIXED                            ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-BOOL-PROBE-HDR-MISS (MEDIUM; Check C http500 bool-confirmation path;   ║
+║      UH technique and any header/cookie/json/xml/path/bg surface; all DBMSes;   ║
+║      all cascade paths):                                                          ║
+║      The initial numeric-context boolean probe in _run_check_c                   ║
+║      (" AND 1=1-- -" / " AND 1=2-- -") compares response status codes and body  ║
+║      SimHash similarity only.  For UH and other non-body surfaces, the DB's      ║
+║      boolean condition result may appear exclusively in response HEADERS (e.g.   ║
+║      X-SQL-Row-Count: 42 for the true branch vs X-SQL-Row-Count: 0 for the      ║
+║      false branch), not in the body which is typically empty or static.           ║
+║      Root cause: when both probes return the same status code AND the same body  ║
+║      (e.g. both 200 + empty body), _bool_confirmed stays False and the code      ║
+║      falls through to the string-context retry loop.  That loop uses             ║
+║      (' AND '1'='1') which is a STRING-context probe — on a NUMERIC injection   ║
+║      point both string-context probes produce SQL syntax errors → both return    ║
+║      500 with identical error-page bodies and identical headers → _bool_confirmed ║
+║      stays False for all 4 retry pairs → falls back to weak http500_x2.          ║
+║      Consequence: numeric-context UH injection where boolean output appears in   ║
+║      response headers is misclassified as weak (requires corroboration) even     ║
+║      though the header differential is a self-corroborating signal.              ║
+║      Fix: before marking _bool_confirmed=False, check response headers for a     ║
+║      differential when _is_header_cookie_surface is True. Mirrors the header    ║
+║      check already present in the string-context retry loop (lines 120163-172).  ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  PRIOR VERSION HISTORY (v229) — unchanged below                                  ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+╔════════════════════════════════════════════════════════════════════════════════════╗
 ║  SQLReaper v229 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 28, 2026)         ║
 ║  v228 base + 2 fixes. v229 adds http500_x2_framework_error upgrade path and     ║
 ║  marks it self-corroborating in the _c_needs_corroboration exclusion set.       ║
@@ -120124,12 +120159,35 @@ class TechniqueCascadeEngine:
                                         if _validate_response(_bfalse_fp, allow_empty=True) else b"")
                         _bool_body_sim = SimHasher.body_similarity(_btrue_norm, _bfalse_norm)
                         _bool_body_diff = _bool_body_sim < 0.85
-                        _bool_confirmed = _bool_status_diff or _bool_body_diff
+                        # BUG-BOOL-PROBE-HDR-MISS FIX: For UH and other non-body surfaces
+                        # (header/cookie/json/xml/path/bg), the boolean condition result may
+                        # appear in response HEADERS, not in the body.  The numeric-context
+                        # probes (" AND 1=1" / " AND 1=2") check status and body only; if both
+                        # probes return the same status and empty/identical bodies but different
+                        # response headers (e.g. X-SQL-Row-Count: 42 vs X-SQL-Row-Count: 0),
+                        # the boolean differential is missed here.  The string-context retry
+                        # loop below also checks headers, but it uses string-context probes
+                        # (' AND '1'='1') which produce syntax errors on numeric-context
+                        # injection points, preventing them from producing the same header diff.
+                        # Fix: also scan response headers for a differential when
+                        # _is_header_cookie_surface is True, mirroring the retry-loop approach.
+                        _bool_hdr_diff = False
+                        if _is_header_cookie_surface and not _bool_body_diff and not _bool_status_diff:
+                            try:
+                                _bth = " ".join(f"{_k}:{_v}" for _k, _v in
+                                                (list((getattr(_btrue_fp, 'headers', None) or {}).items()))).lower()
+                                _bfh = " ".join(f"{_k}:{_v}" for _k, _v in
+                                                (list((getattr(_bfalse_fp, 'headers', None) or {}).items()))).lower()
+                                _bool_hdr_diff = _bth != _bfh
+                            except Exception:
+                                pass
+                        _bool_confirmed = _bool_status_diff or _bool_body_diff or _bool_hdr_diff
                         if _bool_confirmed:
                             print(f"[*]     Check C HTTP-500 + boolean differential: "
                                   f"{_status_500_count} error payloads → 500, boolean probe "
                                   f"status={_btrue_status}vs{_bfalse_status} "
-                                  f"body_sim={_bool_body_sim:.3f} → SQL condition evaluation PROVED",
+                                  f"body_sim={_bool_body_sim:.3f} hdr_diff={_bool_hdr_diff} "
+                                  "→ SQL condition evaluation PROVED",
                                   flush=True)
                         else:
                             # BUG-HTTP500-BOOL-STRCTX FIX: Numeric-context probes (" AND 1=1")
