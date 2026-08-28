@@ -1,6 +1,47 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
+║  SQLReaper v229 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 28, 2026)         ║
+║  v228 base + 2 fixes. v229 adds http500_x2_framework_error upgrade path and     ║
+║  marks it self-corroborating in the _c_needs_corroboration exclusion set.       ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v228 → v229) — 2 BUGS/GAPS FIXED                     ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V229-HTTP500-FRAMEWORK-ERROR-SIGNAL (HIGH; all techniques; all          ║
+║      DBMSes; all surfaces; _run_check_c http500 upgrade path):                   ║
+║      When Check C error payloads trigger HTTP 500 responses (baseline=200,       ║
+║      canary=non-500) but no DBMS-identifying text is visible in the response     ║
+║      body, the code fell through to plain http500_x2 (weakest signal, requires  ║
+║      Check A or D corroboration).  Production log: "no DBMS text visible —      ║
+║      maybe it isn't there but it triggered sql injection."                        ║
+║      Root cause: _err_patterns in Check C only search for DBMS-identifying text  ║
+║      (ORA-, XPATH syntax error, etc.).  When an application uses an ORM or      ║
+║      driver that wraps DB errors behind generic exception text (SQLSTATE[,       ║
+║      PDOException, java.sql.SQLException, ActiveRecord::StatementInvalid, etc.), ║
+║      no DBMS pattern matches even though a DB query genuinely failed.            ║
+║      Fix: add http500_x2_framework_error upgrade path that scans 500 response   ║
+║      bodies (and response headers for non-body surfaces) for application-layer   ║
+║      DB error wrappers absent from the baseline.  SQLSTATE[, PDOException,      ║
+║      java.sql.*, ActiveRecord::*, django.db.utils, OperationalError,            ║
+║      SqlException, SequelizeDatabaseError, etc. — 40+ patterns covering PHP,    ║
+║      Python, Java, Ruby, .NET, Node.js ORMs.  Baseline-subtracted so static     ║
+║      debug pages are excluded.  Self-corroborating: SQL-selective 500 status    ║
+║      plus ORM/driver exception text absent from canary proves DB-layer failure   ║
+║      without needing Check A body canary or Check D header diff.                 ║
+║                                                                                    ║
+║  [✓] BUG-V229-HTTP500-FRAMEWORK-CORROBORATION (HIGH; follows from above):       ║
+║      http500_x2_framework_error was not in the _c_needs_corroboration exclusion  ║
+║      set, so it would have required Check A or D corroboration even though it    ║
+║      is self-corroborating.  Fix: add "http500_x2_framework_error" to the       ║
+║      exclusion tuple alongside http500_x2_hdr_error, http500_x2_hdr_structural, ║
+║      and http500_x2_cookie_structural.                                            ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  PRIOR VERSION HISTORY (v228) — unchanged below                                  ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+╔════════════════════════════════════════════════════════════════════════════════════╗
 ║  SQLReaper v228 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 28, 2026)         ║
 ║  v227 base + 5 fixes. v228 closes remaining sentinel gaps in detect_union        ║
 ║  phases 0/1/2 and the union extraction response-value scanner.                   ║
@@ -120633,6 +120674,91 @@ class TechniqueCascadeEngine:
                            (f" (HTTP 500 on {_status_500_count} error payloads, simple valid SQL → "
                             f"{_simple_disc_status} non-error — semantic SQL evaluation confirmed, "
                             f"absent from baseline {_bl_status})")
+                # http500_x2_framework_error: application-layer DB error wrappers in the
+                # 500 response body (or response headers for non-body surfaces).  These are
+                # ORM/driver/framework patterns that prove a DB-layer query failure occurred
+                # without identifying the specific DBMS.  They are absent from the DBMS-
+                # specific _err_patterns above (which only match DBMS-identifying text) but
+                # confirm that a database driver or ORM raised an exception, ruling out pure
+                # WAF keyword-blocking or input-validation as the source of the 500 status.
+                # Baseline-subtracted: patterns already present in the non-SQL canary or the
+                # baseline response are not counted (they are static debug page artefacts).
+                # Self-corroborating: SQL-selective 500 status + ORM/driver exception text
+                # absent from the canary prove DB-layer execution failure without needing
+                # a separate Check A body canary or Check D header diff.
+                _fw_err_patterns = [
+                    # Universal PDO/ODBC prefix (PHP, Python pyodbc, Node odbc, etc.)
+                    "sqlstate[",
+                    # PHP PDO / mysqli / pg / OCI drivers
+                    "pdoexception", "pdostatement", "pdo::prepare(",
+                    "mysqli_query(", "mysqli_connect(", "mysql_query(",
+                    "pg_query(", "pg_connect(",
+                    "oci_execute(", "oci_parse(",
+                    # Python ORMs / DBAPI-2 drivers
+                    "operationalerror", "programmingerror", "databaseerror",
+                    "integrityerror", "interfaceerror",
+                    "sqlalchemy.exc", "django.db.utils", "psycopg2.", "asyncpg.",
+                    "peewee.operationalerror", "tortoise.exceptions",
+                    # Java / JVM JDBC / JPA / Hibernate
+                    "java.sql.sqlexception", "java.sql.statement",
+                    "java.sql.preparedstatement", "org.hibernate.exception",
+                    "javax.persistence.", "jakarta.persistence.",
+                    "jdbctemplate", "jdbc:mysql", "jdbc:postgresql",
+                    "jdbc:oracle", "jdbc:sqlserver",
+                    # Ruby / Rails ActiveRecord
+                    "activerecord::statementinvalid", "activerecord::queryaborted",
+                    # .NET ADO.NET / EF / Dapper
+                    "system.data.sqlclient", "oledbexception",
+                    "microsoft.data.sqlclient",
+                    # Node.js ORMs / query builders
+                    "sequelizedatabaseerror", "knex:error", "typeorm error",
+                    # Generic ORM/driver error strings (language-agnostic)
+                    "could not execute statement", "query execution failed",
+                    "execute() failed", "sql query failed",
+                    "database query error", "db query error",
+                ]
+                _fw_match = None
+                if _status_500_count >= 2 and _err_fps:
+                    try:
+                        _bl_body_fw = (_bl_body or "").lower()
+                        _bl_hdr_str_fw = (_bl_headers_str or "").lower()
+                        for _efp_fw in _err_fps[:4]:
+                            _fw_body_str = _safe_decode_body(
+                                _efp_fw, encoding="utf-8", errors='replace',
+                                func_name='check_c_fw').lower()
+                            # For non-body surfaces also scan response headers so that
+                            # driver error text surfaced in X-Error or Set-Cookie is caught.
+                            if _is_header_cookie_surface:
+                                try:
+                                    _fw_hdr_items = list(
+                                        (getattr(_efp_fw, 'headers', None) or {}).items())
+                                    _fw_body_str += " " + " ".join(
+                                        f"{_hk}:{_hv}"
+                                        for _hk, _hv in _fw_hdr_items).lower()
+                                except Exception:
+                                    pass
+                            for _fwp in _fw_err_patterns:
+                                if (_fwp in _fw_body_str
+                                        and _fwp not in _bl_body_fw
+                                        and _fwp not in _bl_hdr_str_fw):
+                                    _fw_match = _fwp
+                                    break
+                            if _fw_match:
+                                break
+                    except Exception:
+                        pass
+                if _fw_match:
+                    print(f"[*]     Check C HTTP-500 framework-error: "
+                          f"{_status_500_count} error payloads → 500, "
+                          f"application DB error wrapper '{_fw_match}' found in response "
+                          f"(absent from baseline {_bl_status}) — ORM/driver exception "
+                          "proves DB-layer execution failure without DBMS-identifying text; "
+                          "upgraded to http500_x2_framework_error (self-corroborating)",
+                          flush=True)
+                    return True, "http500_x2_framework_error", "http_500_framework_error", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, "
+                            f"framework DB error '{_fw_match}' in response, "
+                            f"absent from baseline {_bl_status})")
                 # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
                 # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
                 # size discrimination.  Cannot rule out WAF keyword-blocking or input-validation
@@ -122006,7 +122132,14 @@ class TechniqueCascadeEngine:
                                           # http500_x2_cookie_structural: error responses produce
                                           # deterministic Set-Cookie values absent from the canary —
                                           # SQL-selective cookie state change; self-corroborating.
-                                          "http500_x2_cookie_structural"))
+                                          "http500_x2_cookie_structural",
+                                          # http500_x2_framework_error: application ORM/driver
+                                          # exception text (SQLSTATE[, PDOException, java.sql.*,
+                                          # ActiveRecord::StatementInvalid, etc.) in the 500
+                                          # response body/headers and absent from the baseline —
+                                          # proves DB-layer query failure without DBMS-identifying
+                                          # text; self-corroborating.
+                                          "http500_x2_framework_error"))
                 _c_has_corroboration = _a_pass or _d_pass
                 # BUG-UH-CHECKC-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH),
                 # Check C proving SQL reaches the DB (via error-payload 500s) does NOT
