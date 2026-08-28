@@ -118501,9 +118501,15 @@ class TechniqueCascadeEngine:
                 # BUG-V225-UH-SENTINEL-HEADER-FIX: helper — check response headers
                 # for sentinel value; used when body check fails for UH technique.
                 def _sentinel_in_headers(_fp):
+                    # BUG-SENTINEL-SETCOOKIE-COLLAPSE FIX: dict() collapses multiple
+                    # Set-Cookie headers to one value — sentinel in any but the last
+                    # header is silently dropped.  Iterate raw .items() so every
+                    # header value (including all Set-Cookie entries) is checked.
                     try:
-                        _hdrs = dict(getattr(_fp, 'headers', {}) or {})
-                        for _hk, _hv in _hdrs.items():
+                        _raw_hdrs = getattr(_fp, 'headers', None) or {}
+                        _hdr_items = (list(_raw_hdrs.items())
+                                      if hasattr(_raw_hdrs, 'items') else [])
+                        for _hk, _hv in _hdr_items:
                             if _sentinel_val in str(_hv):
                                 return _hk
                     except Exception:
@@ -119624,9 +119630,15 @@ class TechniqueCascadeEngine:
             _bl_headers_str = ""
             if _is_header_cookie_surface:
                 try:
-                    _bl_hdrs = dict(getattr(_bl_fp, 'headers', {}) or {})
+                    # BUG-CHECKC-SETCOOKIE-COLLAPSE FIX: dict() collapses duplicate
+                    # response headers (e.g. multiple Set-Cookie values) to one entry.
+                    # Iterate raw .items() to preserve every header value in the baseline
+                    # string so baseline-subtraction correctly masks all static values.
+                    _bl_raw_hdrs = getattr(_bl_fp, 'headers', None) or {}
+                    _bl_hdr_items = (list(_bl_raw_hdrs.items())
+                                     if hasattr(_bl_raw_hdrs, 'items') else [])
                     _bl_headers_str = " ".join(
-                        f"{_k}:{_v}" for _k, _v in _bl_hdrs.items()
+                        f"{_k}:{_v}" for _k, _v in _bl_hdr_items
                     ).lower()
                 except Exception:
                     _bl_headers_str = ""
@@ -119685,9 +119697,15 @@ class TechniqueCascadeEngine:
                         # body.  Scan response headers with baseline subtraction when body scan
                         # produced no matches.
                         try:
-                            _c_hdrs = dict(getattr(_cfp, 'headers', {}) or {})
+                            # BUG-CHECKC-SETCOOKIE-COLLAPSE FIX: dict() collapses
+                            # duplicate response headers to one value — a DBMS error
+                            # pattern in any but the last Set-Cookie is silently lost.
+                            # Iterate raw .items() so every value is scanned.
+                            _c_raw_hdrs = getattr(_cfp, 'headers', None) or {}
+                            _c_hdr_items = (list(_c_raw_hdrs.items())
+                                            if hasattr(_c_raw_hdrs, 'items') else [])
                             _cheaders_str = " ".join(
-                                f"{_k}:{_v}" for _k, _v in _c_hdrs.items()
+                                f"{_k}:{_v}" for _k, _v in _c_hdr_items
                             ).lower()
                             for p in _err_patterns:
                                 if p in _cheaders_str and p not in _bl_headers_str:
@@ -121702,7 +121720,12 @@ class TechniqueCascadeEngine:
                   "not confirming to avoid false positive", flush=True)
 
         # Check E + borderline A  SQL logic confirmed (not for stacked queries)
-        if _e_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS"):
+        # BUG-UH-EA-SENTINEL-MISSING FIX: For U/UE/UH techniques, body canaries and
+        # Check E matching prove SQL execution but NOT that UNION output is reflected
+        # in the response (required for UH confirmation).  Block this path unless the
+        # sentinel was already confirmed reflected in the appropriate surface.
+        if (_e_pass and _a_pass and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             if _is_error_page:
                 # BUG-PCV-ERROR-PAGE-DEADLOCK FIX: When Check A passes (gap=0.500, genuine
                 # body difference on the canary probes) AND Check E passes with very high
@@ -121777,7 +121800,12 @@ class TechniqueCascadeEngine:
                 and not _a_pass  # redundant safety: only fire when Check A genuinely failed
                 and tech not in ("S", "HQ", "T", "BT", "TH", "DS")
                 and (not _is_error_page or _waf_skewed_baseline)
-                and (_bl_status not in range(400, 600) or _waf_skewed_baseline)):
+                and (_bl_status not in range(400, 600) or _waf_skewed_baseline)
+                # BUG-UH-E-STANDALONE-SENTINEL-MISSING FIX: Check E standalone (all Check A
+                # canaries WAF-blocked) proving SQL execution does NOT prove UNION output is
+                # reflected — required for U/UE/UH confirmation.  Block unless sentinel was
+                # confirmed reflected in the appropriate surface (body or response headers).
+                and (tech not in ("U", "UE", "UH") or _sentinel_pass is True)):
             # Raise threshold for standalone Check E: 0.88 > 0.80 (normal Check E floor)
             try:
                 _e_direct_sim_val = float(_details.get("E", "direct_sim=0").split("direct_sim=")[1].split(" ")[0])
