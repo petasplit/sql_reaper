@@ -119873,6 +119873,12 @@ class TechniqueCascadeEngine:
                         _status_500_count += 1
                         if _cfp is not None:
                             _error_body_sizes.append(len(_extract_body_safe(_cfp)))
+                            # BUG-A FIX: WAF-blocked error payloads must also be added to
+                            # _error_fps so that http500_x2_hdr_error and
+                            # http500_x2_hdr_structural can inspect their response headers.
+                            # For UH/EH/BH/TH techniques DBMS error text may appear in
+                            # response headers of WAF-adjacent 4xx responses.
+                            _error_fps.append(_cfp)
                         _all_c_matches.append((_c_name, "waf_block_detected", _c_status))
                         continue  # no body error patterns to match on a WAF page
 
@@ -120376,16 +120382,24 @@ class TechniqueCascadeEngine:
                 _hdr_structural_note = ""
                 try:
                     if _can_fp is not None and _error_fps:
+                        # BUG-B FIX: dict() collapses duplicate Set-Cookie headers so
+                        # only the last value survives; use .items() to enumerate every
+                        # header key (including all Set-Cookie entries) to avoid missing
+                        # headers that appear only in duplicate entries.
+                        _can_raw_h = getattr(_can_fp, 'headers', None) or {}
                         _can_hdrs_set = set(
                             k.lower()
-                            for k in (dict(getattr(_can_fp, 'headers', {}) or {})).keys()
+                            for k, _ in (list(_can_raw_h.items())
+                                         if hasattr(_can_raw_h, 'items') else [])
                         )
                         _err_only_hdrs = set()
                         for _efp_s in _error_fps:
                             try:
+                                _efp_s_raw_h = getattr(_efp_s, 'headers', None) or {}
                                 _efp_s_keys = set(
                                     k.lower()
-                                    for k in (dict(getattr(_efp_s, 'headers', {}) or {})).keys()
+                                    for k, _ in (list(_efp_s_raw_h.items())
+                                                  if hasattr(_efp_s_raw_h, 'items') else [])
                                 )
                                 _err_only_hdrs |= (_efp_s_keys - _can_hdrs_set)
                             except Exception:
@@ -120421,6 +120435,58 @@ class TechniqueCascadeEngine:
                     return True, "http500_x2_hdr_structural", "http_500_header_structural", \
                            (f" (HTTP 500 on {_status_500_count} error payloads, "
                             f"structural header difference vs canary: {_hdr_structural_note}, "
+                            f"absent from baseline {_bl_status})")
+                # FIX-2 ADDITIONAL SIGNAL: When all explicit signals (DBMS text, boolean,
+                # WAF asymmetric, conditional, oracle, size, sql_universal, valid_discriminator,
+                # hdr_error, hdr_structural) fail, attempt a cookie-value structural
+                # discrimination before falling through to the plain (weak) fallback.
+                # If error payloads produce Set-Cookie values that are BOTH absent from the
+                # canary AND consistent across ≥2 error responses (deterministic server
+                # state change), that constitutes a SQL-selective cookie signal independent
+                # of DBMS text visibility.  Upgrade to http500_x2_cookie_structural
+                # (self-corroborating — determinism proves DB involvement).
+                _cookie_structural_confirmed = False
+                _cookie_structural_note = ""
+                if _is_header_cookie_surface and _error_fps and _can_fp is not None:
+                    try:
+                        def _extract_setcookie_values(fp):
+                            """Return list of Set-Cookie value strings from response headers."""
+                            raw_h = getattr(fp, 'headers', None) or {}
+                            vals = []
+                            if hasattr(raw_h, 'items'):
+                                for _k, _v in raw_h.items():
+                                    if _k.lower() == 'set-cookie':
+                                        vals.append(str(_v).lower())
+                            return vals
+                        _can_cookie_vals = set(_extract_setcookie_values(_can_fp))
+                        # Collect Set-Cookie values unique to error responses (not in canary)
+                        _err_cookie_sets = []
+                        for _efp_ck in _error_fps:
+                            _ec_vals = set(_extract_setcookie_values(_efp_ck)) - _can_cookie_vals
+                            if _ec_vals:
+                                _err_cookie_sets.append(_ec_vals)
+                        if len(_err_cookie_sets) >= 2:
+                            # Find cookie values shared by ≥2 error responses (deterministic)
+                            _shared_cookies = _err_cookie_sets[0]
+                            for _ecs in _err_cookie_sets[1:]:
+                                _shared_cookies &= _ecs
+                            if _shared_cookies:
+                                _cookie_structural_confirmed = True
+                                _cookie_structural_note = next(iter(_shared_cookies))[:40]
+                                print(
+                                    f"[*]     Check C HTTP-500 + cookie structural signal: "
+                                    f"{_status_500_count} error payloads → 500, deterministic "
+                                    f"Set-Cookie value absent from canary "
+                                    f"('{_cookie_structural_note}') — SQL-selective cookie "
+                                    "state change", flush=True)
+                    except Exception:
+                        pass
+                if _cookie_structural_confirmed:
+                    return True, "http500_x2_cookie_structural", \
+                           "http_500_cookie_structural_response", \
+                           (f" (HTTP 500 on {_status_500_count} error payloads, "
+                            f"deterministic Set-Cookie change vs canary: "
+                            f"'{_cookie_structural_note}', "
                             f"absent from baseline {_bl_status})")
                 # Plain http500_x2 fallback — weakest signal: error-SQL → 500, canary → non-500,
                 # but no boolean differential, no SQL-universal pattern, no WAF asymmetry, no
@@ -121759,7 +121825,11 @@ class TechniqueCascadeEngine:
                                           # http500_x2_hdr_structural: error responses carry extra
                                           # header keys absent from the non-SQL canary — structural
                                           # SQL-selective difference; self-corroborating.
-                                          "http500_x2_hdr_structural"))
+                                          "http500_x2_hdr_structural",
+                                          # http500_x2_cookie_structural: error responses produce
+                                          # deterministic Set-Cookie values absent from the canary —
+                                          # SQL-selective cookie state change; self-corroborating.
+                                          "http500_x2_cookie_structural"))
                 _c_has_corroboration = _a_pass or _d_pass
                 # BUG-UH-CHECKC-SENTINEL-GUARD FIX: For UNION techniques (U/UE/UH),
                 # Check C proving SQL reaches the DB (via error-payload 500s) does NOT
