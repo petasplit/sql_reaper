@@ -1,8 +1,66 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v227 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 28, 2026)         ║
-║  v226 base + 2 fixes.  v227 closes two remaining root causes:                    ║
+║  SQLReaper v228 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 28, 2026)         ║
+║  v227 base + 5 fixes. v228 closes remaining sentinel gaps in detect_union        ║
+║  phases 0/1/2 and the union extraction response-value scanner.                   ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v227 → v228) — 5 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V228-DETECT-UNION-PH0-UH-TECH (HIGH; UH technique; all DBMSes; all    ║
+║      surfaces; detect_union Phase 0 / primary DBMS-specific UNION probes):       ║
+║      _u1_sentinel_hit header scan (for body-less UH probes) was guarded only on  ║
+║      `data_fmt in (...)` — `tech == "UH"` was missing.  UH probes injected via  ║
+║      standard form/GET surfaces would fail the guard and never scan headers,     ║
+║      forcing detection to fall through to the multi-probe body-diff path which   ║
+║      is noisier and can produce false positives on dynamic pages.                ║
+║      Also used dict() to build the header scan — Set-Cookie collapse bug.        ║
+║      Fix: add `tech == "UH"` to condition; use .items() directly.               ║
+║                                                                                    ║
+║  [✓] BUG-V228-DETECT-UNION-PH1-UH-TECH (HIGH; UH technique; all DBMSes; all    ║
+║      surfaces; detect_union Phase 1 cross-category probes):                      ║
+║      Same issue as above in the cross-category (_uwc_sentinel_hit) path.        ║
+║      Both `tech == "UH"` condition and Set-Cookie collapse fix applied.          ║
+║                                                                                    ║
+║  [✓] BUG-V228-DETECT-UNION-PH2-NC-HEADER (HIGH; UH technique and any header/   ║
+║      cookie/json/xml/path/bg surface; all DBMSes; detect_union Phase 2 null-    ║
+║      column count probes):                                                        ║
+║      The null-column probe sentinel check (`_u_nc_sentinel.encode() in           ║
+║      fp_nc.body`) only scanned the response body.  For UH/non-body surfaces     ║
+║      the server reflects UNION output into response headers — fp_nc.body is      ║
+║      always sentinel-free, so Phase 2 column-count detection always missed for   ║
+║      these surfaces.  Fix: after body check, scan response headers for sentinel  ║
+║      when `tech == "UH"` or `data_fmt in non-body surfaces`; use .items().      ║
+║                                                                                    ║
+║  [✓] BUG-V228-UNION-EXTRACT-HDR-SENTINEL (HIGH; UH technique and any header/   ║
+║      cookie/json/xml/path/bg surface; all DBMSes; _union_extract):               ║
+║      The SQRXS/SQRXE extraction sentinel scan in _union_extract only searched   ║
+║      `body` (response body).  For UH/non-body surfaces UNION SELECT output       ║
+║      appears in response headers — body sentinel scan always missed → fell       ║
+║      through to word-scan heuristic → picked up CSS class names, JS library     ║
+║      names, HTML structural words → garbage extraction values (observed in       ║
+║      production log as `'\x94Ȋ䐂ঈȠ'` and similar).                              ║
+║      Fix: when body sentinel scan yields nothing and surface is UH/non-body,    ║
+║      scan all response header values for SQRXS/SQRXE using .items().            ║
+║                                                                                    ║
+║  [✓] BUG-V228-UNION-EXTRACT-EMPTY-BODY-SKIP (HIGH; UH technique and any        ║
+║      header/cookie/json/xml/path/bg surface; all DBMSes; _union_extract):        ║
+║      The early-exit guard `if not body or len(body) < 3: continue` fired before ║
+║      the header sentinel scan above, causing UH extractions with empty response  ║
+║      bodies to be skipped entirely — extraction always returned empty for UH    ║
+║      when the server returned only response headers with no body.                 ║
+║      Fix: bypass the early-exit for UH/non-body surfaces so the header sentinel  ║
+║      scan is always reached; body-based word-scan fallbacks are naturally safe   ║
+║      (finditer on empty string yields no matches).                                ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  PRIOR VERSION HISTORY (v225–v227) — see below                                   ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  v227 — 2 fixes.  v227 closes two remaining root causes:                         ║
 ║  (1) The inline PCV sentinel check (_inline_pcv_check UNION branch) only checked ║
 ║  _fu.body for UH/header-surface techniques — sentinel in response headers was    ║
 ║  never found → sentinel probe always "failed" for UH → inline UNION confirmation ║
@@ -42428,10 +42486,14 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                          SENTINEL.lower().encode() in _u1_resp_body)
                         if _u1_resp_body else False
                     )
-                    if not _u1_sentinel_hit and data_fmt in ("header", "cookie", "json", "xml", "path", "bg"):
+                    # BUG-SENTINEL-UH-TECH-FIX: also check tech=="UH" (Union Header) not just data_fmt.
+                    # BUG-SETCOOKIE-COLLAPSE-FIX: use .items() not dict() to avoid Set-Cookie dedup.
+                    if not _u1_sentinel_hit and (tech == "UH" or data_fmt in ("header", "cookie", "json", "xml", "path", "bg")):
                         try:
-                            _u1_resp_hdrs = dict(getattr(fp_u, 'headers', {}) or {})
-                            for _u1_hv in _u1_resp_hdrs.values():
+                            _u1_resp_hdrs_raw = getattr(fp_u, 'headers', None) or {}
+                            _u1_hdr_items = (list(_u1_resp_hdrs_raw.items())
+                                             if hasattr(_u1_resp_hdrs_raw, 'items') else [])
+                            for _u1_hk, _u1_hv in _u1_hdr_items:
                                 _u1_hv_str = (_u1_hv if isinstance(_u1_hv, str)
                                               else (_u1_hv.decode('utf-8', 'replace')
                                                     if isinstance(_u1_hv, bytes) else str(_u1_hv)))
@@ -42658,10 +42720,14 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                          SENTINEL.lower().encode() in _uwc_resp_body)
                         if _uwc_resp_body else False
                     )
-                    if not _uwc_sentinel_hit and data_fmt in ("header", "cookie", "json", "xml", "path", "bg"):
+                    # BUG-SENTINEL-UH-TECH-FIX (cross-cat): also check tech=="UH" not just data_fmt.
+                    # BUG-SETCOOKIE-COLLAPSE-FIX (cross-cat): use .items() not dict().
+                    if not _uwc_sentinel_hit and (tech == "UH" or data_fmt in ("header", "cookie", "json", "xml", "path", "bg")):
                         try:
-                            _uwc_resp_hdrs = dict(getattr(fp_wu, 'headers', {}) or {})
-                            for _uwc_hv in _uwc_resp_hdrs.values():
+                            _uwc_resp_hdrs_raw = getattr(fp_wu, 'headers', None) or {}
+                            _uwc_hdr_items = (list(_uwc_resp_hdrs_raw.items())
+                                              if hasattr(_uwc_resp_hdrs_raw, 'items') else [])
+                            for _uwc_hk, _uwc_hv in _uwc_hdr_items:
                                 _uwc_hv_str = (_uwc_hv if isinstance(_uwc_hv, str)
                                                else (_uwc_hv.decode('utf-8', 'replace')
                                                      if isinstance(_uwc_hv, bytes) else str(_uwc_hv)))
@@ -42776,8 +42842,30 @@ async def detect_union(engine,config,method,url,data,data_fmt,
                         return None
                     fp_nc = await _send_injected(engine, method, url, data, data_fmt,
                                                   param, original + _nc_test_pay, tamper_chain)
+                    # BUG-SENTINEL-NC-HEADER-FIX: For UH tech and non-body surfaces (header/cookie/
+                    # json/xml/path/bg) the server reflects UNION output into response HEADERS,
+                    # not the body. The old code only checked fp_nc.body, so col-count probing
+                    # always failed for these surfaces. Add header scan alongside body check.
+                    # BUG-SETCOOKIE-COLLAPSE-FIX: use .items() not dict() to preserve duplicate Set-Cookie.
+                    _fp_nc_body_bytes = (fp_nc.body if fp_nc else None) or b""
+                    _nc_sentinel_hit = bool(_fp_nc_body_bytes and _u_nc_sentinel.encode() in _fp_nc_body_bytes)
+                    if not _nc_sentinel_hit and fp_nc and (tech == "UH" or data_fmt in (
+                            "header", "cookie", "json", "xml", "path", "bg")):
+                        try:
+                            _nc_resp_hdrs_raw = getattr(fp_nc, 'headers', None) or {}
+                            _nc_hdr_items = (list(_nc_resp_hdrs_raw.items())
+                                             if hasattr(_nc_resp_hdrs_raw, 'items') else [])
+                            for _nc_hk, _nc_hv in _nc_hdr_items:
+                                _nc_hv_str = (_nc_hv if isinstance(_nc_hv, str)
+                                              else (_nc_hv.decode('utf-8', 'replace')
+                                                    if isinstance(_nc_hv, bytes) else str(_nc_hv)))
+                                if _u_nc_sentinel in _nc_hv_str:
+                                    _nc_sentinel_hit = True
+                                    break
+                        except Exception:
+                            pass
                     if (fp_nc and not WAFBlockDiscriminator.is_waf_block(fp_nc)
-                            and _validate_response(fp_nc, "fp_nc_sentinel_check") and _u_nc_sentinel.encode() in fp_nc.body):
+                            and _validate_response(fp_nc, "fp_nc_sentinel_check") and _nc_sentinel_hit):
                         LOG.info(f"[UNION-COLCOUNT] ✓ DETECTED {_nc_n} cols, sentinel in col {_nc_ci}")
                         try:
                             _nc_exact = DetectionResult.compute_exact_payload(
@@ -68595,7 +68683,18 @@ class Scanner:
                     LOG.debug("[UnionExtract] Body decode error: %s", _e_body)
                     continue
 
-                if not body or len(body) < 3:
+                # BUG-UH-EXTRACT-EMPTY-BODY-FIX: For UH and non-body surfaces, the UNION
+                # SELECT output goes to response HEADERS, not the body. The old guard
+                # `if not body or len(body) < 3: continue` skips the header sentinel
+                # scan below, causing UH extraction to always return empty values.
+                # Fix: allow empty body for UH/non-body surfaces; the header sentinel
+                # scan runs regardless. Body-based word-scan fallbacks remain gated on
+                # body length (they require content in the body to match against).
+                _ue_is_header_surface = (
+                    getattr(_det, 'technique', '') == "UH"
+                    or enum.data_fmt in ("header", "cookie", "json", "xml", "path", "bg")
+                )
+                if (not body or len(body) < 3) and not _ue_is_header_surface:
                     continue
 
                 # BUG-V57-UNION-BODY-PARSE FIX (Req 7/10/16): Replace fragile HTML/JSON/
@@ -68632,6 +68731,36 @@ class Scanner:
                     if _ue_sent_val:
                         value = _ue_sent_val
                         LOG.info("[UnionExtract] %s = %r (sentinel-match)", label, value[:60])
+
+                # BUG-UH-EXTRACT-HEADER-SENTINEL-FIX: For UH technique and non-body surfaces
+                # (header/cookie/json/xml/path/bg), UNION SELECT output appears in response
+                # HEADERS, not the body. The body sentinel scan above always misses in these
+                # cases, causing fall-through to the word-scan heuristic which produces garbage
+                # values (CSS class names, JS identifiers, HTML structural words).
+                # Fix: when body sentinel scan fails (value is None) and the surface is UH or
+                # a non-body format, scan all response header values for SQRXS...SQRXE.
+                # Use .items() not dict() to preserve duplicate Set-Cookie entries.
+                if value is None and (
+                        getattr(_det, 'technique', '') == "UH"
+                        or enum.data_fmt in ("header", "cookie", "json", "xml", "path", "bg")):
+                    try:
+                        _ue_fp_hdrs_raw = getattr(fp, 'headers', None) or {}
+                        _ue_fp_hdr_items = (list(_ue_fp_hdrs_raw.items())
+                                            if hasattr(_ue_fp_hdrs_raw, 'items') else [])
+                        for _ue_hk, _ue_hv in _ue_fp_hdr_items:
+                            _ue_hv_str = (_ue_hv if isinstance(_ue_hv, str)
+                                          else (_ue_hv.decode('utf-8', 'replace')
+                                                if isinstance(_ue_hv, bytes) else str(_ue_hv)))
+                            _ue_hdr_sent_m = _re.search(r'SQRXS(.*?)SQRXE', _ue_hv_str, _re.S)
+                            if _ue_hdr_sent_m:
+                                _ue_hdr_sent_val = _ue_hdr_sent_m.group(1).strip()
+                                if _ue_hdr_sent_val:
+                                    value = _ue_hdr_sent_val
+                                    LOG.info("[UnionExtract] %s = %r (header sentinel-match in %s)",
+                                             label, value[:60], _ue_hk)
+                                    break
+                    except Exception:
+                        pass
 
                 # BUG-UNION-UE-EXTENDED-STOP-SCOPE FIX (Req 7/16):
                 # _SQL_STOP_WORDS and _UE_EXTENDED_STOP were previously defined INSIDE
