@@ -119030,7 +119030,39 @@ class TechniqueCascadeEngine:
                         _sentinel_pass = False
                         print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected in "
                               "body or response headers  UH FP", flush=True)
-                # WAF block on sentinel probe → inconclusive (don't block other checks)
+                elif (tech == "UH" or data_fmt in ("header", "cookie", "json", "xml", "path", "bg")) and _sfp:
+                    # BUG-V230-WAF-SENTINEL-HEADER-FIX: Both previous branches excluded WAF-
+                    # blocked responses via `not WAFBlockDiscriminator.is_waf_block(_sfp)`.
+                    # For header-based injection surfaces the application may set response
+                    # headers (including Set-Cookie) BEFORE the WAF intercepts and replaces
+                    # the body with a challenge page.  The sentinel value can therefore appear
+                    # in response headers even when `is_waf_block` is True for the body.
+                    # This branch checks headers regardless of WAF body status for all UH /
+                    # header-surface / cookie-surface / json-surface techniques.
+                    _waf_hdr_key = _sentinel_in_headers(_sfp)
+                    if _waf_hdr_key is None:
+                        # WAF-blocked str probe had no header sentinel — try numeric probe
+                        try:
+                            _sfp_num_waf, _, _, _ = await _pcv_send(_sfx_num)
+                            if _sfp_num_waf:
+                                _waf_hdr_key = _sentinel_in_headers(_sfp_num_waf)
+                                if _waf_hdr_key:
+                                    _sfp = _sfp_num_waf
+                        except Exception:
+                            pass
+                    if _waf_hdr_key:
+                        print(f"[*]   [PCV] Sentinel '{_sentinel_val}' REFLECTED in response "
+                              f"header '{_waf_hdr_key}' (WAF body-blocked)  injection confirmed "
+                              "(headers preserved through WAF body intercept)", flush=True)
+                        print("[*]   [PCV] Result: CONFIRMED  reflected sentinel "
+                              "(response header, WAF body)", flush=True)
+                        return await _do_sentinel_confirm(f"header_wafbody:{_waf_hdr_key}")
+                    else:
+                        _sentinel_pass = False
+                        print(f"[*]   [PCV] Sentinel '{_sentinel_val}' NOT reflected in "
+                              "response headers (WAF body-blocked)  FP (WAF-blocked, no header "
+                              f"reflection, tech={tech}, data_fmt={data_fmt})", flush=True)
+                # WAF block on non-header-surface sentinel probe → inconclusive (don't block other checks)
             except Exception as _se:
                 LOG.debug(f"PCV sentinel check: {_se}")
 
