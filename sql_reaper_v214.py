@@ -1,14 +1,53 @@
 #!/usr/bin/env python3
 r"""
 ╔════════════════════════════════════════════════════════════════════════════════════╗
-║  SQLReaper v226 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 27, 2026)         ║
-║  v225 base + 1 critical fix. v226 fixes the missing sentinel guard on the        ║
-║  E+D dual-check path: Check E (DBMS-SQL consistency) + Check D (header diff)    ║
-║  could confirm U/UE/UH without requiring sentinel reflection in headers.         ║
-║  WAF-added/removed headers (X-Cache, X-Forwarded-For) satisfy _d_count>=1,      ║
-║  and DBMS-SQL consistency (Check E) proves SQL execution but NOT that UNION      ║
-║  output appeared in response headers. This FP path bypassed all v219-v224       ║
-║  sentinel guards.                                                                  ║
+║  SQLReaper v227 — PRODUCTION ROOT-CAUSE INVESTIGATION (August 28, 2026)         ║
+║  v226 base + 2 fixes.  v227 closes two remaining root causes:                    ║
+║  (1) The inline PCV sentinel check (_inline_pcv_check UNION branch) only checked ║
+║  _fu.body for UH/header-surface techniques — sentinel in response headers was    ║
+║  never found → sentinel probe always "failed" for UH → inline UNION confirmation ║
+║  path was dead for UH in all cascade paths going through _inline_pcv_check.      ║
+║  (2) The http500_x2_hdr_error upgrade path (Check C error-in-headers scan)      ║
+║  used dict() to build the header scan string — duplicate Set-Cookie headers      ║
+║  collapsed to the last value, silently discarding DBMS error text in earlier     ║
+║  Set-Cookie entries. Now uses raw .items() to scan every header value.           ║
+║                                                                                    ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║  FRESH EXAMINATION AUDIT (v226 → v227) — 2 BUGS FIXED                           ║
+║  ══════════════════════════════════════════════════════════════════════════════ ║
+║                                                                                    ║
+║  [✓] BUG-V227-IPCV-UH-SENTINEL-HEADER (HIGH; UH technique and any header/       ║
+║      cookie/json/xml/path/bg surface; all DBMSes; _inline_pcv_check UNION       ║
+║      branch; all cascade paths that route through _inline_pcv_check instead of  ║
+║      _post_confirm_verify_locked for their initial confirmation):                 ║
+║      The UNION sentinel check inside _inline_pcv_check (mechanism-sniffing       ║
+║      block) built a sentinel payload and then checked ONLY _fu.body for the      ║
+║      sentinel string (`_sentinel_pcv.encode() in _fu.body`). For UH (Union-     ║
+║      Header injection), the UNION SELECT output goes into response HEADERS, not  ║
+║      the body. The body was always empty/sentinel-free → the inline confirmation ║
+║      returned nothing → fell through to _effective_tech="U" → fell into          ║
+║      _post_confirm_verify_locked → sentinel check there DID look in headers     ║
+║      (v225 fix), but the inline path had already bypassed the positive result.   ║
+║      Net effect: for UH injection going through _inline_pcv_check (the common   ║
+║      cascade path), the quick inline UNION confirmation never fired for headers. ║
+║      Fix: after the body check, also scan _fu.headers.items() for the sentinel  ║
+║      when tech=="UH" or data_fmt in ("header","cookie","json","xml","path","bg")║
+║      — same surface logic as the v225 outline fix.  On match, print the header  ║
+║      name and confirm injection, consistent with the outline sentinel path.      ║
+║                                                                                    ║
+║  [✓] BUG-V227-CHECKC-HDR-ERROR-SETCOOKIE-COLLAPSE (MEDIUM; header/cookie/json/ ║
+║      xml/path/bg surfaces; all DBMSes; http500_x2_hdr_error upgrade path in     ║
+║      _run_check_c; when _is_header_cookie_surface=True and _error_fps non-empty):║
+║      The http500_x2_hdr_error upgrade path scanned response headers for DBMS    ║
+║      error text by building a scan string via `dict(getattr(_efp,'headers',{}))`║
+║      followed by `.items()`. Using dict() first collapses duplicate Set-Cookie  ║
+║      headers to the last value — any DBMS error text in earlier Set-Cookie      ║
+║      values was silently dropped before the pattern scan ran.  The baseline      ║
+║      (_bl_headers_str) and the body-scan loop header check (lines 119661/119728)║
+║      were already fixed (BUG-CHECKC-SETCOOKIE-COLLAPSE FIX applied in v225),   ║
+║      but the http500_x2_hdr_error path had its own separate dict() call that    ║
+║      missed the fix.  Fix: replace dict()/items() with a direct .items() call   ║
+║      on the raw headers object so all Set-Cookie values are scanned.            ║
 ║                                                                                    ║
 ║  ══════════════════════════════════════════════════════════════════════════════ ║
 ║  FRESH EXAMINATION AUDIT (v225 → v226) — 1 BUG FIXED                            ║
@@ -116575,8 +116614,36 @@ class TechniqueCascadeEngine:
                         try:
                             _fu = await self._safe_confirm(method, url, data, data_fmt,
                                 param, original + _union_p2, self.tamper_chain)
-                            if _fu and _validate_response(_fu, "_fu_sentinel_check") and _sentinel_pcv.encode() in _fu.body:
-                                print(f"[+] PCV CONFIRMED [{tech}→U] {dbms}  SENTINEL reflected", flush=True)
+                            # BUG-IPCV-UH-SENTINEL-HEADER FIX: For UH (Union-Header) and any
+                            # header/cookie/json/xml/path/bg surface, UNION SELECT output appears
+                            # in response HEADERS, not the body.  The old code only checked
+                            # _fu.body, causing all UH inline sentinel checks to fail silently
+                            # → no inline confirmation → fell through to _post_confirm_verify_locked
+                            # which might accept a body-canary that fires for non-injection reasons.
+                            # Fix: also scan response header values for the sentinel when tech is
+                            # UH or data_fmt indicates a non-body surface.  Use .items() not dict()
+                            # to avoid collapsing duplicate Set-Cookie headers.
+                            _fu_sentinel_reflected_body = bool(
+                                _fu and _validate_response(_fu, "_fu_sentinel_check")
+                                and _fu.body and _sentinel_pcv.encode() in _fu.body)
+                            _fu_sentinel_hdr_key_ipcv = None
+                            if (_fu and _validate_response(_fu, "_fu_sentinel_check")
+                                    and (tech == "UH" or data_fmt in (
+                                        "header", "cookie", "json", "xml", "path", "bg"))):
+                                try:
+                                    _ipcv_hdrs = getattr(_fu, 'headers', None) or {}
+                                    for _ipcv_hk, _ipcv_hv in (
+                                            list(_ipcv_hdrs.items())
+                                            if hasattr(_ipcv_hdrs, 'items') else []):
+                                        if _sentinel_pcv in str(_ipcv_hv):
+                                            _fu_sentinel_hdr_key_ipcv = _ipcv_hk
+                                            break
+                                except Exception:
+                                    pass
+                            if _fu_sentinel_reflected_body or _fu_sentinel_hdr_key_ipcv:
+                                _fu_where = (f"header:{_fu_sentinel_hdr_key_ipcv}"
+                                             if _fu_sentinel_hdr_key_ipcv else "body")
+                                print(f"[+] PCV CONFIRMED [{tech}→U] {dbms}  SENTINEL reflected in {_fu_where}", flush=True)
                                 # BUG-C FIX (REQ-4): Set _SCAN_STOPPED immediately so all
                                 # concurrent probe loops exit. Also fire _confirmed_event so
                                 # header-batch loops abort. Previously returned True with no flags.
@@ -120135,9 +120202,16 @@ class TechniqueCascadeEngine:
                     _hdr_err_name = ""
                     for _efp in _error_fps:
                         try:
-                            _efp_hdrs = dict(getattr(_efp, 'headers', {}) or {})
+                            # BUG-CHECKC-SETCOOKIE-COLLAPSE FIX: dict() collapses duplicate
+                            # Set-Cookie headers to the last value only — DBMS error text in
+                            # earlier Set-Cookie headers is silently lost.  Use .items() on the
+                            # raw headers object so every header pair (including all Set-Cookie
+                            # entries) is included in the scan string.
+                            _efp_raw_hdrs = getattr(_efp, 'headers', None) or {}
+                            _efp_hdr_items = (list(_efp_raw_hdrs.items())
+                                              if hasattr(_efp_raw_hdrs, 'items') else [])
                             _ehdr_str = " ".join(
-                                f"{_k}:{_v}" for _k, _v in _efp_hdrs.items()
+                                f"{_k}:{_v}" for _k, _v in _efp_hdr_items
                             ).lower()
                             for p in _err_patterns:
                                 if p in _ehdr_str and p not in _bl_headers_str:
