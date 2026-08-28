@@ -120722,11 +120722,11 @@ class TechniqueCascadeEngine:
                     "database query error", "db query error",
                 ]
                 _fw_match = None
-                if _status_500_count >= 2 and _err_fps:
+                if _status_500_count >= 2 and _error_fps:
                     try:
                         _bl_body_fw = (_bl_body or "").lower()
                         _bl_hdr_str_fw = (_bl_headers_str or "").lower()
-                        for _efp_fw in _err_fps[:4]:
+                        for _efp_fw in _error_fps[:4]:
                             _fw_body_str = _safe_decode_body(
                                 _efp_fw, encoding="utf-8", errors='replace',
                                 func_name='check_c_fw').lower()
@@ -120779,7 +120779,7 @@ class TechniqueCascadeEngine:
                 # Upgraded signal: http500_x2_content_type_discriminator (self-corroborating).
                 _ct_disc_confirmed = False
                 _ct_disc_note = ""
-                if _status_500_count >= 2 and _err_fps and _can_fp is not None:
+                if _status_500_count >= 2 and _error_fps and _can_fp is not None:
                     try:
                         def _get_ct(fp):
                             """Return Content-Type value (lowercase, stripped) or ''."""
@@ -120806,7 +120806,7 @@ class TechniqueCascadeEngine:
                         _ct_mismatches = 0
                         _hdr_count_mismatches = 0
                         _err_ct_seen = set()
-                        for _efp_ct in _err_fps[:4]:
+                        for _efp_ct in _error_fps[:4]:
                             _ect = _get_ct(_efp_ct)
                             if _ect:
                                 _err_ct_seen.add(_ect)
