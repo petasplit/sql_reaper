@@ -108750,7 +108750,19 @@ class WAFBlockDiscriminator:
       - Rate limit responses
     """
 
-    WAF_BLOCK_CODES = {400, 403, 404, 406, 412, 429, 503}  # FIX-WAFBD-404: 404 is Imperva silent-block
+    # FIX-WAFBD-404: 404 is Imperva silent-block.
+    # BUG-WAFBD-CDN FIX (HIGH, all E/EH/B/S techniques, WAFBlockDiscriminator.single_waf_blocked):
+    # Cloudflare CDN error codes 520-530 (520=Unknown Error, 521=Web Server Down,
+    # 522=Connection Timed Out, 524=Timeout, 525=SSL Handshake Failed, 526=Invalid SSL,
+    # 527=Railgun Error, 530=Origin DNS Error) indicate CDN infrastructure errors — the
+    # HTTP request never reached the database. CDN error pages are Cloudflare-generated
+    # HTML that can contain SQL-related text (e.g. "Database error" in site-specific
+    # Cloudflare error templates, or payload echo in the error reference section).
+    # single_waf_blocked() was returning False for all CDN 5xx codes, causing
+    # boolean/error oracle evaluators to treat CDN error responses as valid DB signals.
+    # Fix: add the full Cloudflare CDN error range (520-530) to WAF_BLOCK_CODES.
+    WAF_BLOCK_CODES = {400, 403, 404, 406, 412, 429, 503,
+                       520, 521, 522, 523, 524, 525, 526, 527, 528, 529, 530}
 
     WAF_BLOCK_PATTERNS = [
         r"cloudflare.*ray",
@@ -111451,8 +111463,14 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"unknown column .+ in .field list",
         # Wire-protocol: MySQL EXTRACTVALUE/UPDATEXML error — MySQL NEVER echoes the
         # function name; it always emits "XPATH syntax error: '~<data>'" format.
-        # This pattern is immune to WAF echo (WAF echoes function call, not error output).
-        r"xpath syntax error:\s*'[^'\"]{0,10}",
+        # The tilde (~) is the 0x7e delimiter injected by CONCAT(0x7e,<data>,0x7e) in
+        # every EXTRACTVALUE/UPDATEXML detection payload. Requiring '~ prevents WAF block
+        # pages from matching: WAF pages echo the function name after the quote
+        # (e.g. "XPATH syntax error: 'EXTRACTVALUE'") which never starts with ~.
+        # BUG-SQLPAT-XPATH-TILDE FIX (HIGH, MySQL/MariaDB/TiDB E/EH techniques):
+        # Old pattern matched any char after the quote — WAF block advisories containing
+        # "XPATH syntax error: '<injected_func>'" triggered false-positive E detections.
+        r"xpath syntax error:\s*'~",
         # Wire-protocol: MySQL collation mismatch (requires MySQL collation system)
         r"illegal mix of collations",
         # Wire-protocol: MySQL truncation error (MySQL-specific phrasing with data type name)
@@ -111468,8 +111486,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"you have an error in your sql syntax; check the manual",
         # DBMS-identifying: MariaDB-specific version string in error output
         r"mariadb server version",
-        # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL)
-        r"xpath syntax error:\s*'[^'\"]{0,10}",
+        # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
+        # BUG-SQLPAT-XPATH-TILDE FIX: require tilde after quote (see MySQL entry above).
+        r"xpath syntax error:\s*'~",
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
         # REMOVED: warning: mysqli_ — PHP driver warning, not MariaDB wire-protocol format
@@ -111485,8 +111504,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     "TiDB": [
         # Wire-protocol: same MySQL-format error messages (TiDB uses MySQL parser)
         r"you have an error in your sql syntax; check the manual",
-        # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL)
-        r"xpath syntax error:\s*'[^'\"]{0,10}",
+        # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
+        # BUG-SQLPAT-XPATH-TILDE FIX: require tilde after quote (see MySQL entry above).
+        r"xpath syntax error:\s*'~",
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
         r"truncated incorrect (?:integer|double|real)",
@@ -111534,7 +111554,12 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # WAF pages echoing the phrase omit the quote (not reproducing wire-protocol format).
         r"incorrect syntax near '",
         # Wire-protocol: SQL Server error number + severity level (Msg N, Level N, State N)
-        r"Msg \d+, Level \d+",
+        # BUG-SQLPAT-MSG-CASE FIX (MEDIUM, MSSQL E/EH techniques): MSSQL ALWAYS emits
+        # "Msg NNNNN, Level NN" with capital M and L. With re.I active, the unguarded pattern
+        # also matches "msg 5, level 2" which can appear in application log excerpts or WAF
+        # advisories echoing partial SQL Server output. Fix: (?-i:Msg) + (?-i:Level) pins
+        # both tokens to their exact wire-protocol capitalisation.
+        r"(?-i:Msg) \d+, (?-i:Level) \d+",
         # Wire-protocol: MSSQL-specific type conversion errors
         r"conversion failed when converting",
         r"string or binary data would be truncated",
@@ -111565,18 +111590,25 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # error number without the colon do NOT match this pattern.
         # BUG-PCV-1 FIX: r"ora-\\d{4,5}" used double-backslash → never matched real errors.
         # BUG-ORA-COLON FIX: require trailing colon to exclude app text "ORA-1234 occurred".
-        r"ora-\d{4,5}:",
+        # BUG-SQLPAT-ORA-CASE FIX (HIGH, Oracle E/EH techniques): Oracle ALWAYS emits error
+        # codes in uppercase: "ORA-NNNNN:", never "ora-nnnnn:". Without (?-i:ORA), the pattern
+        # matches with re.I active, so lowercase "ora-" in application variable names, config
+        # strings, or WAF block advisory text ("ora-cle database error blocked") could match.
+        # Fix: use (?-i:ORA) to pin the prefix to uppercase-only, matching Oracle wire-protocol.
+        r"(?-i:ORA)-\d{4,5}:",
         # Wire-protocol: Oracle-specific error message phrasing (from ORA-01756 parser error)
         r"quoted string not properly terminated",
         # Wire-protocol: PL/SQL error codes (PLS-NNNNN:) — colon required, same as ORA-
-        r"pls-\d{4,5}:",
-        # Wire-protocol: Oracle TNS (Transparent Network Substrate) errors — format TNS-NNNNN
+        # BUG-SQLPAT-PLS-CASE FIX: (?-i:PLS) pins to uppercase (Oracle ALWAYS uses uppercase).
+        r"(?-i:PLS)-\d{4,5}:",
+        # Wire-protocol: Oracle TNS (Transparent Network Substrate) errors — format TNS-NNNNN:
         # Oracle TNS errors ALWAYS use "TNS-NNNNN:" format with a 5-digit code and colon.
         # This is immune to WAF echo: WAF block pages do not produce TNS error codes.
         # BUG-ORACLE-TNS-PAT FIX: old r"tns:.*error" matched "TNS: error" but also any
         # application log containing "tns:.*error" (e.g. "tns: connection error" in non-Oracle
         # apps, config files mentioning TNS). The numeric TNS-NNNNN: format is DBMS-specific.
-        r"TNS-\d{5}",
+        # BUG-SQLPAT-TNS-CASE FIX: (?-i:TNS) pins to uppercase + colon required (was missing).
+        r"(?-i:TNS)-\d{5}:",
         # REMOVED: r"sp2-\d{4}" — SQL*Plus command-line errors (SP2-NNNN); SQL*Plus is a
         #   local CLI tool, not a network service — SP2 error codes cannot appear in HTTP
         #   responses from a web application backed by Oracle. Only ORA-/PLS-/TNS- codes
@@ -111599,9 +111631,15 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"sqlite3\.interfaceerror",
         # Wire-protocol: C-level SQLite error constant (appears in C/Go/Rust bindings)
         r"SQLITE_ERROR",
-        # Wire-protocol: SQLite syntax error format — "near TOKEN: syntax error"
-        # The "near X: syntax error" format with colon is SQLite-specific
-        r"near .{1,20}: syntax error",
+        # Wire-protocol: SQLite syntax error format — "near \"TOKEN\": syntax error"
+        # SQLite ALWAYS quotes the token in double or single quotes: near "UNION": syntax error.
+        # BUG-SQLPAT-NEAR-TOKEN FIX (MEDIUM, SQLite E/EH techniques): The old pattern
+        # r"near .{1,20}: syntax error" used `.` which matches any character including
+        # spaces and newlines (in DOTALL), and would match non-SQLite parsers that emit
+        # "near <something>: syntax error" (CSS/HTML/template parsers, YAML error messages,
+        # GraphQL schema validators). Fix: require a quoted token (double or single-quoted)
+        # between "near" and ": syntax error" — SQLite always quotes the unexpected token.
+        r"near [\"'][^\"'\n]{1,30}[\"']:\s*syntax error",
         # REMOVED: sqlite.*error — too broad; WAF block pages mentioning SQLite match
         # REMOVED: sqlite3.*exception — too broad; matches any exception message mentioning sqlite3
         # REMOVED: r"unrecognized token" — too generic (appears in CSS/HTML/template parsers)
@@ -128782,6 +128820,14 @@ class TechniqueCascadeEngine:
                         _e_mp_hard_sc = _fp_hard_sc  # reuse value already computed above
                         _e_initial_waf_blocked = (
                             _e_mp_hard_sc in {403, 406, 412} or
+                            # BUG-E-INITIAL-CDN FIX (HIGH, all E/EH surfaces):
+                            # CDN/Cloudflare error codes 520-530 indicate infrastructure
+                            # errors (origin down, SSL failure, timeout). The SQL payload
+                            # never reached the database. CDN error pages contain HTML that
+                            # can match SQL_ERROR_PATTERNS (e.g. "XPATH syntax error" echoed
+                            # by the CDN in a block advisory). Treat as waf_blocked: require
+                            # 2 independent non-CDN confirmations before accepting detection.
+                            (520 <= _e_mp_hard_sc <= 530) or
                             (not (_get_safe_status_code(fp) == 429) and
                              WAFBlockDiscriminator.single_waf_blocked(fp))
                         )
@@ -132217,8 +132263,14 @@ class TechniqueCascadeEngine:
                             # EH probe is WAF-blocked (non-429), the SQL pattern match is likely
                             # the WAF echoing the injected header value in its block page.
                             # Start with 0 and require 2 independent non-WAF-blocked confirmations.
-                            _eh_initial_waf_blocked = (not (_get_safe_status_code(fp) == 429) and
-                                                       WAFBlockDiscriminator.single_waf_blocked(fp))
+                            _eh_initial_waf_blocked = (
+                                # BUG-EH-INITIAL-CDN FIX: Mirror E-technique CDN guard.
+                                # CDN/Cloudflare 520-530 error pages can contain SQL-looking
+                                # text (header value echo in block advisory). Treat as waf_blocked.
+                                (520 <= _get_safe_status_code(fp) <= 530) or
+                                (not (_get_safe_status_code(fp) == 429) and
+                                 WAFBlockDiscriminator.single_waf_blocked(fp))
+                            )
                             _eh_confirmed = 0 if _eh_initial_waf_blocked else 1
                             _eh_initial_429 = _get_safe_status_code(fp) == 429
                             _eh_429_neutral = 0
@@ -187723,6 +187775,22 @@ class ConditionalErrorOracle:
             self._baseline_status = _fp.status_code if _fp else 200
         except Exception:
             self._baseline_status = 200
+
+        # BUG-CEO-RATELIMIT-BASELINE FIX (HIGH, all E/EH techniques, all 5 DBMSes):
+        # When the target rate-limits ALL requests (baseline returns 429), any oracle
+        # calibrated here measures WAF rate-limiting behaviour, not SQL error conditions.
+        # A 429 baseline means true/false probes also hit the rate limit, so any status-
+        # code difference between them is noise (transient rate-limit expiry), not SQL
+        # signal. Calibrating on rate-limit noise leads to a non-functional oracle that
+        # returns True/False at random depending on whether each individual probe hit the
+        # rate limit, producing garbage binary-search extraction results.
+        # Fix: reject calibration immediately when baseline is 429 (rate-limited) or 503
+        # (service unavailable). The caller falls back to other extraction methods.
+        if self._baseline_status in (429, 503):
+            LOG.debug("[ErrorOracle] Baseline returned %d (rate-limit/unavailable) — "
+                      "target is too aggressively rate-limiting for a reliable error oracle; "
+                      "refusing calibration", self._baseline_status)
+            return False
 
         # BUG-CEO-CRDB-YG-ALIASES FIX (MEDIUM, CockroachDB, YugabyteDB, E/EH technique,
         # all surfaces, ConditionalErrorOracle):
