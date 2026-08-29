@@ -42194,9 +42194,19 @@ async def detect_error(engine,config,method,url,data,data_fmt,
             if _validate_response(_ec_fp, "detect_error._error_cat_oracle", allow_empty=False) and not WAFBlockDiscriminator.is_waf_block(_ec_fp):
                 _ec_b = _safe_decode_body(_ec_fp, encoding="utf-8", errors="replace", func_name="detect_error._error_cat_oracle").lower()
                 _generic_err_pats = [
-                    'you have an error in your sql', 'syntax error', 'ora-00',
+                    # FIX-ERRCAT-ORACLE-FP: Removed 'syntax error' — critically too broad;
+                    # matches JavaScript syntax errors, CSS parse errors, HTML validation
+                    # messages, template engine errors (Jinja2, Twig, Handlebars), and WAF
+                    # block pages that echo "syntax error" in their body. A WAF page saying
+                    # "SQL syntax error blocked" would confirm every E/EH probe as a real
+                    # injection through this oracle.
+                    # FIX-ERRCAT-ORACLE-FP: Changed 'incorrect syntax' → 'incorrect syntax near'
+                    # — the bare phrase 'incorrect syntax' appears in non-SQL error messages
+                    # (grammar checkers, compilers, template engines). MSSQL's actual error is
+                    # "Incorrect syntax near 'TOKEN'" — the 'near' qualifier makes it MSSQL-specific.
+                    'you have an error in your sql', 'ora-00',
                     'sqlstate[', 'unclosed quotation', 'pg_query', 'sqlite3.operationalerror',
-                    'incorrect syntax', 'microsoft ole db', 'error 1064',
+                    'incorrect syntax near', 'microsoft ole db', 'error 1064',
                 ]
                     # BUG-R1-ORACLE-FP FIX: baseline-subtract error patterns to avoid matching
                     # static error text that appears in the page before any injection.
@@ -111344,10 +111354,10 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # generators.  The xpath-syntax-error pattern below catches all real MySQL
         # EXTRACTVALUE/UPDATEXML errors without the WAF echo risk.
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        # DBMS-identifying: tilde-prefixed hex data in MySQL error message (CONCAT + 0x7e sentinel)
-        # This matches the actual extracted data channel: "~<hex_data>" in error output.
-        # Require at least 4 hex chars so random "~" chars in HTML don't trigger it.
-        r"~[0-9a-f]{4,}",
+        # REMOVED: r"~[0-9a-f]{4,}" — False positive risk: WAF block pages, HTML/CSS content,
+        # hex-encoded page data can all contain "~" followed by 4+ hex chars. The XPATH
+        # syntax error pattern above already catches all EXTRACTVALUE/UPDATEXML MySQL errors;
+        # this tilde-hex pattern adds no true-positive coverage and only adds FP risk.
         # DBMS-identifying: MySQL-specific collation error (requires MySQL collation system)
         r"illegal mix of collations",
         # DBMS-identifying: MySQL-specific truncation error format
@@ -111366,7 +111376,8 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # as MySQL: MariaDB never echoes the function call in its error message; those patterns
         # matched WAF block pages echoing the injected payload.
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        r"~[0-9a-f]{4,}",
+        # REMOVED: r"~[0-9a-f]{4,}" — same FP reasoning as MySQL: xpath syntax error catches real MariaDB
+        # EXTRACTVALUE/UPDATEXML errors; tilde-hex alone is too broad for WAF-intercepted responses.
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
     ],
@@ -111386,7 +111397,8 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # as MySQL: TiDB (MySQL-wire-compatible) never echoes the function call in its error
         # message; those patterns matched WAF block pages echoing the injected payload.
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        r"~[0-9a-f]{4,}",
+        # REMOVED: r"~[0-9a-f]{4,}" — same FP reasoning as MySQL: xpath syntax error catches real TiDB
+        # EXTRACTVALUE/UPDATEXML errors (TiDB is MySQL-wire-compatible); tilde-hex alone is too broad.
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
         r"truncated incorrect (?:integer|double|real)",
@@ -111426,7 +111438,7 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"odbc sql server driver|odbc driver.*sql server",
         # DBMS-identifying: MSSQL-specific error message format
         r"error converting data type",
-        r"unclosed quotation mark after",
+        r"unclosed quotation mark after the character string",
         r"incorrect syntax near",
         # DBMS-identifying: PHP MSSQL driver function name
         r"warning: .*mssql_",
@@ -111463,15 +111475,18 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"oci_\w+",                      # Oracle OCI PHP function names
         # DBMS-identifying: Oracle-specific error message phrasing
         r"quoted string not properly terminated",
-        r"not a valid month",            # ORA-01843: Oracle date parsing error
+        # REMOVED: r"not a valid month" — ORA-01843 text but also appears in PHP/Python date
+        # validation libraries (e.g. Carbon, Arrow, dateutil) without any Oracle involvement.
+        # The r"ora-\d{4,5}" pattern above already catches ORA-01843 definitively.
         # DBMS-identifying: PL/SQL error codes (PLS-NNNNN)
         r"pls-\d{4,5}",
         # DBMS-identifying: SQL*Plus error codes (SP2-NNNN)
         r"sp2-\d{4}",
         # DBMS-identifying: TNS (Transparent Network Substrate) Oracle connection errors
         r"tns:.*error",
-        # DBMS-identifying: Oracle error description (when ORA code not shown)
-        r"oracle error",
+        # REMOVED: r"oracle error" — too generic; appears in application error messages unrelated
+        # to SQL injection (e.g. "Oracle error handled", "contact support"). The ORA-\d{4,5}
+        # pattern is definitively Oracle-specific and sufficient.
         # REMOVED: r"missing expression" — too generic (appears in JavaScript, HTML, template errors)
         # REMOVED: r"missing keyword" — too generic
         # REMOVED: r"missing right parenthesis" — too generic
