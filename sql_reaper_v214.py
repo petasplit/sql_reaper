@@ -111282,9 +111282,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"column count doesn.t match",
         r"unknown column .* in .field list",
         r"table .* doesn.t exist",
-        r"extract_?value\s*\(",          # extractvalue() error injection
-        r"updatexml\s*\(",               # updatexml() error injection
-        r"xpath syntax error",           # result of extractvalue/updatexml
+        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",  # BUG-SQLPAT-WAF-ECHO FIX: require SQL arg (not WAF block text)
+        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",    # same guard — WAF pages echo bare function name
+        r"xpath syntax error:\s*'[^'\"]{0,10}",             # BUG-SQLPAT-WAF-ECHO FIX: require colon+quote (actual MySQL error format)
         r"(\~|0x7e)[0-9a-f]{4,}",       # hex-extracted data in error msg
         r"illegal mix of collations",
         r"division by zero",
@@ -111294,9 +111294,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     "MariaDB": [
         r"you have an error in your sql syntax",
         r"mariadb server version", r"warning: mysqli_",
-        r"extract_?value\s*\(",
-        r"updatexml\s*\(",
-        r"xpath syntax error",
+        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",  # BUG-SQLPAT-WAF-ECHO FIX: require SQL arg
+        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",     # same guard
+        r"xpath syntax error:\s*'[^'\"]{0,10}",              # require colon+quote (actual error format)
         r"unknown column .* in .field list",
         r"column count doesn.t match",
     ],
@@ -111312,9 +111312,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"you have an error in your sql syntax",
         r"tidb.*error",                  # TiDB-specific error strings
         r"warning: mysqli_",
-        r"extract_?value\s*\(",
-        r"updatexml\s*\(",
-        r"xpath syntax error",
+        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",  # BUG-SQLPAT-WAF-ECHO FIX: require SQL arg
+        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",     # same guard
+        r"xpath syntax error:\s*'[^'\"]{0,10}",              # require colon+quote (actual error format)
         r"(\~|0x7e)[0-9a-f]{4,}",
         r"unknown column .* in .field list",
         r"column count doesn.t match",
@@ -128476,7 +128476,14 @@ class TechniqueCascadeEngine:
                         # Fix: track 429-neutral probes (cannot confirm OR deny). When ALL
                         # confirmations are 429-neutral, relax threshold to _e_confirmed >= 1.
                         # The clean probe still required to prevent false positives.
-                        _e_confirmed = 1
+                        # BUG-E-INITIAL-WAF FIX: If the initial probe is WAF-blocked (non-429),
+                        # the SQL error pattern match in its body is likely the WAF echoing the
+                        # blocked payload (e.g. 403 with "EXTRACTVALUE() is prohibited" in body).
+                        # Start with 0 confirmations and require at least 2 independent non-WAF-
+                        # blocked probes to confirm the SQL error pattern before accepting detection.
+                        _e_initial_waf_blocked = (not (_get_safe_status_code(fp) == 429) and
+                                                  WAFBlockDiscriminator.single_waf_blocked(fp))
+                        _e_confirmed = 0 if _e_initial_waf_blocked else 1
                         _e_initial_429 = _get_safe_status_code(fp) == 429
                         _e_429_neutral = 0
                         _e_non429_total = 0  # non-429 confirmations (real signal either way)
@@ -128503,6 +128510,14 @@ class TechniqueCascadeEngine:
                                 self._total_reqs += 1
                                 if _get_safe_status_code(_e_mp_fp) == 429:
                                     # Rate-limited — cannot confirm or deny; treat as neutral
+                                    _e_429_neutral += 1
+                                elif WAFBlockDiscriminator.single_waf_blocked(_e_mp_fp):
+                                    # BUG-E-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe (non-429).
+                                    # WAF block pages frequently echo the injected function names
+                                    # (EXTRACTVALUE, UPDATEXML, xpath syntax error) in their body,
+                                    # causing the SQL error pattern to match even though no SQL was
+                                    # executed on the backend. Treat WAF-blocked confirmations as
+                                    # neutral — they can neither confirm nor deny injection.
                                     _e_429_neutral += 1
                                 else:
                                     _e_non429_total += 1
@@ -128561,7 +128576,23 @@ class TechniqueCascadeEngine:
                                 if _SCAN_STOPPED[0]: break  # BUG-FIX-REQ4-E-CLEAN: stop after sleep
                                 _e_fp_clean = await self._safe_confirm(method, url, data,
                                     data_fmt, param, _e_clean_probe_value, self.tamper_chain)
-                                if _e_fp_clean:
+                                if _e_fp_clean is None:
+                                    # BUG-E-CLEAN-FAIL-CLOSED FIX: Previously _e_clean_ok defaulted
+                                    # True when _e_fp_clean was None (timeout/request failure).
+                                    # Fail-open allowed false positives when the clean probe couldn't
+                                    # be sent. Fix: fail-closed — timeout is ambiguous, reject.
+                                    _e_clean_ok = False
+                                    _src = "original" if _e_clean_fallback_used else "false-condition"
+                                    print(f"[*]     E clean probe ({_src}): timeout/failure — ambiguous, rejected", flush=True)
+                                elif WAFBlockDiscriminator.single_waf_blocked(_e_fp_clean):
+                                    # BUG-E-CLEAN-WAF FIX: WAF-blocked clean probe. Pattern match
+                                    # on a WAF block page is meaningless — WAF echoes SQL keywords.
+                                    # Cannot determine whether the false-condition causes SQL errors.
+                                    # Fail-closed: reject to prevent false positive.
+                                    _e_clean_ok = False
+                                    _src = "original" if _e_clean_fallback_used else "false-condition"
+                                    print(f"[*]     E clean probe ({_src}): WAF-blocked ({_get_safe_status_code(_e_fp_clean)}) — ambiguous, rejected", flush=True)
+                                else:
                                     self._total_reqs += 1
                                     _e_clean_body = _safe_decode_body(_e_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__e_fp_clean') if _e_fp_clean.body else ""
                                     if re.search(pat, _e_clean_body, re.I):
@@ -128621,6 +128652,10 @@ class TechniqueCascadeEngine:
                                     self._total_reqs += 1
                                     if _get_safe_status_code(_ex_fp) == 429:
                                         _ex_429_neutral += 1
+                                    elif WAFBlockDiscriminator.single_waf_blocked(_ex_fp):
+                                        # BUG-EX-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe (non-429).
+                                        # WAF pages echo SQL keywords — treat as neutral, not as confirmation.
+                                        _ex_429_neutral += 1
                                     else:
                                         _ex_non429_total += 1
                                         # BUG-E-XDBMS-MULTIPROBE-FP FIX (v52): was _safe_decode_body(fp, ...)
@@ -128651,7 +128686,15 @@ class TechniqueCascadeEngine:
                                     if _SCAN_STOPPED[0]: break  # BUG-FIX-REQ4-EX-CLEAN
                                     _ex_fc = await self._safe_confirm(method, url, data,
                                         data_fmt, param, _ex_clean_probe, self.tamper_chain)
-                                    if _ex_fc:
+                                    if _ex_fc is None:
+                                        # BUG-EX-CLEAN-FAIL-CLOSED FIX: Timeout/failure on clean
+                                        # probe — ambiguous result, fail-closed to prevent FP.
+                                        _ex_clean_ok = False
+                                    elif WAFBlockDiscriminator.single_waf_blocked(_ex_fc):
+                                        # BUG-EX-CLEAN-WAF FIX: WAF-blocked clean probe — ambiguous.
+                                        # Cannot determine if false-condition causes errors. Reject.
+                                        _ex_clean_ok = False
+                                    else:
                                         self._total_reqs += 1
                                         # BUG-FIX-3: Safe decode operation
                                         _ex_fc_body = ""
@@ -187448,7 +187491,7 @@ class ConditionalErrorOracle:
                         # Do NOT check _baseline_is_waf here — the false positive occurs
                         # regardless of baseline status. Only require that BOTH probes carry
                         # the same WAF code to eliminate the false positive on baseline=200.
-                        _ceo_cal_waf = {400, 403, 406, 412, 429, 430, 503}  # FIX: added 412 to match WAFBlockDiscriminator.WAF_BLOCK_CODES
+                        _ceo_cal_waf = {400, 403, 404, 406, 412, 429, 430, 503}  # FIX: added 404+412 to match WAFBlockDiscriminator.WAF_BLOCK_CODES
                         if (_t_st in _ceo_cal_waf and _f_st in _ceo_cal_waf
                                 and _t_st == _f_st
                                 and _body_size_diff >= 100):
@@ -187517,12 +187560,23 @@ class ConditionalErrorOracle:
                             # converging to garbage Unicode.  Flag CDN error oracles so
                             # the extraction caller can apply stricter validation.
                             if 520 <= _t_st <= 530:
-                                self._is_cdn_error_oracle = True
+                                # BUG-CEO-CDN-REJECT FIX: CDN error codes (520-530) indicate
+                                # Cloudflare/CDN infrastructure errors (origin crash, SSL failure,
+                                # timeout). When the "true" probe triggers a CDN error, calibration
+                                # succeeds (525 >= 500 → _true_err=True), but during extraction the
+                                # WAF blocks complex char-comparison payloads inconsistently —
+                                # binary search converges to garbage Unicode (non-ASCII code points).
+                                # Previously _is_cdn_error_oracle was set but NEVER READ anywhere,
+                                # so extraction proceeded and produced garbage. Fix: reject CDN error
+                                # oracle calibration entirely so the caller falls back to other methods.
+                                LOG.debug("[ErrorOracle] Rejecting CDN error oracle (status=%d vs %d): "
+                                          "CDN error codes produce garbage extraction results; "
+                                          "falling back to next template", _t_st, _f_st)
+                                continue  # try next template; do not accept this oracle
                             self._working_template = tpl
                             self._working_prefix   = _prefix  # BUG-CEO-1 FIX: persist context
                             print("[+] [ErrorOracle] Calibrated: status "
                                   f"{_fp_t.status_code} vs {_fp_f.status_code} "
-                                  f"{'(CDN-error oracle — unreliable for extraction) ' if 520 <= _t_st <= 530 else ''}"
                                   f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
                             return True
                         # Body-size fallback: status codes match baseline but body sizes differ
@@ -189666,6 +189720,16 @@ class ErrorBasedExtractor:
                                 if m.lastindex and m.lastindex >= 1:
                                     leaked = m.group(1).strip()
                                     if leaked and len(leaked) > 1 and leaked != original:
+                                        # BUG-ERREXT-NONASCII-GUARD FIX: Reject leaked values that
+                                        # contain non-ASCII characters. Database values (version
+                                        # strings, usernames, database names) are always printable
+                                        # ASCII on all supported DBMSes. Non-ASCII in a "leaked"
+                                        # value indicates oracle noise (CDN error oracle, WAF-echoed
+                                        # content, or binary data), not real extracted data.
+                                        if any(ord(c) > 127 for c in leaked):
+                                            LOG.debug("[ErrorExtract] Rejected non-ASCII leaked value "
+                                                      "(oracle noise): %r", leaked[:40])
+                                            continue
                                         print(f"[+] [ErrorExtract] Leaked: {leaked[:60]}", flush=True)
                                         return leaked
                 except Exception:
