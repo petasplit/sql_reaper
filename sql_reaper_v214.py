@@ -42267,9 +42267,27 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                     # — the bare phrase 'incorrect syntax' appears in non-SQL error messages
                     # (grammar checkers, compilers, template engines). MSSQL's actual error is
                     # "Incorrect syntax near 'TOKEN'" — the 'near' qualifier makes it MSSQL-specific.
+                    # FIX-ERRCAT-ORACLE-FP-2: Removed 'pg_query' — this is a PHP driver
+                    # function name (pg_query()), not a DBMS error string. It appears verbatim
+                    # in WAF block pages that reference the PHP call that was intercepted, and
+                    # in application debug traces that echo the function call alongside generic
+                    # errors. No PostgreSQL wire-protocol error contains 'pg_query'.
+                    # FIX-ERRCAT-ORACLE-FP-3: Removed 'microsoft ole db' — Microsoft OLE DB
+                    # provider strings appear in WAF block pages (Cloudflare, Imperva) that
+                    # reference the blocked provider in their advisory text (e.g. "Microsoft OLE
+                    # DB Provider for SQL Server error '80040e14' was blocked"). Matching it
+                    # here would confirm every probe against a Cloudflare-protected target as
+                    # a false injection. The MSSQL-specific patterns in SQL_ERROR_PATTERNS
+                    # already cover genuine OLE DB error messages via their DBMS-specific path.
+                    # FIX-ERRCAT-ORACLE-FP-4: Replaced 'error 1064' with '1064 (42000):' —
+                    # the bare string 'error 1064' appears in WAF block pages and sysadmin
+                    # documentation that reference MySQL error numbers. The precise format
+                    # '1064 (42000):' requires the SQLSTATE code in MySQL wire-protocol
+                    # format, which only MySQL/MariaDB produce; WAF pages and docs never
+                    # include the parenthesised SQLSTATE suffix followed by a colon.
                     'you have an error in your sql', 'ora-00',
-                    'sqlstate[', 'unclosed quotation', 'pg_query', 'sqlite3.operationalerror',
-                    'incorrect syntax near', 'microsoft ole db', 'error 1064',
+                    'sqlstate[', 'unclosed quotation', 'sqlite3.operationalerror',
+                    'incorrect syntax near', '1064 (42000):',
                 ]
                     # BUG-R1-ORACLE-FP FIX: baseline-subtract error patterns to avoid matching
                     # static error text that appears in the page before any injection.
@@ -111807,7 +111825,18 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"jdbc.*exception",           # DBMS-identifying: Java JDBC driver exception chain
         r"pdo.*exception",            # DBMS-identifying: PHP PDO driver exception (PDOException)
         r"sqlexception",              # DBMS-identifying: Java java.sql.SQLException class name
-        r"odbc.*error",               # DBMS-identifying: ODBC driver error string
+        # FIX-SQLPAT-GENERIC-ODBC: r"odbc.*error" was too broad — matches WAF block pages
+        # that reference ODBC in their advisory text ("ODBC SQL injection error detected")
+        # and application log lines that say "ODBC connection error" for any DB failure.
+        # Genuine ODBC driver error messages always contain the bracket-notation driver
+        # identifier (e.g. "[Microsoft][ODBC SQL Server Driver][SQL Server]") or the
+        # Microsoft OLE DB / ODBC Driver strings followed by a bracket-enclosed error code.
+        # Replace with two tighter alternatives:
+        #   1. r"\[odbc[^\]]*\]" — bracket-notation ODBC driver string (only in real errors)
+        #   2. r"odbc.*(?:sql\s+server|driver\b|data\s+source\s+name\s+not\s+found)"
+        #      — requires driver-specific terms alongside "odbc", cannot appear in WAF pages
+        r"\[odbc[^\]]*\]",            # ODBC bracket-notation: "[ODBC SQL Server Driver]" etc.
+        r"odbc.*(?:sql\s*server|driver\b|data\s+source\s+name\s+not\s+found)",  # ODBC driver-specific
         # NOTE: "syntax error", "sql syntax.*error", and "database error" are intentionally
         # absent — too generic (appear on form validation pages, WAF block pages, ORM errors).
     ],
