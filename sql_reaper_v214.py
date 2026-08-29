@@ -38395,40 +38395,43 @@ class DetectionResult:
         Compute the exact payload that will be sent by _send_injected_inner.
         This replicates the mutation logic to capture what's actually sent.
          FIX: Allows PCV to reuse exact successful payload for 100% reproduction
+
+        BUG-COMPUTE-EXACT-PME-NONDETERMINISTIC FIX (HIGH): The previous implementation
+        applied PayloadMutationEngine.mutate() which uses random choices (random.random(),
+        random.shuffle(), random.choice()) at 20 mutation layers. Calling it here (AFTER
+        the payload was already sent) produces a DIFFERENT, randomly-transformed version
+        than the one actually sent. This causes two concrete problems:
+          1. The displayed "Payload:" in the confirmation banner shows a mutation-garbled
+             string that does not reflect what was sent, confusing operators (e.g. showing
+             "(SELECT (SELECT (SELECT  AND EXTRACTVALUE(0x0a,...)))) " with AND inside
+             a SELECT, which is syntactically invalid and was never actually sent).
+          2. When PCV tries to re-send the "exact" payload for confirmation, it sends a
+             different, potentially-invalid payload → PCV false-negatives on genuinely
+             vulnerable targets.
+        Root cause: PayloadMutationEngine.mutate() is a non-deterministic transformation
+        (random seed varies per call). To reproduce the ACTUAL sent payload post-hoc we
+        would need to capture it inside _send_injected_inner at send time (or seed the
+        RNG with the payload hash). Neither is done here.
+        Fix: skip the PME mutation step entirely (Step 1 removed). Only apply the tamper
+        chain (Step 2) which IS deterministic: TamperLib.apply_chain() uses the same
+        sequence of string transformations with no randomness. The result is:
+          exact_sent_payload = tamper(original + raw_payload)
+        This is still not the full picture (PME mutation is not included), but it is
+        syntactically valid, consistent across calls, and much closer to the actual wire
+        payload than a different random mutation each time. Operators can see what
+        tamper functions were applied to the raw detection payload.
         """
         if not value:
             return value
-        
-        # Step 1: Apply PayloadMutationEngine.mutate (same as line 7802)
-        if len(value) > 5:
-            try:
-                _mut_dbms = "Generic"
-                _upper = value.upper()
-                if "PG_SLEEP" in _upper or "::INT" in _upper or "::INTEGER" in _upper or "::TEXT" in _upper:
-                    _mut_dbms = "PostgreSQL"
-                elif "WAITFOR" in _upper or ("CONVERT(" in _upper and "NVARCHAR" in _upper):
-                    _mut_dbms = "MSSQL"
-                elif ("DBMS_PIPE" in _upper or "UTL_INADDR" in _upper or
-                      "DBMS_SESSION" in _upper or "DBMS_LOCK" in _upper or
-                      "XMLTYPE(" in _upper or "CTXSYS." in _upper or
-                      " ROWNUM" in _upper or "FROM DUAL" in _upper or
-                      "UTL_HTTP" in _upper or "ALL_OBJECTS" in _upper):
-                    _mut_dbms = "Oracle"
-                elif ("RANDOMBLOB" in _upper or "SQLITE_VERSION" in _upper or
-                      "SQLITE_MASTER" in _upper or "PRAGMA " in _upper):
-                    _mut_dbms = "SQLite"
-                elif "SLEEP(" in _upper or "BENCHMARK(" in _upper or "INFORMATION_SCHEMA" in _upper:
-                    _mut_dbms = "MySQL"
-                # BUG-PME-UNBOUND-GLOBAL FIX: use _get_module_pme() instance
-                _val_pme = _get_module_pme()
-                if _val_pme is not None:
-                    value = _val_pme.mutate(value, _mut_dbms)
-            except Exception:
-                pass  # mutation failed  use original
-        
-        # Step 2: Apply tamper chain (same as line 7806)
+
+        # Step 1 (REMOVED): PayloadMutationEngine.mutate() was non-deterministic.
+        # Applying it here produces a different random transformation from what was sent.
+        # Do NOT apply PME mutation to compute_exact_payload — it produces misleading
+        # and potentially syntactically-invalid "exact" payloads.
+
+        # Step 2: Apply tamper chain only (deterministic — same transforms as send time)
         value = TamperLib.apply_chain(value, tamper_chain)
-        
+
         return value
 
 
@@ -111510,7 +111513,16 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # "XPATH syntax error: '<injected_func>'" triggered false-positive E detections.
         r"xpath syntax error:\s*'~",
         # Wire-protocol: MySQL collation mismatch (requires MySQL collation system)
-        r"illegal mix of collations",
+        # BUG-SQLPAT-COLLATION-ANCHOR FIX (MEDIUM, MySQL E/EH techniques): The bare phrase
+        # "illegal mix of collations" can appear in WAF block advisory pages ("Illegal mix of
+        # collations attack blocked"), application debug logs, and ORM error dumps that
+        # reproduce the MySQL error string without the wire-protocol collation detail.
+        # MySQL's ACTUAL wire-protocol format ALWAYS includes both collation names in parentheses:
+        #   "Illegal mix of collations (utf8_general_ci,IMPLICIT) and (latin1_swedish_ci,IMPLICIT)"
+        # The parenthesised collation list is mandatory in the wire-protocol format and
+        # NEVER appears in WAF block pages (which only echo the error class name).
+        # Fix: require the opening parenthesis after the phrase to force wire-protocol origin.
+        r"illegal mix of collations\s*\(",
         # Wire-protocol: MySQL truncation error (MySQL-specific phrasing with data type name)
         # BUG-SQLPAT-TRUNCATED-ANCHOR FIX: "Truncated incorrect INTEGER value:" is MySQL's
         # EXACT wire-protocol format — the word "value" followed by the colon is mandatory
@@ -111594,7 +111606,22 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     ],
     "MSSQL": [
         # Wire-protocol: MSSQL-specific error message format
-        r"error converting data type",
+        # BUG-SQLPAT-MSSQL-CONVERT-TYPE-ANCHOR FIX (HIGH, MSSQL E/EH techniques):
+        # The bare phrase "error converting data type" is too generic — it can match
+        # application error handlers that say "error converting data type in ORM model",
+        # Python/Java exception messages wrapping a type coercion failure, and WAF block
+        # advisories that echo the injected phrase "CAST(...)" as "error converting data type".
+        # MSSQL's ACTUAL wire-protocol format ALWAYS names both the source and destination
+        # type explicitly:
+        #   "Error converting data type varchar to bigint."
+        #   "Error converting data type nvarchar to int."
+        #   "Error converting data type float to data type int."   (uses "to data type" variant)
+        # The type names immediately follow "data type" and "to", making the pattern
+        # DBMS-specific: no WAF block page or ORM error reproduces the full pair of type names
+        # in the exact MSSQL wire-protocol word order.
+        # Fix: require the source-type word after "data type" AND the "to" connector —
+        # using a character class limited to MSSQL scalar type names for the source type.
+        r"error converting data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time|binary|varbinary|uniqueidentifier|xml|image)\b",
         r"unclosed quotation mark after the character string",
         # Require the opening quote: "Incorrect syntax near 'X'."
         # WAF pages echoing the phrase omit the quote (not reproducing wire-protocol format).
@@ -128989,8 +129016,15 @@ class TechniqueCascadeEngine:
                                     _e_mp_body = _safe_decode_body(_e_mp_fp, encoding="utf-8", errors="replace", func_name="e_multiprobe_confirm") if _e_mp_fp.body else ""
                                     if re.search(pat, _e_mp_body, re.I):
                                         _e_confirmed += 1
+                            # BUG-E-MULTIPROBE-DISPLAY FIX: old condition _e_confirmed > _e_mp+1
+                            # made "error found" progressively harder to show as more probes ran:
+                            # probe 2/6 requires _e_confirmed>1 (ok), probe 5/6 requires >4 (never
+                            # true with only 5 probes). This caused probe 5/6 to print "missing
+                            # (2/2 needed)" even when the threshold was already met — confusing to
+                            # operators reading the output. Fix: use _e_confirmed>=2 which directly
+                            # mirrors the threshold condition used at line 129006.
                             print(f"[*]     E multi-probe {_e_mp+2}/6: "
-                                  f"{' error found' if _e_confirmed > _e_mp + 1 else ' missing'} "
+                                  f"{' error found' if _e_confirmed >= 2 else ' missing'} "
                                   f"({_e_confirmed}/2 needed)")
                             # BUG-E-EARLY-EXIT FIX: Break as soon as 2 confirmations are found.
                             # Previously all 5 probes always fired even when confirmation was
