@@ -111273,32 +111273,61 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # letting generic English words ("syntax error") through as false positives.
     # All patterns are anchored to DBMS-specific text that cannot appear in
     # normal page content (error codes, function names, driver strings, etc.).
+    #
+    # BUG-SQLPAT-TIGHTEN FIX (CRITICAL, all E/EH techniques, all 5 major DBMSes):
+    # Several patterns were too generic and matched:
+    #   (a) WAF block pages that echo injected SQL function names in their body
+    #       (e.g. 403 "EXTRACTVALUE() is prohibited", "WAITFOR DELAY blocked")
+    #   (b) Application/ORM error messages unrelated to SQL injection
+    #       (e.g. "Table does not exist" from Django ORM, "no such table" from
+    #        ORM migration errors, "division by zero" from PHP math operations)
+    # Root cause: patterns lacked DBMS-identifying context — they matched the SQL
+    # concept without requiring the DBMS-specific phrasing, error code prefix, or
+    # driver string that distinguishes a real database error from application noise.
+    # Fix: remove all patterns that are too generic or can appear in WAF block pages;
+    # require DBMS-identifying tokens (error codes, driver prefixes, version strings,
+    # DBMS-specific keywords) for all 5 major DBMSes (MySQL, PostgreSQL, MSSQL,
+    # Oracle, SQLite).
     "MySQL": [
+        # DBMS-identifying: full MySQL syntax error format
         r"you have an error in your sql syntax",
+        # DBMS-identifying: PHP MySQL driver function names
         r"warning: mysql_", r"warning: mysqli_",
         r"mysql_num_rows|mysql_fetch_array|mysql_fetch_object",
+        # DBMS-identifying: MySQL driver error description
         r"supplied argument is not a valid mysql",
         r"mysql server version for the right syntax",
-        r"column count doesn.t match",
-        r"unknown column .* in .field list",
-        r"table .* doesn.t exist",
-        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",  # BUG-SQLPAT-WAF-ECHO FIX: require SQL arg (not WAF block text)
-        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",    # same guard — WAF pages echo bare function name
-        r"xpath syntax error:\s*'[^'\"]{0,10}",             # BUG-SQLPAT-WAF-ECHO FIX: require colon+quote (actual MySQL error format)
-        r"(\~|0x7e)[0-9a-f]{4,}",       # hex-extracted data in error msg
+        # DBMS-identifying: MySQL-specific phrasing (not ORM — ORM says "column count mismatch")
+        r"column count doesn.t match value count at row",
+        # DBMS-identifying: MySQL-specific field list phrasing
+        r"unknown column .+ in .field list",
+        # DBMS-identifying: MySQL EXTRACTVALUE/UPDATEXML error format requires SQL argument context
+        # (WAF block pages echo bare "extractvalue()" without numeric args — require arg)
+        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        # DBMS-identifying: actual MySQL XPATH error message format (colon + tilde + extracted data)
+        r"xpath syntax error:\s*'[^'\"]{0,10}",
+        # DBMS-identifying: tilde-prefixed hex data extracted from error channel
+        r"(?:~|0x7e)[0-9a-f]{4,}",
+        # DBMS-identifying: MySQL-specific collation error (requires MySQL collation system)
         r"illegal mix of collations",
-        r"division by zero",
+        # DBMS-identifying: MySQL-specific truncation error format
         r"truncated incorrect (?:integer|double|real)",
+        # DBMS-identifying: MySQL-specific column data length error
         r"data too long for column",
+        # REMOVED: r"division by zero" — appears in generic PHP/JS math errors and WAF block pages;
+        #   no DBMS-identifying context. MySQL's actual division error leaks via xpath syntax error.
+        # REMOVED: r"table .* doesn.t exist" — appears in ORM/Django/Rails errors; too generic.
+        #   Use r"column count doesn.t match value count at row" (MySQL-specific phrasing) instead.
     ],
     "MariaDB": [
         r"you have an error in your sql syntax",
         r"mariadb server version", r"warning: mysqli_",
-        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",  # BUG-SQLPAT-WAF-ECHO FIX: require SQL arg
-        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",     # same guard
-        r"xpath syntax error:\s*'[^'\"]{0,10}",              # require colon+quote (actual error format)
-        r"unknown column .* in .field list",
-        r"column count doesn.t match",
+        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        r"xpath syntax error:\s*'[^'\"]{0,10}",
+        r"unknown column .+ in .field list",
+        r"column count doesn.t match value count at row",
     ],
     # BUG-SQLPAT-TIDB FIX: TiDB absent from SQL_ERROR_PATTERNS.
     # SQL_ERROR_PATTERNS.get("TiDB", []) returned [] → fell to Generic patterns.
@@ -111312,90 +111341,125 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"you have an error in your sql syntax",
         r"tidb.*error",                  # TiDB-specific error strings
         r"warning: mysqli_",
-        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",  # BUG-SQLPAT-WAF-ECHO FIX: require SQL arg
-        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",     # same guard
-        r"xpath syntax error:\s*'[^'\"]{0,10}",              # require colon+quote (actual error format)
-        r"(\~|0x7e)[0-9a-f]{4,}",
-        r"unknown column .* in .field list",
-        r"column count doesn.t match",
-        r"division by zero",
+        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        r"xpath syntax error:\s*'[^'\"]{0,10}",
+        r"(?:~|0x7e)[0-9a-f]{4,}",
+        r"unknown column .+ in .field list",
+        r"column count doesn.t match value count at row",
         r"truncated incorrect (?:integer|double|real)",
+        # REMOVED: r"division by zero" — generic; not TiDB-identifying
     ],
     "PostgreSQL": [
+        # DBMS-identifying: PHP PostgreSQL driver function names
         r"pg_query|pg_exec|pg_num_rows",
+        # DBMS-identifying: PostgreSQL in error string / Python psycopg2 driver
         r"postgresql.*error", r"psycopg2",
-        r"operator does not exist",
-        r"syntax error at or near",
-        r"invalid input syntax for (?:type )?",
-        r"column .* does not exist",
-        r"unterminated quoted string",
+        # DBMS-identifying: PostgreSQL version string (version disclosure)
+        r"PostgreSQL \d+\.\d+",
+        # DBMS-identifying: all of the following require the "ERROR:" prefix which is
+        # the PostgreSQL wire-protocol error message format — cannot appear in WAF pages
         r"ERROR:\s+division by zero",
-        r"ERROR:\s+relation .* does not exist",
-        r"ERROR:\s+function .* does not exist",
+        r"ERROR:\s+relation .+ does not exist",
+        r"ERROR:\s+function .+ does not exist",
         r"ERROR:\s+could not determine data type",
         r"ERROR:\s+invalid byte sequence",
-        r"pg_sleep",                      # confirmed sleep in error context
-        r"PostgreSQL \d+\.\d+",           # version disclosure
+        r"ERROR:\s+operator does not exist",
+        r"ERROR:\s+column .+ does not exist",
+        r"ERROR:\s+syntax error at or near",
+        r"ERROR:\s+invalid input syntax for",
+        r"ERROR:\s+unterminated quoted string",
         r"pgsql.*error|error.*pgsql",
+        # REMOVED: r"operator does not exist" — without ERROR: prefix, too generic
+        # REMOVED: r"syntax error at or near" — too generic without ERROR: prefix
+        # REMOVED: r"invalid input syntax for" — too generic without ERROR: prefix
+        # REMOVED: r"column .* does not exist" — too generic without ERROR: prefix
+        # REMOVED: r"unterminated quoted string" — too generic without ERROR: prefix
+        # REMOVED: r"pg_sleep" — WAF block pages echo injected function names
     ],
     "MSSQL": [
+        # DBMS-identifying: Microsoft SQL Server in response (version string, error header)
         r"microsoft sql server",
+        # DBMS-identifying: ODBC driver name contains "sql server"
         r"odbc sql server driver|odbc driver.*sql server",
+        # DBMS-identifying: MSSQL-specific error message format
         r"error converting data type",
-        r"syntax error converting",
         r"unclosed quotation mark after",
         r"incorrect syntax near",
-        r"warning: .*mssql_", r"sqlstate",
-        r"Msg \d+, Level \d+",           # SQL Server error format
+        # DBMS-identifying: PHP MSSQL driver function name
+        r"warning: .*mssql_",
+        # DBMS-identifying: SQL Server error number + severity level format (Msg N, Level N)
+        r"Msg \d+, Level \d+",
+        # DBMS-identifying: MSSQL-specific type conversion errors
         r"conversion failed when converting",
-        r"cannot convert value",
         r"string or binary data would be truncated",
         r"arithmetic overflow error",
+        # DBMS-identifying: MSSQL-specific divide-by-zero format (note "error encountered" suffix)
         r"divide by zero error encountered",
-        r"invalid column name",
-        r"invalid object name",
-        r"ambiguous column name",
-        r"procedure .* expects parameter",
-        r"waitfor delay",                 # timing injection confirmation
+        # DBMS-identifying: MSSQL-specific stored procedure error
+        r"procedure .+ expects parameter",
+        # DBMS-identifying: PHP sqlsrv/mssql function names
         r"mssql_query|sqlsrv_query|mssql_num_rows",
+        # DBMS-identifying: MSSQL syntax conversion error (unique phrasing)
+        r"syntax error converting",
+        # REMOVED: r"sqlstate" — generic ODBC header, appears in any ODBC error regardless of DBMS
+        # REMOVED: r"invalid column name" — too generic (appears in ORM/framework errors)
+        # REMOVED: r"invalid object name" — too generic (appears in ORM/framework errors)
+        # REMOVED: r"ambiguous column name" — too generic
+        # REMOVED: r"waitfor delay" — WAF block pages echo the injected WAITFOR DELAY payload
+        # REMOVED: r"cannot convert value" — too generic
     ],
     "Oracle": [
+        # DBMS-identifying: Oracle error code format ORA-NNNNN (4-5 digits) — canonical Oracle identifier
         # BUG-PCV-1 FIX: r"ora-\\d{4,5}" used a double-backslash in raw string.
         # Raw string r"ora-\\d{4,5}" → regex content ora-\\d{4,5} → matches "ora-" +
         # literal backslash + 4-5 letter 'd's.  Never matches real Oracle errors like
         # "ORA-1234".  Fix: single backslash so regex sees \d (digit character class).
         r"ora-\d{4,5}",
+        # DBMS-identifying: Oracle driver in error string / PHP OCI functions
         r"oracle.*driver", r"warning: oci_",
+        r"oci_\w+",                      # Oracle OCI PHP function names
+        # DBMS-identifying: Oracle-specific error message phrasing
         r"quoted string not properly terminated",
-        r"not a valid month", r"invalid identifier",
-        r"ora-\d{5}",                    # Extra: ORA-xxxxx 5-digit codes
+        r"not a valid month",            # ORA-01843: Oracle date parsing error
+        # DBMS-identifying: PL/SQL error codes (PLS-NNNNN)
+        r"pls-\d{4,5}",
+        # DBMS-identifying: SQL*Plus error codes (SP2-NNNN)
+        r"sp2-\d{4}",
+        # DBMS-identifying: TNS (Transparent Network Substrate) Oracle connection errors
+        r"tns:.*error",
+        # DBMS-identifying: Oracle error description (when ORA code not shown)
         r"oracle error",
-        r"pls-\d{4,5}",                  # PL/SQL errors (PLS-00103 etc.)
-        r"sp2-\d{4}",                    # SQL*Plus errors
-        r"tns:.*error",                  # TNS connection errors
-        r"missing expression",           # ORA-00936
-        r"missing keyword",              # ORA-00905
-        r"missing right parenthesis",    # ORA-00907
-        r"divisor is equal to zero",     # ORA-01476
-        r"invalid number",               # ORA-01722
-        r"string literal too long",      # ORA-01704
-        r"oci_\w+",                      # Oracle OCI PHP errors
-        r"ora-00933",                    # SQL command not properly ended
+        # REMOVED: r"missing expression" — too generic (appears in JavaScript, HTML, template errors)
+        # REMOVED: r"missing keyword" — too generic
+        # REMOVED: r"missing right parenthesis" — too generic
+        # REMOVED: r"divisor is equal to zero" — too generic without ORA- code context
+        # REMOVED: r"invalid number" — too generic (appears in form validation errors)
+        # REMOVED: r"string literal too long" — too generic
+        # REMOVED: r"invalid identifier" — too generic (appears in many non-Oracle contexts)
+        # REMOVED: r"ora-00933" — already covered by r"ora-\d{4,5}" above
     ],
     "SQLite": [
+        # DBMS-identifying: SQLite in error string or Python sqlite3 exception class name
         r"sqlite.*error", r"sqlite3.*exception",
+        # DBMS-identifying: Python sqlite3 exception class names (fully qualified)
         # BUG-PCV-2 FIX: r"sqlite3\\.operationalerror" used double-backslash in raw
         # string → regex sqlite3\\.operationalerror → matches "sqlite3" + literal
         # backslash + any-char + "operationalerror".  Never matches real error text
         # "sqlite3.OperationalError".  Fix: single backslash so \. means literal period.
         r"sqlite3\.operationalerror",
-        r"unrecognized token", r"incomplete input",
-        r"no such table", r"no such column",
-        r"SQLITE_ERROR",                 # C-level error constant
-        r"near .{1,20}: syntax error",   # SQLite syntax error format
         r"sqlite3\.databaseerror",
         r"sqlite3\.interfaceerror",
-        r"unable to open database",
+        # DBMS-identifying: C-level SQLite error constant (appears in C/Go/Rust bindings)
+        r"SQLITE_ERROR",
+        # DBMS-identifying: SQLite syntax error format — "near TOKEN: syntax error"
+        # The "near X: syntax error" format with colon is SQLite-specific
+        r"near .{1,20}: syntax error",
+        # REMOVED: r"unrecognized token" — too generic (appears in CSS/HTML/template parsers)
+        # REMOVED: r"incomplete input" — too generic (appears in shell/network errors)
+        # REMOVED: r"no such table" — appears in ORM migration errors (Django, Rails, etc.)
+        # REMOVED: r"no such column" — appears in ORM framework errors
+        # REMOVED: r"unable to open database" — too generic (appears in any DB driver error)
     ],
     # BUG-ERRPAT-PGCOMPAT FIX: CockroachDB, YugabyteDB, and Amazon Redshift are
     # PG-wire-compatible; they produce PostgreSQL-style SQL error messages.
@@ -111407,41 +111471,50 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # confirmation accuracy and increasing false-negative rate for error-based
     # technique detection on all three DBMS families.
     "CockroachDB": [
-        r"operator does not exist",
-        r"syntax error at or near",
-        r"invalid input syntax for (?:type )?",
-        r"column .* does not exist",
-        r"relation .* does not exist",
+        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format
+        r"ERROR:\s+operator does not exist",
+        r"ERROR:\s+syntax error at or near",
+        r"ERROR:\s+invalid input syntax for",
+        r"ERROR:\s+column .+ does not exist",
+        r"ERROR:\s+relation .+ does not exist",
         r"ERROR:\s+division by zero",
-        r"ERROR:\s+function .* does not exist",
+        r"ERROR:\s+function .+ does not exist",
+        r"ERROR:\s+could not parse",
+        # DBMS-identifying: CockroachDB-specific driver prefix and error strings
         r"pq:.*error",                           # CockroachDB Go pq driver prefix
         r"crdb.*error|cockroachdb.*error",        # CockroachDB-specific strings
         r"ambiguous column reference",
-        r"ERROR:\s+could not parse",
+        # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "YugabyteDB": [
-        r"operator does not exist",
-        r"syntax error at or near",
-        r"invalid input syntax for (?:type )?",
-        r"column .* does not exist",
-        r"relation .* does not exist",
+        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format
+        r"ERROR:\s+operator does not exist",
+        r"ERROR:\s+syntax error at or near",
+        r"ERROR:\s+invalid input syntax for",
+        r"ERROR:\s+column .+ does not exist",
+        r"ERROR:\s+relation .+ does not exist",
         r"ERROR:\s+division by zero",
-        r"ERROR:\s+function .* does not exist",
-        r"yb.*error|yugabyte.*error",            # YugabyteDB-specific prefix
+        r"ERROR:\s+function .+ does not exist",
+        r"ERROR:\s+invalid byte sequence",
+        # DBMS-identifying: YugabyteDB-specific error strings
+        r"yb.*error|yugabyte.*error",
         r"pgsql.*error|error.*pgsql",
-        r"invalid byte sequence",
+        # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "Amazon Redshift": [
-        r"operator does not exist",
-        r"syntax error at or near",
-        r"invalid input syntax for (?:type )?",
-        r"column .* does not exist",
-        r"relation .* does not exist",
+        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format
+        r"ERROR:\s+operator does not exist",
+        r"ERROR:\s+syntax error at or near",
+        r"ERROR:\s+invalid input syntax for",
+        r"ERROR:\s+column .+ does not exist",
+        r"ERROR:\s+relation .+ does not exist",
         r"ERROR:\s+division by zero",
-        r"ERROR:\s+function .* does not exist",
-        r"amazon.*redshift|redshift.*error",     # Redshift-specific string
+        r"ERROR:\s+function .+ does not exist",
+        # DBMS-identifying: Amazon Redshift-specific strings
+        r"amazon.*redshift|redshift.*error",
         r"serializable isolation violation",     # Redshift MVCC error string
         r"pg_exception_context",                 # Redshift verbose error field
+        # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "Generic": [
         r"sql syntax.*error", r"sql error",
@@ -128632,7 +128705,16 @@ class TechniqueCascadeEngine:
                                 continue
                             # Multi-probe + clean probe for cross-DBMS
                             # BUG-EX-429-NEUTRAL FIX: Same as BUG-E-429-NEUTRAL.
-                            _ex_confirmed = 1
+                            # BUG-EX-INITIAL-WAF FIX: Cross-DBMS fallback previously started
+                            # with _ex_confirmed=1 unconditionally, meaning a WAF-blocked initial
+                            # probe (non-429) counted as a genuine SQL error confirmation. WAF block
+                            # pages echo the injected SQL function names in their body, so the SQL
+                            # pattern match on a WAF-blocked 403 probe is WAF echo, not DB error.
+                            # Fix: apply the same initial-WAF-block guard as the DBMS-specific path:
+                            # start at 0 if the initial probe is WAF-blocked (non-429), 1 otherwise.
+                            _ex_initial_waf_blocked = (not (_get_safe_status_code(fp) == 429) and
+                                                       WAFBlockDiscriminator.single_waf_blocked(fp))
+                            _ex_confirmed = 0 if _ex_initial_waf_blocked else 1
                             _ex_initial_429 = _get_safe_status_code(fp) == 429
                             _ex_429_neutral = 0
                             _ex_non429_total = 0
