@@ -41976,7 +41976,7 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                         _de_hard_sc = int(str(_sc_raw_de or 0)[:3]) if _sc_raw_de is not None else 0
                     except Exception:
                         _de_hard_sc = 0
-                    if _de_hard_sc in {403, 406, 412} or (520 <= _de_hard_sc <= 530):
+                    if _de_hard_sc in {400, 403, 406, 412} or (520 <= _de_hard_sc <= 530):
                         continue
                     # FIX-ERROR-WAF-STATUS: use single_waf_blocked() so plain 400/403 without
                     # WAF body patterns is also correctly skipped (not mistaken for a SQL error).
@@ -42045,7 +42045,7 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                     _cfm_hard_sc = int(str(_sc_raw_cfm or 0)[:3]) if _sc_raw_cfm is not None else 0
                                 except Exception:
                                     _cfm_hard_sc = 0
-                                if (_cfm_hard_sc in {403, 406, 412} or
+                                if (_cfm_hard_sc in {400, 403, 406, 412} or
                                         (520 <= _cfm_hard_sc <= 530)):
                                     continue  # WAF/CDN-blocked confirmation — skip
                                 if _e_cfm_fp and not WAFBlockDiscriminator.single_waf_blocked(_e_cfm_fp):
@@ -129078,7 +129078,7 @@ class TechniqueCascadeEngine:
                 _fp_hard_sc = int(str(_sc_raw or 0)[:3]) if _sc_raw is not None else 0
             except Exception:
                 _fp_hard_sc = 0
-            if _fp_hard_sc in {403, 406, 412} or (520 <= _fp_hard_sc <= 530):
+            if _fp_hard_sc in {400, 403, 406, 412} or (520 <= _fp_hard_sc <= 530):
                 # BUG-E-CDN-EARLY-EXIT FIX: CDN error codes 520-530 (Cloudflare/CDN
                 # infrastructure errors: origin down, SSL handshake failure, timeout,
                 # invalid response) must also trigger early return.  These codes mean the
@@ -129479,15 +129479,35 @@ class TechniqueCascadeEngine:
                                     _e_clean_ok = False
                                     _src = "original" if _e_clean_fallback_used else "false-condition"
                                     print(f"[*]     E clean probe ({_src}): CDN error ({_get_safe_status_code(_e_fp_clean)}) — ambiguous, rejected", flush=True)
-                                elif WAFBlockDiscriminator.single_waf_blocked(_e_fp_clean):
-                                    # BUG-E-CLEAN-WAF FIX: WAF-blocked clean probe. Pattern match
-                                    # on a WAF block page is meaningless — WAF echoes SQL keywords.
-                                    # Cannot determine whether the false-condition causes SQL errors.
-                                    # Fail-closed: reject to prevent false positive.
-                                    _e_clean_ok = False
-                                    _src = "original" if _e_clean_fallback_used else "false-condition"
-                                    print(f"[*]     E clean probe ({_src}): WAF-blocked ({_get_safe_status_code(_e_fp_clean)}) — ambiguous, rejected", flush=True)
                                 else:
+                                    # BUG-E-CLEAN-HARDSC-400 FIX: Compute hard status code once for
+                                    # the clean probe, immune to type-conversion failures. Use this
+                                    # before WAFBlockDiscriminator.single_waf_blocked() which relies
+                                    # on _get_safe_status_code() → may return 0 for string status codes.
+                                    try:
+                                        _e_clean_sc_raw = getattr(_e_fp_clean, 'status_code', None)
+                                        _e_clean_hard_sc = int(str(_e_clean_sc_raw or 0)[:3]) if _e_clean_sc_raw is not None else 0
+                                    except Exception:
+                                        _e_clean_hard_sc = 0
+                                    if _e_clean_hard_sc in {400, 403, 406, 412}:
+                                        # Hard WAF block code — type-conversion-immune guard.
+                                        # WAF block bodies do not reproduce DBMS-specific error patterns
+                                        # (they echo the payload, but the pattern may not match). Fail-
+                                        # closed: a WAF-blocked clean probe cannot confirm injection-specificity.
+                                        _e_clean_ok = False
+                                        _src = "original" if _e_clean_fallback_used else "false-condition"
+                                        print(f"[*]     E clean probe ({_src}): WAF-hard-blocked ({_e_clean_hard_sc}) — ambiguous, rejected", flush=True)
+                                    elif WAFBlockDiscriminator.single_waf_blocked(_e_fp_clean):
+                                        # BUG-E-CLEAN-WAF FIX: WAF-blocked clean probe. Pattern match
+                                        # on a WAF block page is meaningless — WAF echoes SQL keywords.
+                                        # Cannot determine whether the false-condition causes SQL errors.
+                                        # Fail-closed: reject to prevent false positive.
+                                        _e_clean_ok = False
+                                        _src = "original" if _e_clean_fallback_used else "false-condition"
+                                        print(f"[*]     E clean probe ({_src}): WAF-blocked ({_get_safe_status_code(_e_fp_clean)}) — ambiguous, rejected", flush=True)
+                                    else:
+                                        pass  # fall through to body check below
+                                if _e_clean_ok:  # body check only when not already rejected
                                     self._total_reqs += 1
                                     _e_clean_body = _safe_decode_body(_e_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__e_fp_clean') if _e_fp_clean.body else ""
                                     if re.search(pat, _e_clean_body, re.I):
@@ -129552,7 +129572,7 @@ class TechniqueCascadeEngine:
                             # BUG-EX-INITIAL-HARDSC FIX: Same hard status-code guard as the
                             # primary DBMS-specific path — reuse _fp_hard_sc computed above.
                             _ex_initial_waf_blocked = (
-                                _fp_hard_sc in {403, 406, 412} or
+                                _fp_hard_sc in {400, 403, 406, 412} or
                                 # BUG-EX-INITIAL-CDN FIX: Cross-DBMS fallback path was missing the
                                 # CDN error code guard that exists in the primary DBMS-specific path
                                 # (line 128821-128833).  CDN codes 520-530 on the initial probe mean
@@ -129589,7 +129609,7 @@ class TechniqueCascadeEngine:
                                         _ex_mp_hard_sc = 0
                                     if _get_safe_status_code(_ex_fp) == 429:
                                         _ex_429_neutral += 1
-                                    elif _ex_mp_hard_sc in {403, 406, 412}:
+                                    elif _ex_mp_hard_sc in {400, 403, 406, 412}:
                                         # Hard WAF block: canonical WAF codes, immune to type failures.
                                         _ex_429_neutral += 1
                                     elif 520 <= _get_safe_status_code(_ex_fp) <= 530:
@@ -132847,7 +132867,7 @@ class TechniqueCascadeEngine:
                     _eh_hard_sc = int(str(_eh_hard_sc_raw or 0)[:3]) if _eh_hard_sc_raw is not None else 0
                 except Exception:
                     _eh_hard_sc = 0
-                if _eh_hard_sc in {403, 406, 412} or (520 <= _eh_hard_sc <= 530):
+                if _eh_hard_sc in {400, 403, 406, 412} or (520 <= _eh_hard_sc <= 530):
                     print(f"    [EH-error] [{dbms}] req#{self._total_reqs} "
                           f"status={fp.status_code}  WAF/CDN-blocked-hard (skipped)", flush=True)
                     return None
@@ -132929,7 +132949,7 @@ class TechniqueCascadeEngine:
                             except Exception:
                                 _eh_fp_hard_sc = 0
                             _eh_initial_waf_blocked = (
-                                _eh_fp_hard_sc in {403, 406, 412} or
+                                _eh_fp_hard_sc in {400, 403, 406, 412} or
                                 # BUG-EH-INITIAL-CDN FIX: Mirror E-technique CDN guard.
                                 # CDN/Cloudflare 520-530 error pages can contain SQL-looking
                                 # text (header value echo in block advisory). Treat as waf_blocked.
@@ -132996,7 +133016,7 @@ class TechniqueCascadeEngine:
                                         _eh_mp_hard_sc = 0
                                     if _get_safe_status_code(_eh_mp_fp) == 429:
                                         _eh_429_neutral += 1
-                                    elif _eh_mp_hard_sc in {403, 406, 412}:
+                                    elif _eh_mp_hard_sc in {400, 403, 406, 412}:
                                         # Hard WAF block: canonical WAF-block status codes that
                                         # single_waf_blocked() might miss due to type-conversion failure.
                                         _eh_429_neutral += 1
@@ -133086,13 +133106,27 @@ class TechniqueCascadeEngine:
                                         _eh_clean_ok = False
                                         _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
                                         print(f"[*]     EH clean probe ({_eh_ctype}): CDN error ({_get_safe_status_code(_eh_fp_clean)}) — ambiguous, rejected", flush=True)
-                                    elif WAFBlockDiscriminator.single_waf_blocked(_eh_fp_clean):
-                                        # BUG-EH-CLEAN-WAF FIX: WAF-blocked clean probe — cannot determine
-                                        # whether false-condition causes errors. Fail-closed: reject.
-                                        _eh_clean_ok = False
-                                        _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
-                                        print(f"[*]     EH clean probe ({_eh_ctype}): WAF-blocked ({_get_safe_status_code(_eh_fp_clean)}) — ambiguous, rejected", flush=True)
-                                    elif _eh_fp_clean:
+                                    else:
+                                        try:
+                                            _eh_clean_sc_raw = getattr(_eh_fp_clean, 'status_code', None)
+                                            _eh_clean_hard_sc = int(str(_eh_clean_sc_raw or 0)[:3]) if _eh_clean_sc_raw is not None else 0
+                                        except Exception:
+                                            _eh_clean_hard_sc = 0
+                                        if _eh_clean_hard_sc in {400, 403, 406, 412}:
+                                            # BUG-EH-CLEAN-WAF-HARD-SC FIX (HIGH, EH technique, all DBMSes):
+                                            # Hard status code guard is immune to type-conversion failures
+                                            # (e.g. status_code="403 Forbidden" → _get_safe_status_code → 0).
+                                            # WAF hard-blocked (400/403/406/412) clean probe is ambiguous.
+                                            _eh_clean_ok = False
+                                            _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                            print(f"[*]     EH clean probe ({_eh_ctype}): WAF-hard-blocked ({_eh_clean_hard_sc}) — ambiguous, rejected", flush=True)
+                                        elif WAFBlockDiscriminator.single_waf_blocked(_eh_fp_clean):
+                                            # BUG-EH-CLEAN-WAF FIX: WAF-blocked clean probe — cannot determine
+                                            # whether false-condition causes errors. Fail-closed: reject.
+                                            _eh_clean_ok = False
+                                            _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                            print(f"[*]     EH clean probe ({_eh_ctype}): WAF-blocked ({_get_safe_status_code(_eh_fp_clean)}) — ambiguous, rejected", flush=True)
+                                    if _eh_clean_ok and _eh_fp_clean:
                                         self._total_reqs += 1
                                         _eh_clean_body = _safe_decode_body(_eh_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__eh_fp_clean') if _eh_fp_clean.body else ""
                                         _eh_clean_has_err = bool(re.search(_pp, _eh_clean_body, re.I))
