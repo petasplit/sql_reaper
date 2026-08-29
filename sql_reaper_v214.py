@@ -42200,14 +42200,38 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                     _xcc_clean_fp = await _send_injected(
                                         engine, method, url, data, data_fmt,
                                         param, original, tamper_chain)
-                                    if _validate_response(_xcc_clean_fp, func_name="crosscat_error_clean", allow_empty=True):
+                                    if not _validate_response(_xcc_clean_fp, func_name="crosscat_error_clean", allow_empty=True):
+                                        # BUG-XCC-CLEAN-FAIL-CLOSED FIX: Invalid/None clean probe response
+                                        # was previously ignored (fail-open) — detection proceeded without
+                                        # verifying injection-specificity. Fail-closed: ambiguous result.
+                                        _xcc_clean_ok = False
+                                        LOG.debug(f"[Error-CrossCat-{_ec_cat}] FP suppressed: "
+                                                  "clean probe returned invalid/None response — ambiguous")
+                                    elif _get_safe_status_code(_xcc_clean_fp) == 429:
+                                        # BUG-XCC-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
+                                        # cannot verify injection-specificity. Fail-closed.
+                                        _xcc_clean_ok = False
+                                        LOG.debug(f"[Error-CrossCat-{_ec_cat}] FP suppressed: "
+                                                  "clean probe rate-limited (429) — ambiguous")
+                                    elif WAFBlockDiscriminator.single_waf_blocked(_xcc_clean_fp):
+                                        # BUG-XCC-CLEAN-WAF-FAIL-CLOSED FIX: WAF-blocked clean probe
+                                        # cannot verify injection-specificity. Fail-closed.
+                                        _xcc_clean_ok = False
+                                        LOG.debug(f"[Error-CrossCat-{_ec_cat}] FP suppressed: "
+                                                  "clean probe WAF-blocked — ambiguous")
+                                    else:
                                         _xcc_clean_body = _safe_decode_body(_xcc_clean_fp, encoding="utf-8", errors="replace", func_name="xcc_clean").lower()
                                         if re.search(_ep, _xcc_clean_body, re.I):
                                             _xcc_clean_ok = False  # error present without injection — FP
                                             LOG.debug(f"[Error-CrossCat-{_ec_cat}] FP suppressed: "
                                                       "error pattern present in clean probe (original value)")
                                 except Exception:
-                                    pass  # clean probe failed — proceed with detection (fail-open)
+                                    # BUG-XCC-CLEAN-EXCEPTION-FAIL-CLOSED FIX: Exception during clean
+                                    # probe previously left _xcc_clean_ok=True (fail-open). Fail-closed:
+                                    # network error or exception is ambiguous, cannot verify detection.
+                                    _xcc_clean_ok = False
+                                    LOG.debug(f"[Error-CrossCat-{_ec_cat}] FP suppressed: "
+                                              "clean probe exception — ambiguous, fail-closed")
                                 if not _xcc_clean_ok:
                                     break
                                 LOG.info(f"[Error-CrossCat-{_ec_cat}] ✓ DETECTED "
@@ -54791,13 +54815,28 @@ class _HTTPHeaderInjectorV1:
                                         try:
                                             _hxe_clean_fp = await self.engine.send(
                                                 method, url, data=data, headers=base_headers)
-                                            if (_hxe_clean_fp and not WAFBlockDiscriminator.single_waf_blocked(_hxe_clean_fp)):
+                                            if not _hxe_clean_fp:
+                                                # BUG-HXE-CLEAN-NONE-FAIL-CLOSED FIX: None response
+                                                # was previously fail-open. Fail-closed: ambiguous.
+                                                _hxe_clean_ok = False
+                                                LOG.debug("[HdrXcatErr-FPG] clean probe None — ambiguous, fail-closed")
+                                            elif _get_safe_status_code(_hxe_clean_fp) == 429:
+                                                # BUG-HXE-CLEAN-429-FAIL-CLOSED FIX: Rate-limited.
+                                                _hxe_clean_ok = False
+                                                LOG.debug("[HdrXcatErr-FPG] clean probe 429 — ambiguous, fail-closed")
+                                            elif WAFBlockDiscriminator.single_waf_blocked(_hxe_clean_fp):
+                                                _hxe_clean_ok = False
+                                                LOG.debug("[HdrXcatErr-FPG] clean probe WAF-blocked — ambiguous, fail-closed")
+                                            else:
                                                 _hxe_clean_body = _safe_decode_body(_hxe_clean_fp).lower()
                                                 if re.search(_hx_err_matched, _hxe_clean_body, re.I):
                                                     _hxe_clean_ok = False
                                                     LOG.debug(f"[HdrXcatErr-FPG] error in clean probe — page content FP")
                                         except Exception:
-                                            pass  # clean probe failed — fail-open
+                                            # BUG-HXE-CLEAN-EXCEPTION-FAIL-CLOSED FIX: Exception
+                                            # was previously fail-open. Fail-closed: ambiguous.
+                                            _hxe_clean_ok = False
+                                            LOG.debug("[HdrXcatErr-FPG] clean probe exception — fail-closed")
                                         if _hxe_clean_ok:
                                             r = DetectionResult(
                                                 param=f"header:{header_name}", technique="E",
@@ -111585,6 +111624,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # row number prevents matching generic ORM "data too long for column" messages that
         # omit the column name and row number.
         r"data too long for column '.+' at row \d+",
+        # Wire-protocol: MySQL storage engine error format — "got error N 'message' from storage engine"
+        # MySQL-specific: storage engines (MyISAM, InnoDB, NDB) emit this exact phrasing when
+        # they return DBMS-internal error codes to the SQL layer. The numeric error code in
+        # single quotes and "from .* storage engine" suffix together are DBMS-wire-protocol-specific
+        # and cannot appear in WAF block pages or ORM/application error handlers.
+        r"got error \d+ '.*' from .* storage engine",
+        # Wire-protocol: MySQL duplicate entry error — "Duplicate entry 'X' for key 'Y'"
+        # MySQL ALWAYS emits this exact format with both the value and key name in single quotes.
+        # Requiring both quoted values prevents matching generic ORM unique-constraint messages
+        # (Django: "UNIQUE constraint failed: table.column", Rails: "has already been taken").
+        r"duplicate entry '.+' for key '",
         # REMOVED: warning: mysql_, warning: mysqli_, mysql_num_rows|...,
         #   supplied argument is not a valid mysql — PHP driver function names/warnings;
         #   WAF block pages echo injected SQL function names and these PHP warning strings.
@@ -111647,6 +111697,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"(?-i:ERROR):\s+syntax error at or near",
         r"(?-i:ERROR):\s+invalid input syntax for",
         r"(?-i:ERROR):\s+unterminated quoted string",
+        # Wire-protocol: PostgreSQL-specific additional error formats.
+        # All use (?-i:ERROR) to require uppercase (see rationale above).
+        # BUG-SQLPAT-PG-MISSING FIX (MEDIUM, PostgreSQL E/EH techniques):
+        # Additional PostgreSQL wire-protocol error strings that are DBMS-specific
+        # and cannot appear in WAF block pages (WAF pages use lowercase "error:" and
+        # never reproduce PostgreSQL's exact error-class phrasings).
+        r"(?-i:ERROR):\s+permission denied for",     # PG ACL: "ERROR:  permission denied for table X"
+        r"(?-i:ERROR):\s+duplicate key value violates unique constraint",  # PG constraint: unique violation
+        r"(?-i:ERROR):\s+null value in column .+ violates not-null constraint",  # PG NOT NULL violation
+        r"(?-i:ERROR):\s+canceling statement due to conflict",  # PG hot standby conflict
+        r"(?-i:ERROR):\s+value too long for type character",    # PG character type overflow
         # REMOVED: pg_query|pg_exec|pg_num_rows — PHP function names, not PG wire-protocol
         # REMOVED: postgresql.*error — too broad; WAF block pages mentioning PostgreSQL match
         # REMOVED: psycopg2 — Python driver name; appears in Django/Flask debug pages
@@ -111723,10 +111784,24 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"syntax error converting .+ to a .+ data type",
         # DBMS-identifying: ODBC driver string specific to SQL Server (both driver and protocol named)
         r"odbc sql server driver|odbc driver.*sql server",
+        # Wire-protocol: MSSQL arithmetic overflow with specific type names.
+        # BUG-SQLPAT-MSSQL-ARITH-ANCHOR FIX (MEDIUM, MSSQL E/EH techniques):
+        # The bare phrase "arithmetic overflow error" was previously removed as too generic
+        # because it can appear in application math error handlers and generic exception messages.
+        # MSSQL's ACTUAL wire-protocol format ALWAYS specifies both the value type being
+        # converted AND the target data type: "Arithmetic overflow error converting <type>
+        # to data type <type>." The "to data type" connector phrase with a named MSSQL scalar
+        # type is DBMS-wire-protocol-specific and cannot appear in WAF block advisory pages or
+        # generic application error handlers. Re-introduce with the type-anchored format.
+        r"arithmetic overflow error converting .+ to data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time)\b",
+        # Wire-protocol: MSSQL cannot insert NULL — required column constraint violation.
+        # MSSQL format: "Cannot insert the value NULL into column 'X', table 'Y.dbo.Z';
+        # column does not allow nulls." Requiring "column does not allow nulls" pins to
+        # MSSQL wire-protocol — no WAF page or ORM error reproduces the trailing constraint phrase.
+        r"cannot insert the value null into column .+; column does not allow nulls",
         # REMOVED: microsoft sql server — too broad; WAF block pages name the target DBMS
         # REMOVED: warning: .*mssql_ — PHP driver warning; WAF pages echo PHP function names
         # REMOVED: mssql_query|sqlsrv_query|mssql_num_rows — PHP function names, not wire-protocol
-        # REMOVED: arithmetic overflow error — too generic; appears in application math errors
         # REMOVED: r"sqlstate" — generic ODBC header, appears in any ODBC error regardless of DBMS
         # REMOVED: r"invalid column name" — too generic (appears in ORM/framework errors)
         # REMOVED: r"waitfor delay" — WAF block pages echo the injected WAITFOR DELAY payload
@@ -111764,6 +111839,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # apps, config files mentioning TNS). The numeric TNS-NNNNN: format is DBMS-specific.
         # BUG-SQLPAT-TNS-CASE FIX: (?-i:TNS) pins to uppercase + colon required (was missing).
         r"(?-i:TNS)-\d{5}:",
+        # Wire-protocol: Oracle JDBC thin driver exception class in stack traces.
+        # Oracle JDBC always uses the oracle.jdbc package path: "oracle.jdbc.driver.*Exception"
+        # or "oracle.sql.*Exception". The package path with oracle.jdbc prefix is DBMS-specific
+        # and cannot appear in WAF block pages (which use plain English descriptions).
+        r"oracle\.jdbc\.\w+",
+        # Wire-protocol: Oracle DBMS_OUTPUT / PL/SQL bulk collect error format.
+        # Oracle PL/SQL errors in web responses ALWAYS appear as part of ORA-/PLS- prefixed
+        # messages already covered above. This is the ODP.NET (Oracle Data Provider for .NET)
+        # exception class string that appears in .NET stack traces when Oracle errors surface.
+        # The class name "OracleException" in fully-qualified form is DBMS-specific.
+        r"oracle\.dataaccess\.client\.oracleexception",
         # REMOVED: r"sp2-\d{4}" — SQL*Plus command-line errors (SP2-NNNN); SQL*Plus is a
         #   local CLI tool, not a network service — SP2 error codes cannot appear in HTTP
         #   responses from a web application backed by Oracle. Only ORA-/PLS-/TNS- codes
@@ -111799,6 +111885,16 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # GraphQL schema validators). Fix: require a quoted token (double or single-quoted)
         # between "near" and ": syntax error" — SQLite always quotes the unexpected token.
         r"near [\"'][^\"'\n]{1,30}[\"']:\s*syntax error",
+        # Wire-protocol: SQLite Python binding exception types in stack traces.
+        # These class names appear in Python stack traces when SQLite errors surface through
+        # the Python DB-API 2.0 interface. The period-separated class path (sqlite3.X) is
+        # DBMS-specific — WAF block pages use plain English and never reproduce Python class paths.
+        r"sqlite3\.programmingError",
+        r"sqlite3\.dataError",
+        # Wire-protocol: SQLite C-level disk/IO error constants used in Rust/Go/C bindings.
+        # These constants (SQLITE_IOERR, SQLITE_CORRUPT, SQLITE_MISUSE) appear ONLY in
+        # SQLite wire error output from native language bindings, not in WAF block pages.
+        r"(?-i:SQLITE_IOERR)|(?-i:SQLITE_CORRUPT)|(?-i:SQLITE_MISUSE)",
         # REMOVED: sqlite.*error — too broad; WAF block pages mentioning SQLite match
         # REMOVED: sqlite3.*exception — too broad; matches any exception message mentioning sqlite3
         # REMOVED: r"unrecognized token" — too generic (appears in CSS/HTML/template parsers)
@@ -129163,6 +129259,21 @@ class TechniqueCascadeEngine:
                                     _e_clean_ok = False
                                     _src = "original" if _e_clean_fallback_used else "false-condition"
                                     print(f"[*]     E clean probe ({_src}): timeout/failure — ambiguous, rejected", flush=True)
+                                elif _get_safe_status_code(_e_fp_clean) == 429:
+                                    # BUG-E-CLEAN-429-FAIL-CLOSED FIX (HIGH, all E techniques, all DBMSes):
+                                    # WAFBlockDiscriminator.single_waf_blocked() returns False for 429
+                                    # (rate-limit is handled separately from WAF blocks). A 429 clean probe
+                                    # falls through to the body-pattern check, which finds no SQL error in the
+                                    # rate-limit page → _e_clean_ok stays True → detection confirmed as false
+                                    # positive. This happens when: (a) initial + 2 confirmation probes return
+                                    # real SQL errors, then (b) the clean probe is rate-limited (429). The
+                                    # rate-limit body does not contain the SQL error pattern, so the clean probe
+                                    # appears to "pass" — but it only passes because the server rate-limited it,
+                                    # not because the false-condition is SQL-error-free. Fix: fail-closed on 429
+                                    # (rate-limited clean probe is ambiguous — we cannot verify injection-specificity).
+                                    _e_clean_ok = False
+                                    _src = "original" if _e_clean_fallback_used else "false-condition"
+                                    print(f"[*]     E clean probe ({_src}): rate-limited (429) — ambiguous, rejected", flush=True)
                                 elif WAFBlockDiscriminator.single_waf_blocked(_e_fp_clean):
                                     # BUG-E-CLEAN-WAF FIX: WAF-blocked clean probe. Pattern match
                                     # on a WAF block page is meaningless — WAF echoes SQL keywords.
@@ -129303,6 +129414,10 @@ class TechniqueCascadeEngine:
                                         # BUG-EX-CLEAN-FAIL-CLOSED FIX: Timeout/failure on clean
                                         # probe — ambiguous result, fail-closed to prevent FP.
                                         _ex_clean_ok = False
+                                    elif _get_safe_status_code(_ex_fc) == 429:
+                                        # BUG-EX-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
+                                        # is ambiguous — cannot verify injection-specificity. Fail-closed.
+                                        _ex_clean_ok = False
                                     elif WAFBlockDiscriminator.single_waf_blocked(_ex_fc):
                                         # BUG-EX-CLEAN-WAF FIX: WAF-blocked clean probe — ambiguous.
                                         # Cannot determine if false-condition causes errors. Reject.
@@ -129411,6 +129526,11 @@ class TechniqueCascadeEngine:
                                     if _ml_cfp_clean is None:
                                         _ml_clean_ok = False  # timeout — fail-closed
                                         LOG.debug("[ErrorML] FP suppressed: clean probe timeout")
+                                    elif _get_safe_status_code(_ml_cfp_clean) == 429:
+                                        # BUG-ML-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
+                                        # is ambiguous — cannot verify injection-specificity. Fail-closed.
+                                        _ml_clean_ok = False
+                                        LOG.debug("[ErrorML] FP suppressed: clean probe rate-limited (429)")
                                     elif WAFBlockDiscriminator.single_waf_blocked(_ml_cfp_clean):
                                         _ml_clean_ok = False  # WAF block — ambiguous, fail-closed
                                         LOG.debug("[ErrorML] FP suppressed: clean probe WAF-blocked")
@@ -132021,7 +132141,16 @@ class TechniqueCascadeEngine:
                                 if _SCAN_STOPPED[0]: return None  # BUG-FIX-REQ4-S-CLEAN
                                 _s_fp_clean = await self._safe_confirm(method, url, data,
                                     data_fmt, param, _s_clean_probe_val, self.tamper_chain)
-                                if _s_fp_clean:
+                                if _s_fp_clean and _get_safe_status_code(_s_fp_clean) == 429:
+                                    # BUG-S-CLEAN-429-FAIL-CLOSED FIX (MEDIUM, S technique, all DBMSes):
+                                    # A rate-limited (429) clean probe cannot verify injection-specificity.
+                                    # The 429 body is a rate-limit page, not a SQL response — body-size
+                                    # comparisons and SQL error checks are meaningless on rate-limit content.
+                                    # Fail-closed: reject detection to prevent false positive.
+                                    _s_clean_ok = False
+                                    _s_ctype_429 = "original" if _s_clean_fallback else "false-cond"
+                                    print(f"    [S-clean] ({_s_ctype_429}) clean probe rate-limited (429) — ambiguous, rejected", flush=True)
+                                elif _s_fp_clean:
                                     self._total_reqs += 1
                                     _s_clean_body = _safe_decode_body(_s_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__s_fp_clean') if _s_fp_clean.body else ""
                                     _s_clean_err = any(re.search(p, _s_clean_body, re.I) for pats in SQL_ERROR_PATTERNS.values() for p in pats)
@@ -132214,17 +132343,18 @@ class TechniqueCascadeEngine:
                                 else:
                                     # _s_fp_clean is None — clean probe produced no response (network
                                     # error, request cancelled, or _safe_confirm returned falsy).
-                                    # On a path-injection surface with the false-cond probe variant
-                                    # (not the original-value fallback), an absent response cannot
-                                    # confirm SQL processing: reject as path-manipulation FP rather
-                                    # than allowing _s_clean_ok to stay True and producing a cascade
-                                    # into PCV that wastes 4+ more probes to reach the same outcome.
-                                    if _s_is_path_inj and not _s_clean_fallback:
-                                        _s_clean_ok = False
-                                        print(
-                                            "    [S-clean] (false-cond) clean probe returned None "
-                                            "on path-inj surface → path-manipulation FP rejected "
-                                            "(no PCV needed)")
+                                    # BUG-S-CLEAN-NONE-FAIL-CLOSED FIX (HIGH, S technique, all surfaces):
+                                    # Previously only path-injection surfaces with a false-cond probe
+                                    # rejected on None. All other surfaces left _s_clean_ok=True
+                                    # (fail-open), allowing stacked-query detections to proceed when
+                                    # the clean probe timed out or failed — we cannot verify that the
+                                    # stacked query is SQL-specific without a working clean probe.
+                                    # Fix: fail-closed on None for ALL surfaces and probe variants.
+                                    _s_clean_ok = False
+                                    _s_ctype_n = "original" if _s_clean_fallback else "false-cond"
+                                    print(
+                                        f"    [S-clean] ({_s_ctype_n}) clean probe returned None "
+                                        "— ambiguous, rejected (fail-closed)")
                             if _s_clean_ok:
                                 print("[+] Real injection confirmed via S on "
                                       f"{('path-injection' if param in ('__path__','path-injection') else param)!r}")
@@ -132647,6 +132777,12 @@ class TechniqueCascadeEngine:
                                         _eh_clean_ok = False
                                         _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
                                         print(f"[*]     EH clean probe ({_eh_ctype}): timeout/failure — ambiguous, rejected", flush=True)
+                                    elif _get_safe_status_code(_eh_fp_clean) == 429:
+                                        # BUG-EH-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
+                                        # is ambiguous — cannot verify injection-specificity. Fail-closed.
+                                        _eh_clean_ok = False
+                                        _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                        print(f"[*]     EH clean probe ({_eh_ctype}): rate-limited (429) — ambiguous, rejected", flush=True)
                                     elif WAFBlockDiscriminator.single_waf_blocked(_eh_fp_clean):
                                         # BUG-EH-CLEAN-WAF FIX: WAF-blocked clean probe — cannot determine
                                         # whether false-condition causes errors. Fail-closed: reject.
@@ -133031,7 +133167,26 @@ class TechniqueCascadeEngine:
                     if True:  # always run clean probe
                         _in_fc = await self._safe_confirm(method, url, data,
                             data_fmt, param, _in_clean_probe_val, self.tamper_chain)
-                        if _in_fc:
+                        _in_ctype = "original" if _in_clean_fallback else "false-cond"
+                        if _in_fc is None:
+                            # BUG-IN-CLEAN-FAIL-CLOSED FIX (HIGH, IN technique, all DBMSes):
+                            # Timeout/request failure on clean probe — previously _in_clean_ok stayed True
+                            # (fail-open), allowing detection to proceed without verifying
+                            # injection-specificity. Fail-closed: timeout is ambiguous, reject.
+                            _in_clean_ok = False
+                            print(f"[*]     IN clean probe ({_in_ctype}): timeout/failure — ambiguous, rejected", flush=True)
+                        elif _get_safe_status_code(_in_fc) == 429:
+                            # BUG-IN-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe is ambiguous.
+                            # Cannot verify the false-condition is SQL-error-free. Fail-closed.
+                            _in_clean_ok = False
+                            print(f"[*]     IN clean probe ({_in_ctype}): rate-limited (429) — ambiguous, rejected", flush=True)
+                        elif WAFBlockDiscriminator.single_waf_blocked(_in_fc):
+                            # BUG-IN-CLEAN-WAF-FAIL-CLOSED FIX: WAF-blocked clean probe is ambiguous.
+                            # WAF block pages echo SQL keywords — pattern absence does not confirm
+                            # injection-specificity. Fail-closed to prevent false positive.
+                            _in_clean_ok = False
+                            print(f"[*]     IN clean probe ({_in_ctype}): WAF-blocked ({_get_safe_status_code(_in_fc)}) — ambiguous, rejected", flush=True)
+                        else:
                             self._total_reqs += 1
                             # BUG-FIX-3: Safe decode operation
                             _in_fc_b = ""
@@ -133039,7 +133194,6 @@ class TechniqueCascadeEngine:
                                 _in_fc_b = _safe_decode_body(_in_fc) if _in_fc.body else ""
                             except (UnicodeDecodeError, AttributeError, TypeError):
                                 _in_fc_b = "" # Fallback
-                            _in_ctype = "original" if _in_clean_fallback else "false-cond"
                             if re.search(_err_pat, _in_fc_b, re.I):
                                 _in_clean_ok = False
                                 print(f"[*]     IN clean probe ({_in_ctype}): error ALSO in clean  page content", flush=True)
@@ -133137,7 +133291,22 @@ class TechniqueCascadeEngine:
                     if True:  # always run clean probe
                         _ue_fc = await self._safe_confirm(method, url, data,
                             data_fmt, param, _ue_clean_probe, self.tamper_chain)
-                        if _ue_fc:
+                        _ue_src = "original" if _ue_clean_fallback else "false-condition"
+                        if _ue_fc is None:
+                            # BUG-UE-CLEAN-FAIL-CLOSED FIX (HIGH, UE technique, all DBMSes):
+                            # Timeout/request failure — fail-open previously allowed detection
+                            # without verifying injection-specificity. Fail-closed: reject.
+                            _ue_clean_ok = False
+                            print(f"[*]     UE clean probe ({_ue_src}): timeout/failure — ambiguous, rejected", flush=True)
+                        elif _get_safe_status_code(_ue_fc) == 429:
+                            # BUG-UE-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe is ambiguous.
+                            _ue_clean_ok = False
+                            print(f"[*]     UE clean probe ({_ue_src}): rate-limited (429) — ambiguous, rejected", flush=True)
+                        elif WAFBlockDiscriminator.single_waf_blocked(_ue_fc):
+                            # BUG-UE-CLEAN-WAF-FAIL-CLOSED FIX: WAF-blocked clean probe is ambiguous.
+                            _ue_clean_ok = False
+                            print(f"[*]     UE clean probe ({_ue_src}): WAF-blocked ({_get_safe_status_code(_ue_fc)}) — ambiguous, rejected", flush=True)
+                        else:
                             self._total_reqs += 1
                             # BUG-FIX-3: Safe decode operation
                             _ue_fc_b = ""
@@ -133147,10 +133316,8 @@ class TechniqueCascadeEngine:
                                 _ue_fc_b = "" # Fallback
                             if re.search(_ue_pat, _ue_fc_b, re.I):
                                 _ue_clean_ok = False
-                                _ue_src = "original" if _ue_clean_fallback else "false-condition"
                                 print(f"[*]     UE clean probe ({_ue_src}): error ALSO present  page content", flush=True)
                             else:
-                                _ue_src = "original" if _ue_clean_fallback else "false-condition"
                                 print(f"[*]     UE clean probe ({_ue_src}): error absent  confirmed", flush=True)
                     if _ue_clean_ok:
                         _det_ue = DetectionResult(
