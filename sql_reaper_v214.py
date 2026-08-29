@@ -27684,7 +27684,17 @@ class ConditionalErrorExtractor:
                             _cee_fp_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
                         except Exception:
                             _cee_fp_sc = 0
-                        if _cee_fp_sc not in {403, 406, 412}:
+                        if _cee_fp_sc not in {403, 406, 412} and not (520 <= _cee_fp_sc <= 530):
+                            # BUG-CEE-CDN-EXTRACT FIX: CDN/Cloudflare error codes 520-530
+                            # (origin down, SSL handshake failure, connection timeout, etc.)
+                            # indicate the SQL payload never reached the database. CDN error
+                            # pages contain structured HTML that can match ERROR_EXTRACTORS
+                            # patterns — especially the XPATH tilde pattern and generic catch-all
+                            # — producing garbage ASCII characters for every position.
+                            # The non-ASCII guard at extract_string_from_response() tail catches
+                            # non-ASCII garbage but misses ASCII-range garbage (e.g. dots from
+                            # CSS custom-property names or CDN ray-IDs enclosed in tildes).
+                            # Fix: skip extraction for CDN error codes same as WAF block codes.
                             body_str = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                             ch = cls.extract_char(body_str)
                 except Exception as _esr_err:
@@ -27722,7 +27732,10 @@ class ConditionalErrorExtractor:
                                     _cee_retry_sc = int(str(getattr(fp_retry, 'status_code', '') or '')[:3])
                                 except Exception:
                                     _cee_retry_sc = 0
-                                if _cee_retry_sc not in {403, 406, 412}:
+                                if _cee_retry_sc not in {403, 406, 412} and not (520 <= _cee_retry_sc <= 530):
+                                    # BUG-CEE-CDN-RETRY FIX: Same CDN code guard as the primary
+                                    # extraction path — retry probes returning CDN error codes
+                                    # must not be parsed for extraction characters.
                                     body_retry = _safe_decode_body(fp_retry, encoding="utf-8", errors="replace", func_name="extraction_retry") or ""
                                     ch = cls.extract_char(body_retry)
                     except Exception as _retry_err:
@@ -111458,9 +111471,16 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"you have an error in your sql syntax; check the manual",
         r"mysql server version for the right syntax",
         # Wire-protocol: MySQL-specific error phrasing (not ORM — ORM says "column count mismatch")
-        r"column count doesn.t match value count at row",
+        # BUG-SQLPAT-COLCOUNT-ANCHOR FIX: The `.` in "doesn.t" matches any char; the row-number
+        # suffix "at row \d+" is always present in MySQL wire-protocol output and makes the pattern
+        # immune to matching ORM messages like "column count doesn't match value count" (no row number).
+        r"column count doesn't match value count at row \d+",
         # Wire-protocol: MySQL field list error (Unknown column 'x' in 'field list')
-        r"unknown column .+ in .field list",
+        # BUG-SQLPAT-FIELDLIST-ANCHOR FIX: The old `in .field list` used `.` which matches any
+        # character before "field list", allowing matches like "in 'some list'" or "in any list".
+        # MySQL ALWAYS emits the exact phrasing: Unknown column 'X' in 'field list'
+        # (single-quoted 'field list' is mandatory in the MySQL wire-protocol error format).
+        r"unknown column .+ in 'field list'",
         # Wire-protocol: MySQL EXTRACTVALUE/UPDATEXML error — MySQL NEVER echoes the
         # function name; it always emits "XPATH syntax error: '~<data>'" format.
         # The tilde (~) is the 0x7e delimiter injected by CONCAT(0x7e,<data>,0x7e) in
@@ -111474,9 +111494,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Wire-protocol: MySQL collation mismatch (requires MySQL collation system)
         r"illegal mix of collations",
         # Wire-protocol: MySQL truncation error (MySQL-specific phrasing with data type name)
-        r"truncated incorrect (?:integer|double|real)",
-        # Wire-protocol: MySQL column data length (MySQL-specific phrasing)
-        r"data too long for column",
+        # BUG-SQLPAT-TRUNCATED-ANCHOR FIX: "Truncated incorrect INTEGER value:" is MySQL's
+        # EXACT wire-protocol format — the word "value" followed by the colon is mandatory
+        # and differentiates this from generic "truncated incorrect" application log messages.
+        # MySQL ALWAYS emits: "Truncated incorrect integer value: '<literal>'"
+        r"truncated incorrect (?:integer|double|real) value:",
+        # Wire-protocol: MySQL column data length (MySQL-specific phrasing with column name)
+        # BUG-SQLPAT-DATALENGTH-ANCHOR FIX: MySQL's exact format is
+        # "Data too long for column 'X' at row N" — requiring the quoted column name and
+        # row number prevents matching generic ORM "data too long for column" messages that
+        # omit the column name and row number.
+        r"data too long for column '.+' at row \d+",
         # REMOVED: warning: mysql_, warning: mysqli_, mysql_num_rows|...,
         #   supplied argument is not a valid mysql — PHP driver function names/warnings;
         #   WAF block pages echo injected SQL function names and these PHP warning strings.
@@ -111489,8 +111517,8 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
         # BUG-SQLPAT-XPATH-TILDE FIX: require tilde after quote (see MySQL entry above).
         r"xpath syntax error:\s*'~",
-        r"unknown column .+ in .field list",
-        r"column count doesn.t match value count at row",
+        r"unknown column .+ in 'field list'",
+        r"column count doesn't match value count at row \d+",
         # REMOVED: warning: mysqli_ — PHP driver warning, not MariaDB wire-protocol format
     ],
     # BUG-SQLPAT-TIDB FIX: TiDB absent from SQL_ERROR_PATTERNS.
@@ -111507,9 +111535,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
         # BUG-SQLPAT-XPATH-TILDE FIX: require tilde after quote (see MySQL entry above).
         r"xpath syntax error:\s*'~",
-        r"unknown column .+ in .field list",
-        r"column count doesn.t match value count at row",
-        r"truncated incorrect (?:integer|double|real)",
+        r"unknown column .+ in 'field list'",
+        r"column count doesn't match value count at row \d+",
+        r"truncated incorrect (?:integer|double|real) value:",
         # Wire-protocol: TiDB-specific internal error code format [component:NNNN]
         # TiDB error messages use bracketed component:errorcode prefixes that do
         # NOT appear in WAF block pages. Example: [planner:1055], [executor:8062].
@@ -111560,8 +111588,14 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # advisories echoing partial SQL Server output. Fix: (?-i:Msg) + (?-i:Level) pins
         # both tokens to their exact wire-protocol capitalisation.
         r"(?-i:Msg) \d+, (?-i:Level) \d+",
-        # Wire-protocol: MSSQL-specific type conversion errors
-        r"conversion failed when converting",
+        # Wire-protocol: MSSQL-specific type conversion errors.
+        # BUG-SQLPAT-MSSQL-CONVERT-ANCHOR FIX: "Conversion failed when converting" alone is not
+        # MSSQL-specific — other DBMSes and ORMs can emit similar phrases.  MSSQL's exact wire-
+        # protocol format ALWAYS names the source type (nvarchar, varchar, char, etc.) immediately
+        # after "converting": "Conversion failed when converting the nvarchar value 'X' to data type int."
+        # Requiring "(?:the |)(?:nvarchar|varchar|char|nchar|datetime|date|time|bigint|smallint|tinyint|"
+        # "decimal|numeric|float|real|money|bit)" pins the pattern to MSSQL type names.
+        r"conversion failed when converting (?:the |)(?:nvarchar|varchar|char|nchar|datetime|date|time|bigint|smallint|tinyint|decimal|numeric|float|real|money|bit)",
         r"string or binary data would be truncated",
         # Wire-protocol: MSSQL-specific divide-by-zero format with "error encountered" suffix
         r"divide by zero error encountered",
@@ -111571,8 +111605,12 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Requiring "'@" (quote + at-sign) prevents matching generic application messages like
         # "procedure handleRequest expects parameter userId" (no @-prefixed quoted param in non-MSSQL).
         r"procedure .+ expects parameter '@",
-        # Wire-protocol: MSSQL syntax conversion error (unique phrasing with "converting" keyword)
-        r"syntax error converting",
+        # Wire-protocol: MSSQL syntax conversion error (unique phrasing with type name).
+        # BUG-SQLPAT-MSSQL-SYNTAXCONV-ANCHOR FIX: "Syntax error converting" is MSSQL-specific
+        # but the standalone phrase could match application error handlers.  MSSQL's exact format
+        # is "Syntax error converting X to a Y data type." — requiring "to a .+ data type"
+        # anchors the match to MSSQL wire-protocol output exclusively.
+        r"syntax error converting .+ to a .+ data type",
         # DBMS-identifying: ODBC driver string specific to SQL Server (both driver and protocol named)
         r"odbc sql server driver|odbc driver.*sql server",
         # REMOVED: microsoft sql server — too broad; WAF block pages name the target DBMS
@@ -111596,8 +111634,15 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # strings, or WAF block advisory text ("ora-cle database error blocked") could match.
         # Fix: use (?-i:ORA) to pin the prefix to uppercase-only, matching Oracle wire-protocol.
         r"(?-i:ORA)-\d{4,5}:",
-        # Wire-protocol: Oracle-specific error message phrasing (from ORA-01756 parser error)
-        r"quoted string not properly terminated",
+        # Wire-protocol: Oracle-specific error message phrasing (ORA-01756 parser error).
+        # BUG-SQLPAT-ORA-QUOTED-ANCHOR FIX: The standalone phrase "quoted string not properly
+        # terminated" can appear in template engine error messages, PL/SQL documentation pages,
+        # or application debug output unrelated to Oracle wire-protocol injection signals.
+        # Oracle ALWAYS emits this as part of a full ORA-01756 error response which starts with
+        # the ORA error code prefix already matched by the r"(?-i:ORA)-\d{4,5}:" pattern above.
+        # The standalone phrase is therefore redundant AND imprecise.  Anchor it to require the
+        # Oracle ORA-01756 numeric code so it cannot match documentation pages or template errors.
+        r"(?-i:ORA)-01756:.*quoted string not properly terminated",
         # Wire-protocol: PL/SQL error codes (PLS-NNNNN:) — colon required, same as ORA-
         # BUG-SQLPAT-PLS-CASE FIX: (?-i:PLS) pins to uppercase (Oracle ALWAYS uses uppercase).
         r"(?-i:PLS)-\d{4,5}:",
@@ -111629,8 +111674,12 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"sqlite3\.operationalerror",
         r"sqlite3\.databaseerror",
         r"sqlite3\.interfaceerror",
-        # Wire-protocol: C-level SQLite error constant (appears in C/Go/Rust bindings)
-        r"SQLITE_ERROR",
+        # Wire-protocol: C-level SQLite error constant (appears in C/Go/Rust bindings).
+        # BUG-SQLPAT-SQLITE-CASE FIX: SQLITE_ERROR is always uppercase in C/Go/Rust SQLite
+        # bindings wire output.  Without (?-i:SQLITE_ERROR), the re.I flag active in detect_error
+        # also matches lowercase "sqlite_error" which can appear in application code as a string
+        # literal, variable name, or config key.  Pin to uppercase to require wire-protocol origin.
+        r"(?-i:SQLITE_ERROR)",
         # Wire-protocol: SQLite syntax error format — "near \"TOKEN\": syntax error"
         # SQLite ALWAYS quotes the token in double or single quotes: near "UNION": syntax error.
         # BUG-SQLPAT-NEAR-TOKEN FIX (MEDIUM, SQLite E/EH techniques): The old pattern
@@ -128693,9 +128742,16 @@ class TechniqueCascadeEngine:
                 _fp_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
             except Exception:
                 _fp_hard_sc = 0
-            if _fp_hard_sc in {403, 406, 412}:
+            if _fp_hard_sc in {403, 406, 412} or (520 <= _fp_hard_sc <= 530):
+                # BUG-E-CDN-EARLY-EXIT FIX: CDN error codes 520-530 (Cloudflare/CDN
+                # infrastructure errors: origin down, SSL handshake failure, timeout,
+                # invalid response) must also trigger early return.  These codes mean the
+                # SQL payload NEVER reached the database.  CDN error pages can contain
+                # SQL-looking fragments (XPATH, function names, syntax keywords) in their
+                # advisory HTML that would match SQL_ERROR_PATTERNS, triggering a false-
+                # positive E detection.  Treat CDN codes identically to WAF-hard codes.
                 print(f"    [E-error] [{dbms}] req#{self._total_reqs} "
-                      f"status={fp.status_code}  WAF-blocked-hard (skipped)", flush=True)
+                      f"status={fp.status_code}  WAF/CDN-blocked-hard (skipped)", flush=True)
                 return None
             if _waf_blocked or WAFBlockDiscriminator.single_waf_blocked(fp):
                 print(f"    [E-error] [{dbms}] req#{self._total_reqs} "
@@ -129016,6 +129072,12 @@ class TechniqueCascadeEngine:
                             # primary DBMS-specific path — reuse _fp_hard_sc computed above.
                             _ex_initial_waf_blocked = (
                                 _fp_hard_sc in {403, 406, 412} or
+                                # BUG-EX-INITIAL-CDN FIX: Cross-DBMS fallback path was missing the
+                                # CDN error code guard that exists in the primary DBMS-specific path
+                                # (line 128821-128833).  CDN codes 520-530 on the initial probe mean
+                                # the payload never reached the DB — start at 0 confirmations and
+                                # require 2 independent non-CDN probes to confirm, same as the primary path.
+                                (520 <= _fp_hard_sc <= 530) or
                                 (not (_get_safe_status_code(fp) == 429) and
                                  WAFBlockDiscriminator.single_waf_blocked(fp))
                             )
@@ -173323,7 +173385,12 @@ class ConditionalErrorTypeOracle:
             # the "error" probe was intercepted by the WAF — not a SQL error response.
             # Accepting this as the "error" status means every extraction probe that
             # also gets WAF-blocked returns err_status → all bits True → garbage.
-            if err_status in _ceto_waf_codes:
+            # BUG-CETO-CDN-STATUS FIX: CDN error codes 520-530 (Cloudflare/CDN infrastructure
+            # errors) indicate the probe was intercepted at the CDN layer — never reached the DB.
+            # An err_status of 520-530 is a CDN error page, not a SQL error response.
+            # Calibrating with CDN error status produces an unreliable oracle that returns CDN
+            # error codes for any complex SQL payload blocked at the CDN → all bits True → garbage.
+            if err_status in _ceto_waf_codes or (520 <= (err_status or 0) <= 530):
                 continue
 
             if err_status != clean_status:
@@ -173403,7 +173470,12 @@ class ConditionalErrorTypeOracle:
                 # the "error" response is actually a WAF block page — not a SQL error type.
                 # Accepting it produces viable: TRUE557 FALSE155 false positives.
                 # Also skip when clean_status alone is WAF-blocked (true probe blocked).
-                if err_status in _novel_waf_codes or clean_status in _novel_waf_codes:
+                # BUG-CETO-CDN-LENGTH FIX: CDN error codes 520-530 on either probe mean
+                # the CDN intercepted the request — the length difference reflects CDN page
+                # size variation, not SQL signal.  Reject CDN-code probes same as WAF codes.
+                if (err_status in _novel_waf_codes or clean_status in _novel_waf_codes
+                        or (520 <= (err_status or 0) <= 530)
+                        or (520 <= (clean_status or 0) <= 530)):
                     continue
                 if _eo_pct >= 0.10 or _eo_max < 5000:
                     # BUG-ERRTYPE-ORACLE-WAF-COLLISION FIX: calibration with 1=1/1=2
