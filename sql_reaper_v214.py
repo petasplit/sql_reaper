@@ -111485,13 +111485,16 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     "TiDB": [
         # Wire-protocol: same MySQL-format error messages (TiDB uses MySQL parser)
         r"you have an error in your sql syntax; check the manual",
-        # DBMS-identifying: TiDB-specific error strings
-        r"tidb.*error",
         # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL)
         r"xpath syntax error:\s*'[^'\"]{0,10}",
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
         r"truncated incorrect (?:integer|double|real)",
+        # Wire-protocol: TiDB-specific internal error code format [component:NNNN]
+        # TiDB error messages use bracketed component:errorcode prefixes that do
+        # NOT appear in WAF block pages. Example: [planner:1055], [executor:8062].
+        r"\[(?:planner|executor|ddl|server|types|domain):\d+\]",
+        # REMOVED: r"tidb.*error" — too broad; WAF block pages mentioning TiDB match
         # REMOVED: warning: mysqli_ — PHP driver warning, not TiDB wire-protocol format
         # REMOVED: r"division by zero" — generic; not TiDB-identifying
     ],
@@ -111499,16 +111502,23 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Wire-protocol: all ERROR:-prefixed patterns use the PostgreSQL wire-protocol
         # error message format — PostgreSQL ALWAYS emits "ERROR:  <message>" (one or
         # more spaces after the colon). This prefix cannot appear in WAF block pages.
-        r"ERROR:\s+division by zero",
-        r"ERROR:\s+relation .+ does not exist",
-        r"ERROR:\s+function .+ does not exist",
-        r"ERROR:\s+could not determine data type",
-        r"ERROR:\s+invalid byte sequence",
-        r"ERROR:\s+operator does not exist",
-        r"ERROR:\s+column .+ does not exist",
-        r"ERROR:\s+syntax error at or near",
-        r"ERROR:\s+invalid input syntax for",
-        r"ERROR:\s+unterminated quoted string",
+        # BUG-PG-CASE-SENSITIVE FIX: sql_reaper scans bodies with re.I (case-insensitive).
+        # Without (?-i:ERROR), the pattern "ERROR:\s+..." also matches lowercase "error:"
+        # which appears in generic application messages ("error: division by zero in foo.php")
+        # and WAF block pages ("error: SQL division-by-zero attempt blocked").
+        # PostgreSQL ALWAYS emits uppercase "ERROR:" in its wire-protocol output.
+        # Fix: use (?-i:ERROR) to require uppercase ERROR even when re.I is active.
+        # This makes all PG patterns immune to lowercase application/WAF message matches.
+        r"(?-i:ERROR):\s+division by zero",
+        r"(?-i:ERROR):\s+relation .+ does not exist",
+        r"(?-i:ERROR):\s+function .+ does not exist",
+        r"(?-i:ERROR):\s+could not determine data type",
+        r"(?-i:ERROR):\s+invalid byte sequence",
+        r"(?-i:ERROR):\s+operator does not exist",
+        r"(?-i:ERROR):\s+column .+ does not exist",
+        r"(?-i:ERROR):\s+syntax error at or near",
+        r"(?-i:ERROR):\s+invalid input syntax for",
+        r"(?-i:ERROR):\s+unterminated quoted string",
         # REMOVED: pg_query|pg_exec|pg_num_rows — PHP function names, not PG wire-protocol
         # REMOVED: postgresql.*error — too broad; WAF block pages mentioning PostgreSQL match
         # REMOVED: psycopg2 — Python driver name; appears in Django/Flask debug pages
@@ -111530,8 +111540,12 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"string or binary data would be truncated",
         # Wire-protocol: MSSQL-specific divide-by-zero format with "error encountered" suffix
         r"divide by zero error encountered",
-        # Wire-protocol: MSSQL-specific stored procedure parameter error
-        r"procedure .+ expects parameter",
+        # Wire-protocol: MSSQL-specific stored procedure parameter error.
+        # MSSQL stored procedure errors ALWAYS name the parameter with an @ prefix
+        # inside single quotes: "Procedure 'sp_x' expects parameter '@p', which was not supplied."
+        # Requiring "'@" (quote + at-sign) prevents matching generic application messages like
+        # "procedure handleRequest expects parameter userId" (no @-prefixed quoted param in non-MSSQL).
+        r"procedure .+ expects parameter '@",
         # Wire-protocol: MSSQL syntax conversion error (unique phrasing with "converting" keyword)
         r"syntax error converting",
         # DBMS-identifying: ODBC driver string specific to SQL Server (both driver and protocol named)
@@ -111554,17 +111568,25 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"ora-\d{4,5}:",
         # Wire-protocol: Oracle-specific error message phrasing (from ORA-01756 parser error)
         r"quoted string not properly terminated",
-        # Wire-protocol: PL/SQL error codes (PLS-NNNNN)
-        r"pls-\d{4,5}",
-        # Wire-protocol: SQL*Plus error codes (SP2-NNNN)
-        r"sp2-\d{4}",
-        # Wire-protocol: TNS (Transparent Network Substrate) Oracle connection errors
-        r"tns:.*error",
+        # Wire-protocol: PL/SQL error codes (PLS-NNNNN:) — colon required, same as ORA-
+        r"pls-\d{4,5}:",
+        # Wire-protocol: Oracle TNS (Transparent Network Substrate) errors — format TNS-NNNNN
+        # Oracle TNS errors ALWAYS use "TNS-NNNNN:" format with a 5-digit code and colon.
+        # This is immune to WAF echo: WAF block pages do not produce TNS error codes.
+        # BUG-ORACLE-TNS-PAT FIX: old r"tns:.*error" matched "TNS: error" but also any
+        # application log containing "tns:.*error" (e.g. "tns: connection error" in non-Oracle
+        # apps, config files mentioning TNS). The numeric TNS-NNNNN: format is DBMS-specific.
+        r"TNS-\d{5}",
+        # REMOVED: r"sp2-\d{4}" — SQL*Plus command-line errors (SP2-NNNN); SQL*Plus is a
+        #   local CLI tool, not a network service — SP2 error codes cannot appear in HTTP
+        #   responses from a web application backed by Oracle. Only ORA-/PLS-/TNS- codes
+        #   appear in Oracle's JDBC/ODBC wire protocol when accessed through a web application.
+        # REMOVED: r"tns:.*error" — too broad; any app can emit "tns: connection error"
         # REMOVED: oracle.*driver — too broad; WAF block pages name the target ("Oracle driver blocked")
         # REMOVED: warning: oci_ — PHP OCI function warning; WAF pages echo PHP function names
         # REMOVED: oci_\w+ — PHP OCI function names; WAF block pages echo injected function calls
         # REMOVED: r"oracle error" — too generic
-        # REMOVED: r"ora-00933" — already covered by r"ora-\d{4,5}" above
+        # REMOVED: r"ora-00933" — already covered by r"ora-\d{4,5}:" above
     ],
     "SQLite": [
         # Wire-protocol: Python sqlite3 exception class names (fully qualified dot-notation)
@@ -111595,49 +111617,65 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # confirmation accuracy and increasing false-negative rate for error-based
     # technique detection on all three DBMS families.
     "CockroachDB": [
-        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format
-        r"ERROR:\s+operator does not exist",
-        r"ERROR:\s+syntax error at or near",
-        r"ERROR:\s+invalid input syntax for",
-        r"ERROR:\s+column .+ does not exist",
-        r"ERROR:\s+relation .+ does not exist",
-        r"ERROR:\s+division by zero",
-        r"ERROR:\s+function .+ does not exist",
-        r"ERROR:\s+could not parse",
-        # DBMS-identifying: CockroachDB-specific driver prefix and error strings
-        r"pq:.*error",                           # CockroachDB Go pq driver prefix
-        r"crdb.*error|cockroachdb.*error",        # CockroachDB-specific strings
-        r"ambiguous column reference",
+        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format.
+        # (?-i:ERROR) required — see PostgreSQL section above for rationale.
+        r"(?-i:ERROR):\s+operator does not exist",
+        r"(?-i:ERROR):\s+syntax error at or near",
+        r"(?-i:ERROR):\s+invalid input syntax for",
+        r"(?-i:ERROR):\s+column .+ does not exist",
+        r"(?-i:ERROR):\s+relation .+ does not exist",
+        r"(?-i:ERROR):\s+division by zero",
+        r"(?-i:ERROR):\s+function .+ does not exist",
+        r"(?-i:ERROR):\s+could not parse",
+        # Wire-protocol: CockroachDB-specific internal node/range errors (unique to CRDB)
+        # crdb_internal.* table names and "node ID" references only appear in CockroachDB.
+        r"crdb_internal\.",                      # CockroachDB internal virtual schema prefix
+        # REMOVED: r"pq:.*error" — Go pq driver prefix; appears in any Go app using lib/pq,
+        #   not CockroachDB-specific. WAF block pages from Go-backed apps can include pq errors.
+        # REMOVED: r"crdb.*error|cockroachdb.*error" — too broad; WAF block pages mentioning
+        #   CockroachDB (e.g. "CockroachDB access error blocked") match. The ERROR: patterns
+        #   above are sufficient for PG-wire-protocol identification.
+        # REMOVED: r"ambiguous column reference" — too generic; PostgreSQL and other SQL databases
+        #   emit this exact phrase. Not CockroachDB-specific.
         # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "YugabyteDB": [
-        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format
-        r"ERROR:\s+operator does not exist",
-        r"ERROR:\s+syntax error at or near",
-        r"ERROR:\s+invalid input syntax for",
-        r"ERROR:\s+column .+ does not exist",
-        r"ERROR:\s+relation .+ does not exist",
-        r"ERROR:\s+division by zero",
-        r"ERROR:\s+function .+ does not exist",
-        r"ERROR:\s+invalid byte sequence",
-        # DBMS-identifying: YugabyteDB-specific error strings
-        r"yb.*error|yugabyte.*error",
+        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format.
+        # (?-i:ERROR) required — see PostgreSQL section above for rationale.
+        r"(?-i:ERROR):\s+operator does not exist",
+        r"(?-i:ERROR):\s+syntax error at or near",
+        r"(?-i:ERROR):\s+invalid input syntax for",
+        r"(?-i:ERROR):\s+column .+ does not exist",
+        r"(?-i:ERROR):\s+relation .+ does not exist",
+        r"(?-i:ERROR):\s+division by zero",
+        r"(?-i:ERROR):\s+function .+ does not exist",
+        r"(?-i:ERROR):\s+invalid byte sequence",
+        # Wire-protocol: YugabyteDB-specific internal error prefix (yb/ in error context path)
+        # YugabyteDB debug output uses "yb/" as a path prefix in internal error traces.
+        # More specific than r"yb.*error" which matches any 2-char word starting with "yb".
+        r"yb/[a-z]+/.*error",
+        # REMOVED: r"yb.*error|yugabyte.*error" — "yb.*error" is extremely broad (any 2-char
+        #   sequence "yb" followed anywhere by "error" matches). "yugabyte.*error" matches WAF
+        #   block pages that mention YugabyteDB in their body ("YugabyteDB access blocked").
+        #   The ERROR: patterns above are sufficient for PG-wire-protocol identification.
         # REMOVED: pgsql.*error|error.*pgsql — too broad; WAF block pages mentioning pgsql match
         # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "Amazon Redshift": [
-        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format
-        r"ERROR:\s+operator does not exist",
-        r"ERROR:\s+syntax error at or near",
-        r"ERROR:\s+invalid input syntax for",
-        r"ERROR:\s+column .+ does not exist",
-        r"ERROR:\s+relation .+ does not exist",
-        r"ERROR:\s+division by zero",
-        r"ERROR:\s+function .+ does not exist",
-        # DBMS-identifying: Amazon Redshift-specific strings
-        r"amazon.*redshift|redshift.*error",
-        r"serializable isolation violation",     # Redshift MVCC error string
-        r"pg_exception_context",                 # Redshift verbose error field
+        # DBMS-identifying: all ERROR: prefixed patterns are PG-wire-protocol format.
+        # (?-i:ERROR) required — see PostgreSQL section above for rationale.
+        r"(?-i:ERROR):\s+operator does not exist",
+        r"(?-i:ERROR):\s+syntax error at or near",
+        r"(?-i:ERROR):\s+invalid input syntax for",
+        r"(?-i:ERROR):\s+column .+ does not exist",
+        r"(?-i:ERROR):\s+relation .+ does not exist",
+        r"(?-i:ERROR):\s+division by zero",
+        r"(?-i:ERROR):\s+function .+ does not exist",
+        # Wire-protocol: Amazon Redshift-specific strings in error detail
+        # r"amazon.*redshift|redshift.*error" removed — too broad; WAF block pages that
+        # identify the target DBMS ("Amazon Redshift access blocked") would match.
+        r"serializable isolation violation",     # Redshift MVCC error string (unique to Redshift)
+        r"pg_exception_context",                 # Redshift verbose error field (unique to Redshift)
         # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "Generic": [
@@ -111671,13 +111709,20 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # REMOVED: r"sql error"      — too generic, matched WAF and app error pages
         # REMOVED: r"database error" — too generic, matched ORMs, app 500 pages
         # REMOVED: r"invalid query"  — too generic, matched REST/URL validation errors
-        r"sql syntax.*error",         # Requires both "sql syntax" AND "error" tokens; very unlikely in WAF pages
+        # BUG-SQLPAT-GENERIC-SQLSYNTAX FIX: r"sql syntax.*error" removed.
+        # "sql syntax" + "error" together still appear on WAF block pages that describe
+        # the blocked attack as a "SQL syntax error attempt", and in ORM error handlers
+        # that say "sql syntax is invalid: error parsing query". No DBMS wire-protocol
+        # error message uses this exact phrasing — MySQL says "check the manual that
+        # corresponds to your MySQL server version", PostgreSQL uses "ERROR: syntax error
+        # at or near", MSSQL uses "Incorrect syntax near 'X'". All three are already
+        # covered by their DBMS-specific entries above.
         r"jdbc.*exception",           # DBMS-identifying: Java JDBC driver exception chain
         r"pdo.*exception",            # DBMS-identifying: PHP PDO driver exception (PDOException)
         r"sqlexception",              # DBMS-identifying: Java java.sql.SQLException class name
         r"odbc.*error",               # DBMS-identifying: ODBC driver error string
-        # NOTE: "syntax error" and "database error" are intentionally absent —
-        # too generic (appear on form validation pages, WAF block pages, ORM errors).
+        # NOTE: "syntax error", "sql syntax.*error", and "database error" are intentionally
+        # absent — too generic (appear on form validation pages, WAF block pages, ORM errors).
     ],
 }
 
@@ -132108,6 +132153,28 @@ class TechniqueCascadeEngine:
             # For TH (timing-header), 403 alone is not a timing signal so it is also safe
             # to treat as WAF-blocked, but we conservatively limit to EH where the false
             # positive risk from WAF-echoed SQL error patterns is confirmed by logs.
+            # BUG-EH-HARDSC-GUARD FIX (CRITICAL): Mirror the hard status-code guard from
+            # the E-handler (lines ~128609-128616). _waf_blocked and single_waf_blocked()
+            # both call _get_safe_status_code() which uses `int(fp.status_code)` — if
+            # status_code is a non-int type such as "403 Forbidden" (string), int() raises
+            # ValueError and _get_safe_status_code returns 0 (its default). 0 is NOT in
+            # WAF_BLOCK_CODES so single_waf_blocked returns False, and a 403 response
+            # bypasses the WAF guard entirely. The EH body then contains WAF-echoed SQL
+            # error patterns → false EH detection. Fix: parse status_code as a 3-char
+            # string prefix (immune to type issues) and reject canonical WAF codes before
+            # reaching the body pattern scan. Applied to EH only (not BH/TH) because
+            # single_waf_blocked() already excludes BH from its check (see comment above),
+            # and for TH a 403 timing signal is unreliable but does not cause false-positive
+            # SQL error pattern matches (timing is measured by response time, not body).
+            if tech == "EH":
+                try:
+                    _eh_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                except Exception:
+                    _eh_hard_sc = 0
+                if _eh_hard_sc in {403, 406, 412}:
+                    print(f"    [EH-error] [{dbms}] req#{self._total_reqs} "
+                          f"status={fp.status_code}  WAF-blocked-hard (skipped)", flush=True)
+                    return None
             _eh_singlewaf = (tech == "EH" and WAFBlockDiscriminator.single_waf_blocked(fp))
             if _waf_blocked or _eh_singlewaf:
                 _hdr_name = {"EH":"EH-error","BH":"BH-bool","TH":"TH-timing"}.get(tech,tech)
@@ -132174,7 +132241,22 @@ class TechniqueCascadeEngine:
                                     bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                                 if _eh_mp_fp:
                                     self._total_reqs += 1
+                                    # BUG-EH-MP-HARDSC FIX: Mirror E-handler's hard status-code guard
+                                    # (line ~128774-128784). single_waf_blocked() calls
+                                    # _get_safe_status_code() which returns 0 for non-int status_code
+                                    # types (e.g. "403 Forbidden" string). 0 is not in WAF_BLOCK_CODES
+                                    # so single_waf_blocked returns False → 403 confirmation body is
+                                    # scanned for SQL patterns → false positive confirmed.
+                                    # Parse status_code as 3-char string prefix (immune to type issues).
+                                    try:
+                                        _eh_mp_hard_sc = int(str(getattr(_eh_mp_fp, 'status_code', '') or '')[:3])
+                                    except Exception:
+                                        _eh_mp_hard_sc = 0
                                     if _get_safe_status_code(_eh_mp_fp) == 429:
+                                        _eh_429_neutral += 1
+                                    elif _eh_mp_hard_sc in {403, 406, 412}:
+                                        # Hard WAF block: canonical WAF-block status codes that
+                                        # single_waf_blocked() might miss due to type-conversion failure.
                                         _eh_429_neutral += 1
                                     elif 520 <= _get_safe_status_code(_eh_mp_fp) <= 530:
                                         # BUG-EH-MULTIPROBE-CDN FIX: CDN/Cloudflare error codes (520-530)
