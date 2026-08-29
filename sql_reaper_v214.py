@@ -42224,6 +42224,13 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                         _xcc_clean_ok = False
                                         LOG.debug(f"[Error-CrossCat-{_ec_cat}] FP suppressed: "
                                                   "clean probe rate-limited (429) — ambiguous")
+                                    elif 520 <= _get_safe_status_code(_xcc_clean_fp) <= 530:
+                                        # BUG-XCC-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, cross-category E path):
+                                        # CDN error on clean probe — false condition never reached the DB.
+                                        # Cannot verify injection-specificity. Fail-closed.
+                                        _xcc_clean_ok = False
+                                        LOG.debug(f"[Error-CrossCat-{_ec_cat}] FP suppressed: "
+                                                  f"clean probe CDN error ({_get_safe_status_code(_xcc_clean_fp)}) — ambiguous")
                                     elif WAFBlockDiscriminator.single_waf_blocked(_xcc_clean_fp):
                                         # BUG-XCC-CLEAN-WAF-FAIL-CLOSED FIX: WAF-blocked clean probe
                                         # cannot verify injection-specificity. Fail-closed.
@@ -54835,6 +54842,12 @@ class _HTTPHeaderInjectorV1:
                                                 # BUG-HXE-CLEAN-429-FAIL-CLOSED FIX: Rate-limited.
                                                 _hxe_clean_ok = False
                                                 LOG.debug("[HdrXcatErr-FPG] clean probe 429 — ambiguous, fail-closed")
+                                            elif 520 <= _get_safe_status_code(_hxe_clean_fp) <= 530:
+                                                # BUG-HXE-CLEAN-CDN-FAIL-CLOSED FIX: CDN error on clean
+                                                # probe — payload never reached DB. Cannot verify injection-
+                                                # specificity. Fail-closed to prevent false positive.
+                                                _hxe_clean_ok = False
+                                                LOG.debug(f"[HdrXcatErr-FPG] clean probe CDN error ({_get_safe_status_code(_hxe_clean_fp)}) — ambiguous, fail-closed")
                                             elif WAFBlockDiscriminator.single_waf_blocked(_hxe_clean_fp):
                                                 _hxe_clean_ok = False
                                                 LOG.debug("[HdrXcatErr-FPG] clean probe WAF-blocked — ambiguous, fail-closed")
@@ -129285,6 +129298,21 @@ class TechniqueCascadeEngine:
                                     _e_clean_ok = False
                                     _src = "original" if _e_clean_fallback_used else "false-condition"
                                     print(f"[*]     E clean probe ({_src}): rate-limited (429) — ambiguous, rejected", flush=True)
+                                elif 520 <= _get_safe_status_code(_e_fp_clean) <= 530:
+                                    # BUG-E-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, E technique, all DBMSes):
+                                    # CDN/Cloudflare error codes 520-530 indicate infrastructure errors
+                                    # (origin down, SSL handshake failure, connection timeout). The clean
+                                    # probe never reached the database. We cannot verify whether the
+                                    # false-condition produces a SQL error or not — the CDN intercepted
+                                    # before the DB was involved. Fail-closed: reject ambiguous CDN response.
+                                    # Scenario: true probe hits rate-limit page echoing SQL keywords
+                                    # (429+error), confirmations all return CDN errors (neutral), then
+                                    # clean probe also returns CDN error. The CDN error body lacks the
+                                    # SQL pattern so _e_clean_ok would stay True — producing a false
+                                    # positive detection without any real database execution.
+                                    _e_clean_ok = False
+                                    _src = "original" if _e_clean_fallback_used else "false-condition"
+                                    print(f"[*]     E clean probe ({_src}): CDN error ({_get_safe_status_code(_e_fp_clean)}) — ambiguous, rejected", flush=True)
                                 elif WAFBlockDiscriminator.single_waf_blocked(_e_fp_clean):
                                     # BUG-E-CLEAN-WAF FIX: WAF-blocked clean probe. Pattern match
                                     # on a WAF block page is meaningless — WAF echoes SQL keywords.
@@ -129429,6 +129457,12 @@ class TechniqueCascadeEngine:
                                         # BUG-EX-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
                                         # is ambiguous — cannot verify injection-specificity. Fail-closed.
                                         _ex_clean_ok = False
+                                    elif 520 <= _get_safe_status_code(_ex_fc) <= 530:
+                                        # BUG-EX-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, cross-DBMS E path):
+                                        # CDN error on the clean probe is ambiguous — the false condition
+                                        # never reached the DB. Cannot verify injection-specificity.
+                                        # Fail-closed to prevent false positive from CDN noise.
+                                        _ex_clean_ok = False
                                     elif WAFBlockDiscriminator.single_waf_blocked(_ex_fc):
                                         # BUG-EX-CLEAN-WAF FIX: WAF-blocked clean probe — ambiguous.
                                         # Cannot determine if false-condition causes errors. Reject.
@@ -129542,6 +129576,11 @@ class TechniqueCascadeEngine:
                                         # is ambiguous — cannot verify injection-specificity. Fail-closed.
                                         _ml_clean_ok = False
                                         LOG.debug("[ErrorML] FP suppressed: clean probe rate-limited (429)")
+                                    elif 520 <= _get_safe_status_code(_ml_cfp_clean) <= 530:
+                                        # BUG-ML-CLEAN-CDN-FAIL-CLOSED FIX: CDN error on clean probe.
+                                        # False condition never reached DB — cannot verify injection-specificity.
+                                        _ml_clean_ok = False
+                                        LOG.debug(f"[ErrorML] FP suppressed: clean probe CDN error ({_get_safe_status_code(_ml_cfp_clean)}) — ambiguous")
                                     elif WAFBlockDiscriminator.single_waf_blocked(_ml_cfp_clean):
                                         _ml_clean_ok = False  # WAF block — ambiguous, fail-closed
                                         LOG.debug("[ErrorML] FP suppressed: clean probe WAF-blocked")
@@ -132161,6 +132200,16 @@ class TechniqueCascadeEngine:
                                     _s_clean_ok = False
                                     _s_ctype_429 = "original" if _s_clean_fallback else "false-cond"
                                     print(f"    [S-clean] ({_s_ctype_429}) clean probe rate-limited (429) — ambiguous, rejected", flush=True)
+                                elif _s_fp_clean and 520 <= _get_safe_status_code(_s_fp_clean) <= 530:
+                                    # BUG-S-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, S technique, all DBMSes):
+                                    # CDN/Cloudflare infrastructure error (520-530) on the clean probe.
+                                    # The false-condition payload never reached the database — the CDN
+                                    # intercepted it. Body-size comparisons against CDN error pages are
+                                    # meaningless (CDN error pages vary in size independently of SQL).
+                                    # Fail-closed to prevent false positive from CDN noise.
+                                    _s_clean_ok = False
+                                    _s_ctype_cdn = "original" if _s_clean_fallback else "false-cond"
+                                    print(f"    [S-clean] ({_s_ctype_cdn}) clean probe CDN error ({_get_safe_status_code(_s_fp_clean)}) — ambiguous, rejected", flush=True)
                                 elif _s_fp_clean:
                                     self._total_reqs += 1
                                     _s_clean_body = _safe_decode_body(_s_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__s_fp_clean') if _s_fp_clean.body else ""
@@ -132794,6 +132843,16 @@ class TechniqueCascadeEngine:
                                         _eh_clean_ok = False
                                         _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
                                         print(f"[*]     EH clean probe ({_eh_ctype}): rate-limited (429) — ambiguous, rejected", flush=True)
+                                    elif 520 <= _get_safe_status_code(_eh_fp_clean) <= 530:
+                                        # BUG-EH-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, EH technique, all DBMSes):
+                                        # CDN/Cloudflare error (520-530) on the clean probe: the false-condition
+                                        # payload never reached the database. Cannot verify whether the false
+                                        # condition produces a SQL error or not. Fail-closed to prevent a false
+                                        # positive where CDN noise in confirmation probes masks a non-injectable
+                                        # target (CDN error body lacks SQL pattern → clean_ok=True incorrectly).
+                                        _eh_clean_ok = False
+                                        _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                        print(f"[*]     EH clean probe ({_eh_ctype}): CDN error ({_get_safe_status_code(_eh_fp_clean)}) — ambiguous, rejected", flush=True)
                                     elif WAFBlockDiscriminator.single_waf_blocked(_eh_fp_clean):
                                         # BUG-EH-CLEAN-WAF FIX: WAF-blocked clean probe — cannot determine
                                         # whether false-condition causes errors. Fail-closed: reject.
@@ -133544,7 +133603,14 @@ class TechniqueCascadeEngine:
                     try:
                         _ds_ecl = await self._safe_confirm(method, url, data,
                             data_fmt, param, original, self.tamper_chain)
-                        if _ds_ecl and _ds_ecl.body:
+                        if _ds_ecl and 520 <= _get_safe_status_code(_ds_ecl) <= 530:
+                            # BUG-DS-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, DS technique):
+                            # CDN/Cloudflare infrastructure error (520-530) on the clean probe.
+                            # The false-condition payload never reached the database — the CDN
+                            # intercepted it. Body-pattern checks against CDN error pages are
+                            # meaningless. Fail-closed to prevent false positive from CDN noise.
+                            _ds_err_clean_ok = False
+                        elif _ds_ecl and _ds_ecl.body:
                             _ds_ecl_body = _safe_decode_body(_ds_ecl, encoding="utf-8",
                                 errors="replace", func_name="ds_err_clean")
                             if re.search(_ds_pat, _ds_ecl_body, re.I):
