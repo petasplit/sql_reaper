@@ -57676,12 +57676,29 @@ class Scanner:
         
         # BUG-ROOT-CAUSE-4 FIX: Print extracted data to console so user can see results
         # Same issue as inference extraction - data was stored but never printed.
+        # DEFENSIVE-NONASCII FIX: All three values pass through a non-ASCII guard before
+        # printing.  The char-by-char extractor (extract_char) parses actual DBMS error
+        # messages and is unlikely to produce non-ASCII, but a miscalibrated oracle or
+        # transient CDN interference can corrupt even this path.  DB values (version,
+        # user, database name) are always printable ASCII on all supported DBMSes.
         if "current_db" in _data and _data["current_db"]:
-            print(f"[+] [ErrorExtract] database: {_data['current_db']}", flush=True)
+            _v = _data["current_db"]
+            if not any(ord(c) > 127 for c in _v):
+                print(f"[+] [ErrorExtract] database: {_v}", flush=True)
+            else:
+                LOG.debug("[ErrorExtract] Rejected non-ASCII database value (oracle noise): %r", _v[:40])
         if "current_user" in _data and _data["current_user"]:
-            print(f"[+] [ErrorExtract] user: {_data['current_user']}", flush=True)
+            _v = _data["current_user"]
+            if not any(ord(c) > 127 for c in _v):
+                print(f"[+] [ErrorExtract] user: {_v}", flush=True)
+            else:
+                LOG.debug("[ErrorExtract] Rejected non-ASCII user value (oracle noise): %r", _v[:40])
         if "banner" in _data and _data["banner"]:
-            print(f"[+] [ErrorExtract] version: {_data['banner']}", flush=True)
+            _v = _data["banner"]
+            if not any(ord(c) > 127 for c in _v):
+                print(f"[+] [ErrorExtract] version: {_v}", flush=True)
+            else:
+                LOG.debug("[ErrorExtract] Rejected non-ASCII version value (oracle noise): %r", _v[:40])
         # FIX BUG #1: Populate enum.result with extracted data so caller can access it
         # The extraction functions were storing data in self.session.data but NEVER
         # updating enum.result, making extracted data invisible to the caller.
@@ -70890,8 +70907,25 @@ class Scanner:
                                     _scan_param, _scan_orig, _eo_dbms, _scan_tc,
                                     _eo_q, max_len=64)
                             if _eo_val:
-                                LOG.info("[ErrorExtract] Error oracle %s: %s", _eo_label, _eo_val)
-                                print(f"[+] [ErrorExtract] {_eo_label}: {_eo_val}", flush=True)
+                                # BUG-ERROREXTRACT-NONASCII FIX: ConditionalErrorExtractor
+                                # can return garbage Unicode when the oracle is calibrated
+                                # on CDN error codes (e.g. 525 vs 403) and extraction
+                                # payloads cause the WAF to respond inconsistently —
+                                # binary search converges to the maximum code point
+                                # producing strings like '⅗󀫏󹿹...' that satisfy the
+                                # printable-ASCII guard (ord('?')=63) but are non-ASCII.
+                                # Database version strings, names, and usernames are always
+                                # printable ASCII on all supported DBMSes.  Non-ASCII in an
+                                # extraction result is a reliable indicator of oracle noise.
+                                # Fix: reject and log non-ASCII results; never print or store
+                                # them as valid extraction output.
+                                if any(ord(c) > 127 for c in _eo_val):
+                                    LOG.debug("[ErrorExtract] Oracle %s: rejected non-ASCII result "
+                                              "(oracle noise, CDN error oracle or WAF interference): %r",
+                                              _eo_label, _eo_val[:40])
+                                else:
+                                    LOG.info("[ErrorExtract] Error oracle %s: %s", _eo_label, _eo_val)
+                                    print(f"[+] [ErrorExtract] {_eo_label}: {_eo_val}", flush=True)
                         except Exception as _eo_q_err:
                             LOG.debug("[ErrorExtract] Oracle query '%s' failed: %s", _eo_label, _eo_q_err)
                 except Exception as _eo_err:
@@ -111301,14 +111335,19 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"column count doesn.t match value count at row",
         # DBMS-identifying: MySQL-specific field list phrasing
         r"unknown column .+ in .field list",
-        # DBMS-identifying: MySQL EXTRACTVALUE/UPDATEXML error format requires SQL argument context
-        # (WAF block pages echo bare "extractvalue()" without numeric args — require arg)
-        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
-        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
         # DBMS-identifying: actual MySQL XPATH error message format (colon + tilde + extracted data)
+        # NOTE: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." were REMOVED.
+        # MySQL's actual EXTRACTVALUE/UPDATEXML errors read "XPATH syntax error: '~<data>'"
+        # — MySQL NEVER echoes the function call in its error message.  Those patterns
+        # only matched WAF block pages that echo the injected payload text (e.g. 403 body
+        # "extractvalue(0x0a,concat(...)) is prohibited"), making them pure false positive
+        # generators.  The xpath-syntax-error pattern below catches all real MySQL
+        # EXTRACTVALUE/UPDATEXML errors without the WAF echo risk.
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        # DBMS-identifying: tilde-prefixed hex data extracted from error channel
-        r"(?:~|0x7e)[0-9a-f]{4,}",
+        # DBMS-identifying: tilde-prefixed hex data in MySQL error message (CONCAT + 0x7e sentinel)
+        # This matches the actual extracted data channel: "~<hex_data>" in error output.
+        # Require at least 4 hex chars so random "~" chars in HTML don't trigger it.
+        r"~[0-9a-f]{4,}",
         # DBMS-identifying: MySQL-specific collation error (requires MySQL collation system)
         r"illegal mix of collations",
         # DBMS-identifying: MySQL-specific truncation error format
@@ -111323,9 +111362,11 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     "MariaDB": [
         r"you have an error in your sql syntax",
         r"mariadb server version", r"warning: mysqli_",
-        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
-        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        # REMOVED: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." — same reasoning
+        # as MySQL: MariaDB never echoes the function call in its error message; those patterns
+        # matched WAF block pages echoing the injected payload.
         r"xpath syntax error:\s*'[^'\"]{0,10}",
+        r"~[0-9a-f]{4,}",
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
     ],
@@ -111341,10 +111382,11 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"you have an error in your sql syntax",
         r"tidb.*error",                  # TiDB-specific error strings
         r"warning: mysqli_",
-        r"extractvalue\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
-        r"updatexml\s*\(\s*(?:\d+|0x[0-9a-f]+|null\b)",
+        # REMOVED: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." — same reasoning
+        # as MySQL: TiDB (MySQL-wire-compatible) never echoes the function call in its error
+        # message; those patterns matched WAF block pages echoing the injected payload.
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        r"(?:~|0x7e)[0-9a-f]{4,}",
+        r"~[0-9a-f]{4,}",
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
         r"truncated incorrect (?:integer|double|real)",
