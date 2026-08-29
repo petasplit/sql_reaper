@@ -59607,9 +59607,9 @@ class Scanner:
                 # pages for different malformed requests, not SQL-driven output differences.
                 # Require different status codes for body-based oracle when both are error codes.
                 # BUG-SAME-ERROR-CDN FIX: include CDN codes 520-530 so that when both probes
-            # return the same CDN error code (e.g. both 525), hash/body-size oracle branches
-            # are also suppressed by _same_error_status alongside the _both_waf_blocked guard.
-            _same_error_status = (_ts_safe == _fs_safe and _ts_safe in ({400, 403, 406, 412, 429, 430, 500, 503} | set(range(520, 531))))
+                # return the same CDN error code (e.g. both 525), hash/body-size oracle branches
+                # are also suppressed by _same_error_status alongside the _both_waf_blocked guard.
+                _same_error_status = (_ts_safe == _fs_safe and _ts_safe in ({400, 403, 406, 412, 429, 430, 500, 503} | set(range(520, 531))))
                 if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and (not _both_waf_blocked or _bl_pct >= 0.20) and not _same_error_status:
                     # BUG-BOOL-BODY-STABILITY FIX: The MD5 branch sends a stability probe before
                     # accepting the hash as an oracle (line ~55901). The body-length branch had no
@@ -111691,9 +111691,24 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Requiring "(?:the |)(?:nvarchar|varchar|char|nchar|datetime|date|time|bigint|smallint|tinyint|"
         # "decimal|numeric|float|real|money|bit)" pins the pattern to MSSQL type names.
         r"conversion failed when converting (?:the |)(?:nvarchar|varchar|char|nchar|datetime|date|time|bigint|smallint|tinyint|decimal|numeric|float|real|money|bit)",
-        r"string or binary data would be truncated",
-        # Wire-protocol: MSSQL-specific divide-by-zero format with "error encountered" suffix
-        r"divide by zero error encountered",
+        # Wire-protocol: MSSQL data-truncation error — MSSQL ALWAYS emits with capital S.
+        # BUG-SQLPAT-MSSQL-TRUNCATE-CASE FIX (MEDIUM, MSSQL E/EH techniques):
+        # The bare phrase "string or binary data would be truncated" can appear in WAF block
+        # advisory pages that describe the blocked SQL pattern as a truncation injection
+        # ("string or binary data would be truncated — attack blocked"). MSSQL ALWAYS emits
+        # this with capital S: "String or binary data would be truncated." (capital S, period).
+        # Pin to uppercase S via (?-i:String) so lowercase matches (WAF advisories, PHP debug
+        # output, application logs) are excluded. The period terminator is optional here (the
+        # pattern is applied to a body fragment, not the complete sentence) but the capital S
+        # is sufficient to exclude all WAF pages which use lowercase "string".
+        r"(?-i:String) or binary data would be truncated",
+        # Wire-protocol: MSSQL-specific divide-by-zero format with "error encountered" suffix.
+        # BUG-SQLPAT-MSSQL-DIVZERO-CASE FIX (MEDIUM, MSSQL E/EH techniques):
+        # MSSQL ALWAYS emits: "Divide by zero error encountered." (capital D, period).
+        # WAF block pages describing the blocked injection attempt use lowercase:
+        # "divide by zero error encountered in SQL statement — blocked".
+        # Pin to uppercase D via (?-i:Divide) to exclude WAF advisory text.
+        r"(?-i:Divide) by zero error encountered",
         # Wire-protocol: MSSQL-specific stored procedure parameter error.
         # MSSQL stored procedure errors ALWAYS name the parameter with an @ prefix
         # inside single quotes: "Procedure 'sp_x' expects parameter '@p', which was not supplied."
@@ -111899,8 +111914,30 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # corresponds to your MySQL server version", PostgreSQL uses "ERROR: syntax error
         # at or near", MSSQL uses "Incorrect syntax near 'X'". All three are already
         # covered by their DBMS-specific entries above.
-        r"jdbc.*exception",           # DBMS-identifying: Java JDBC driver exception chain
-        r"pdo.*exception",            # DBMS-identifying: PHP PDO driver exception (PDOException)
+        # DBMS-identifying: Java JDBC driver exception class in stack trace format.
+        # BUG-SQLPAT-GENERIC-JDBC-TIGHTEN FIX (HIGH, E/EH technique, unknown DBMS):
+        # The bare pattern r"jdbc.*exception" matched WAF block advisory pages containing
+        # "JDBC exception blocked" or "JDBC SQL exception detected" (two plain English words)
+        # — no Java class path structure, no dot-notation required. WAF block pages routinely
+        # name the JDBC layer when blocking SQL injection to identify the attack vector.
+        # Real JDBC exception chains in HTTP responses ALWAYS appear as Java class name paths
+        # with dot-notation: java.sql.SQLException, javax.sql.rowset.RowSetException,
+        # com.mysql.jdbc.exceptions.jdbc4.MySQLSyntaxErrorException, etc.
+        # The dot-notation (e.g. "java.sql." or "com.X.jdbc.") cannot appear in WAF advisory
+        # plain-English descriptions — WAF pages use "JDBC exception" (no dots).
+        # Fix: require the Java package dot-path format before the exception class name.
+        # Covers all standard JDBC packages: java.sql, javax.sql, org.X.jdbc, com.X.jdbc.
+        r"(?:java\.sql\.|javax\.sql\.|org\.\w+\.jdbc\.|com\.\w+\.jdbc\.)\w*[Ee]xception",
+        # DBMS-identifying: PHP PDO driver exception class (PDOException).
+        # BUG-SQLPAT-GENERIC-PDO-TIGHTEN FIX (HIGH, E/EH technique, unknown DBMS):
+        # The bare pattern r"pdo.*exception" matched WAF block advisory pages containing
+        # "PDO exception blocked", "PDO SQL exception", or "pdo connection exception" —
+        # all plain English. Real PHP PDOException output ALWAYS uses the exact class name
+        # "PDOException" (capital P, D, O — PHP class name, case-sensitive in practice).
+        # Pin to exact case via (?-i:PDO)(?-i:Exception) to exclude lowercase WAF advisory
+        # text and generic "pdo error" application log lines.
+        # Real format: "PDOException: SQLSTATE[HY000]: General error: 1064 You have an error..."
+        r"(?-i:PDO)(?-i:Exception)",
         r"sqlexception",              # DBMS-identifying: Java java.sql.SQLException class name
         # FIX-SQLPAT-GENERIC-ODBC: r"odbc.*error" was too broad — matches WAF block pages
         # that reference ODBC in their advisory text ("ODBC SQL injection error detected")
@@ -129325,6 +129362,13 @@ class TechniqueCascadeEngine:
                         # probe. A dynamic page that occasionally shows SQL-like text would trigger
                         # this on the first probe. Fix: require 2/3 confirmation probes to also
                         # classify >= 0.35 confidence before returning a detection.
+                        # BUG-ML-CLASSIFIER-NO-WAF-GUARD FIX (MEDIUM, E technique, ML fallback path):
+                        # Confirmation probes that are WAF-blocked or CDN-error were not filtered.
+                        # WAF block pages can contain SQL-related text (echoed SQL keywords, error
+                        # descriptions) that scores >= 0.35 on the TF-IDF classifier, driving
+                        # _ml_confirm_count to 2 from WAF noise → false positive detection.
+                        # Fix: skip confirmation probes that are WAF-blocked or CDN-error (treat as
+                        # neutral: neither confirm nor deny). Mirror the E multi-probe WAF guard.
                         _ml_confirm_count = 1
                         for _ml_cf_i in range(2):
                             if _SCAN_STOPPED[0]: break
@@ -129333,19 +129377,57 @@ class TechniqueCascadeEngine:
                             try:
                                 _ml_cfp = await self._safe_confirm(method, url, data, data_fmt,
                                     param, original + payload, self.tamper_chain, bypass_mutation=True)
-                                if _ml_cfp and _ml_cfp.body:
-                                    _ml_cf_text = _safe_decode_body(_ml_cfp, encoding="utf-8", errors="replace", func_name="ml_confirm").lower()
-                                    _ml_cf_dbms, _ml_cf_conf = ErrorMessageClassifier.classify(_ml_cf_text)
-                                    if _ml_cf_conf >= 0.35 and _ml_cf_dbms == _ml_dbms:
-                                        _ml_confirm_count += 1
+                                # BUG-ML-WAF-CDN-FIX: skip WAF-blocked/CDN-error confirmation probes
+                                if not _ml_cfp or not _ml_cfp.body:
+                                    continue
+                                _ml_cfp_sc = _get_safe_status_code(_ml_cfp)
+                                if 520 <= _ml_cfp_sc <= 530:
+                                    continue  # CDN infrastructure error — indeterminate
+                                if WAFBlockDiscriminator.single_waf_blocked(_ml_cfp):
+                                    continue  # WAF block page — indeterminate
+                                _ml_cf_text = _safe_decode_body(_ml_cfp, encoding="utf-8", errors="replace", func_name="ml_confirm").lower()
+                                _ml_cf_dbms, _ml_cf_conf = ErrorMessageClassifier.classify(_ml_cf_text)
+                                if _ml_cf_conf >= 0.35 and _ml_cf_dbms == _ml_dbms:
+                                    _ml_confirm_count += 1
                             except Exception:
                                 pass
+                        # BUG-ML-CLASSIFIER-NO-CLEAN-PROBE FIX (MEDIUM, E technique, ML fallback):
+                        # The ML classifier had no clean probe — it only required 2/3 multi-probe
+                        # plus baseline exclusion. A server that responds with SQL-like debug output
+                        # for any non-standard input (not injection-specific) passes both guards when
+                        # the baseline uses the original value. Fix: send a false-condition (or
+                        # original) clean probe and verify the ML classifier does NOT classify it as
+                        # a SQL error at >= 0.3 confidence. If it does, the SQL-like text is
+                        # page-content, not injection-specific — reject to prevent false positive.
+                        _ml_clean_ok = True
                         if _ml_confirm_count >= 2:
+                            try:
+                                _ml_clean_pl = self._make_false_payload(payload)
+                                _ml_clean_val = original if not _ml_clean_pl else original + _ml_clean_pl
+                                if not _SCAN_STOPPED[0]:
+                                    await asyncio.sleep(0.1)
+                                    _ml_cfp_clean = await self._safe_confirm(method, url, data, data_fmt,
+                                        param, _ml_clean_val, self.tamper_chain)
+                                    if _ml_cfp_clean is None:
+                                        _ml_clean_ok = False  # timeout — fail-closed
+                                        LOG.debug("[ErrorML] FP suppressed: clean probe timeout")
+                                    elif WAFBlockDiscriminator.single_waf_blocked(_ml_cfp_clean):
+                                        _ml_clean_ok = False  # WAF block — ambiguous, fail-closed
+                                        LOG.debug("[ErrorML] FP suppressed: clean probe WAF-blocked")
+                                    elif _ml_cfp_clean.body:
+                                        _ml_clean_text = _safe_decode_body(_ml_cfp_clean, encoding="utf-8", errors="replace", func_name="ml_clean").lower()
+                                        _ml_clean_dbms, _ml_clean_conf = ErrorMessageClassifier.classify(_ml_clean_text)
+                                        if _ml_clean_conf >= 0.3 and _ml_clean_dbms == _ml_dbms:
+                                            _ml_clean_ok = False
+                                            LOG.debug(f"[ErrorML] FP suppressed: clean probe also classifies as {_ml_clean_dbms} (conf={_ml_clean_conf:.2f})")
+                            except Exception:
+                                pass
+                        if _ml_confirm_count >= 2 and _ml_clean_ok:
                             _det_e = DetectionResult(
                                 param=param, technique="E",
                                 payload=payload, dbms=_ml_dbms,
                                 confidence=min(0.82, _ml_conf),
-                                notes=f"cascade_error_ml_classifier conf={_ml_conf:.2f} confirmed={_ml_confirm_count}/3 bypass=none")
+                                notes=f"cascade_error_ml_classifier conf={_ml_conf:.2f} confirmed={_ml_confirm_count}/3 clean_ok=True bypass=none")
                             try:
                                 _det_e.exact_sent_payload = DetectionResult.compute_exact_payload(
                                     original + payload, self.tamper_chain)
@@ -129353,7 +129435,7 @@ class TechniqueCascadeEngine:
                                 pass
                             return _det_e
                         else:
-                            LOG.debug(f"[ErrorML] FP suppressed: only {_ml_confirm_count}/3 probes confirmed ML classification")
+                            LOG.debug(f"[ErrorML] FP suppressed: only {_ml_confirm_count}/3 probes confirmed ML classification or clean probe failed")
 
             # FIX-ISSUE2-E-TIMING (Issue 2/12): Cross-category dispatch includes Timebased
             # payloads in the E-oracle's merged payload list (all 10 CPDB categories merged).
@@ -132438,7 +132520,17 @@ class TechniqueCascadeEngine:
                             # EH probe is WAF-blocked (non-429), the SQL pattern match is likely
                             # the WAF echoing the injected header value in its block page.
                             # Start with 0 and require 2 independent non-WAF-blocked confirmations.
+                            # BUG-EH-INITIAL-HARDSC FIX: Mirror E-technique hard status-code guard.
+                            # single_waf_blocked() can miss canonical WAF codes when fp.status_code
+                            # is an unusual type (string "403 Forbidden", non-int) causing
+                            # _get_safe_status_code to return 0 instead of 403. Parse the first 3
+                            # chars of the string representation directly — same as E-technique.
+                            try:
+                                _eh_fp_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                            except Exception:
+                                _eh_fp_hard_sc = 0
                             _eh_initial_waf_blocked = (
+                                _eh_fp_hard_sc in {403, 406, 412} or
                                 # BUG-EH-INITIAL-CDN FIX: Mirror E-technique CDN guard.
                                 # CDN/Cloudflare 520-530 error pages can contain SQL-looking
                                 # text (header value echo in block advisory). Treat as waf_blocked.
@@ -132507,8 +132599,12 @@ class TechniqueCascadeEngine:
                                         _eh_mp_body = _safe_decode_body(_eh_mp_fp, encoding="utf-8", errors="replace", func_name="eh_multiprobe_confirm") if _eh_mp_fp.body else ""
                                         if re.search(_pp, _eh_mp_body, re.I):
                                             _eh_confirmed += 1
+                                # BUG-EH-MULTIPROBE-DISPLAY FIX: old condition _eh_confirmed > _eh_mp+1
+                                # mirrors the E-technique display bug — progressively harder threshold.
+                                # Probe 5/6 requires _eh_confirmed > 5 (impossible), always shows "missing".
+                                # Fix: use _eh_confirmed >= 2 to directly mirror the threshold condition.
                                 print(f"[*]     EH multi-probe {_eh_mp+2}/6: "
-                                      f"{' error pattern found' if _eh_confirmed > _eh_mp + 1 else ' pattern missing'} "
+                                      f"{' error pattern found' if _eh_confirmed >= 2 else ' pattern missing'} "
                                       f"({_eh_confirmed}/2 needed)")
                                 # BUG-EH-EARLY-EXIT FIX: Stop as soon as 2 confirmations found.
                                 if _eh_confirmed >= 2:
@@ -188395,6 +188491,24 @@ class ConditionalErrorOracle:
                 # was calibrated to discriminate by body size.
                 if self._body_size_oracle:
                     _ceo_resp_sc = _get_safe_status_code(_fp)
+                    # BUG-CEO-BODYSIZE-CDN-FIX (HIGH, body-size oracle, symmetric WAF case):
+                    # When the body-size oracle was calibrated with identical true/false statuses
+                    # (e.g. both 403 in symmetric WAF blocking), the asymmetric status guard below
+                    # is skipped and the symmetric proximity guard only activates when
+                    # _ceo_resp_sc == _true_oracle_status.  A CDN error (520-530) produces a
+                    # different status code than the calibrated 403 — skipping both guards —
+                    # and falls through to `return _to_true < _to_false` where it compares the
+                    # CDN error page body size against calibrated WAF block page sizes.
+                    # CDN error pages (typically 4-15KB) are much larger than WAF block pages
+                    # (typically 500-2000B), so _to_true and _to_false are both large; the
+                    # comparison produces a garbage True/False based on which calibrated size is
+                    # accidentally closer to the CDN page size — not SQL oracle signal.
+                    # Root cause: the CDN guard at line 188494 only runs OUTSIDE the body-size
+                    # oracle branch; CDN codes inside the body-size path go unchecked.
+                    # Fix: reject CDN error codes at the top of the body-size path, before any
+                    # size comparison, so the binary search step is skipped (None = indeterminate).
+                    if 520 <= _ceo_resp_sc <= 530:
+                        return None  # CDN error inside body-size oracle — indeterminate
                     _resp_size = len(getattr(_fp, 'text', '') or '')
                     _to_true = abs(_resp_size - self._true_oracle_size)
                     _to_false = abs(_resp_size - self._false_oracle_size)
