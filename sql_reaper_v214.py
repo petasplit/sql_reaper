@@ -27681,7 +27681,8 @@ class ConditionalErrorExtractor:
                         # names and may contain XPATH-like patterns that match ERROR_EXTRACTORS,
                         # producing garbage chars. Skip extraction from WAF-blocked responses.
                         try:
-                            _cee_fp_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                            _cee_fp_sc_raw = getattr(fp, 'status_code', None)
+                            _cee_fp_sc = int(str(_cee_fp_sc_raw or 0)[:3]) if _cee_fp_sc_raw is not None else 0
                         except Exception:
                             _cee_fp_sc = 0
                         if _cee_fp_sc not in {403, 406, 412} and not (520 <= _cee_fp_sc <= 530):
@@ -27729,7 +27730,8 @@ class ConditionalErrorExtractor:
                             # BUG-FIX #2: Use comprehensive _validate_response instead of bare fp_retry.body check
                             if _validate_response(fp_retry, allow_empty=True, func_name="CEE-extract_string_retry"):
                                 try:
-                                    _cee_retry_sc = int(str(getattr(fp_retry, 'status_code', '') or '')[:3])
+                                    _cee_retry_sc_raw = getattr(fp_retry, 'status_code', None)
+                                    _cee_retry_sc = int(str(_cee_retry_sc_raw or 0)[:3]) if _cee_retry_sc_raw is not None else 0
                                 except Exception:
                                     _cee_retry_sc = 0
                                 if _cee_retry_sc not in {403, 406, 412} and not (520 <= _cee_retry_sc <= 530):
@@ -41961,7 +41963,12 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                     # infrastructure error codes (520-530 = Cloudflare origin/SSL errors) and
                     # hard WAF block codes (403/406/412) from ever reaching SQL error matching.
                     try:
-                        _de_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                        # BUG-HARDSC-OR-EMPTY-FIX: same as _send_and_check — `or ''`
+                        # converts falsy status codes (None, 0, "") to '' causing int()
+                        # to raise → _de_hard_sc=0 → 403/406/412 guard never fires.
+                        # Fix: use `or 0` so falsy status codes give integer 0, not ''.
+                        _sc_raw_de = getattr(fp, 'status_code', None)
+                        _de_hard_sc = int(str(_sc_raw_de or 0)[:3]) if _sc_raw_de is not None else 0
                     except Exception:
                         _de_hard_sc = 0
                     if _de_hard_sc in {403, 406, 412} or (520 <= _de_hard_sc <= 530):
@@ -42021,6 +42028,21 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                     engine, method, url, data, data_fmt,
                                     param, original + test_payload, tamper_chain)
                                 if not _validate_response(_e_cfm_fp, func_name="waf_block_check"): continue
+                                # BUG-DE-CONFIRM-HARDSC FIX: apply hard status-code guard to
+                                # confirmation probes, same as the initial probe guard above.
+                                # WAFBlockDiscriminator.single_waf_blocked() uses _get_safe_status_code
+                                # which calls int(sc) — fails for "403 Forbidden" string, returns 0.
+                                # A 403 confirmation with body lacking WAF fingerprints then passes
+                                # single_waf_blocked()=False → gets counted toward _e_fp_confirm_count
+                                # → false positive confirmation. Use the same string-prefix parse.
+                                try:
+                                    _sc_raw_cfm = getattr(_e_cfm_fp, 'status_code', None)
+                                    _cfm_hard_sc = int(str(_sc_raw_cfm or 0)[:3]) if _sc_raw_cfm is not None else 0
+                                except Exception:
+                                    _cfm_hard_sc = 0
+                                if (_cfm_hard_sc in {403, 406, 412} or
+                                        (520 <= _cfm_hard_sc <= 530)):
+                                    continue  # WAF/CDN-blocked confirmation — skip
                                 if _e_cfm_fp and not WAFBlockDiscriminator.single_waf_blocked(_e_cfm_fp):
                                     _cfm_text = _safe_decode_body(_e_cfm_fp, encoding="utf-8", errors="replace", func_name="extraction").lower()
                                     if (re.search(_matched_pat, _cfm_text, re.IGNORECASE) and
@@ -111614,7 +111636,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # character before "field list", allowing matches like "in 'some list'" or "in any list".
         # MySQL ALWAYS emits the exact phrasing: Unknown column 'X' in 'field list'
         # (single-quoted 'field list' is mandatory in the MySQL wire-protocol error format).
-        r"unknown column .+ in 'field list'",
+        # BUG-SQLPAT-UNKNOWNCOL-LEN FIX: `.+` between "unknown column" and "'field list'"
+        # had no upper bound. MySQL column references are at most ~256 chars. Cap at 256.
+        r"unknown column .{1,256} in 'field list'",
         # Wire-protocol: MySQL EXTRACTVALUE/UPDATEXML error — MySQL NEVER echoes the
         # function name; it always emits "XPATH syntax error: '~<data>'" format.
         # The tilde (~) is the 0x7e delimiter injected by CONCAT(0x7e,<data>,0x7e) in
@@ -111647,18 +111671,27 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # "Data too long for column 'X' at row N" — requiring the quoted column name and
         # row number prevents matching generic ORM "data too long for column" messages that
         # omit the column name and row number.
-        r"data too long for column '.+' at row \d+",
+        # BUG-SQLPAT-DATALENGTH-LEN FIX: `.+` inside the column name quote had no upper
+        # bound. MySQL column names are at most 64 chars (identifier limit). Cap at 64.
+        r"data too long for column '[^']{1,64}' at row \d+",
         # Wire-protocol: MySQL storage engine error format — "got error N 'message' from storage engine"
         # MySQL-specific: storage engines (MyISAM, InnoDB, NDB) emit this exact phrasing when
         # they return DBMS-internal error codes to the SQL layer. The numeric error code in
         # single quotes and "from .* storage engine" suffix together are DBMS-wire-protocol-specific
         # and cannot appear in WAF block pages or ORM/application error handlers.
-        r"got error \d+ '.*' from .* storage engine",
+        # BUG-SQLPAT-STORAGEERR-GREEDY FIX: `'.*'` is greedy and can span across multiple
+        # quoted values in a long WAF advisory page. Real storage engine error messages
+        # have short error text (typically under 100 chars). Cap the inner quote content
+        # to 100 chars with a non-greedy match to prevent multi-quote span matching.
+        r"got error \d+ '[^']{0,100}' from .{0,30} storage engine",
         # Wire-protocol: MySQL duplicate entry error — "Duplicate entry 'X' for key 'Y'"
         # MySQL ALWAYS emits this exact format with both the value and key name in single quotes.
         # Requiring both quoted values prevents matching generic ORM unique-constraint messages
         # (Django: "UNIQUE constraint failed: table.column", Rails: "has already been taken").
-        r"duplicate entry '.+' for key '",
+        # BUG-SQLPAT-DUPKEY-LEN FIX: `.+` inside quotes had no upper bound — could match across
+        # large HTML spans. Real MySQL duplicate key values are short (typically < 200 chars).
+        # Bound the value match and require the closing quote to limit span.
+        r"duplicate entry '[^']{0,200}' for key '[^']+",
         # REMOVED: warning: mysql_, warning: mysqli_, mysql_num_rows|...,
         #   supplied argument is not a valid mysql — PHP driver function names/warnings;
         #   WAF block pages echo injected SQL function names and these PHP warning strings.
@@ -111671,7 +111704,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
         # BUG-SQLPAT-XPATH-TILDE FIX: require tilde after quote (see MySQL entry above).
         r"xpath syntax error:\s*'~",
-        r"unknown column .+ in 'field list'",
+        # BUG-SQLPAT-UNKNOWNCOL-LEN FIX: `.+` between "unknown column" and "'field list'"
+        # had no upper bound. MySQL column references are at most ~256 chars. Cap at 256.
+        r"unknown column .{1,256} in 'field list'",
         r"column count doesn't match value count at row \d+",
         # REMOVED: warning: mysqli_ — PHP driver warning, not MariaDB wire-protocol format
     ],
@@ -111689,7 +111724,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
         # BUG-SQLPAT-XPATH-TILDE FIX: require tilde after quote (see MySQL entry above).
         r"xpath syntax error:\s*'~",
-        r"unknown column .+ in 'field list'",
+        # BUG-SQLPAT-UNKNOWNCOL-LEN FIX: `.+` between "unknown column" and "'field list'"
+        # had no upper bound. MySQL column references are at most ~256 chars. Cap at 256.
+        r"unknown column .{1,256} in 'field list'",
         r"column count doesn't match value count at row \d+",
         r"truncated incorrect (?:integer|double|real) value:",
         # Wire-protocol: TiDB-specific internal error code format [component:NNNN]
@@ -111712,12 +111749,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # Fix: use (?-i:ERROR) to require uppercase ERROR even when re.I is active.
         # This makes all PG patterns immune to lowercase application/WAF message matches.
         r"(?-i:ERROR):\s+division by zero",
-        r"(?-i:ERROR):\s+relation .+ does not exist",
-        r"(?-i:ERROR):\s+function .+ does not exist",
+        # BUG-SQLPAT-PG-DOTPLUS-FIX: `.+` in these patterns had no upper bound. PostgreSQL
+        # relation/function/column names are at most 63 bytes (NAMEDATALEN-1). Bound at
+        # 256 chars to cover qualified names (schema.table.column) with safety margin.
+        # The `(?-i:ERROR):\s+` prefix is already highly specific (requires uppercase ERROR
+        # with colon) but bounding eliminates any residual multi-line-span risk.
+        r"(?-i:ERROR):\s+relation .{1,256} does not exist",
+        r"(?-i:ERROR):\s+function .{1,256} does not exist",
         r"(?-i:ERROR):\s+could not determine data type",
         r"(?-i:ERROR):\s+invalid byte sequence",
         r"(?-i:ERROR):\s+operator does not exist",
-        r"(?-i:ERROR):\s+column .+ does not exist",
+        r"(?-i:ERROR):\s+column .{1,256} does not exist",
         r"(?-i:ERROR):\s+syntax error at or near",
         r"(?-i:ERROR):\s+invalid input syntax for",
         r"(?-i:ERROR):\s+unterminated quoted string",
@@ -111729,7 +111771,8 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # never reproduce PostgreSQL's exact error-class phrasings).
         r"(?-i:ERROR):\s+permission denied for",     # PG ACL: "ERROR:  permission denied for table X"
         r"(?-i:ERROR):\s+duplicate key value violates unique constraint",  # PG constraint: unique violation
-        r"(?-i:ERROR):\s+null value in column .+ violates not-null constraint",  # PG NOT NULL violation
+        # BUG-SQLPAT-PG-NULLCOL-BOUND FIX: bound column reference to 256 chars max.
+        r"(?-i:ERROR):\s+null value in column .{1,256} violates not-null constraint",  # PG NOT NULL violation
         r"(?-i:ERROR):\s+canceling statement due to conflict",  # PG hot standby conflict
         r"(?-i:ERROR):\s+value too long for type character",    # PG character type overflow
         # REMOVED: pg_query|pg_exec|pg_num_rows — PHP function names, not PG wire-protocol
@@ -111799,13 +111842,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # inside single quotes: "Procedure 'sp_x' expects parameter '@p', which was not supplied."
         # Requiring "'@" (quote + at-sign) prevents matching generic application messages like
         # "procedure handleRequest expects parameter userId" (no @-prefixed quoted param in non-MSSQL).
-        r"procedure .+ expects parameter '@",
+        # BUG-SQLPAT-MSSQL-PROC-BOUND FIX: `.+` between "procedure" and "expects parameter"
+        # had no upper bound. MSSQL procedure names are at most 128 chars (sysname limit).
+        r"procedure .{1,128} expects parameter '@",
         # Wire-protocol: MSSQL syntax conversion error (unique phrasing with type name).
         # BUG-SQLPAT-MSSQL-SYNTAXCONV-ANCHOR FIX: "Syntax error converting" is MSSQL-specific
         # but the standalone phrase could match application error handlers.  MSSQL's exact format
         # is "Syntax error converting X to a Y data type." — requiring "to a .+ data type"
         # anchors the match to MSSQL wire-protocol output exclusively.
-        r"syntax error converting .+ to a .+ data type",
+        # BUG-SQLPAT-MSSQL-SYNTAXCONV-BOUND FIX: bound `.+` to 100 chars each for the
+        # source value and type name to prevent greedy span across long WAF page fragments.
+        r"syntax error converting .{1,100} to a .{1,80} data type",
         # DBMS-identifying: ODBC driver string specific to SQL Server (both driver and protocol named)
         r"odbc sql server driver|odbc driver.*sql server",
         # Wire-protocol: MSSQL arithmetic overflow with specific type names.
@@ -111817,12 +111864,16 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # to data type <type>." The "to data type" connector phrase with a named MSSQL scalar
         # type is DBMS-wire-protocol-specific and cannot appear in WAF block advisory pages or
         # generic application error handlers. Re-introduce with the type-anchored format.
-        r"arithmetic overflow error converting .+ to data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time)\b",
+        # BUG-SQLPAT-MSSQL-ARITH-BOUND FIX: `.+` before "to data type" had no upper bound.
+        # Bound to 80 chars to limit span (source type expression in MSSQL errors is short).
+        r"arithmetic overflow error converting .{1,80} to data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time)\b",
         # Wire-protocol: MSSQL cannot insert NULL — required column constraint violation.
         # MSSQL format: "Cannot insert the value NULL into column 'X', table 'Y.dbo.Z';
         # column does not allow nulls." Requiring "column does not allow nulls" pins to
         # MSSQL wire-protocol — no WAF page or ORM error reproduces the trailing constraint phrase.
-        r"cannot insert the value null into column .+; column does not allow nulls",
+        # BUG-SQLPAT-MSSQL-NULLCOL-BOUND FIX: `.+` between "column" and the semicolon had no
+        # upper bound. MSSQL column references (with table qualifier) are at most ~256 chars.
+        r"cannot insert the value null into column .{1,256}; column does not allow nulls",
         # REMOVED: microsoft sql server — too broad; WAF block pages name the target DBMS
         # REMOVED: warning: .*mssql_ — PHP driver warning; WAF pages echo PHP function names
         # REMOVED: mssql_query|sqlsrv_query|mssql_num_rows — PHP function names, not wire-protocol
@@ -112069,8 +112120,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         #   1. r"\[odbc[^\]]*\]" — bracket-notation ODBC driver string (only in real errors)
         #   2. r"odbc.*(?:sql\s+server|driver\b|data\s+source\s+name\s+not\s+found)"
         #      — requires driver-specific terms alongside "odbc", cannot appear in WAF pages
-        r"\[odbc[^\]]*\]",            # ODBC bracket-notation: "[ODBC SQL Server Driver]" etc.
-        r"odbc.*(?:sql\s*server|driver\b|data\s+source\s+name\s+not\s+found)",  # ODBC driver-specific
+        # BUG-SQLPAT-ODBC-LEN FIX: r"\[odbc[^\]]*\]" had no length cap — a WAF page
+        # containing "[odbc ... very long text ...]" could match across a large HTML span.
+        # Real ODBC bracket-notation driver strings are at most ~60 chars (e.g.
+        # "[ODBC SQL Server Driver]" = 25 chars). Cap at 80 chars to exclude HTML spans.
+        r"\[odbc[^\]]{0,80}\]",       # ODBC bracket-notation: "[ODBC SQL Server Driver]" etc.
+        # BUG-SQLPAT-ODBC-WILDCARD FIX: r"odbc.*(?:sql\s*server|...)" used `.*` allowing
+        # arbitrary content between "odbc" and the driver keyword — a WAF advisory saying
+        # "ODBC connection to the SQL Server was blocked after 500ms" would match since
+        # "ODBC" appears far before "SQL Server" in plain English. Real ODBC driver error
+        # strings place the keyword within a few words of "odbc". Cap the gap at 40 chars.
+        r"odbc.{0,40}(?:sql\s*server|driver\b|data\s+source\s+name\s+not\s+found)",  # ODBC driver-specific, proximity-bounded
         # NOTE: "syntax error", "sql syntax.*error", and "database error" are intentionally
         # absent — too generic (appear on form validation pages, WAF block pages, ORM errors).
     ],
@@ -129002,7 +129062,15 @@ class TechniqueCascadeEngine:
             # 429 is omitted: handled by the _e_initial_429 relaxed-threshold path.
             # 503/404 require body-pattern confirmation (WAF vs legitimate error).
             try:
-                _fp_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                # BUG-HARDSC-OR-EMPTY-FIX: `or ''` converts any falsy status_code
+                # (0, None, empty string) to '' making int() raise → _fp_hard_sc=0 →
+                # guard silently skips the 403/406/412 check. Replace with `or 0` so
+                # falsy status codes produce the integer 0 (not in WAF-block set) rather
+                # than raising. Also drop the [:3] slice for the `or 0` branch since
+                # str(int) is always 3 digits for HTTP codes; [:3] is kept for string-
+                # typed status codes (e.g. "403 Forbidden") which are still sliced safely.
+                _sc_raw = getattr(fp, 'status_code', None)
+                _fp_hard_sc = int(str(_sc_raw or 0)[:3]) if _sc_raw is not None else 0
             except Exception:
                 _fp_hard_sc = 0
             if _fp_hard_sc in {403, 406, 412} or (520 <= _fp_hard_sc <= 530):
@@ -129247,7 +129315,10 @@ class TechniqueCascadeEngine:
                                 # non-int types) causing _get_safe_status_code to return 0.
                                 # Parse the string prefix of fp.status_code directly.
                                 try:
-                                    _e_mp_hard_sc = int(str(getattr(_e_mp_fp, 'status_code', '') or '')[:3])
+                                    # BUG-HARDSC-OR-EMPTY-FIX (multiprobe): same fix as initial probe —
+                                    # `or ''` converts falsy status_code to '' causing int() to raise.
+                                    _e_mp_sc_raw = getattr(_e_mp_fp, 'status_code', None)
+                                    _e_mp_hard_sc = int(str(_e_mp_sc_raw or 0)[:3]) if _e_mp_sc_raw is not None else 0
                                 except Exception:
                                     _e_mp_hard_sc = 0
                                 if _get_safe_status_code(_e_mp_fp) == 429:
@@ -129482,7 +129553,8 @@ class TechniqueCascadeEngine:
                                     # BUG-EX-MP-HARDSC FIX: Hard status-code guard for cross-DBMS
                                     # confirmation probes, same as primary path.
                                     try:
-                                        _ex_mp_hard_sc = int(str(getattr(_ex_fp, 'status_code', '') or '')[:3])
+                                        _ex_mp_sc_raw = getattr(_ex_fp, 'status_code', None)
+                                        _ex_mp_hard_sc = int(str(_ex_mp_sc_raw or 0)[:3]) if _ex_mp_sc_raw is not None else 0
                                     except Exception:
                                         _ex_mp_hard_sc = 0
                                     if _get_safe_status_code(_ex_fp) == 429:
@@ -132741,7 +132813,8 @@ class TechniqueCascadeEngine:
             # SQL error pattern matches (timing is measured by response time, not body).
             if tech == "EH":
                 try:
-                    _eh_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                    _eh_hard_sc_raw = getattr(fp, 'status_code', None)
+                    _eh_hard_sc = int(str(_eh_hard_sc_raw or 0)[:3]) if _eh_hard_sc_raw is not None else 0
                 except Exception:
                     _eh_hard_sc = 0
                 if _eh_hard_sc in {403, 406, 412} or (520 <= _eh_hard_sc <= 530):
@@ -132821,7 +132894,8 @@ class TechniqueCascadeEngine:
                             # _get_safe_status_code to return 0 instead of 403. Parse the first 3
                             # chars of the string representation directly — same as E-technique.
                             try:
-                                _eh_fp_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                                _eh_fp_hard_sc_raw = getattr(fp, 'status_code', None)
+                                _eh_fp_hard_sc = int(str(_eh_fp_hard_sc_raw or 0)[:3]) if _eh_fp_hard_sc_raw is not None else 0
                             except Exception:
                                 _eh_fp_hard_sc = 0
                             _eh_initial_waf_blocked = (
@@ -132886,7 +132960,8 @@ class TechniqueCascadeEngine:
                                     # scanned for SQL patterns → false positive confirmed.
                                     # Parse status_code as 3-char string prefix (immune to type issues).
                                     try:
-                                        _eh_mp_hard_sc = int(str(getattr(_eh_mp_fp, 'status_code', '') or '')[:3])
+                                        _eh_mp_sc_raw = getattr(_eh_mp_fp, 'status_code', None)
+                                        _eh_mp_hard_sc = int(str(_eh_mp_sc_raw or 0)[:3]) if _eh_mp_sc_raw is not None else 0
                                     except Exception:
                                         _eh_mp_hard_sc = 0
                                     if _get_safe_status_code(_eh_mp_fp) == 429:
@@ -188690,7 +188765,23 @@ class ConditionalErrorOracle:
                             # the BUG-CEO-BODY-SIZE-PRIORITY FIX ensures body-size is checked
                             # before the WAF-None guard in evaluate(), so WAF-blocked true
                             # probes (status 400, body 557B) correctly return True.
-                            if (_f_st not in _ceo_cal_waf and _body_size_diff >= 100):
+                            # BUG-CEO-ASYM-CDN-REJECT FIX (CRITICAL, all 5 DBMSes, all surfaces):
+                            # When true probe is WAF-blocked (403) and false probe returns a CDN
+                            # infrastructure error (520-530, e.g. Cloudflare 525 SSL Handshake
+                            # Failed), the asymmetric oracle calibrates using WAF block page size
+                            # (true) vs CDN error page size (false). During extraction, complex
+                            # char-comparison payloads both hit WAF blocks (not CDN errors) →
+                            # binary search reads WAF page vs WAF page (same size) → oracle noise
+                            # → garbage extraction or all-True (binary search left at every step).
+                            # Additionally, CDN error pages contain HTML including tilde-like
+                            # sequences that can match ConditionalErrorExtractor.ERROR_EXTRACTORS,
+                            # producing garbage Unicode in extracted database metadata.
+                            # Fix: also reject when _f_st is a CDN infrastructure code (520-530)
+                            # or the WAF fallback set (429/503) — these pages are not DB responses.
+                            _ceo_cdn_range = set(range(520, 531))
+                            _ceo_infra_reject = _ceo_cdn_range | {429, 503}
+                            if (_f_st not in _ceo_cal_waf and _f_st not in _ceo_infra_reject
+                                    and _body_size_diff >= 100):
                                 self._working_template = tpl
                                 self._working_prefix = _prefix
                                 self._body_size_oracle = True
@@ -188704,7 +188795,12 @@ class ConditionalErrorOracle:
                                       f"diff={_body_size_diff}B "
                                       f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
                                 return True
-                            continue  # WAF-block on true probe — can't calibrate from this template
+                            if _f_st in _ceo_infra_reject:
+                                LOG.debug("[ErrorOracle] Rejecting asymmetric oracle: false probe returned "
+                                          "CDN/infra code %d (WAF-block=%d) — body-size diff measures "
+                                          "infrastructure page variation, not SQL condition; try next template",
+                                          _f_st, _t_st)
+                            continue  # WAF-block on true probe or CDN on false — can't calibrate from this template
                         _true_err = (_t_st >= 500 or _t_st != self._baseline_status)
                         _false_ok = (_f_st < 500 and _f_st == self._baseline_status)
                         if _true_err and _false_ok:
