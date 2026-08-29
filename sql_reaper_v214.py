@@ -27677,8 +27677,16 @@ class ConditionalErrorExtractor:
                     fp = await _send_injected(engine, method, url, data, data_fmt,
                                               param, _full, tamper_chain)
                     if _validate_response(fp, allow_empty=True):
-                        body_str = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
-                        ch = cls.extract_char(body_str)
+                        # BUG-CEE-WAF-EXTRACT FIX: WAF block pages echo injected SQL function
+                        # names and may contain XPATH-like patterns that match ERROR_EXTRACTORS,
+                        # producing garbage chars. Skip extraction from WAF-blocked responses.
+                        try:
+                            _cee_fp_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                        except Exception:
+                            _cee_fp_sc = 0
+                        if _cee_fp_sc not in {403, 406, 412}:
+                            body_str = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
+                            ch = cls.extract_char(body_str)
                 except Exception as _esr_err:
                     LOG.debug(f"[CEE-extract_string] pos={pos} prefix={_pfx!r} error: {_esr_err}")
                 if ch is not None:
@@ -27710,8 +27718,13 @@ class ConditionalErrorExtractor:
                                                             param, _retry_full, tamper_chain)
                             # BUG-FIX #2: Use comprehensive _validate_response instead of bare fp_retry.body check
                             if _validate_response(fp_retry, allow_empty=True, func_name="CEE-extract_string_retry"):
-                                body_retry = _safe_decode_body(fp_retry, encoding="utf-8", errors="replace", func_name="extraction_retry") or ""
-                                ch = cls.extract_char(body_retry)
+                                try:
+                                    _cee_retry_sc = int(str(getattr(fp_retry, 'status_code', '') or '')[:3])
+                                except Exception:
+                                    _cee_retry_sc = 0
+                                if _cee_retry_sc not in {403, 406, 412}:
+                                    body_retry = _safe_decode_body(fp_retry, encoding="utf-8", errors="replace", func_name="extraction_retry") or ""
+                                    ch = cls.extract_char(body_retry)
                     except Exception as _retry_err:
                         LOG.debug(f"[CEE-extract_string] pos={pos} retry error: {_retry_err}")
                 if ch is None:
@@ -111392,59 +111405,74 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # require DBMS-identifying tokens (error codes, driver prefixes, version strings,
     # DBMS-specific keywords) for all 5 major DBMSes (MySQL, PostgreSQL, MSSQL,
     # Oracle, SQLite).
+    # BUG-SQLPAT-TIGHTEN2 FIX (CRITICAL, all E/EH techniques, all 5 major DBMSes):
+    # Removed PHP driver function-name patterns (warning: mysql_, mysql_num_rows, etc.)
+    # and overly generic patterns (postgresql.*error, microsoft sql server, etc.) that
+    # appear in WAF block pages echoing injected payload text. WAF error pages routinely
+    # include SQL function names, driver names, and error keywords in their rejection
+    # bodies — matching these produces false-positive detections even on WAF-only targets
+    # where no SQL ever reaches the database engine.
+    #
+    # Principle applied: every remaining pattern must be anchored to a token that appears
+    # ONLY in the DBMS wire-protocol error message, not in WAF/CDN block pages, PHP/Python
+    # driver warning prefixes, ORM framework errors, or generic application error handlers.
+    # Specifically removed across all DBMSes:
+    #   MySQL/MariaDB/TiDB: "warning: mysql_", "warning: mysqli_",
+    #     "mysql_num_rows|...", "supplied argument is not a valid mysql"
+    #     — PHP runtime warnings echoing the driver function that failed; WAF block pages
+    #       frequently echo these to identify what was blocked.
+    #   PostgreSQL: "pg_query|pg_exec|pg_num_rows", "postgresql.*error", "psycopg2",
+    #     "PostgreSQL \\d+\\.\\d+", "pgsql.*error|error.*pgsql"
+    #     — PHP function names, Python driver name, version disclosure, broad string.
+    #       None identify the PG wire-protocol error format. WAF block pages that mention
+    #       "PostgreSQL" in their error description match "postgresql.*error".
+    #   MSSQL: "microsoft sql server", "warning: .*mssql_",
+    #     "mssql_query|sqlsrv_query|mssql_num_rows"
+    #     — "microsoft sql server" appears in documentation pages, WAF 403 bodies that
+    #       name the target DBMS ("Request to Microsoft SQL Server blocked"), and any
+    #       page mentioning SQL Server. PHP function warning prefixes match WAF echo bodies.
+    #   Oracle: "oracle.*driver", "warning: oci_", "oci_\\w+"
+    #     — OCI function names and driver strings appear in WAF block pages that name
+    #       Oracle as the blocked target ("Oracle driver access blocked").
+    #   SQLite: "sqlite.*error", "sqlite3.*exception"
+    #     — Too broad; matches "SQLite error caught" in application debug output,
+    #       WAF block pages mentioning SQLite, and any documentation page discussing
+    #       SQLite errors. The SQLITE_ERROR constant and sqlite3.OperationalError class
+    #       names (retained below) are DBMS-wire-protocol-specific.
     "MySQL": [
-        # DBMS-identifying: canonical MySQL syntax error format including the
-        # "check the manual that corresponds to your MySQL server version" clause.
-        # Requiring this clause eliminates WAF block pages that echo partial SQL
-        # keywords like "you have an error in your sql syntax" without the rest
-        # of the MySQL error message — real MySQL always emits the full phrase.
+        # Wire-protocol: canonical MySQL syntax error — MySQL ALWAYS emits the full phrase
+        # including "check the manual that corresponds to your MySQL server version".
+        # This guards against WAF echo of partial SQL keywords without the MySQL suffix.
         r"you have an error in your sql syntax; check the manual",
-        # DBMS-identifying: PHP MySQL driver function names
-        r"warning: mysql_", r"warning: mysqli_",
-        r"mysql_num_rows|mysql_fetch_array|mysql_fetch_object",
-        # DBMS-identifying: MySQL driver error description
-        r"supplied argument is not a valid mysql",
         r"mysql server version for the right syntax",
-        # DBMS-identifying: MySQL-specific phrasing (not ORM — ORM says "column count mismatch")
+        # Wire-protocol: MySQL-specific error phrasing (not ORM — ORM says "column count mismatch")
         r"column count doesn.t match value count at row",
-        # DBMS-identifying: MySQL-specific field list phrasing
+        # Wire-protocol: MySQL field list error (Unknown column 'x' in 'field list')
         r"unknown column .+ in .field list",
-        # DBMS-identifying: actual MySQL XPATH error message format (colon + tilde + extracted data)
-        # NOTE: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." were REMOVED.
-        # MySQL's actual EXTRACTVALUE/UPDATEXML errors read "XPATH syntax error: '~<data>'"
-        # — MySQL NEVER echoes the function call in its error message.  Those patterns
-        # only matched WAF block pages that echo the injected payload text (e.g. 403 body
-        # "extractvalue(0x0a,concat(...)) is prohibited"), making them pure false positive
-        # generators.  The xpath-syntax-error pattern below catches all real MySQL
-        # EXTRACTVALUE/UPDATEXML errors without the WAF echo risk.
+        # Wire-protocol: MySQL EXTRACTVALUE/UPDATEXML error — MySQL NEVER echoes the
+        # function name; it always emits "XPATH syntax error: '~<data>'" format.
+        # This pattern is immune to WAF echo (WAF echoes function call, not error output).
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        # REMOVED: r"~[0-9a-f]{4,}" — False positive risk: WAF block pages, HTML/CSS content,
-        # hex-encoded page data can all contain "~" followed by 4+ hex chars. The XPATH
-        # syntax error pattern above already catches all EXTRACTVALUE/UPDATEXML MySQL errors;
-        # this tilde-hex pattern adds no true-positive coverage and only adds FP risk.
-        # DBMS-identifying: MySQL-specific collation error (requires MySQL collation system)
+        # Wire-protocol: MySQL collation mismatch (requires MySQL collation system)
         r"illegal mix of collations",
-        # DBMS-identifying: MySQL-specific truncation error format
+        # Wire-protocol: MySQL truncation error (MySQL-specific phrasing with data type name)
         r"truncated incorrect (?:integer|double|real)",
-        # DBMS-identifying: MySQL-specific column data length error
+        # Wire-protocol: MySQL column data length (MySQL-specific phrasing)
         r"data too long for column",
-        # REMOVED: r"division by zero" — appears in generic PHP/JS math errors and WAF block pages;
-        #   no DBMS-identifying context. MySQL's actual division error leaks via xpath syntax error.
-        # REMOVED: r"table .* doesn.t exist" — appears in ORM/Django/Rails errors; too generic.
-        #   Use r"column count doesn.t match value count at row" (MySQL-specific phrasing) instead.
+        # REMOVED: warning: mysql_, warning: mysqli_, mysql_num_rows|...,
+        #   supplied argument is not a valid mysql — PHP driver function names/warnings;
+        #   WAF block pages echo injected SQL function names and these PHP warning strings.
     ],
     "MariaDB": [
-        # DBMS-identifying: canonical MariaDB/MySQL syntax error with "check the manual" clause
+        # Wire-protocol: same MySQL-format error messages (MariaDB uses MySQL parser)
         r"you have an error in your sql syntax; check the manual",
-        r"mariadb server version", r"warning: mysqli_",
-        # REMOVED: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." — same reasoning
-        # as MySQL: MariaDB never echoes the function call in its error message; those patterns
-        # matched WAF block pages echoing the injected payload.
+        # DBMS-identifying: MariaDB-specific version string in error output
+        r"mariadb server version",
+        # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL)
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        # REMOVED: r"~[0-9a-f]{4,}" — same FP reasoning as MySQL: xpath syntax error catches real MariaDB
-        # EXTRACTVALUE/UPDATEXML errors; tilde-hex alone is too broad for WAF-intercepted responses.
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
+        # REMOVED: warning: mysqli_ — PHP driver warning, not MariaDB wire-protocol format
     ],
     # BUG-SQLPAT-TIDB FIX: TiDB absent from SQL_ERROR_PATTERNS.
     # SQL_ERROR_PATTERNS.get("TiDB", []) returned [] → fell to Generic patterns.
@@ -111455,30 +111483,22 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # Fix: add TiDB with the same pattern set as MySQL (TiDB uses MySQL parser/error format).
     # TiDB also exposes its own version string "TiDB" in some error messages.
     "TiDB": [
-        # DBMS-identifying: canonical MySQL/TiDB syntax error with "check the manual" clause
+        # Wire-protocol: same MySQL-format error messages (TiDB uses MySQL parser)
         r"you have an error in your sql syntax; check the manual",
-        r"tidb.*error",                  # TiDB-specific error strings
-        r"warning: mysqli_",
-        # REMOVED: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." — same reasoning
-        # as MySQL: TiDB (MySQL-wire-compatible) never echoes the function call in its error
-        # message; those patterns matched WAF block pages echoing the injected payload.
+        # DBMS-identifying: TiDB-specific error strings
+        r"tidb.*error",
+        # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL)
         r"xpath syntax error:\s*'[^'\"]{0,10}",
-        # REMOVED: r"~[0-9a-f]{4,}" — same FP reasoning as MySQL: xpath syntax error catches real TiDB
-        # EXTRACTVALUE/UPDATEXML errors (TiDB is MySQL-wire-compatible); tilde-hex alone is too broad.
         r"unknown column .+ in .field list",
         r"column count doesn.t match value count at row",
         r"truncated incorrect (?:integer|double|real)",
+        # REMOVED: warning: mysqli_ — PHP driver warning, not TiDB wire-protocol format
         # REMOVED: r"division by zero" — generic; not TiDB-identifying
     ],
     "PostgreSQL": [
-        # DBMS-identifying: PHP PostgreSQL driver function names
-        r"pg_query|pg_exec|pg_num_rows",
-        # DBMS-identifying: PostgreSQL in error string / Python psycopg2 driver
-        r"postgresql.*error", r"psycopg2",
-        # DBMS-identifying: PostgreSQL version string (version disclosure)
-        r"PostgreSQL \d+\.\d+",
-        # DBMS-identifying: all of the following require the "ERROR:" prefix which is
-        # the PostgreSQL wire-protocol error message format — cannot appear in WAF pages
+        # Wire-protocol: all ERROR:-prefixed patterns use the PostgreSQL wire-protocol
+        # error message format — PostgreSQL ALWAYS emits "ERROR:  <message>" (one or
+        # more spaces after the colon). This prefix cannot appear in WAF block pages.
         r"ERROR:\s+division by zero",
         r"ERROR:\s+relation .+ does not exist",
         r"ERROR:\s+function .+ does not exist",
@@ -111489,93 +111509,65 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"ERROR:\s+syntax error at or near",
         r"ERROR:\s+invalid input syntax for",
         r"ERROR:\s+unterminated quoted string",
-        r"pgsql.*error|error.*pgsql",
-        # REMOVED: r"operator does not exist" — without ERROR: prefix, too generic
-        # REMOVED: r"syntax error at or near" — too generic without ERROR: prefix
-        # REMOVED: r"invalid input syntax for" — too generic without ERROR: prefix
-        # REMOVED: r"column .* does not exist" — too generic without ERROR: prefix
-        # REMOVED: r"unterminated quoted string" — too generic without ERROR: prefix
-        # REMOVED: r"pg_sleep" — WAF block pages echo injected function names
+        # REMOVED: pg_query|pg_exec|pg_num_rows — PHP function names, not PG wire-protocol
+        # REMOVED: postgresql.*error — too broad; WAF block pages mentioning PostgreSQL match
+        # REMOVED: psycopg2 — Python driver name; appears in Django/Flask debug pages
+        # REMOVED: PostgreSQL \d+\.\d+ — version disclosure, not an error format
+        # REMOVED: pgsql.*error|error.*pgsql — too broad, matches WAF block page text
+        # REMOVED: pg_sleep — WAF block pages echo injected function names
     ],
     "MSSQL": [
-        # DBMS-identifying: Microsoft SQL Server in response (version string, error header)
-        r"microsoft sql server",
-        # DBMS-identifying: ODBC driver name contains "sql server"
-        r"odbc sql server driver|odbc driver.*sql server",
-        # DBMS-identifying: MSSQL-specific error message format
+        # Wire-protocol: MSSQL-specific error message format
         r"error converting data type",
         r"unclosed quotation mark after the character string",
-        # Require the opening quote that MSSQL always places around the offending token:
-        # "Incorrect syntax near 'X'." — WAF pages echoing the phrase omit the quote
-        # because they are not reproducing the actual MSSQL wire-protocol error format.
+        # Require the opening quote: "Incorrect syntax near 'X'."
+        # WAF pages echoing the phrase omit the quote (not reproducing wire-protocol format).
         r"incorrect syntax near '",
-        # DBMS-identifying: PHP MSSQL driver function name
-        r"warning: .*mssql_",
-        # DBMS-identifying: SQL Server error number + severity level format (Msg N, Level N)
+        # Wire-protocol: SQL Server error number + severity level (Msg N, Level N, State N)
         r"Msg \d+, Level \d+",
-        # DBMS-identifying: MSSQL-specific type conversion errors
+        # Wire-protocol: MSSQL-specific type conversion errors
         r"conversion failed when converting",
         r"string or binary data would be truncated",
-        r"arithmetic overflow error",
-        # DBMS-identifying: MSSQL-specific divide-by-zero format (note "error encountered" suffix)
+        # Wire-protocol: MSSQL-specific divide-by-zero format with "error encountered" suffix
         r"divide by zero error encountered",
-        # DBMS-identifying: MSSQL-specific stored procedure error
+        # Wire-protocol: MSSQL-specific stored procedure parameter error
         r"procedure .+ expects parameter",
-        # DBMS-identifying: PHP sqlsrv/mssql function names
-        r"mssql_query|sqlsrv_query|mssql_num_rows",
-        # DBMS-identifying: MSSQL syntax conversion error (unique phrasing)
+        # Wire-protocol: MSSQL syntax conversion error (unique phrasing with "converting" keyword)
         r"syntax error converting",
+        # DBMS-identifying: ODBC driver string specific to SQL Server (both driver and protocol named)
+        r"odbc sql server driver|odbc driver.*sql server",
+        # REMOVED: microsoft sql server — too broad; WAF block pages name the target DBMS
+        # REMOVED: warning: .*mssql_ — PHP driver warning; WAF pages echo PHP function names
+        # REMOVED: mssql_query|sqlsrv_query|mssql_num_rows — PHP function names, not wire-protocol
+        # REMOVED: arithmetic overflow error — too generic; appears in application math errors
         # REMOVED: r"sqlstate" — generic ODBC header, appears in any ODBC error regardless of DBMS
         # REMOVED: r"invalid column name" — too generic (appears in ORM/framework errors)
-        # REMOVED: r"invalid object name" — too generic (appears in ORM/framework errors)
-        # REMOVED: r"ambiguous column name" — too generic
         # REMOVED: r"waitfor delay" — WAF block pages echo the injected WAITFOR DELAY payload
-        # REMOVED: r"cannot convert value" — too generic
     ],
     "Oracle": [
-        # DBMS-identifying: Oracle error code format ORA-NNNNN: (4-5 digits + colon).
-        # All real Oracle errors use the format "ORA-NNNNN: description text".
-        # The colon is mandatory in the Oracle wire-protocol error format and is never
-        # emitted by WAF block pages or application error messages that merely mention
-        # an ORA error number without the colon (e.g. "ORA-1234 occurred" without colon
-        # is application text, not an Oracle database error message).
-        # BUG-PCV-1 FIX: r"ora-\\d{4,5}" used a double-backslash in raw string.
-        # Raw string r"ora-\\d{4,5}" → regex content ora-\\d{4,5} → matches "ora-" +
-        # literal backslash + 4-5 letter 'd's.  Never matches real Oracle errors like
-        # "ORA-1234".  Fix: single backslash so regex sees \d (digit character class).
-        # BUG-ORA-COLON FIX: require trailing colon so "ORA-1234" in app text (no colon)
-        # does not match; only the actual Oracle error header "ORA-1234: message" matches.
+        # Wire-protocol: Oracle error code format ORA-NNNNN: (4-5 digits + colon).
+        # All real Oracle errors use "ORA-NNNNN: description text".
+        # The colon is mandatory in Oracle wire-protocol — WAF pages that mention an ORA
+        # error number without the colon do NOT match this pattern.
+        # BUG-PCV-1 FIX: r"ora-\\d{4,5}" used double-backslash → never matched real errors.
+        # BUG-ORA-COLON FIX: require trailing colon to exclude app text "ORA-1234 occurred".
         r"ora-\d{4,5}:",
-        # DBMS-identifying: Oracle driver in error string / PHP OCI functions
-        r"oracle.*driver", r"warning: oci_",
-        r"oci_\w+",                      # Oracle OCI PHP function names
-        # DBMS-identifying: Oracle-specific error message phrasing
+        # Wire-protocol: Oracle-specific error message phrasing (from ORA-01756 parser error)
         r"quoted string not properly terminated",
-        # REMOVED: r"not a valid month" — ORA-01843 text but also appears in PHP/Python date
-        # validation libraries (e.g. Carbon, Arrow, dateutil) without any Oracle involvement.
-        # The r"ora-\d{4,5}" pattern above already catches ORA-01843 definitively.
-        # DBMS-identifying: PL/SQL error codes (PLS-NNNNN)
+        # Wire-protocol: PL/SQL error codes (PLS-NNNNN)
         r"pls-\d{4,5}",
-        # DBMS-identifying: SQL*Plus error codes (SP2-NNNN)
+        # Wire-protocol: SQL*Plus error codes (SP2-NNNN)
         r"sp2-\d{4}",
-        # DBMS-identifying: TNS (Transparent Network Substrate) Oracle connection errors
+        # Wire-protocol: TNS (Transparent Network Substrate) Oracle connection errors
         r"tns:.*error",
-        # REMOVED: r"oracle error" — too generic; appears in application error messages unrelated
-        # to SQL injection (e.g. "Oracle error handled", "contact support"). The ORA-\d{4,5}
-        # pattern is definitively Oracle-specific and sufficient.
-        # REMOVED: r"missing expression" — too generic (appears in JavaScript, HTML, template errors)
-        # REMOVED: r"missing keyword" — too generic
-        # REMOVED: r"missing right parenthesis" — too generic
-        # REMOVED: r"divisor is equal to zero" — too generic without ORA- code context
-        # REMOVED: r"invalid number" — too generic (appears in form validation errors)
-        # REMOVED: r"string literal too long" — too generic
-        # REMOVED: r"invalid identifier" — too generic (appears in many non-Oracle contexts)
+        # REMOVED: oracle.*driver — too broad; WAF block pages name the target ("Oracle driver blocked")
+        # REMOVED: warning: oci_ — PHP OCI function warning; WAF pages echo PHP function names
+        # REMOVED: oci_\w+ — PHP OCI function names; WAF block pages echo injected function calls
+        # REMOVED: r"oracle error" — too generic
         # REMOVED: r"ora-00933" — already covered by r"ora-\d{4,5}" above
     ],
     "SQLite": [
-        # DBMS-identifying: SQLite in error string or Python sqlite3 exception class name
-        r"sqlite.*error", r"sqlite3.*exception",
-        # DBMS-identifying: Python sqlite3 exception class names (fully qualified)
+        # Wire-protocol: Python sqlite3 exception class names (fully qualified dot-notation)
         # BUG-PCV-2 FIX: r"sqlite3\\.operationalerror" used double-backslash in raw
         # string → regex sqlite3\\.operationalerror → matches "sqlite3" + literal
         # backslash + any-char + "operationalerror".  Never matches real error text
@@ -111583,16 +111575,15 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"sqlite3\.operationalerror",
         r"sqlite3\.databaseerror",
         r"sqlite3\.interfaceerror",
-        # DBMS-identifying: C-level SQLite error constant (appears in C/Go/Rust bindings)
+        # Wire-protocol: C-level SQLite error constant (appears in C/Go/Rust bindings)
         r"SQLITE_ERROR",
-        # DBMS-identifying: SQLite syntax error format — "near TOKEN: syntax error"
+        # Wire-protocol: SQLite syntax error format — "near TOKEN: syntax error"
         # The "near X: syntax error" format with colon is SQLite-specific
         r"near .{1,20}: syntax error",
+        # REMOVED: sqlite.*error — too broad; WAF block pages mentioning SQLite match
+        # REMOVED: sqlite3.*exception — too broad; matches any exception message mentioning sqlite3
         # REMOVED: r"unrecognized token" — too generic (appears in CSS/HTML/template parsers)
-        # REMOVED: r"incomplete input" — too generic (appears in shell/network errors)
         # REMOVED: r"no such table" — appears in ORM migration errors (Django, Rails, etc.)
-        # REMOVED: r"no such column" — appears in ORM framework errors
-        # REMOVED: r"unable to open database" — too generic (appears in any DB driver error)
     ],
     # BUG-ERRPAT-PGCOMPAT FIX: CockroachDB, YugabyteDB, and Amazon Redshift are
     # PG-wire-compatible; they produce PostgreSQL-style SQL error messages.
@@ -111631,7 +111622,7 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"ERROR:\s+invalid byte sequence",
         # DBMS-identifying: YugabyteDB-specific error strings
         r"yb.*error|yugabyte.*error",
-        r"pgsql.*error|error.*pgsql",
+        # REMOVED: pgsql.*error|error.*pgsql — too broad; WAF block pages mentioning pgsql match
         # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "Amazon Redshift": [
@@ -128602,6 +128593,27 @@ class TechniqueCascadeEngine:
             # which is the correct guard for error-based detection: if the WAF
             # intercepted the request, any SQL text in the response comes from the
             # WAF layer, not the DB engine, and is not a valid SQL error signal.
+            # BUG-E-HARDSC-GUARD FIX (CRITICAL): single_waf_blocked() calls
+            # _get_safe_status_code() which wraps int(fp.status_code) in try/except
+            # returning 0 on ANY failure (non-int type, "403 Forbidden" string, etc.).
+            # When _get_safe_status_code returns 0, single_waf_blocked falls through to
+            # is_waf_block() (body-pattern only).  If the body has no WAF fingerprint
+            # keywords (plain JSON 403, minimal CF block, etc.) is_waf_block returns False
+            # → single_waf_blocked returns False → 403 response reaches pattern scan →
+            # SQL keywords echoed in WAF block body trigger _e_any_err=True → false positive.
+            # Fix: parse status_code directly from its string prefix (immune to type issues)
+            # and unconditionally skip E-detection for canonical WAF-block codes 403/406/412.
+            # 400 is omitted intentionally: some apps return 400 with real SQL error detail.
+            # 429 is omitted: handled by the _e_initial_429 relaxed-threshold path.
+            # 503/404 require body-pattern confirmation (WAF vs legitimate error).
+            try:
+                _fp_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+            except Exception:
+                _fp_hard_sc = 0
+            if _fp_hard_sc in {403, 406, 412}:
+                print(f"    [E-error] [{dbms}] req#{self._total_reqs} "
+                      f"status={fp.status_code}  WAF-blocked-hard (skipped)", flush=True)
+                return None
             if _waf_blocked or WAFBlockDiscriminator.single_waf_blocked(fp):
                 print(f"    [E-error] [{dbms}] req#{self._total_reqs} "
                       f"status={fp.status_code}  WAF-blocked (skipped)")
@@ -128717,8 +128729,17 @@ class TechniqueCascadeEngine:
                         # blocked payload (e.g. 403 with "EXTRACTVALUE() is prohibited" in body).
                         # Start with 0 confirmations and require at least 2 independent non-WAF-
                         # blocked probes to confirm the SQL error pattern before accepting detection.
-                        _e_initial_waf_blocked = (not (_get_safe_status_code(fp) == 429) and
-                                                  WAFBlockDiscriminator.single_waf_blocked(fp))
+                        # BUG-E-INITIAL-HARDSC FIX: Use the same hard status-code check
+                        # as the outer guard (string-prefix parse, immune to type failures)
+                        # so _e_initial_waf_blocked is True whenever fp.status_code is a
+                        # canonical WAF block code, regardless of _get_safe_status_code
+                        # returning 0 due to type-conversion failure on unusual fp objects.
+                        _e_mp_hard_sc = _fp_hard_sc  # reuse value already computed above
+                        _e_initial_waf_blocked = (
+                            _e_mp_hard_sc in {403, 406, 412} or
+                            (not (_get_safe_status_code(fp) == 429) and
+                             WAFBlockDiscriminator.single_waf_blocked(fp))
+                        )
                         _e_confirmed = 0 if _e_initial_waf_blocked else 1
                         _e_initial_429 = _get_safe_status_code(fp) == 429
                         _e_429_neutral = 0
@@ -128744,8 +128765,22 @@ class TechniqueCascadeEngine:
                                 bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                             if _e_mp_fp:
                                 self._total_reqs += 1
+                                # BUG-E-MP-HARDSC FIX: Apply hard status-code guard to
+                                # confirmation probes, same as the initial probe guard.
+                                # single_waf_blocked() can silently return False for
+                                # non-standard fp.status_code types (string "403 Forbidden",
+                                # non-int types) causing _get_safe_status_code to return 0.
+                                # Parse the string prefix of fp.status_code directly.
+                                try:
+                                    _e_mp_hard_sc = int(str(getattr(_e_mp_fp, 'status_code', '') or '')[:3])
+                                except Exception:
+                                    _e_mp_hard_sc = 0
                                 if _get_safe_status_code(_e_mp_fp) == 429:
                                     # Rate-limited — cannot confirm or deny; treat as neutral
+                                    _e_429_neutral += 1
+                                elif _e_mp_hard_sc in {403, 406, 412}:
+                                    # Hard WAF block: canonical WAF-block status codes that
+                                    # single_waf_blocked() might miss due to type issues.
                                     _e_429_neutral += 1
                                 elif 520 <= _get_safe_status_code(_e_mp_fp) <= 530:
                                     # BUG-E-MULTIPROBE-CDN FIX: CDN/Cloudflare error codes (520-530)
@@ -128886,8 +128921,13 @@ class TechniqueCascadeEngine:
                             # pattern match on a WAF-blocked 403 probe is WAF echo, not DB error.
                             # Fix: apply the same initial-WAF-block guard as the DBMS-specific path:
                             # start at 0 if the initial probe is WAF-blocked (non-429), 1 otherwise.
-                            _ex_initial_waf_blocked = (not (_get_safe_status_code(fp) == 429) and
-                                                       WAFBlockDiscriminator.single_waf_blocked(fp))
+                            # BUG-EX-INITIAL-HARDSC FIX: Same hard status-code guard as the
+                            # primary DBMS-specific path — reuse _fp_hard_sc computed above.
+                            _ex_initial_waf_blocked = (
+                                _fp_hard_sc in {403, 406, 412} or
+                                (not (_get_safe_status_code(fp) == 429) and
+                                 WAFBlockDiscriminator.single_waf_blocked(fp))
+                            )
                             _ex_confirmed = 0 if _ex_initial_waf_blocked else 1
                             _ex_initial_429 = _get_safe_status_code(fp) == 429
                             _ex_429_neutral = 0
@@ -128906,7 +128946,16 @@ class TechniqueCascadeEngine:
                                     bypass_mutation=True)  # BUG-DEDUP-MULTIPROBE FIX
                                 if _ex_fp:
                                     self._total_reqs += 1
+                                    # BUG-EX-MP-HARDSC FIX: Hard status-code guard for cross-DBMS
+                                    # confirmation probes, same as primary path.
+                                    try:
+                                        _ex_mp_hard_sc = int(str(getattr(_ex_fp, 'status_code', '') or '')[:3])
+                                    except Exception:
+                                        _ex_mp_hard_sc = 0
                                     if _get_safe_status_code(_ex_fp) == 429:
+                                        _ex_429_neutral += 1
+                                    elif _ex_mp_hard_sc in {403, 406, 412}:
+                                        # Hard WAF block: canonical WAF codes, immune to type failures.
                                         _ex_429_neutral += 1
                                     elif 520 <= _get_safe_status_code(_ex_fp) <= 530:
                                         # BUG-EX-MULTIPROBE-CDN FIX: CDN error codes (520-530) indicate
