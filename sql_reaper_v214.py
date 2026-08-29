@@ -27417,7 +27417,29 @@ class ConditionalErrorExtractor:
         # code in hex. Group 1 captures the hex bytes, decoded by extract_char() below.
         re.compile(r"cannot convert '([0-9A-Fa-f]+)x' to", re.I),
         re.compile(r"datatype mismatch.*?'([0-9A-Fa-f]+)x'", re.I),
-        re.compile(r"~(.+?)~"),
+        # BUG-ERREXTRACT-TILDE-FP FIX (HIGH, MySQL/MariaDB/TiDB, E/EH technique):
+        # The previous generic r"~(.+?)~" catch-all matched ANY content between two
+        # tilde characters in the HTTP response body.  WAF block pages and CDN error
+        # pages frequently contain tilde-enclosed content (CSS selectors, CSS custom
+        # property names, Cloudflare ray-IDs, Base64-encoded data, etc.), causing
+        # extract_char() to return a single non-SQL character for every position and
+        # producing garbage extraction results like "............................................."
+        # (confirmed issue logged as 'WAF block pages... matching ERROR_EXTRACTORS
+        # patterns (especially the generic r"~(.+?)~" tilde catch-all), producing '.'
+        # for every position').
+        # Root cause: the pattern lacked ANY contextual anchoring — it fired on any
+        # response body regardless of DBMS error context.
+        # Fix: replace the catch-all with a context-anchored XPATH syntax error
+        # variant that also handles quote-style variations (single, double, none).
+        # MySQL EXTRACTVALUE/UPDATEXML and MariaDB/TiDB ALWAYS produce:
+        #   XPATH syntax error: '~VALUE~'
+        # and the first ERROR_EXTRACTORS pattern (line 27386) already catches this
+        # exact format.  The anchored replacement below covers edge-case WAF bypass
+        # mutations that alter the surrounding quotes without changing the XPATH error
+        # message body — it cannot fire on arbitrary WAF page content because it
+        # requires the literal "XPATH" and "syntax" and "error" tokens to appear
+        # earlier in the match, which WAF block pages never contain.
+        re.compile(r"XPATH\s+syntax\s+error:\s*['\"]?~(.+?)~['\"]?", re.I),
     ]
     
     @classmethod
@@ -27710,7 +27732,22 @@ class ConditionalErrorExtractor:
             else:
                 _consecutive_none = 0  # reset on successful extraction
             result_chars.append(ch)
-        return "".join(result_chars)
+        _cee_result = "".join(result_chars)
+        # BUG-CEE-NONASCII-GUARD FIX (HIGH, MySQL/MariaDB/TiDB, E/EH technique):
+        # ConditionalErrorExtractor.extract_char() can return non-ASCII characters
+        # when XPATH syntax error context anchoring fails or when a WAF echo response
+        # contains tilde-enclosed non-ASCII content that matches the fallback XPATH
+        # pattern.  Without a guard here, garbage Unicode propagates to enum.get()
+        # and gets printed as "[+]   Version: ⅗󀫏..." in enumeration output.
+        # Database version strings, usernames, and database names are always printable
+        # ASCII (code points 32-126) on all supported DBMSes.  Non-ASCII in the CEE
+        # result is a reliable indicator of oracle noise or WAF echo corruption.
+        # Fix: reject the result and return "" so the caller falls through to the
+        # next extraction technique (blind boolean, timing, side-channel).
+        if _cee_result and any(ord(c) > 127 for c in _cee_result):
+            LOG.debug("[CEE] Non-ASCII chars in extraction result — oracle noise rejected: %r", _cee_result[:40])
+            return ""
+        return _cee_result
 
 
 #  Bit-Shifting Extraction (exactly 8 probes per char) 
@@ -71856,9 +71893,17 @@ class Scanner:
                         val = await asyncio.wait_for(
                             _mse.extract_string(f"SELECT {_expr}"), timeout=3600)  # 24h  never timeout extraction
                         if val and len(val) > 1:
-                            data[key] = val
-                            LOG.info("  %-15s %s (via MSE/%s)", label + ":", val, _mse._oracles[0])
-                            return
+                            # BUG-MSE-NONASCII-GUARD FIX: same non-ASCII guard as the legacy
+                            # enum fallback path below — MSE oracles (especially body-diff and
+                            # error-oracle paths) can also return non-ASCII garbage when CDN
+                            # error codes or WAF echo content corrupts the extraction.
+                            _mse_val_str = str(val)
+                            if any(ord(c) > 127 for c in _mse_val_str):
+                                LOG.warning("  %-15s (MSE rejected — non-ASCII oracle garbage: %r)", label + ":", _mse_val_str[:40])
+                            else:
+                                data[key] = val
+                                LOG.info("  %-15s %s (via MSE/%s)", label + ":", val, _mse._oracles[0])
+                                return
                     except Exception as _me:
                         LOG.debug("  %-15s (MSE: %s)", label + ":", _me)
             #  Legacy enum fallback
@@ -71873,8 +71918,23 @@ class Scanner:
             try:
                 val = await asyncio.wait_for(enum.get(query_key, **fmt), timeout=3600)
                 if val:
-                    data[key] = val
-                    LOG.info("  %-15s %s", label + ":", val)
+                    # BUG-ENUM-NONASCII-GUARD FIX (HIGH): Extraction methods that lack their own
+                    # non-ASCII guard can return garbage Unicode (e.g. '⅗󀫏...') from CDN error
+                    # oracle binary search or WAF echo content matching the tilde catch-all pattern.
+                    # Without this guard, garbage propagates to LOG.info and prints as:
+                    #   "[+]   Version:        ⅗󀫏..."
+                    # giving the user false confidence that real data was extracted.
+                    # Database version strings, usernames, and database names are always
+                    # printable ASCII (code points 32-126) on all supported DBMSes;
+                    # non-ASCII reliably indicates oracle noise or extraction garbage.
+                    # Fix: reject non-ASCII results at the printer as a last-resort guard;
+                    # warn so the operator knows an extraction path produced garbage.
+                    _val_str = str(val)
+                    if any(ord(c) > 127 for c in _val_str):
+                        LOG.warning("  %-15s (rejected — non-ASCII oracle garbage: %r)", label + ":", _val_str[:40])
+                    else:
+                        data[key] = val
+                        LOG.info("  %-15s %s", label + ":", val)
                 else:
                     LOG.debug("  %-15s (empty)", label + ":")
             except (asyncio.TimeoutError, TimeoutError):
@@ -111574,13 +111634,43 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # REMOVED: unanchored generic patterns without ERROR: prefix — WAF echo risk
     ],
     "Generic": [
-        r"sql syntax.*error", r"sql error",
-        r"database error", r"jdbc.*exception",
-        r"pdo.*exception", r"sqlexception",
-        r"odbc.*error",
-        r"invalid query",
-        # NOTE: "syntax error" is intentionally absent — too generic (appears on form
-        # validation pages unrelated to SQL injection, causing false positives).
+        # BUG-SQLPAT-GENERIC-TIGHTEN FIX (HIGH, E/EH technique, unknown/fallback DBMS):
+        # The previous Generic pattern list contained three patterns that matched
+        # common application and WAF error page content unrelated to SQL injection:
+        #   r"sql error"      — matched ANY page containing "sql error" as a phrase,
+        #                       including WAF block pages ("SQL error detected"),
+        #                       application debug pages, ORM error handlers, generic
+        #                       500-page templates, and even help pages discussing SQL.
+        #   r"database error" — matched any "database error" message, including Django/
+        #                       Rails ORM exceptions, PHP PDO generic catches,
+        #                       application 500-error pages, Cloudflare error pages.
+        #   r"invalid query"  — matched REST API validation responses ("invalid query
+        #                       parameter"), search engine "invalid query syntax", and
+        #                       any application rejecting a malformed URL or parameter.
+        # Root cause: these patterns have no DBMS-identifying context — they match
+        # the English description of a problem rather than a DBMS wire-protocol error
+        # format.  They produced false-positive detections when:
+        #   (a) WAF block pages echo the blocked payload type ("SQL error blocked")
+        #   (b) Applications with SQL error debug logging expose generic error strings
+        #       for ALL malformed parameters, not just injection-specific ones
+        # The multi-probe + clean probe guards (in _send_and_check()) filter most of
+        # these FPs, but a server that consistently shows "database error" for any
+        # malformed parameter (without showing it for the clean baseline) passes all
+        # three gates — producing a confirmed-false detection.
+        # Fix: remove the three broad patterns.  The remaining patterns (jdbc, pdo,
+        # sqlexception, odbc) all require driver-specific tokens that only appear in
+        # genuine DBMS driver error propagation, cannot appear in WAF block pages,
+        # and do not appear in generic application error handlers.
+        # REMOVED: r"sql error"      — too generic, matched WAF and app error pages
+        # REMOVED: r"database error" — too generic, matched ORMs, app 500 pages
+        # REMOVED: r"invalid query"  — too generic, matched REST/URL validation errors
+        r"sql syntax.*error",         # Requires both "sql syntax" AND "error" tokens; very unlikely in WAF pages
+        r"jdbc.*exception",           # DBMS-identifying: Java JDBC driver exception chain
+        r"pdo.*exception",            # DBMS-identifying: PHP PDO driver exception (PDOException)
+        r"sqlexception",              # DBMS-identifying: Java java.sql.SQLException class name
+        r"odbc.*error",               # DBMS-identifying: ODBC driver error string
+        # NOTE: "syntax error" and "database error" are intentionally absent —
+        # too generic (appear on form validation pages, WAF block pages, ORM errors).
     ],
 }
 
@@ -187892,6 +187982,26 @@ class ConditionalErrorOracle:
                         and _ceo_sc < 500
                         and _ceo_sc != self._baseline_status):
                     return None  # WAF-blocked probe -- indeterminate
+                # BUG-CEO-EVAL-CDN-ERROR FIX (HIGH, all 5 DBMSes, method 6d):
+                # CDN infrastructure error codes (520-530: Cloudflare Unknown Error,
+                # Web Server Down, Connection Timed Out, SSL Handshake Failed, etc.)
+                # are >= 500, so the line below (`_ceo_sc >= 500`) returns True for
+                # every CDN-error response.  During binary search extraction, when
+                # heavily-obfuscated payloads (after apply_heavy_variation + _obfuscate
+                # _extraction_cond + apply_sql_noise) trigger CDN errors for some or
+                # all comparison probes, evaluate() returns True unconditionally for
+                # those probes regardless of the actual SQL condition being tested.
+                # The binary search then drives _c_lo up to the maximum on every
+                # CDN-error step, converging to garbage Unicode code points (⅗󀫏...)
+                # even when calibration used a legitimate non-CDN oracle (e.g., 500
+                # vs 200 from a genuine SQL error).
+                # Root cause: _ceo_waf_codes only guards against < 500 status codes;
+                # it was never extended to cover the 520-530 CDN range which is > 500.
+                # Fix: treat CDN error codes (520-530) as None (indeterminate) so the
+                # binary search step is skipped (callers break on None) rather than
+                # silently forcing True → garbage extraction.
+                if 520 <= _ceo_sc <= 530:
+                    return None  # CDN infrastructure error — indeterminate, do not treat as True
                 return _ceo_sc >= 500 or _ceo_sc != self._baseline_status
         except Exception:
             pass
