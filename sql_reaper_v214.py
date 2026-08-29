@@ -27685,7 +27685,7 @@ class ConditionalErrorExtractor:
                             _cee_fp_sc = int(str(_cee_fp_sc_raw or 0)[:3]) if _cee_fp_sc_raw is not None else 0
                         except Exception:
                             _cee_fp_sc = 0
-                        if _cee_fp_sc not in {403, 406, 412} and not (520 <= _cee_fp_sc <= 530):
+                        if _cee_fp_sc not in {400, 403, 406, 412} and not (520 <= _cee_fp_sc <= 530):
                             # BUG-CEE-CDN-EXTRACT FIX: CDN/Cloudflare error codes 520-530
                             # (origin down, SSL handshake failure, connection timeout, etc.)
                             # indicate the SQL payload never reached the database. CDN error
@@ -27696,6 +27696,10 @@ class ConditionalErrorExtractor:
                             # non-ASCII garbage but misses ASCII-range garbage (e.g. dots from
                             # CSS custom-property names or CDN ray-IDs enclosed in tildes).
                             # Fix: skip extraction for CDN error codes same as WAF block codes.
+                            # BUG-CEE-400-SKIP FIX: 400 (Bad Request) responses from WAFs that
+                            # echo injected SQL payload in their rejection body can match
+                            # ERROR_EXTRACTORS patterns and produce garbage chars.  Skip 400
+                            # same as 403/406/412 — extraction from WAF rejection bodies is invalid.
                             body_str = _safe_decode_body(fp, encoding="utf-8", errors="replace", func_name="extraction")
                             ch = cls.extract_char(body_str)
                 except Exception as _esr_err:
@@ -27734,10 +27738,11 @@ class ConditionalErrorExtractor:
                                     _cee_retry_sc = int(str(_cee_retry_sc_raw or 0)[:3]) if _cee_retry_sc_raw is not None else 0
                                 except Exception:
                                     _cee_retry_sc = 0
-                                if _cee_retry_sc not in {403, 406, 412} and not (520 <= _cee_retry_sc <= 530):
+                                if _cee_retry_sc not in {400, 403, 406, 412} and not (520 <= _cee_retry_sc <= 530):
                                     # BUG-CEE-CDN-RETRY FIX: Same CDN code guard as the primary
                                     # extraction path — retry probes returning CDN error codes
                                     # must not be parsed for extraction characters.
+                                    # 400 included for same reason as primary path (WAF echo).
                                     body_retry = _safe_decode_body(fp_retry, encoding="utf-8", errors="replace", func_name="extraction_retry") or ""
                                     ch = cls.extract_char(body_retry)
                     except Exception as _retry_err:
@@ -129244,7 +129249,16 @@ class TechniqueCascadeEngine:
                         # returning 0 due to type-conversion failure on unusual fp objects.
                         _e_mp_hard_sc = _fp_hard_sc  # reuse value already computed above
                         _e_initial_waf_blocked = (
-                            _e_mp_hard_sc in {403, 406, 412} or
+                            _e_mp_hard_sc in {400, 403, 406, 412} or
+                            # BUG-E-INITIAL-400 FIX (HIGH, all E/EH surfaces):
+                            # HTTP 400 (Bad Request) is returned by WAFs and reverse proxies
+                            # when a request contains illegal characters or violates protocol
+                            # constraints — many WAFs use 400 instead of 403 to block SQL
+                            # injection payloads.  A 400 response body can echo the injected
+                            # payload and contain SQL keywords matching SQL_ERROR_PATTERNS,
+                            # seeding _e_confirmed=1 from the initial probe (false positive).
+                            # Adding 400 to the waf_blocked set forces 2 independent non-WAF
+                            # confirmation probes before accepting detection, same as 403/412.
                             # BUG-E-INITIAL-CDN FIX (HIGH, all E/EH surfaces):
                             # CDN/Cloudflare error codes 520-530 indicate infrastructure
                             # errors (origin down, SSL failure, timeout). The SQL payload
@@ -129324,9 +129338,11 @@ class TechniqueCascadeEngine:
                                 if _get_safe_status_code(_e_mp_fp) == 429:
                                     # Rate-limited — cannot confirm or deny; treat as neutral
                                     _e_429_neutral += 1
-                                elif _e_mp_hard_sc in {403, 406, 412}:
+                                elif _e_mp_hard_sc in {400, 403, 406, 412}:
                                     # Hard WAF block: canonical WAF-block status codes that
                                     # single_waf_blocked() might miss due to type issues.
+                                    # 400 included: WAFs returning 400 echo injected payloads
+                                    # in body; cannot confirm or deny injection from these.
                                     _e_429_neutral += 1
                                 elif 520 <= _get_safe_status_code(_e_mp_fp) <= 530:
                                     # BUG-E-MULTIPROBE-CDN FIX: CDN/Cloudflare error codes (520-530)
@@ -129378,8 +129394,22 @@ class TechniqueCascadeEngine:
                         # returned real signal (all confirmations were rate-limited neutral).
                         # _e_non429_total == 0 ensures we never relax when we had real
                         # non-429 responses showing no error (those are genuine non-confirms).
+                        # BUG-E-429NEUTRAL-MIN2 FIX (HIGH, all E techniques, all DBMSes):
+                        # Previous guard required _e_429_neutral >= 1: a single neutral
+                        # confirmation probe was enough to trigger threshold relaxation.
+                        # Attack scenario: initial 429 body echoes SQL keyword (rare but
+                        # real for custom rate-limiters that log the blocked payload in
+                        # the body) → _e_confirmed=1; ONE follow-up probe also 429-neutral
+                        # → _e_all_429_neutral=True → detection fires with 1 real signal.
+                        # Fix: require _e_429_neutral >= 2 so that at least TWO confirmation
+                        # probes must all return neutral before the threshold relaxes.
+                        # This ensures the initial signal is not the only data point —
+                        # the target must consistently rate-limit without real non-429 probes
+                        # showing pattern-absence before we accept the 429-relaxed detection.
+                        # The clean probe's injection-specificity check is still required
+                        # after this gate, providing an additional false-positive guard.
                         _e_all_429_neutral = (_e_initial_429 and _e_non429_total == 0
-                                              and _e_429_neutral >= 1 and _e_confirmed == 1)
+                                              and _e_429_neutral >= 2 and _e_confirmed == 1)
                         _e_threshold_met = (_e_confirmed >= 2) or (_e_all_429_neutral and _e_confirmed >= 1)
                         if _e_all_429_neutral:
                             print(f"[*]     E multi-probe: {_e_confirmed}/2 needed  ({_e_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
