@@ -111393,8 +111393,12 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # DBMS-specific keywords) for all 5 major DBMSes (MySQL, PostgreSQL, MSSQL,
     # Oracle, SQLite).
     "MySQL": [
-        # DBMS-identifying: full MySQL syntax error format
-        r"you have an error in your sql syntax",
+        # DBMS-identifying: canonical MySQL syntax error format including the
+        # "check the manual that corresponds to your MySQL server version" clause.
+        # Requiring this clause eliminates WAF block pages that echo partial SQL
+        # keywords like "you have an error in your sql syntax" without the rest
+        # of the MySQL error message — real MySQL always emits the full phrase.
+        r"you have an error in your sql syntax; check the manual",
         # DBMS-identifying: PHP MySQL driver function names
         r"warning: mysql_", r"warning: mysqli_",
         r"mysql_num_rows|mysql_fetch_array|mysql_fetch_object",
@@ -111430,7 +111434,8 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         #   Use r"column count doesn.t match value count at row" (MySQL-specific phrasing) instead.
     ],
     "MariaDB": [
-        r"you have an error in your sql syntax",
+        # DBMS-identifying: canonical MariaDB/MySQL syntax error with "check the manual" clause
+        r"you have an error in your sql syntax; check the manual",
         r"mariadb server version", r"warning: mysqli_",
         # REMOVED: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." — same reasoning
         # as MySQL: MariaDB never echoes the function call in its error message; those patterns
@@ -111450,7 +111455,8 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # Fix: add TiDB with the same pattern set as MySQL (TiDB uses MySQL parser/error format).
     # TiDB also exposes its own version string "TiDB" in some error messages.
     "TiDB": [
-        r"you have an error in your sql syntax",
+        # DBMS-identifying: canonical MySQL/TiDB syntax error with "check the manual" clause
+        r"you have an error in your sql syntax; check the manual",
         r"tidb.*error",                  # TiDB-specific error strings
         r"warning: mysqli_",
         # REMOVED: r"extractvalue\s*\(\s*..." and r"updatexml\s*\(\s*..." — same reasoning
@@ -111499,7 +111505,10 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # DBMS-identifying: MSSQL-specific error message format
         r"error converting data type",
         r"unclosed quotation mark after the character string",
-        r"incorrect syntax near",
+        # Require the opening quote that MSSQL always places around the offending token:
+        # "Incorrect syntax near 'X'." — WAF pages echoing the phrase omit the quote
+        # because they are not reproducing the actual MSSQL wire-protocol error format.
+        r"incorrect syntax near '",
         # DBMS-identifying: PHP MSSQL driver function name
         r"warning: .*mssql_",
         # DBMS-identifying: SQL Server error number + severity level format (Msg N, Level N)
@@ -111524,12 +111533,19 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # REMOVED: r"cannot convert value" — too generic
     ],
     "Oracle": [
-        # DBMS-identifying: Oracle error code format ORA-NNNNN (4-5 digits) — canonical Oracle identifier
+        # DBMS-identifying: Oracle error code format ORA-NNNNN: (4-5 digits + colon).
+        # All real Oracle errors use the format "ORA-NNNNN: description text".
+        # The colon is mandatory in the Oracle wire-protocol error format and is never
+        # emitted by WAF block pages or application error messages that merely mention
+        # an ORA error number without the colon (e.g. "ORA-1234 occurred" without colon
+        # is application text, not an Oracle database error message).
         # BUG-PCV-1 FIX: r"ora-\\d{4,5}" used a double-backslash in raw string.
         # Raw string r"ora-\\d{4,5}" → regex content ora-\\d{4,5} → matches "ora-" +
         # literal backslash + 4-5 letter 'd's.  Never matches real Oracle errors like
         # "ORA-1234".  Fix: single backslash so regex sees \d (digit character class).
-        r"ora-\d{4,5}",
+        # BUG-ORA-COLON FIX: require trailing colon so "ORA-1234" in app text (no colon)
+        # does not match; only the actual Oracle error header "ORA-1234: message" matches.
+        r"ora-\d{4,5}:",
         # DBMS-identifying: Oracle driver in error string / PHP OCI functions
         r"oracle.*driver", r"warning: oci_",
         r"oci_\w+",                      # Oracle OCI PHP function names
@@ -128731,6 +128747,17 @@ class TechniqueCascadeEngine:
                                 if _get_safe_status_code(_e_mp_fp) == 429:
                                     # Rate-limited — cannot confirm or deny; treat as neutral
                                     _e_429_neutral += 1
+                                elif 520 <= _get_safe_status_code(_e_mp_fp) <= 530:
+                                    # BUG-E-MULTIPROBE-CDN FIX: CDN/Cloudflare error codes (520-530)
+                                    # are infrastructure-layer errors (origin down, timeout, invalid
+                                    # response, SSL handshake failure). The SQL payload never reached
+                                    # the database. Pattern matches on CDN error pages are CDN-generated
+                                    # HTML, not DBMS error output. Treat as neutral — cannot confirm or
+                                    # deny SQL execution from a CDN error response.
+                                    # Root cause from logs: confirmation probes returning 525 (CDN error)
+                                    # matched SQL patterns in CDN error page HTML, driving _e_confirmed
+                                    # to 2 — false positive from CDN infrastructure noise.
+                                    _e_429_neutral += 1
                                 elif WAFBlockDiscriminator.single_waf_blocked(_e_mp_fp):
                                     # BUG-E-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe (non-429).
                                     # WAF block pages frequently echo the injected function names
@@ -128880,6 +128907,11 @@ class TechniqueCascadeEngine:
                                 if _ex_fp:
                                     self._total_reqs += 1
                                     if _get_safe_status_code(_ex_fp) == 429:
+                                        _ex_429_neutral += 1
+                                    elif 520 <= _get_safe_status_code(_ex_fp) <= 530:
+                                        # BUG-EX-MULTIPROBE-CDN FIX: CDN error codes (520-530) indicate
+                                        # infrastructure failure — payload never reached the database.
+                                        # Treat as neutral (same as 429): cannot confirm or deny SQL injection.
                                         _ex_429_neutral += 1
                                     elif WAFBlockDiscriminator.single_waf_blocked(_ex_fp):
                                         # BUG-EX-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe (non-429).
@@ -132065,7 +132097,13 @@ class TechniqueCascadeEngine:
                             # BUG-EH-429-NEUTRAL FIX: Same as BUG-E-429-NEUTRAL — initial
                             # 429+error probe followed by 429-neutral confirmations prevents
                             # detection. Relax threshold when ALL confirmations are 429-neutral.
-                            _eh_confirmed = 1
+                            # BUG-EH-INITIAL-WAF FIX: Same as BUG-E-INITIAL-WAF — if the initial
+                            # EH probe is WAF-blocked (non-429), the SQL pattern match is likely
+                            # the WAF echoing the injected header value in its block page.
+                            # Start with 0 and require 2 independent non-WAF-blocked confirmations.
+                            _eh_initial_waf_blocked = (not (_get_safe_status_code(fp) == 429) and
+                                                       WAFBlockDiscriminator.single_waf_blocked(fp))
+                            _eh_confirmed = 0 if _eh_initial_waf_blocked else 1
                             _eh_initial_429 = _get_safe_status_code(fp) == 429
                             _eh_429_neutral = 0
                             _eh_non429_total = 0
@@ -132088,6 +132126,16 @@ class TechniqueCascadeEngine:
                                 if _eh_mp_fp:
                                     self._total_reqs += 1
                                     if _get_safe_status_code(_eh_mp_fp) == 429:
+                                        _eh_429_neutral += 1
+                                    elif 520 <= _get_safe_status_code(_eh_mp_fp) <= 530:
+                                        # BUG-EH-MULTIPROBE-CDN FIX: CDN/Cloudflare error codes (520-530)
+                                        # are infrastructure errors — the payload never reached the database.
+                                        # Treat as neutral, same as 429: cannot confirm or deny injection.
+                                        _eh_429_neutral += 1
+                                    elif WAFBlockDiscriminator.single_waf_blocked(_eh_mp_fp):
+                                        # BUG-EH-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe.
+                                        # WAF pages echo injected header names/values in their body,
+                                        # causing SQL error patterns to match WAF block HTML. Treat as neutral.
                                         _eh_429_neutral += 1
                                     else:
                                         _eh_non429_total += 1
@@ -132139,7 +132187,19 @@ class TechniqueCascadeEngine:
                                     _eh_fp_clean = await self._safe_confirm(method, url, data,
                                         data_fmt, param, _eh_clean_probe_val,
                                         self.tamper_chain, extra_headers=_eh_clean_hdrs)
-                                    if _eh_fp_clean:
+                                    if _eh_fp_clean is None:
+                                        # BUG-EH-CLEAN-FAIL-CLOSED FIX: Timeout/request failure on clean
+                                        # probe — ambiguous result, fail-closed to prevent false positive.
+                                        _eh_clean_ok = False
+                                        _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                        print(f"[*]     EH clean probe ({_eh_ctype}): timeout/failure — ambiguous, rejected", flush=True)
+                                    elif WAFBlockDiscriminator.single_waf_blocked(_eh_fp_clean):
+                                        # BUG-EH-CLEAN-WAF FIX: WAF-blocked clean probe — cannot determine
+                                        # whether false-condition causes errors. Fail-closed: reject.
+                                        _eh_clean_ok = False
+                                        _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                        print(f"[*]     EH clean probe ({_eh_ctype}): WAF-blocked ({_get_safe_status_code(_eh_fp_clean)}) — ambiguous, rejected", flush=True)
+                                    elif _eh_fp_clean:
                                         self._total_reqs += 1
                                         _eh_clean_body = _safe_decode_body(_eh_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__eh_fp_clean') if _eh_fp_clean.body else ""
                                         _eh_clean_has_err = bool(re.search(_pp, _eh_clean_body, re.I))
