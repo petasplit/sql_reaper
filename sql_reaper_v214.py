@@ -41955,6 +41955,17 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                     # BUG #7 FIX: Validate response BEFORE calling is_waf_block to prevent crash
                     if not _validate_response(fp, func_name="detect_error", allow_empty=True):
                         continue
+                    # BUG-DE-HARDSC-GUARD FIX: Parse status code via string prefix (immune to type
+                    # failures) and reject WAF/CDN-blocked responses before pattern matching.
+                    # This mirrors the _fp_hard_sc guard in _send_and_check() and prevents CDN
+                    # infrastructure error codes (520-530 = Cloudflare origin/SSL errors) and
+                    # hard WAF block codes (403/406/412) from ever reaching SQL error matching.
+                    try:
+                        _de_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
+                    except Exception:
+                        _de_hard_sc = 0
+                    if _de_hard_sc in {403, 406, 412} or (520 <= _de_hard_sc <= 530):
+                        continue
                     # FIX-ERROR-WAF-STATUS: use single_waf_blocked() so plain 400/403 without
                     # WAF body patterns is also correctly skipped (not mistaken for a SQL error).
                     if WAFBlockDiscriminator.single_waf_blocked(fp):
@@ -111579,7 +111590,7 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # including "check the manual that corresponds to your MySQL server version".
         # This guards against WAF echo of partial SQL keywords without the MySQL suffix.
         r"you have an error in your sql syntax; check the manual",
-        r"mysql server version for the right syntax",
+        r"mysql server version for the right syntax to use near",
         # Wire-protocol: MySQL-specific error phrasing (not ORM — ORM says "column count mismatch")
         # BUG-SQLPAT-COLCOUNT-ANCHOR FIX: The `.` in "doesn.t" matches any char; the row-number
         # suffix "at row \d+" is always present in MySQL wire-protocol output and makes the pattern
@@ -111818,7 +111829,7 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # matches with re.I active, so lowercase "ora-" in application variable names, config
         # strings, or WAF block advisory text ("ora-cle database error blocked") could match.
         # Fix: use (?-i:ORA) to pin the prefix to uppercase-only, matching Oracle wire-protocol.
-        r"(?-i:ORA)-\d{4,5}:",
+        r"(?-i:ORA)-\d{4,5}:\s",
         # Wire-protocol: Oracle-specific error message phrasing (ORA-01756 parser error).
         # BUG-SQLPAT-ORA-QUOTED-ANCHOR FIX: The standalone phrase "quoted string not properly
         # terminated" can appear in template engine error messages, PL/SQL documentation pages,
@@ -111830,7 +111841,7 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"(?-i:ORA)-01756:.*quoted string not properly terminated",
         # Wire-protocol: PL/SQL error codes (PLS-NNNNN:) — colon required, same as ORA-
         # BUG-SQLPAT-PLS-CASE FIX: (?-i:PLS) pins to uppercase (Oracle ALWAYS uses uppercase).
-        r"(?-i:PLS)-\d{4,5}:",
+        r"(?-i:PLS)-\d{4,5}:\s",
         # Wire-protocol: Oracle TNS (Transparent Network Substrate) errors — format TNS-NNNNN:
         # Oracle TNS errors ALWAYS use "TNS-NNNNN:" format with a 5-digit code and colon.
         # This is immune to WAF echo: WAF block pages do not produce TNS error codes.
@@ -111838,7 +111849,7 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # application log containing "tns:.*error" (e.g. "tns: connection error" in non-Oracle
         # apps, config files mentioning TNS). The numeric TNS-NNNNN: format is DBMS-specific.
         # BUG-SQLPAT-TNS-CASE FIX: (?-i:TNS) pins to uppercase + colon required (was missing).
-        r"(?-i:TNS)-\d{5}:",
+        r"(?-i:TNS)-\d{5}:\s",
         # Wire-protocol: Oracle JDBC thin driver exception class in stack traces.
         # Oracle JDBC always uses the oracle.jdbc package path: "oracle.jdbc.driver.*Exception"
         # or "oracle.sql.*Exception". The package path with oracle.jdbc prefix is DBMS-specific
@@ -132604,9 +132615,9 @@ class TechniqueCascadeEngine:
                     _eh_hard_sc = int(str(getattr(fp, 'status_code', '') or '')[:3])
                 except Exception:
                     _eh_hard_sc = 0
-                if _eh_hard_sc in {403, 406, 412}:
+                if _eh_hard_sc in {403, 406, 412} or (520 <= _eh_hard_sc <= 530):
                     print(f"    [EH-error] [{dbms}] req#{self._total_reqs} "
-                          f"status={fp.status_code}  WAF-blocked-hard (skipped)", flush=True)
+                          f"status={fp.status_code}  WAF/CDN-blocked-hard (skipped)", flush=True)
                     return None
             _eh_singlewaf = (tech == "EH" and WAFBlockDiscriminator.single_waf_blocked(fp))
             if _waf_blocked or _eh_singlewaf:
