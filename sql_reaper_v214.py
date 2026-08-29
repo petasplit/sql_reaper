@@ -129109,11 +129109,49 @@ class TechniqueCascadeEngine:
             #  how many consecutive zero-error responses have been received.  The scan
             #  may encounter targets where SQL errors appear only on specific payloads
             #  deep in the certified payload list — early exit would miss those.)
+            # BUG-E-EXTRACTVALUE-GENERIC-FIX (CRITICAL, MySQL/MariaDB/TiDB E/EH):
+            # EXTRACTVALUE/UPDATEXML payloads require the XPATH-tilde corroboration
+            # pattern to confirm actual SQL execution via the error channel.
+            # Root cause (log1.txt): concat_char_bypass tamper generates syntactically
+            # invalid SQL: "(SELECT (SELECT (SELECT  AND EXTRACTVALUE(0x0a,CONCAT(0x7e,
+            # DATABASE())))))" — AND without left operand inside SELECT. MySQL returns a
+            # generic syntax error ("you have an error in your sql syntax; check the manual")
+            # which matched the generic MySQL pattern and confirmed as E-technique detection.
+            # EXTRACTVALUE never executed; the error was from payload malformation.
+            # When EXTRACTVALUE actually executes in MySQL, it ALWAYS produces the XPATH-
+            # syntax-error format: "XPATH syntax error: '~<data>~'". This is guaranteed by
+            # MySQL's EXTRACTVALUE implementation — the tilde (~) delimiter is injected by
+            # CONCAT(0x7e,<data>,0x7e). If XPATH-tilde is absent, EXTRACTVALUE did not execute.
+            # Fix: for EXTRACTVALUE/UPDATEXML payloads on MySQL-family DBMSes, skip any
+            # pattern that is NOT the XPATH-tilde pattern unless XPATH-tilde ALSO appears
+            # in the body. This prevents generic syntax errors from confirming E-technique
+            # when the payload itself is syntactically invalid SQL.
+            _is_extractvalue_payload = bool(re.search(r'(?:EXTRACTVALUE|UPDATEXML)\s*\(', payload, re.I))
+            _xpath_tilde_corroboration_dbs = {"MySQL", "MariaDB", "TiDB"}
+            _xpath_tilde_pat = r"xpath syntax error:\s*'~"
+            _body_has_xpath_tilde = re.search(_xpath_tilde_pat, body, re.I) if _is_extractvalue_payload else None
             for err_dbms, patterns in SQL_ERROR_PATTERNS.items():
                 if dbms not in ("Generic",) and err_dbms != dbms:
                     continue
                 for pat in patterns:
                     if re.search(pat, body, re.I):
+                        # BUG-E-EXTRACTVALUE-GENERIC-CORROBORATION (CRITICAL):
+                        # For EXTRACTVALUE/UPDATEXML payloads on MySQL-family DBMSes, if the
+                        # matched pattern is NOT the XPATH-tilde pattern, require XPATH-tilde to
+                        # also appear in the body. Without this, generic MySQL syntax errors
+                        # (from malformed bypass tampers that corrupt the SQL syntax) trigger
+                        # E-technique detection even though EXTRACTVALUE never executed.
+                        if (_is_extractvalue_payload and
+                                err_dbms in _xpath_tilde_corroboration_dbs and
+                                pat != _xpath_tilde_pat and
+                                not _body_has_xpath_tilde):
+                            LOG.debug(
+                                "[E] Skipping pattern %r for %s — EXTRACTVALUE payload but "
+                                "no XPATH-tilde corroboration in body (likely malformed "
+                                "payload syntax, not actual EXTRACTVALUE execution)",
+                                pat, err_dbms
+                            )
+                            continue
                         # Cross-check: if pattern also matches baseline, it's page content not injection
                         if _baseline_body and re.search(pat, _baseline_body, re.I):
                             LOG.debug(f"  E [{err_dbms}] pattern {pat!r} also in baseline  FP suppressed")
@@ -129353,9 +129391,24 @@ class TechniqueCascadeEngine:
                                 return _target_match
             # Fallback: scan all DBMS patterns (cross-DBMS detection)
             if _target_match is None and dbms not in ("Generic",):
+                # Reuse _is_extractvalue_payload and _body_has_xpath_tilde computed above
                 for err_dbms, patterns in SQL_ERROR_PATTERNS.items():
                     for pat in patterns:
                         if re.search(pat, body, re.I):
+                            # BUG-EX-EXTRACTVALUE-GENERIC-CORROBORATION (CRITICAL):
+                            # Same EXTRACTVALUE-specific guard as the primary DBMS path.
+                            # Without this, malformed EXTRACTVALUE bypass payloads trigger
+                            # cross-DBMS detection via generic syntax error patterns.
+                            if (_is_extractvalue_payload and
+                                    err_dbms in _xpath_tilde_corroboration_dbs and
+                                    pat != _xpath_tilde_pat and
+                                    not _body_has_xpath_tilde):
+                                LOG.debug(
+                                    "[EX] Skipping pattern %r for %s — EXTRACTVALUE payload but "
+                                    "no XPATH-tilde corroboration (likely malformed payload syntax)",
+                                    pat, err_dbms
+                                )
+                                continue
                             if _baseline_body and re.search(pat, _baseline_body, re.I):
                                 LOG.debug(f"  E [{err_dbms}] cross-DBMS pattern {pat!r} also in baseline  FP suppressed")
                                 continue
@@ -132695,9 +132748,34 @@ class TechniqueCascadeEngine:
                             _eh_body_str = "" # Fallback
 
                         _eh_baseline_body = (getattr(_s0, "text", "") or _eh_body_str)
+                # BUG-EH-EXTRACTVALUE-GENERIC-FIX (CRITICAL, MySQL/MariaDB/TiDB EH):
+                # Same EXTRACTVALUE corroboration guard as the E-technique path (line ~129129).
+                # EH payloads using EXTRACTVALUE/UPDATEXML with bypass tampers (e.g.
+                # concat_char_bypass) can generate syntactically invalid SQL in the injected
+                # header value, producing generic MySQL syntax errors that match SQL_ERROR_PATTERNS
+                # without EXTRACTVALUE ever executing. Require XPATH-tilde corroboration.
+                _eh_is_extractvalue_payload = bool(re.search(r'(?:EXTRACTVALUE|UPDATEXML)\s*\(', payload, re.I))
+                _eh_xpath_tilde_pat = r"xpath syntax error:\s*'~"
+                _eh_xpath_corroboration_dbs = {"MySQL", "MariaDB", "TiDB"}
+                _eh_body_has_xpath_tilde = re.search(_eh_xpath_tilde_pat, body, re.I) if _eh_is_extractvalue_payload else None
                 for _ep, _pats in SQL_ERROR_PATTERNS.items():
                     for _pp in _pats:
                         if re.search(_pp, body, re.I):
+                            # BUG-EH-EXTRACTVALUE-GENERIC-CORROBORATION (CRITICAL):
+                            # For EXTRACTVALUE/UPDATEXML payloads on MySQL-family DBMSes, require
+                            # XPATH-tilde corroboration when the matched pattern is not the XPATH-tilde
+                            # pattern. Prevents generic syntax errors from malformed bypass payloads
+                            # from triggering EH detections.
+                            if (_eh_is_extractvalue_payload and
+                                    _ep in _eh_xpath_corroboration_dbs and
+                                    _pp != _eh_xpath_tilde_pat and
+                                    not _eh_body_has_xpath_tilde):
+                                LOG.debug(
+                                    "[EH] Skipping pattern %r for %s — EXTRACTVALUE payload but "
+                                    "no XPATH-tilde corroboration (likely malformed payload syntax)",
+                                    _pp, _ep
+                                )
+                                continue
                             if _eh_baseline_body and re.search(_pp, _eh_baseline_body, re.I):
                                 LOG.debug(f"  EH [{_ep}] pattern {_pp!r} also in baseline  FP suppressed")
                                 print(f"[*]     EH [{_ep}] pattern in baseline  FP suppressed", flush=True)
