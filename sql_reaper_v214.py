@@ -112058,7 +112058,7 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # text and generic "pdo error" application log lines.
         # Real format: "PDOException: SQLSTATE[HY000]: General error: 1064 You have an error..."
         r"(?-i:PDO)(?-i:Exception)",
-        r"sqlexception",              # DBMS-identifying: Java java.sql.SQLException class name
+        r"(?-i:SQL)(?-i:Exception)",  # DBMS-identifying: Java java.sql.SQLException — exact class-name case required
         # FIX-SQLPAT-GENERIC-ODBC: r"odbc.*error" was too broad — matches WAF block pages
         # that reference ODBC in their advisory text ("ODBC SQL injection error detected")
         # and application log lines that say "ODBC connection error" for any DB failure.
@@ -129188,8 +129188,35 @@ class TechniqueCascadeEngine:
                             (not (_get_safe_status_code(fp) == 429) and
                              WAFBlockDiscriminator.single_waf_blocked(fp))
                         )
-                        _e_confirmed = 0 if _e_initial_waf_blocked else 1
                         _e_initial_429 = _get_safe_status_code(fp) == 429
+                        # BUG-E-429-WAF-BODY FIX (HIGH, E technique, all DBMSes):
+                        # When a WAF rate-limit page (429) echoes SQL error keywords in its
+                        # advisory body (e.g. "Too many requests — SQL injection detected:
+                        # 'you have an error in your sql syntax'"), the initial 429 probe body
+                        # matches SQL_ERROR_PATTERNS → _e_confirmed=1 → _e_all_429_neutral fires
+                        # when all multi-probes are also 429-neutral. The clean probe then gets
+                        # the normal server response (rate limit expired) → false positive confirmed.
+                        # Fix: if the initial 429 body contains WAF/security advisory fingerprint
+                        # keywords alongside the SQL error text, treat as WAF-blocked (require
+                        # 2 independent non-WAF-blocked confirmations, same as 403/406/412).
+                        _e_429_body_is_waf = False
+                        if _e_initial_429 and not _e_initial_waf_blocked:
+                            _e_429_body_lower = body.lower()[:4000]
+                            _e_429_waf_sigs = (
+                                'cloudflare', 'ray id:', 'rate limit', 'too many requests',
+                                'sql injection', 'security check', 'access denied',
+                                'imperva', 'incapsula', 'sucuri', 'akamai',
+                                'ddos protection', 'bot protection', 'captcha',
+                                'please stand by', 'enable javascript',
+                                'checking your browser', 'attention required',
+                            )
+                            if any(sig in _e_429_body_lower for sig in _e_429_waf_sigs):
+                                _e_429_body_is_waf = True
+                                LOG.debug(
+                                    "[E] Initial 429 body contains WAF/security advisory fingerprint "
+                                    "— treating as WAF-blocked (require 2 non-WAF confirmations)"
+                                )
+                        _e_confirmed = 0 if (_e_initial_waf_blocked or _e_429_body_is_waf) else 1
                         _e_429_neutral = 0
                         _e_non429_total = 0  # non-429 confirmations (real signal either way)
                         for _e_mp in range(5):
@@ -132806,8 +132833,31 @@ class TechniqueCascadeEngine:
                                 (not (_get_safe_status_code(fp) == 429) and
                                  WAFBlockDiscriminator.single_waf_blocked(fp))
                             )
-                            _eh_confirmed = 0 if _eh_initial_waf_blocked else 1
                             _eh_initial_429 = _get_safe_status_code(fp) == 429
+                            # BUG-EH-429-WAF-BODY FIX (HIGH, EH technique, all DBMSes):
+                            # Mirror BUG-E-429-WAF-BODY FIX for EH technique. WAF rate-limit pages
+                            # (429) that echo injected header-value SQL error text in their body
+                            # produce false-positive EH detections via the _eh_all_429_neutral path.
+                            # If the initial 429 body contains WAF/security advisory fingerprints,
+                            # treat as WAF-blocked to require 2 independent non-WAF confirmations.
+                            _eh_429_body_is_waf = False
+                            if _eh_initial_429 and not _eh_initial_waf_blocked:
+                                _eh_429_body_lower = body.lower()[:4000]
+                                _eh_429_waf_sigs = (
+                                    'cloudflare', 'ray id:', 'rate limit', 'too many requests',
+                                    'sql injection', 'security check', 'access denied',
+                                    'imperva', 'incapsula', 'sucuri', 'akamai',
+                                    'ddos protection', 'bot protection', 'captcha',
+                                    'please stand by', 'enable javascript',
+                                    'checking your browser', 'attention required',
+                                )
+                                if any(sig in _eh_429_body_lower for sig in _eh_429_waf_sigs):
+                                    _eh_429_body_is_waf = True
+                                    LOG.debug(
+                                        "[EH] Initial 429 body contains WAF/security advisory fingerprint "
+                                        "— treating as WAF-blocked (require 2 non-WAF confirmations)"
+                                    )
+                            _eh_confirmed = 0 if (_eh_initial_waf_blocked or _eh_429_body_is_waf) else 1
                             _eh_429_neutral = 0
                             _eh_non429_total = 0
                             for _eh_mp in range(5):
@@ -165414,9 +165464,21 @@ class ExtractionOrchestrator:
                             # names are always printable ASCII on all supported DBMSes; non-ASCII
                             # in the result is a reliable indicator of oracle noise.
                             _m6d_has_nonascii = any(ord(c) > 127 for c in result)
-                            if _m6d_has_nonascii:
+                            # FIX-M6D-STUCK-ORACLE-SAMECHAR (MEDIUM): When ConditionalErrorOracle
+                            # is stuck returning True for every probe (oracle miscalibrated or WAF
+                            # intermittently rate-limiting extraction probes), binary search
+                            # converges to the same code point for every character position,
+                            # producing an all-identical-character string like "~~~~~" or "aaaaa"
+                            # that passes the non-ASCII guard (all code points ≤ 127) and the '?'
+                            # guard. Real DB strings (version, user, dbname) are never single
+                            # repeated characters for length > 2. Guard: reject when all chars are
+                            # identical and length > 2.
+                            _m6d_all_same_char = len(set(result)) == 1 and len(result) > 2
+                            if _m6d_has_nonascii or _m6d_all_same_char:
                                 LOG.debug("[Orchestrator] ConditionalErrorExtractor rejected "
-                                          "result (non-ASCII chars, oracle noise): %r", result[:40])
+                                          "result (%s, oracle noise): %r",
+                                          "non-ASCII chars" if _m6d_has_nonascii else "all-same-char",
+                                          result[:40])
                             else:
                                 LOG.info("[Orchestrator] ConditionalErrorExtractor extracted: %s", result[:40])
                                 return result
