@@ -59544,7 +59544,20 @@ class Scanner:
             # BUG-BOTH-WAF-NONE-BYPASS FIX: use _get_safe_status_code() (always returns int,
             # never None) so a None status_code (malformed response / network failure) does not
             # silently zero out the guard and allow body-diff to fire a false oracle.
-            _infer_waf_4xx = {400, 403, 406, 412, 429, 430, 503}
+            # BUG-INFER-CDN-WAF-ORACLE FIX (HIGH, all 5 DBMSes, boolean oracle, Inference):
+            # CDN infrastructure error codes (520-530) were absent from _infer_waf_4xx.
+            # When the true-condition probe returns 525 (Cloudflare SSL Handshake Failed /
+            # origin crash) and the false-condition probe returns 403 (WAF block), the
+            # existing _both_waf_blocked check evaluated:
+            #   (525 in {400,403,...,503}) = False → _both_waf_blocked = False
+            # The oracle-accept guard `not _both_waf_blocked` was True → oracle was set!
+            # This caused the Inference engine to spend many minutes attempting bitwise
+            # and equality extraction against a 525-vs-403 boolean oracle that measures
+            # CDN vs WAF infrastructure differences (not SQL condition differences),
+            # producing garbage Unicode or silent extraction failure on every character.
+            # Fix: extend _infer_waf_4xx to cover Cloudflare/CDN error codes 520-530.
+            # With both 525 and 403 in the set, _both_waf_blocked = True → oracle rejected.
+            _infer_waf_4xx = {400, 403, 406, 412, 429, 430, 503} | set(range(520, 531))
             _ts_safe = _get_safe_status_code(fp_true)
             _fs_safe = _get_safe_status_code(fp_false)
             _both_waf_blocked = (_ts_safe in _infer_waf_4xx and _fs_safe in _infer_waf_4xx)
@@ -59562,7 +59575,10 @@ class Scanner:
             # because SQL drove the difference. Fix: compute the actual guard value here using
             # the already-available _ts_safe/_fs_safe so ALL branches (if/elif/else) see the
             # correctly computed value. The elif branch re-assigns the same expression (harmless).
-            _same_error_status = (_ts_safe == _fs_safe and _ts_safe in {400, 403, 406, 412, 429, 430, 500, 503})
+            # BUG-SAME-ERROR-CDN FIX: include CDN codes 520-530 so that when both probes
+            # return the same CDN error code (e.g. both 525), hash/body-size oracle branches
+            # are also suppressed by _same_error_status alongside the _both_waf_blocked guard.
+            _same_error_status = (_ts_safe == _fs_safe and _ts_safe in ({400, 403, 406, 412, 429, 430, 500, 503} | set(range(520, 531))))
 
             # FIX-INFER-STATUS-BOTH-WAF: skip status oracle when BOTH probes return
             # a WAF status code (e.g. true=400 and false=403) — different WAF codes
@@ -59590,7 +59606,10 @@ class Scanner:
                 # NOT a valid boolean oracle — the server is returning different error
                 # pages for different malformed requests, not SQL-driven output differences.
                 # Require different status codes for body-based oracle when both are error codes.
-                _same_error_status = (_ts_safe == _fs_safe and _ts_safe in {400, 403, 406, 412, 429, 430, 500, 503})
+                # BUG-SAME-ERROR-CDN FIX: include CDN codes 520-530 so that when both probes
+            # return the same CDN error code (e.g. both 525), hash/body-size oracle branches
+            # are also suppressed by _same_error_status alongside the _both_waf_blocked guard.
+            _same_error_status = (_ts_safe == _fs_safe and _ts_safe in ({400, 403, 406, 412, 429, 430, 500, 503} | set(range(520, 531))))
                 if (_bl_pct >= 0.10 or (_bl_max < 5000 and _bl_diff >= 50)) and (not _both_waf_blocked or _bl_pct >= 0.20) and not _same_error_status:
                     # BUG-BOOL-BODY-STABILITY FIX: The MD5 branch sends a stability probe before
                     # accepting the hash as an oracle (line ~55901). The body-length branch had no
@@ -61502,14 +61521,31 @@ class Scanner:
             _os = getattr(fp_o, "status_code", 0)
             _eb = len(getattr(fp_e, "text", "") or "")
             _ob = len(getattr(fp_o, "text", "") or "")
-            _err_same_error_status = (_es == _os and _es in {400, 403, 406, 412, 429, 430, 500, 503})
+            # BUG-ERR-SAME-STATUS-CDN FIX: include CDN codes 520-530 so that when both
+            # error and OK probes return the same CDN code (e.g. both 525), body-diff
+            # oracle is also suppressed by _err_same_error_status.
+            _err_same_error_status = (_es == _os and _es in ({400, 403, 406, 412, 429, 430, 500, 503} | set(range(520, 531))))
+            # BUG-INFER-ERROR-ORACLE-CDN FIX (HIGH, all 5 DBMSes, Inference error oracle):
+            # When both error probe and OK probe return infrastructure-layer codes (any mix of
+            # WAF 4xx codes 400/403/406/412/429/430/503 and CDN error codes 520-530), the
+            # status difference is NOT SQL-conditional — it is WAF/CDN page variation noise.
+            # For example: true-condition (division by zero) blocked by CDN with 525 SSL error,
+            # false-condition blocked by WAF with 403 → _es=525 ≠ _os=403 → _error_oracle=True.
+            # The extracted status pair is purely infrastructure-layer, not DBMS-driven SQL error.
+            # Fix: add CDN codes 520-530 to the "infrastructure codes" set and reject the error
+            # oracle when BOTH probes return codes from this extended infrastructure set.
+            _err_infra_codes = {400, 403, 406, 412, 429, 430, 503} | set(range(520, 531))
+            _err_both_infra = (_es in _err_infra_codes and _os in _err_infra_codes)
 
-            if _es != _os:
+            if _es != _os and not _err_both_infra:
                 _error_oracle = True
                 _err_true_sig = _es
                 _err_false_sig = _os
                 LOG.info("[Inference]  ERROR ORACLE: status=%d/%d body=%dB/%dB",
                          _es, _os, _eb, _ob)
+            elif _es != _os and _err_both_infra:
+                LOG.info("[Inference] Error probe: both statuses are infrastructure codes (%d/%d) — "
+                         "WAF/CDN page variation, not SQL error oracle", _es, _os)
             elif _eb != _ob and not _err_same_error_status:
                 # BUG-ERROR-ORACLE-SAME-STATUS FIX: when both probes return the SAME
                 # error status (e.g. both 400), body size difference is NOT proof of
@@ -61545,7 +61581,18 @@ class Scanner:
                     _rf_s = getattr(_recal_f, "status_code", None)
                     _rt_b = getattr(_recal_t, "text", "") or ""
                     _rf_b = getattr(_recal_f, "text", "") or ""
-                    if _rt_s != _rf_s and _rt_s is not None:
+                    # BUG-INFER-RECAL-CDN FIX (HIGH, all 5 DBMSes, re-calibration boolean oracle):
+                    # After an error oracle is established, re-calibration probes may return CDN
+                    # error codes (520-530) for true condition and WAF codes (403 etc.) for false.
+                    # Without this guard, re-calibration sets _boolean_oracle=True on a 525-vs-403
+                    # oracle that measures CDN/WAF infrastructure page differences, not SQL states.
+                    # Fix: check both re-calibration status codes against the extended infrastructure
+                    # set (WAF 4xx + CDN 520-530) and skip the boolean oracle when both are infra codes.
+                    _recal_infra = {400, 403, 406, 412, 429, 430, 503} | set(range(520, 531))
+                    _recal_rt_s_safe = _rt_s if isinstance(_rt_s, int) else 0
+                    _recal_rf_s_safe = _rf_s if isinstance(_rf_s, int) else 0
+                    _recal_both_infra = (_recal_rt_s_safe in _recal_infra and _recal_rf_s_safe in _recal_infra)
+                    if _rt_s != _rf_s and _rt_s is not None and not _recal_both_infra:
                         _boolean_oracle = True
                         _bool_true_status = _rt_s
                         _bool_false_status = _rf_s  # RC-A/RC-B FIX: capture re-calibrated False status
@@ -61553,6 +61600,9 @@ class Scanner:
                         # boolean oracle — clear the flag so _eval does not flip boolean results.
                         _oracle_inverted = False
                         LOG.info("[Inference]  Re-calibrated BOOLEAN oracle: status %s vs %s", _rt_s, _rf_s)
+                    elif _rt_s != _rf_s and _recal_both_infra:
+                        LOG.info("[Inference] Re-calibration skipped: both statuses are infrastructure codes "
+                                 "(%s/%s) — WAF/CDN page variation, not SQL-conditional oracle", _rt_s, _rf_s)
                     elif len(_rt_b) != len(_rf_b):
                         _rc_diff = abs(len(_rt_b) - len(_rf_b))
                         _rc_max = max(len(_rt_b), len(_rf_b), 1)
@@ -187921,10 +187971,19 @@ class ConditionalErrorOracle:
         # rate limit, producing garbage binary-search extraction results.
         # Fix: reject calibration immediately when baseline is 429 (rate-limited) or 503
         # (service unavailable). The caller falls back to other extraction methods.
-        if self._baseline_status in (429, 503):
-            LOG.debug("[ErrorOracle] Baseline returned %d (rate-limit/unavailable) — "
-                      "target is too aggressively rate-limiting for a reliable error oracle; "
-                      "refusing calibration", self._baseline_status)
+        # BUG-CEO-CDN-BASELINE FIX (HIGH, all 5 DBMSes): CDN error codes 520-530 as
+        # baseline mean the origin is unreachable for even the uninjected original value.
+        # Any calibration on such a baseline produces body-size oracles measuring CDN
+        # error page content variation (different CDN error pages for different requests),
+        # not SQL error vs normal responses. The body-size fallback path at line ~188256
+        # fires when _t_st == baseline (525) and _f_st == baseline (525), accepting CDN
+        # page variation as a SQL oracle. Reject CDN baselines identically to rate-limit
+        # baselines — the target is unreachable; no SQL oracle can be calibrated.
+        _ceo_baseline_infra = {429, 503} | set(range(520, 531))
+        if self._baseline_status in _ceo_baseline_infra:
+            LOG.debug("[ErrorOracle] Baseline returned %d (rate-limit/CDN-error/unavailable) — "
+                      "target is unreachable or rate-limiting; refusing calibration",
+                      self._baseline_status)
             return False
 
         # BUG-CEO-CRDB-YG-ALIASES FIX (MEDIUM, CockroachDB, YugabyteDB, E/EH technique,
