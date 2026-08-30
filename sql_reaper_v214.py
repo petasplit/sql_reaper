@@ -111627,9 +111627,18 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     #       names (retained below) are DBMS-wire-protocol-specific.
     "MySQL": [
         # Wire-protocol: canonical MySQL syntax error — MySQL ALWAYS emits the full phrase
-        # including "check the manual that corresponds to your MySQL server version".
-        # This guards against WAF echo of partial SQL keywords without the MySQL suffix.
-        r"you have an error in your sql syntax; check the manual",
+        # "You have an error in your SQL syntax; check the manual that corresponds to your
+        # MySQL server version for the right syntax to use near '<token>' at line N".
+        # The pattern now requires "that corresponds to your mysql server version" so that
+        # WAF block pages which quote only the opening clause ("you have an error in your
+        # sql syntax; check the manual") without the MySQL-identifying continuation do NOT
+        # match. Real MySQL wire-protocol errors always include the full server-version phrase.
+        # BUG-SQLPAT-MYSQL-PARTIAL-ANCHOR FIX (HIGH): old pattern stopped at "check the manual"
+        # — WAF advisory pages that describe the blocked attack as "SQL error: You have an
+        # error in your sql syntax; check the manual" (truncated) would match and trigger
+        # E-technique false-positive detection. Requiring the MySQL-identifying continuation
+        # eliminates this class of false positives.
+        r"you have an error in your sql syntax; check the manual that corresponds to your mysql server version",
         r"mysql server version for the right syntax to use near",
         # Wire-protocol: MySQL-specific error phrasing (not ORM — ORM says "column count mismatch")
         # BUG-SQLPAT-COLCOUNT-ANCHOR FIX: The `.` in "doesn.t" matches any char; the row-number
@@ -111703,7 +111712,10 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     ],
     "MariaDB": [
         # Wire-protocol: same MySQL-format error messages (MariaDB uses MySQL parser)
-        r"you have an error in your sql syntax; check the manual",
+        # BUG-SQLPAT-MARIADB-PARTIAL-ANCHOR FIX (HIGH): same as MySQL — require the full
+        # MySQL/MariaDB error continuation including "that corresponds to your mysql server
+        # version" (MariaDB reuses MySQL's parser error message verbatim).
+        r"you have an error in your sql syntax; check the manual that corresponds to your mysql server version",
         # DBMS-identifying: MariaDB-specific version string in error output
         r"mariadb server version",
         # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
@@ -111804,11 +111816,21 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # in the exact MSSQL wire-protocol word order.
         # Fix: require the source-type word after "data type" AND the "to" connector —
         # using a character class limited to MSSQL scalar type names for the source type.
-        r"error converting data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time|binary|varbinary|uniqueidentifier|xml|image)\b",
-        r"unclosed quotation mark after the character string",
-        # Require the opening quote: "Incorrect syntax near 'X'."
-        # WAF pages echoing the phrase omit the quote (not reproducing wire-protocol format).
-        r"incorrect syntax near '",
+        # BUG-SQLPAT-MSSQL-ERRCONV-CASE FIX (HIGH, MSSQL E/EH): MSSQL ALWAYS emits "Error
+        # converting data type X to Y" with capital E. WAF advisory pages use lowercase:
+        # "error converting data type varchar to int — SQL injection blocked". Pin to
+        # uppercase E via (?-i:Error) to exclude lowercase WAF advisory matches.
+        r"(?-i:Error) converting data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time|binary|varbinary|uniqueidentifier|xml|image)\b",
+        # BUG-SQLPAT-MSSQL-UNCLOSED-CASE FIX (HIGH, MSSQL E/EH): MSSQL ALWAYS emits
+        # "Unclosed quotation mark after the character string" with capital U.
+        # WAF advisory pages use lowercase: "unclosed quotation mark attack detected".
+        # Pin to uppercase U via (?-i:Unclosed) to exclude WAF advisory matches.
+        r"(?-i:Unclosed) quotation mark after the character string",
+        # BUG-SQLPAT-MSSQL-INCSYN-CASE FIX (HIGH, MSSQL E/EH): MSSQL ALWAYS emits
+        # "Incorrect syntax near 'X'" with capital I. WAF advisory pages that describe
+        # the blocked injection use lowercase: "incorrect syntax near 'UNION' — blocked".
+        # Pin to uppercase I via (?-i:Incorrect) to require wire-protocol capitalization.
+        r"(?-i:Incorrect) syntax near '",
         # Wire-protocol: SQL Server error number + severity level (Msg N, Level N, State N)
         # BUG-SQLPAT-MSG-CASE FIX (MEDIUM, MSSQL E/EH techniques): MSSQL ALWAYS emits
         # "Msg NNNNN, Level NN" with capital M and L. With re.I active, the unguarded pattern
@@ -111823,7 +111845,10 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # after "converting": "Conversion failed when converting the nvarchar value 'X' to data type int."
         # Requiring "(?:the |)(?:nvarchar|varchar|char|nchar|datetime|date|time|bigint|smallint|tinyint|"
         # "decimal|numeric|float|real|money|bit)" pins the pattern to MSSQL type names.
-        r"conversion failed when converting (?:the |)(?:nvarchar|varchar|char|nchar|datetime|date|time|bigint|smallint|tinyint|decimal|numeric|float|real|money|bit)",
+        # BUG-SQLPAT-MSSQL-CONVFAIL-CASE FIX (MEDIUM, MSSQL E/EH): MSSQL ALWAYS emits
+        # "Conversion failed when converting..." with capital C. WAF advisory pages use
+        # lowercase. Pin to uppercase C via (?-i:Conversion).
+        r"(?-i:Conversion) failed when converting (?:the |)(?:nvarchar|varchar|char|nchar|datetime|date|time|bigint|smallint|tinyint|decimal|numeric|float|real|money|bit)",
         # Wire-protocol: MSSQL data-truncation error — MSSQL ALWAYS emits with capital S.
         # BUG-SQLPAT-MSSQL-TRUNCATE-CASE FIX (MEDIUM, MSSQL E/EH techniques):
         # The bare phrase "string or binary data would be truncated" can appear in WAF block
@@ -111857,7 +111882,9 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # anchors the match to MSSQL wire-protocol output exclusively.
         # BUG-SQLPAT-MSSQL-SYNTAXCONV-BOUND FIX: bound `.+` to 100 chars each for the
         # source value and type name to prevent greedy span across long WAF page fragments.
-        r"syntax error converting .{1,100} to a .{1,80} data type",
+        # BUG-SQLPAT-MSSQL-SYNTAXCONV-CASE FIX (MEDIUM, MSSQL E/EH): MSSQL ALWAYS emits
+        # "Syntax error converting..." with capital S. Pin via (?-i:Syntax).
+        r"(?-i:Syntax) error converting .{1,100} to a .{1,80} data type",
         # DBMS-identifying: ODBC driver string specific to SQL Server (both driver and protocol named)
         r"odbc sql server driver|odbc driver.*sql server",
         # Wire-protocol: MSSQL arithmetic overflow with specific type names.
@@ -111871,14 +111898,18 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # generic application error handlers. Re-introduce with the type-anchored format.
         # BUG-SQLPAT-MSSQL-ARITH-BOUND FIX: `.+` before "to data type" had no upper bound.
         # Bound to 80 chars to limit span (source type expression in MSSQL errors is short).
-        r"arithmetic overflow error converting .{1,80} to data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time)\b",
+        # BUG-SQLPAT-MSSQL-ARITH-CASE FIX (MEDIUM, MSSQL E/EH): MSSQL ALWAYS emits
+        # "Arithmetic overflow error converting..." with capital A. Pin via (?-i:Arithmetic).
+        r"(?-i:Arithmetic) overflow error converting .{1,80} to data type (?:n?varchar|n?char|n?text|int|bigint|smallint|tinyint|decimal|numeric|float|real|money|smallmoney|bit|datetime(?:2|offset)?|date|time)\b",
         # Wire-protocol: MSSQL cannot insert NULL — required column constraint violation.
         # MSSQL format: "Cannot insert the value NULL into column 'X', table 'Y.dbo.Z';
         # column does not allow nulls." Requiring "column does not allow nulls" pins to
         # MSSQL wire-protocol — no WAF page or ORM error reproduces the trailing constraint phrase.
         # BUG-SQLPAT-MSSQL-NULLCOL-BOUND FIX: `.+` between "column" and the semicolon had no
         # upper bound. MSSQL column references (with table qualifier) are at most ~256 chars.
-        r"cannot insert the value null into column .{1,256}; column does not allow nulls",
+        # BUG-SQLPAT-MSSQL-NULLCOL-CASE FIX (MEDIUM, MSSQL E/EH): MSSQL ALWAYS emits
+        # "Cannot insert the value NULL..." with capital C. Pin via (?-i:Cannot).
+        r"(?-i:Cannot) insert the value null into column .{1,256}; column does not allow nulls",
         # REMOVED: microsoft sql server — too broad; WAF block pages name the target DBMS
         # REMOVED: warning: .*mssql_ — PHP driver warning; WAF pages echo PHP function names
         # REMOVED: mssql_query|sqlsrv_query|mssql_num_rows — PHP function names, not wire-protocol
@@ -129395,29 +129426,31 @@ class TechniqueCascadeEngine:
                             # achieved on probe 1, burning 4 unnecessary requests per detection.
                             if _e_confirmed >= 2:
                                 break
-                        # Relax threshold when: initial was 429+error AND no non-429 probe
-                        # returned real signal (all confirmations were rate-limited neutral).
-                        # _e_non429_total == 0 ensures we never relax when we had real
-                        # non-429 responses showing no error (those are genuine non-confirms).
-                        # BUG-E-429NEUTRAL-MIN2 FIX (HIGH, all E techniques, all DBMSes):
-                        # Previous guard required _e_429_neutral >= 1: a single neutral
-                        # confirmation probe was enough to trigger threshold relaxation.
-                        # Attack scenario: initial 429 body echoes SQL keyword (rare but
-                        # real for custom rate-limiters that log the blocked payload in
-                        # the body) → _e_confirmed=1; ONE follow-up probe also 429-neutral
-                        # → _e_all_429_neutral=True → detection fires with 1 real signal.
-                        # Fix: require _e_429_neutral >= 2 so that at least TWO confirmation
-                        # probes must all return neutral before the threshold relaxes.
-                        # This ensures the initial signal is not the only data point —
-                        # the target must consistently rate-limit without real non-429 probes
-                        # showing pattern-absence before we accept the 429-relaxed detection.
-                        # The clean probe's injection-specificity check is still required
-                        # after this gate, providing an additional false-positive guard.
-                        _e_all_429_neutral = (_e_initial_429 and _e_non429_total == 0
-                                              and _e_429_neutral >= 2 and _e_confirmed == 1)
-                        _e_threshold_met = (_e_confirmed >= 2) or (_e_all_429_neutral and _e_confirmed >= 1)
-                        if _e_all_429_neutral:
-                            print(f"[*]     E multi-probe: {_e_confirmed}/2 needed  ({_e_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                        # BUG-E-429NEUTRAL-DISABLE FIX (CRITICAL, all E/EH techniques, all DBMSes):
+                        # The _e_all_429_neutral relaxed threshold was designed to handle legitimate
+                        # injections where a rate-limited target leaks SQL errors inside 429 bodies.
+                        # However it creates a false-positive path:
+                        #   1. WAF returns 429 + SQL error echoed in body (initial match, _e_confirmed=1)
+                        #   2. All 5 confirmation probes also rate-limited → _e_429_neutral=5, _e_confirmed=1
+                        #   3. Clean probe uses non-injection value → NOT rate-limited by WAF → 200 no-error
+                        #   4. Relaxed threshold fires: 1/2 needed with 429-neutral probes → detection
+                        #      confirmed despite no independent non-WAF confirmation of the error
+                        # This is exactly the scenario observed in production logs (log.txt, log1.txt):
+                        #   "version: timeout", "database: timeout" — extraction fails because no
+                        #   real SQL ever executed. The match was WAF echo in the 429 body.
+                        # Root cause: the relaxed threshold cannot distinguish a WAF rate-limiter
+                        # that echoes SQL errors in its 429 body (false positive) from a server
+                        # that genuinely rate-limits non-SQL requests but allows SQL errors to
+                        # leak in the 429 response (genuine injection). The clean probe passes
+                        # in both cases (clean probe = original value, not rate-limited by WAF
+                        # because it does not contain SQL keywords).
+                        # Fix: disable the relaxed threshold entirely. E-technique detection
+                        # ALWAYS requires 2 independent non-WAF-blocked confirmation probes.
+                        # Real injections on rate-limited targets can be detected by B/T techniques
+                        # which have separate rate-limit handling. E detection without 2 independent
+                        # SQL-error confirmations is too ambiguous to accept as a true positive.
+                        _e_all_429_neutral = False  # disabled: relaxed threshold produces false positives
+                        _e_threshold_met = _e_confirmed >= 2
                         if _e_threshold_met:
                             # Clean probe: non-error payload must NOT show pattern
                             _e_clean_p = self._make_false_payload(payload)
