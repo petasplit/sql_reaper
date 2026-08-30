@@ -189041,6 +189041,12 @@ class ConditionalErrorOracle:
                                 continue  # try next template; do not accept this oracle
                             self._working_template = tpl
                             self._working_prefix   = _prefix  # BUG-CEO-1 FIX: persist context
+                            # BUG-CEO-STATUS-STORE FIX: standard calibration path never stored
+                            # _true_oracle_status/_false_oracle_status (they stayed 0), so
+                            # evaluate() had no calibrated reference to filter unexpected
+                            # infrastructure status codes in the standard (non-body-size) path.
+                            self._true_oracle_status  = _t_st
+                            self._false_oracle_status = _f_st
                             print("[+] [ErrorOracle] Calibrated: status "
                                   f"{_fp_t.status_code} vs {_fp_f.status_code} "
                                   f"(ctx={_prefix!r} template: {tpl[:40]}...)", flush=True)
@@ -189237,6 +189243,17 @@ class ConditionalErrorOracle:
                         and _ceo_sc < 500
                         and _ceo_sc != self._baseline_status):
                     return None  # WAF-blocked probe -- indeterminate
+                # BUG-CEO-503-INFRA FIX: 503 is listed in _ceo_waf_codes above but the
+                # `_ceo_sc < 500` guard excludes it (503 >= 500), so 503 falls through
+                # to `return _ceo_sc >= 500` → returns True, treating a "Service
+                # Unavailable" rate-limit or overload response as a genuine SQL error
+                # signal.  Same issue for 502 (Bad Gateway) and 504 (Gateway Timeout).
+                # These are transient infrastructure codes, not SQL oracle signals.
+                # When they differ from the baseline, return None so the binary search
+                # step is skipped rather than silently forcing True → garbage extraction.
+                _ceo_infra_5xx = {502, 503, 504}
+                if _ceo_sc in _ceo_infra_5xx and _ceo_sc != self._baseline_status:
+                    return None  # Infrastructure/overload code — not a SQL error signal
                 # BUG-CEO-EVAL-CDN-ERROR FIX (HIGH, all 5 DBMSes, method 6d):
                 # CDN infrastructure error codes (520-530: Cloudflare Unknown Error,
                 # Web Server Down, Connection Timed Out, SSL Handshake Failed, etc.)
@@ -189257,6 +189274,22 @@ class ConditionalErrorOracle:
                 # silently forcing True → garbage extraction.
                 if 520 <= _ceo_sc <= 530:
                     return None  # CDN infrastructure error — indeterminate, do not treat as True
+                # BUG-CEO-STATUS-FILTER FIX: When calibrated oracle statuses are known
+                # (stored by both standard and body-size calibration paths), a probe
+                # returning a status code that is neither the calibrated true status, the
+                # calibrated false status, nor the baseline is an unexpected infrastructure
+                # response (load balancer 500, proxy timeout, etc.).  Treating it as a
+                # boolean signal produces random True/False noise in the binary search.
+                # Return None so callers abort the current step rather than propagating
+                # garbage.  Guard: only activate when _true_oracle_status is non-zero AND
+                # it differs from _false_oracle_status (i.e., we have a real status-delta
+                # oracle; skip for body-size oracles where both statuses are the same).
+                if (self._true_oracle_status != 0
+                        and self._true_oracle_status != self._false_oracle_status
+                        and _ceo_sc != self._true_oracle_status
+                        and _ceo_sc != self._false_oracle_status
+                        and _ceo_sc != self._baseline_status):
+                    return None  # unexpected status — infrastructure noise, not SQL oracle signal
                 return _ceo_sc >= 500 or _ceo_sc != self._baseline_status
         except Exception:
             pass
