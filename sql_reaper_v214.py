@@ -112100,9 +112100,18 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # string → regex sqlite3\\.operationalerror → matches "sqlite3" + literal
         # backslash + any-char + "operationalerror".  Never matches real error text
         # "sqlite3.OperationalError".  Fix: single backslash so \. means literal period.
-        r"sqlite3\.operationalerror",
-        r"sqlite3\.databaseerror",
-        r"sqlite3\.interfaceerror",
+        # BUG-SQLPAT-SQLITE-CASE FIX (MEDIUM, SQLite E/EH techniques): Python's sqlite3
+        # exception classes are ALWAYS capitalized as per the DB-API 2.0 spec:
+        # sqlite3.OperationalError, sqlite3.DatabaseError, sqlite3.InterfaceError.
+        # With re.I active, the unguarded patterns r"sqlite3\.operationalerror" etc.
+        # also match all-lowercase variants ("sqlite3.operationalerror") which can appear
+        # in application log strings, WAF advisory bodies echoing the class name in
+        # lowercase, and Python variable names that shadow the exception class.
+        # Pin to exact class-name capitalization via (?-i:...) so only wire-protocol-
+        # origin Python stack traces (which always show the exact class name) match.
+        r"(?-i:sqlite3)\.(?-i:OperationalError)",
+        r"(?-i:sqlite3)\.(?-i:DatabaseError)",
+        r"(?-i:sqlite3)\.(?-i:InterfaceError)",
         # Wire-protocol: C-level SQLite error constant (appears in C/Go/Rust bindings).
         # BUG-SQLPAT-SQLITE-CASE FIX: SQLITE_ERROR is always uppercase in C/Go/Rust SQLite
         # bindings wire output.  Without (?-i:SQLITE_ERROR), the re.I flag active in detect_error
@@ -112122,8 +112131,12 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # These class names appear in Python stack traces when SQLite errors surface through
         # the Python DB-API 2.0 interface. The period-separated class path (sqlite3.X) is
         # DBMS-specific — WAF block pages use plain English and never reproduce Python class paths.
-        r"sqlite3\.programmingError",
-        r"sqlite3\.dataError",
+        # BUG-SQLPAT-SQLITE-SECONDARY-CASE FIX (MEDIUM, SQLite E/EH techniques): same rationale
+        # as the OperationalError/DatabaseError/InterfaceError fix above — pin to exact Python
+        # DB-API 2.0 class-name capitalization (ProgrammingError, DataError) so lowercase
+        # variants in WAF advisory text or application log strings do not match.
+        r"(?-i:sqlite3)\.(?-i:ProgrammingError)",
+        r"(?-i:sqlite3)\.(?-i:DataError)",
         # Wire-protocol: SQLite C-level disk/IO error constants used in Rust/Go/C bindings.
         # These constants (SQLITE_IOERR, SQLITE_CORRUPT, SQLITE_MISUSE) appear ONLY in
         # SQLite wire error output from native language bindings, not in WAF block pages.
@@ -112279,7 +112292,16 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # text and generic "pdo error" application log lines.
         # Real format: "PDOException: SQLSTATE[HY000]: General error: 1064 You have an error..."
         r"(?-i:PDO)(?-i:Exception)",
-        r"(?-i:SQL)(?-i:Exception)",  # DBMS-identifying: Java java.sql.SQLException — exact class-name case required
+        # BUG-SQLPAT-GENERIC-SQLEXC-TIGHTEN FIX (MEDIUM, E/EH technique, Generic fallback):
+        # The bare r"(?-i:SQL)(?-i:Exception)" matches "SQLException" anywhere — including WAF
+        # advisory bodies that say "SQLException blocked" (plain English, no package path).
+        # The JDBC pattern above (r"(?:java\.sql\.|...)...") already covers every real JDBC
+        # exception stack trace via the mandatory package-path prefix. A standalone "SQLException"
+        # in a body that lacks the Java package dot-path is indistinguishable from WAF advisory
+        # text. Remove the standalone pattern; any genuine SQLException in a stack trace is
+        # captured by the JDBC dot-path pattern at the line above.
+        # REMOVED: r"(?-i:SQL)(?-i:Exception)" — covered by JDBC dot-path pattern; standalone
+        #   "SQLException" also appears in WAF advisory text ("SQLException blocked") producing FPs
         # FIX-SQLPAT-GENERIC-ODBC: r"odbc.*error" was too broad — matches WAF block pages
         # that reference ODBC in their advisory text ("ODBC SQL injection error detected")
         # and application log lines that say "ODBC connection error" for any DB failure.
@@ -129775,7 +129797,11 @@ class TechniqueCascadeEngine:
                                         _ex_mp_hard_sc = int(str(_ex_mp_sc_raw or 0)[:3]) if _ex_mp_sc_raw is not None else 0
                                     except Exception:
                                         _ex_mp_hard_sc = 0
-                                    if _get_safe_status_code(_ex_fp) == 429:
+                                    if _ex_mp_hard_sc == 429:
+                                        # BUG-EX-MULTIPROBE-429-HARDSC FIX: Use string-prefix-parsed
+                                        # _ex_mp_hard_sc (immune to non-int status_code types) instead of
+                                        # _get_safe_status_code which returns 0 for non-int types, silently
+                                        # missing 429 rate-limit responses with unusual status_code objects.
                                         _ex_429_neutral += 1
                                     elif _ex_mp_hard_sc in {400, 403, 406, 412}:
                                         # Hard WAF block: canonical WAF codes, immune to type failures.
@@ -129831,21 +129857,44 @@ class TechniqueCascadeEngine:
                                         # BUG-EX-CLEAN-FAIL-CLOSED FIX: Timeout/failure on clean
                                         # probe — ambiguous result, fail-closed to prevent FP.
                                         _ex_clean_ok = False
-                                    elif _get_safe_status_code(_ex_fc) == 429:
-                                        # BUG-EX-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
-                                        # is ambiguous — cannot verify injection-specificity. Fail-closed.
-                                        _ex_clean_ok = False
-                                    elif 520 <= _get_safe_status_code(_ex_fc) <= 530:
-                                        # BUG-EX-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, cross-DBMS E path):
-                                        # CDN error on the clean probe is ambiguous — the false condition
-                                        # never reached the DB. Cannot verify injection-specificity.
-                                        # Fail-closed to prevent false positive from CDN noise.
-                                        _ex_clean_ok = False
-                                    elif WAFBlockDiscriminator.single_waf_blocked(_ex_fc):
-                                        # BUG-EX-CLEAN-WAF FIX: WAF-blocked clean probe — ambiguous.
-                                        # Cannot determine if false-condition causes errors. Reject.
-                                        _ex_clean_ok = False
                                     else:
+                                        # BUG-EX-CLEAN-HARDSC-UNIFIED FIX (HIGH, cross-DBMS E path):
+                                        # Compute string-prefix-parsed hard status code once for all
+                                        # status-based checks below — immune to non-int status_code types
+                                        # (e.g. "525 SSL Error", non-int objects) where _get_safe_status_code
+                                        # returns 0 and silently misses CDN/WAF range checks.
+                                        try:
+                                            _ex_clean_sc_raw = getattr(_ex_fc, 'status_code', None)
+                                            _ex_clean_hard_sc = int(str(_ex_clean_sc_raw or 0)[:3]) if _ex_clean_sc_raw is not None else 0
+                                        except Exception:
+                                            _ex_clean_hard_sc = 0
+                                        if _ex_clean_hard_sc == 429:
+                                            # BUG-EX-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
+                                            # is ambiguous — cannot verify injection-specificity. Fail-closed.
+                                            _ex_clean_ok = False
+                                        elif _ex_clean_hard_sc in {400, 403, 406, 412}:
+                                            # BUG-EX-CLEAN-HARDSC-400 FIX (HIGH, cross-DBMS E path):
+                                            # Hard WAF block status code on clean probe — type-conversion-immune
+                                            # guard. Mirror the primary E path guard at line 129660-129667.
+                                            # WAF block pages do not reproduce DBMS-specific SQL error patterns
+                                            # in a DBMS-attributable way. Fail-closed: a WAF-blocked clean
+                                            # probe cannot confirm injection-specificity.
+                                            _ex_clean_ok = False
+                                        elif 520 <= _ex_clean_hard_sc <= 530:
+                                            # BUG-EX-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, cross-DBMS E path):
+                                            # CDN error on the clean probe is ambiguous — the false condition
+                                            # never reached the DB. Cannot verify injection-specificity.
+                                            # Fail-closed to prevent false positive from CDN noise.
+                                            # BUG-EX-CLEAN-CDN-HARDSC FIX: Use _ex_clean_hard_sc (string-prefix
+                                            # parsed, immune to type-conversion failure) instead of
+                                            # _get_safe_status_code(_ex_fc) which returned 0 for non-int
+                                            # status_code types, silently skipping the CDN fail-closed guard.
+                                            _ex_clean_ok = False
+                                        elif WAFBlockDiscriminator.single_waf_blocked(_ex_fc):
+                                            # BUG-EX-CLEAN-WAF FIX: WAF-blocked clean probe — ambiguous.
+                                            # Cannot determine if false-condition causes errors. Reject.
+                                            _ex_clean_ok = False
+                                    if _ex_clean_ok and _ex_fc is not None:
                                         self._total_reqs += 1
                                         # BUG-FIX-3: Safe decode operation
                                         _ex_fc_body = ""
@@ -129918,8 +129967,20 @@ class TechniqueCascadeEngine:
                                 # BUG-ML-WAF-CDN-FIX: skip WAF-blocked/CDN-error confirmation probes
                                 if not _ml_cfp or not _ml_cfp.body:
                                     continue
-                                _ml_cfp_sc = _get_safe_status_code(_ml_cfp)
-                                if 520 <= _ml_cfp_sc <= 530:
+                                # BUG-ML-CONFIRM-HARDSC FIX (HIGH, E ML fallback, all DBMSes):
+                                # Use string-prefix-parsed hard status code for 429/400/403/406/412/CDN
+                                # checks — immune to non-int status_code types where _get_safe_status_code
+                                # returns 0, silently missing WAF/CDN block codes on confirmation probes.
+                                try:
+                                    _ml_cfp_sc_raw = getattr(_ml_cfp, 'status_code', None)
+                                    _ml_cfp_hard_sc = int(str(_ml_cfp_sc_raw or 0)[:3]) if _ml_cfp_sc_raw is not None else 0
+                                except Exception:
+                                    _ml_cfp_hard_sc = 0
+                                if _ml_cfp_hard_sc == 429:
+                                    continue  # rate-limited — indeterminate
+                                if _ml_cfp_hard_sc in {400, 403, 406, 412}:
+                                    continue  # hard WAF block — indeterminate
+                                if 520 <= _ml_cfp_hard_sc <= 530:
                                     continue  # CDN infrastructure error — indeterminate
                                 if WAFBlockDiscriminator.single_waf_blocked(_ml_cfp):
                                     continue  # WAF block page — indeterminate
@@ -129949,25 +130010,43 @@ class TechniqueCascadeEngine:
                                     if _ml_cfp_clean is None:
                                         _ml_clean_ok = False  # timeout — fail-closed
                                         LOG.debug("[ErrorML] FP suppressed: clean probe timeout")
-                                    elif _get_safe_status_code(_ml_cfp_clean) == 429:
-                                        # BUG-ML-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
-                                        # is ambiguous — cannot verify injection-specificity. Fail-closed.
-                                        _ml_clean_ok = False
-                                        LOG.debug("[ErrorML] FP suppressed: clean probe rate-limited (429)")
-                                    elif 520 <= _get_safe_status_code(_ml_cfp_clean) <= 530:
-                                        # BUG-ML-CLEAN-CDN-FAIL-CLOSED FIX: CDN error on clean probe.
-                                        # False condition never reached DB — cannot verify injection-specificity.
-                                        _ml_clean_ok = False
-                                        LOG.debug(f"[ErrorML] FP suppressed: clean probe CDN error ({_get_safe_status_code(_ml_cfp_clean)}) — ambiguous")
-                                    elif WAFBlockDiscriminator.single_waf_blocked(_ml_cfp_clean):
-                                        _ml_clean_ok = False  # WAF block — ambiguous, fail-closed
-                                        LOG.debug("[ErrorML] FP suppressed: clean probe WAF-blocked")
-                                    elif _ml_cfp_clean.body:
-                                        _ml_clean_text = _safe_decode_body(_ml_cfp_clean, encoding="utf-8", errors="replace", func_name="ml_clean").lower()
-                                        _ml_clean_dbms, _ml_clean_conf = ErrorMessageClassifier.classify(_ml_clean_text)
-                                        if _ml_clean_conf >= 0.3 and _ml_clean_dbms == _ml_dbms:
+                                    else:
+                                        # BUG-ML-CLEAN-HARDSC FIX (HIGH, E ML fallback, all DBMSes):
+                                        # Compute string-prefix-parsed hard status code once for all
+                                        # status-based checks — immune to non-int status_code types where
+                                        # _get_safe_status_code returns 0, silently missing 429/400/403/
+                                        # 406/412/CDN block codes on ML clean probe responses.
+                                        try:
+                                            _ml_clean_sc_raw = getattr(_ml_cfp_clean, 'status_code', None)
+                                            _ml_clean_hard_sc = int(str(_ml_clean_sc_raw or 0)[:3]) if _ml_clean_sc_raw is not None else 0
+                                        except Exception:
+                                            _ml_clean_hard_sc = 0
+                                        if _ml_clean_hard_sc == 429:
+                                            # BUG-ML-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
+                                            # is ambiguous — cannot verify injection-specificity. Fail-closed.
                                             _ml_clean_ok = False
-                                            LOG.debug(f"[ErrorML] FP suppressed: clean probe also classifies as {_ml_clean_dbms} (conf={_ml_clean_conf:.2f})")
+                                            LOG.debug("[ErrorML] FP suppressed: clean probe rate-limited (429)")
+                                        elif _ml_clean_hard_sc in {400, 403, 406, 412}:
+                                            # BUG-ML-CLEAN-HARDSC-400 FIX (HIGH, E ML fallback path):
+                                            # Hard WAF block on ML clean probe — cannot verify injection-
+                                            # specificity when clean probe is blocked at WAF layer. Fail-closed.
+                                            _ml_clean_ok = False
+                                            LOG.debug(f"[ErrorML] FP suppressed: clean probe WAF-hard-blocked ({_ml_clean_hard_sc})")
+                                        elif 520 <= _ml_clean_hard_sc <= 530:
+                                            # BUG-ML-CLEAN-CDN-FAIL-CLOSED FIX: CDN error on clean probe.
+                                            # False condition never reached DB — cannot verify injection-specificity.
+                                            _ml_clean_ok = False
+                                            LOG.debug(f"[ErrorML] FP suppressed: clean probe CDN error ({_ml_clean_hard_sc}) — ambiguous")
+                                        elif WAFBlockDiscriminator.single_waf_blocked(_ml_cfp_clean):
+                                            _ml_clean_ok = False  # WAF block — ambiguous, fail-closed
+                                            LOG.debug("[ErrorML] FP suppressed: clean probe WAF-blocked")
+                                        elif _ml_cfp_clean.body:
+                                            # Response passed all guards — classify body with ML
+                                            _ml_clean_text = _safe_decode_body(_ml_cfp_clean, encoding="utf-8", errors="replace", func_name="ml_clean").lower()
+                                            _ml_clean_dbms, _ml_clean_conf = ErrorMessageClassifier.classify(_ml_clean_text)
+                                            if _ml_clean_conf >= 0.3 and _ml_clean_dbms == _ml_dbms:
+                                                _ml_clean_ok = False
+                                                LOG.debug(f"[ErrorML] FP suppressed: clean probe also classifies as {_ml_clean_dbms} (conf={_ml_clean_conf:.2f})")
                             except Exception:
                                 pass
                         if _ml_confirm_count >= 2 and _ml_clean_ok:
