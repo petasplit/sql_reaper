@@ -42189,6 +42189,23 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                     # BUG #7 FIX: Validate response BEFORE calling is_waf_block
                     if not _validate_response(_ec_fp, func_name="detect_error_cross_cat", allow_empty=True):
                         continue
+                    # BUG-XC-HARDSC-GUARD FIX (HIGH, cross-category E supplement):
+                    # is_waf_block() only classifies a response as WAF-blocked when the body
+                    # contains an explicit WAF fingerprint pattern. A WAF returning HTTP 403
+                    # with a minimal body ("Forbidden", empty, or a plain block page with no
+                    # WAF-specific text) passes is_waf_block()=False and proceeds to SQL error
+                    # pattern matching. If the WAF echoes any SQL function name from the injected
+                    # payload inside its block body ("EXTRACTVALUE prohibited", etc.) the SQL
+                    # pattern could match — false-positive detection. The primary DBMS loop (above,
+                    # line ~41979) already guards these via a hard status-code check that blocks
+                    # 400/403/406/412 and 520-530 regardless of body content. Mirror that guard here.
+                    try:
+                        _ec_sc_raw = getattr(_ec_fp, 'status_code', None)
+                        _ec_hard_sc = int(str(_ec_sc_raw or 0)[:3]) if _ec_sc_raw is not None else 0
+                    except Exception:
+                        _ec_hard_sc = 0
+                    if _ec_hard_sc in {400, 403, 406, 412} or (520 <= _ec_hard_sc <= 530):
+                        continue
                     if WAFBlockDiscriminator.is_waf_block(_ec_fp):
                         continue
                     _ec_body = _safe_decode_body(_ec_fp, encoding="utf-8", errors="replace", func_name="extraction")
@@ -42326,6 +42343,21 @@ async def detect_error(engine,config,method,url,data,data_fmt,
             _ec_fp = await _send_injected(engine, method, url, data, data_fmt,
                                           param, original + str(p), tamper_chain)
             # FIX BUG #3: Validate _ec_fp before accessing .body
+            # BUG-ERRCAT-ORACLE-HARDSC FIX (HIGH, _error_cat_oracle generic cross-cat path):
+            # is_waf_block() only classifies a response as WAF-blocked when the body contains an
+            # explicit WAF fingerprint pattern. A bare 403 "Forbidden" (no WAF body fingerprint)
+            # passes is_waf_block()=False and enters the _generic_err_pats matching below.
+            # WAF responses echoing SQL function names or error keywords inside a sparse body
+            # (rate-limit 429 + sql echoed advisory, or bare 403 body with "sql error detected")
+            # would trigger the generic pattern list. Add the same hard status-code guard used
+            # in the primary detect_error loop (41979) and the cross-category supplement above.
+            try:
+                _eo_sc_raw = getattr(_ec_fp, 'status_code', None)
+                _eo_hard_sc = int(str(_eo_sc_raw or 0)[:3]) if _eo_sc_raw is not None else 0
+            except Exception:
+                _eo_hard_sc = 0
+            if (_eo_hard_sc in {400, 403, 406, 412} or (520 <= _eo_hard_sc <= 530)):
+                return None
             if _validate_response(_ec_fp, "detect_error._error_cat_oracle", allow_empty=False) and not WAFBlockDiscriminator.is_waf_block(_ec_fp):
                 _ec_b = _safe_decode_body(_ec_fp, encoding="utf-8", errors="replace", func_name="detect_error._error_cat_oracle").lower()
                 _generic_err_pats = [
@@ -42392,6 +42424,31 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                 return None  # not reproduced — transient error
                         except Exception:
                             return None  # confirm failed — fail safe, no FP
+                        # BUG-ERRCAT-ORACLE-NO-CLEAN-PROBE FIX (HIGH, _error_cat_oracle generic path):
+                        # After 2/2 reproducibility confirmation the oracle still had no clean probe.
+                        # A server that returns SQL-like error text for ANY malformed parameter
+                        # (not just injection-specific SQL) would confirm for every payload through
+                        # this oracle — 2/2 reproducibility is satisfied for any consistent error.
+                        # Fix: send the original clean value (no payload) and verify the matched error
+                        # string DISAPPEARS. If it persists, the error is not injection-specific → reject.
+                        # Fail-closed on any ambiguity (exception, WAF block, CDN error on clean probe).
+                        try:
+                            _ec_cat_clean_fp = await _send_injected(engine, method, url, data, data_fmt,
+                                                                      param, original, tamper_chain)
+                            if not _validate_response(_ec_cat_clean_fp, "ec_oracle_clean", allow_empty=True):
+                                return None  # ambiguous clean probe — fail-closed
+                            _ec_cat_clean_sc = _get_safe_status_code(_ec_cat_clean_fp)
+                            if (_ec_cat_clean_sc == 429 or
+                                    _ec_cat_clean_sc in {400, 403, 406, 412} or
+                                    (520 <= _ec_cat_clean_sc <= 530) or
+                                    WAFBlockDiscriminator.single_waf_blocked(_ec_cat_clean_fp)):
+                                return None  # clean probe blocked/rate-limited — ambiguous
+                            _ec_cat_clean_b = _safe_decode_body(_ec_cat_clean_fp, encoding="utf-8",
+                                errors="replace", func_name="ec_oracle_clean").lower()
+                            if _ec_oracle_match in _ec_cat_clean_b:
+                                return None  # error present without injection — page content FP
+                        except Exception:
+                            return None  # clean probe failed — fail-closed, no FP
                         # BUG-7-A FIX: set exact_sent_payload
                     _e_cc_exact = None
                     try:
@@ -42401,7 +42458,7 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                         pass
                     return DetectionResult(param=param, technique='E', payload=str(p),
                                            dbms='Generic', confidence=1.0,
-                                           notes='cross_cat_error_generic confirmed=2/2',
+                                           notes='cross_cat_error_generic confirmed=2/2+clean_ok',
                                            exact_sent_payload=_e_cc_exact)
         except Exception:
             pass
