@@ -111737,7 +111737,17 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
     # TiDB also exposes its own version string "TiDB" in some error messages.
     "TiDB": [
         # Wire-protocol: same MySQL-format error messages (TiDB uses MySQL parser)
-        r"you have an error in your sql syntax; check the manual",
+        # BUG-SQLPAT-TIDB-PARTIAL-ANCHOR FIX (HIGH, TiDB E/EH techniques):
+        # The old pattern stopped at "check the manual" — WAF advisory pages that quote
+        # the opening clause ("you have an error in your sql syntax; check the manual")
+        # without the DBMS-identifying continuation triggered TiDB E-technique false-positive
+        # detections. TiDB emits "check the manual that corresponds to your TiDB version"
+        # while MySQL/MariaDB emit "check the manual that corresponds to your MySQL server
+        # version". The alternation (?:mysql server|tidb) covers both wire-protocol formats
+        # (TiDB's fork uses "TiDB version"; some TiDB builds using the upstream MySQL parser
+        # may emit "mysql server version" instead). Requiring the DBMS-identifying
+        # continuation eliminates WAF page truncations, same as the MySQL/MariaDB fix.
+        r"you have an error in your sql syntax; check the manual that corresponds to your (?:mysql server|tidb) version",
         # Wire-protocol: EXTRACTVALUE/UPDATEXML error (same format as MySQL).
         # BUG-SQLPAT-XPATH-TILDE FIX: require tilde after quote (see MySQL entry above).
         r"xpath syntax error:\s*'~",
@@ -129646,10 +129656,14 @@ class TechniqueCascadeEngine:
                                     elif _ex_mp_hard_sc in {400, 403, 406, 412}:
                                         # Hard WAF block: canonical WAF codes, immune to type failures.
                                         _ex_429_neutral += 1
-                                    elif 520 <= _get_safe_status_code(_ex_fp) <= 530:
+                                    elif 520 <= _ex_mp_hard_sc <= 530:
                                         # BUG-EX-MULTIPROBE-CDN FIX: CDN error codes (520-530) indicate
                                         # infrastructure failure — payload never reached the database.
                                         # Treat as neutral (same as 429): cannot confirm or deny SQL injection.
+                                        # BUG-EX-MULTIPROBE-CDN-HARDSC FIX: Use _ex_mp_hard_sc (string-prefix
+                                        # parsed, immune to type-conversion failure) instead of
+                                        # _get_safe_status_code(_ex_fp) which returns 0 for non-int status_code
+                                        # types, silently missing the CDN neutral classification.
                                         _ex_429_neutral += 1
                                     elif WAFBlockDiscriminator.single_waf_blocked(_ex_fp):
                                         # BUG-EX-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe (non-429).
@@ -129666,11 +129680,15 @@ class TechniqueCascadeEngine:
                                 # BUG-EX-EARLY-EXIT FIX: stop as soon as 2 confirmations
                                 if _ex_confirmed >= 2:
                                     break
-                            _ex_all_429_neutral = (_ex_initial_429 and _ex_non429_total == 0
-                                                   and _ex_429_neutral >= 1 and _ex_confirmed == 1)
-                            _ex_threshold_met = (_ex_confirmed >= 2) or (_ex_all_429_neutral and _ex_confirmed >= 1)
-                            if _ex_all_429_neutral:
-                                print(f"[*]     E(xdbms) multi-probe: {_ex_confirmed}/2 needed  ({_ex_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                            # BUG-EX-429NEUTRAL-DISABLE FIX (CRITICAL, EX cross-DBMS E technique, all DBMSes):
+                            # Mirror BUG-E-429NEUTRAL-DISABLE FIX and BUG-EH-429NEUTRAL-DISABLE FIX.
+                            # The _ex_all_429_neutral relaxed threshold creates the same false positive
+                            # path as E/EH technique: initial 429 body echoes SQL pattern (_ex_confirmed=1),
+                            # all 5 confirmation probes 429-neutral, clean probe passes with original value.
+                            # Cannot distinguish WAF rate-limit echo (false positive) from genuine SQL
+                            # error leakage in 429 response (genuine injection). Disable entirely.
+                            _ex_all_429_neutral = False  # disabled: relaxed threshold produces false positives
+                            _ex_threshold_met = (_ex_confirmed >= 2)
                             if _ex_threshold_met:
                                 _ex_clean = self._make_false_payload(payload)
                                 # BUG-E-CLEAN-PROBE-NONE FIX (cross-DBMS path): same issue.
@@ -133095,11 +133113,24 @@ class TechniqueCascadeEngine:
                                 # BUG-EH-EARLY-EXIT FIX: Stop as soon as 2 confirmations found.
                                 if _eh_confirmed >= 2:
                                     break
-                            _eh_all_429_neutral = (_eh_initial_429 and _eh_non429_total == 0
-                                                   and _eh_429_neutral >= 1 and _eh_confirmed == 1)
-                            _eh_threshold_met = (_eh_confirmed >= 2) or (_eh_all_429_neutral and _eh_confirmed >= 1)
-                            if _eh_all_429_neutral:
-                                print(f"[*]     EH multi-probe: {_eh_confirmed}/2 needed  ({_eh_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                            # BUG-EH-429NEUTRAL-DISABLE FIX (CRITICAL, EH technique, all DBMSes):
+                            # Mirror BUG-E-429NEUTRAL-DISABLE FIX from E technique (line ~129452).
+                            # The _eh_all_429_neutral relaxed threshold allows detection when:
+                            #   1. Initial EH 429 body echoes SQL error pattern (_eh_confirmed=1)
+                            #   2. All 5 confirmation probes are also 429-neutral (_eh_non429_total=0)
+                            #   3. Clean probe passes (uses original value, not rate-limited by WAF)
+                            # Root cause: cannot distinguish a WAF rate-limiter that echoes SQL
+                            # patterns from the injected header in its 429 body (false positive)
+                            # from a server that genuinely rate-limits but allows SQL errors to
+                            # leak in 429 responses (genuine injection). The clean probe passes in
+                            # both cases — it uses the original, non-injection header value.
+                            # Fix: disable the relaxed threshold entirely. EH detection ALWAYS
+                            # requires 2 independent non-WAF-blocked confirmation probes.
+                            # Real injections on rate-limited targets can be detected by BH/TH
+                            # techniques (boolean-header, timing-header) which have separate
+                            # rate-limit handling and do not rely on SQL error pattern matching.
+                            _eh_all_429_neutral = False  # disabled: relaxed threshold produces false positives
+                            _eh_threshold_met = (_eh_confirmed >= 2)
                             if _eh_threshold_met:
                                 # Clean probe: non-error payload must NOT show error pattern
                                 _eh_clean_payload = self._make_false_payload(payload)
@@ -141792,11 +141823,18 @@ class ScannerV14(ScannerV13):
                                                                     _surf_conf += 1
                                                     except Exception:
                                                         pass
-                                                _surf_all_429_neutral = (_surf_initial_429 and _surf_non429_total == 0
-                                                                         and _surf_429_neutral >= 1 and _surf_conf == 1)
-                                                _surf_threshold_met = (_surf_conf >= 2) or (_surf_all_429_neutral and _surf_conf >= 1)
-                                                if _surf_all_429_neutral:
-                                                    print(f"[*]     Surface multi-probe: {_surf_conf}/2 needed  ({_surf_429_neutral} probes 429-neutral → threshold relaxed)", flush=True)
+                                                # BUG-SURF-429NEUTRAL-DISABLE FIX (CRITICAL, surface E-technique scanning):
+                                                # Mirror BUG-E-429NEUTRAL-DISABLE FIX, BUG-EH-429NEUTRAL-DISABLE FIX,
+                                                # BUG-EX-429NEUTRAL-DISABLE FIX. The _surf_all_429_neutral relaxed
+                                                # threshold creates the same false positive path: initial surface probe
+                                                # returns 429 with SQL pattern echoed in rate-limit body (_surf_conf=1),
+                                                # all confirmation probes 429-neutral, clean probe passes with original.
+                                                # Cannot distinguish WAF/CDN rate-limit echo (false positive) from
+                                                # genuine SQL error leakage in 429 response (genuine injection).
+                                                # Disable entirely. Surface E detection ALWAYS requires 2 independent
+                                                # non-WAF-blocked, non-429 confirmation probes.
+                                                _surf_all_429_neutral = False  # disabled: relaxed threshold produces false positives
+                                                _surf_threshold_met = (_surf_conf >= 2)
 
                                                 #  Baseline check: clean probe must NOT have error
                                                 _surf_clean = True
