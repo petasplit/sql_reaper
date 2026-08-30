@@ -42076,21 +42076,71 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                             pass
                         _e_clean_probe_val = original if not _e_clean_payload else original + _e_clean_payload
                         _e_clean_probe_ok = True
-                        try:
-                            if not _SCAN_STOPPED[0]:
+                        _e_clean_fp = None
+                        if not _SCAN_STOPPED[0]:
+                            try:
                                 _e_clean_fp = await _send_injected(engine, method, url, data,
                                     data_fmt, param, _e_clean_probe_val, tamper_chain)
-                                if (_validate_response(_e_clean_fp, func_name="detect_error_clean", allow_empty=True)
-                                        and not WAFBlockDiscriminator.single_waf_blocked(_e_clean_fp)):
+                            except Exception:
+                                # BUG-DE-CLEAN-FAIL-CLOSED FIX (HIGH, detect_error E technique, all DBMSes):
+                                # Previously: except Exception: pass — fail-open. A network failure or
+                                # timeout on the clean probe left _e_clean_probe_ok=True, allowing detection
+                                # to proceed without any verification that the error disappears with a
+                                # non-injection payload. On targets with intermittent connectivity, every
+                                # probe with 2/3 multi-probe confirmation would be accepted as genuine
+                                # injection regardless of actual injectability.
+                                # Fix: fail-closed on exception. Cannot verify injection-specificity
+                                # without a clean probe response — reject to prevent false positives.
+                                _e_clean_probe_ok = False
+                                _e_clean_fp = None
+                        if _e_clean_probe_ok:
+                            _ctype = "original" if not _e_clean_payload else "false-cond"
+                            if _e_clean_fp is None or not _validate_response(_e_clean_fp, func_name="detect_error_clean", allow_empty=True):
+                                # BUG-DE-CLEAN-FAILOPEN-NONE FIX (MEDIUM, detect_error E technique, all DBMSes):
+                                # None or invalid response from clean probe: cannot verify injection-specificity.
+                                # Fail-closed to prevent false positive from network failure or empty response.
+                                _e_clean_probe_ok = False
+                                LOG.debug(f"[Error-DBMS] clean probe ({_ctype}): None/invalid response — ambiguous, rejected")
+                            else:
+                                # Hard status-code guard for clean probe — mirrors cross-DBMS clean probe guard
+                                # (lines ~129763-129780 in _send_and_check() cross-DBMS path) and EH clean
+                                # probe guard (lines ~133236-133265 in _send_and_check() EH path).
+                                # Previously only WAFBlockDiscriminator.single_waf_blocked() was checked,
+                                # which can miss canonical WAF/CDN status codes when status_code is a
+                                # non-int type (e.g. "403 Forbidden" string → _get_safe_status_code → 0 →
+                                # not in WAF_BLOCK_CODES → WAF guard silently bypassed).
+                                # BUG-DE-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, detect_error E technique, all DBMSes):
+                                # CDN error codes 520-530 on the clean probe mean the payload never reached
+                                # the database — cannot verify injection-specificity. Fail-closed.
+                                # BUG-DE-CLEAN-WAF-FAIL-CLOSED FIX (HIGH, detect_error E technique, all DBMSes):
+                                # WAF-blocked clean probe (400/403/406/412) is ambiguous: the false-condition
+                                # payload may have been blocked by the WAF before reaching the server.
+                                # If the WAF blocks the clean probe, we cannot determine whether the
+                                # error disappears without injection. Fail-closed to prevent false positive.
+                                try:
+                                    _e_clean_sc_raw = getattr(_e_clean_fp, 'status_code', None)
+                                    _e_clean_hard_sc = int(str(_e_clean_sc_raw or 0)[:3]) if _e_clean_sc_raw is not None else 0
+                                except Exception:
+                                    _e_clean_hard_sc = 0
+                                if _e_clean_hard_sc == 429:
+                                    _e_clean_probe_ok = False
+                                    LOG.debug(f"[Error-DBMS] clean probe ({_ctype}): rate-limited (429) — ambiguous, rejected")
+                                    print(f"[*]   [Error-DBMS] clean probe ({_ctype}): 429 rate-limited — ambiguous, rejected", flush=True)
+                                elif 520 <= _e_clean_hard_sc <= 530:
+                                    _e_clean_probe_ok = False
+                                    LOG.debug(f"[Error-DBMS] clean probe ({_ctype}): CDN error ({_e_clean_hard_sc}) — ambiguous, rejected")
+                                    print(f"[*]   [Error-DBMS] clean probe ({_ctype}): CDN error ({_e_clean_hard_sc}) — ambiguous, rejected", flush=True)
+                                elif _e_clean_hard_sc in {400, 403, 406, 412} or WAFBlockDiscriminator.single_waf_blocked(_e_clean_fp):
+                                    _e_clean_probe_ok = False
+                                    LOG.debug(f"[Error-DBMS] clean probe ({_ctype}): WAF-blocked ({_e_clean_hard_sc}) — ambiguous, rejected")
+                                    print(f"[*]   [Error-DBMS] clean probe ({_ctype}): WAF-blocked ({_e_clean_hard_sc}) — ambiguous, rejected", flush=True)
+                                else:
                                     _e_clean_text = _safe_decode_body(_e_clean_fp, encoding="utf-8",
                                         errors="replace", func_name="detect_error_clean").lower()
                                     if re.search(_matched_pat, _e_clean_text, re.IGNORECASE):
                                         _e_clean_probe_ok = False
-                                        _ctype = "original" if not _e_clean_payload else "false-cond"
                                         LOG.debug(f"[Error-DBMS] FP suppressed: error pattern in clean probe ({_ctype})")
                                         print(f"[*]   [Error-DBMS] clean probe ({_ctype}): error ALSO present — page content FP", flush=True)
-                        except Exception:
-                            pass  # clean probe failed — fail-open (proceed with detection)
                         if not _e_clean_probe_ok:
                             continue  # error in clean probe → not injection-specific
                         metadata = PayloadMetadataExtractor.extract_all(test_payload)
@@ -111762,7 +111812,12 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         # BUG-SQLPAT-DUPKEY-LEN FIX: `.+` inside quotes had no upper bound — could match across
         # large HTML spans. Real MySQL duplicate key values are short (typically < 200 chars).
         # Bound the value match and require the closing quote to limit span.
-        r"duplicate entry '[^']{0,200}' for key '[^']+",
+        # BUG-SQLPAT-DUPKEY-KEYNAME-LEN FIX: `[^']+` for the key name had no upper bound.
+        # MySQL/MariaDB key names are at most 64 chars (identifier length limit). An unbounded
+        # `[^']+` can span across a large HTML fragment if a WAF advisory page contains a long
+        # sequence of non-quote characters after a quote. Bound to 64 chars + require closing
+        # quote so the match is anchored to the wire-protocol format completely.
+        r"duplicate entry '[^']{0,200}' for key '[^']{1,64}'",
         # REMOVED: warning: mysql_, warning: mysqli_, mysql_num_rows|...,
         #   supplied argument is not a valid mysql — PHP driver function names/warnings;
         #   WAF block pages echo injected SQL function names and these PHP warning strings.
@@ -112093,10 +112148,13 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"(?-i:ERROR):\s+operator does not exist",
         r"(?-i:ERROR):\s+syntax error at or near",
         r"(?-i:ERROR):\s+invalid input syntax for",
-        r"(?-i:ERROR):\s+column .+ does not exist",
-        r"(?-i:ERROR):\s+relation .+ does not exist",
+        # BUG-SQLPAT-CRDB-DOTPLUS-FIX: `.+` had no upper bound. PG/CRDB relation/function/column
+        # names are at most 63 bytes (NAMEDATALEN-1). Bound at 256 chars (covers qualified names
+        # schema.table.column with safety margin). Mirrors the PostgreSQL pattern bounds fix.
+        r"(?-i:ERROR):\s+column .{1,256} does not exist",
+        r"(?-i:ERROR):\s+relation .{1,256} does not exist",
         r"(?-i:ERROR):\s+division by zero",
-        r"(?-i:ERROR):\s+function .+ does not exist",
+        r"(?-i:ERROR):\s+function .{1,256} does not exist",
         r"(?-i:ERROR):\s+could not parse",
         # Wire-protocol: CockroachDB-specific internal node/range errors (unique to CRDB)
         # crdb_internal.* table names and "node ID" references only appear in CockroachDB.
@@ -112116,15 +112174,21 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"(?-i:ERROR):\s+operator does not exist",
         r"(?-i:ERROR):\s+syntax error at or near",
         r"(?-i:ERROR):\s+invalid input syntax for",
-        r"(?-i:ERROR):\s+column .+ does not exist",
-        r"(?-i:ERROR):\s+relation .+ does not exist",
+        # BUG-SQLPAT-YDB-DOTPLUS-FIX: `.+` had no upper bound. PG/YDB relation/function/column
+        # names are at most 63 bytes (NAMEDATALEN-1). Bound at 256 chars (covers qualified names
+        # schema.table.column with safety margin). Mirrors the PostgreSQL pattern bounds fix.
+        r"(?-i:ERROR):\s+column .{1,256} does not exist",
+        r"(?-i:ERROR):\s+relation .{1,256} does not exist",
         r"(?-i:ERROR):\s+division by zero",
-        r"(?-i:ERROR):\s+function .+ does not exist",
+        r"(?-i:ERROR):\s+function .{1,256} does not exist",
         r"(?-i:ERROR):\s+invalid byte sequence",
         # Wire-protocol: YugabyteDB-specific internal error prefix (yb/ in error context path)
         # YugabyteDB debug output uses "yb/" as a path prefix in internal error traces.
         # More specific than r"yb.*error" which matches any 2-char word starting with "yb".
-        r"yb/[a-z]+/.*error",
+        # BUG-SQLPAT-YDB-YBERROR-LEN FIX: r"yb/[a-z]+/.*error" had no length bound on the
+        # path segment between the second slash and "error". Real YugabyteDB internal error
+        # trace path segments are short (typically under 50 chars). Bound at 100 chars.
+        r"yb/[a-z]+/.{0,100}error",
         # REMOVED: r"yb.*error|yugabyte.*error" — "yb.*error" is extremely broad (any 2-char
         #   sequence "yb" followed anywhere by "error" matches). "yugabyte.*error" matches WAF
         #   block pages that mention YugabyteDB in their body ("YugabyteDB access blocked").
@@ -112138,10 +112202,13 @@ SQL_ERROR_PATTERNS: Dict[str, List[str]] = {
         r"(?-i:ERROR):\s+operator does not exist",
         r"(?-i:ERROR):\s+syntax error at or near",
         r"(?-i:ERROR):\s+invalid input syntax for",
-        r"(?-i:ERROR):\s+column .+ does not exist",
-        r"(?-i:ERROR):\s+relation .+ does not exist",
+        # BUG-SQLPAT-RS-DOTPLUS-FIX: `.+` had no upper bound. PG/Redshift relation/function/column
+        # names are at most 63 bytes (NAMEDATALEN-1). Bound at 256 chars (covers qualified names
+        # schema.table.column with safety margin). Mirrors the PostgreSQL pattern bounds fix.
+        r"(?-i:ERROR):\s+column .{1,256} does not exist",
+        r"(?-i:ERROR):\s+relation .{1,256} does not exist",
         r"(?-i:ERROR):\s+division by zero",
-        r"(?-i:ERROR):\s+function .+ does not exist",
+        r"(?-i:ERROR):\s+function .{1,256} does not exist",
         # Wire-protocol: Amazon Redshift-specific strings in error detail
         # r"amazon.*redshift|redshift.*error" removed — too broad; WAF block pages that
         # identify the target DBMS ("Amazon Redshift access blocked") would match.
