@@ -129062,8 +129062,9 @@ class TechniqueCascadeEngine:
             # → single_waf_blocked returns False → 403 response reaches pattern scan →
             # SQL keywords echoed in WAF block body trigger _e_any_err=True → false positive.
             # Fix: parse status_code directly from its string prefix (immune to type issues)
-            # and unconditionally skip E-detection for canonical WAF-block codes 403/406/412.
-            # 400 is omitted intentionally: some apps return 400 with real SQL error detail.
+            # and unconditionally skip E-detection for canonical WAF-block codes 400/403/406/412.
+            # 400 is included: WAFs using 400 (Bad Request) echo injected SQL in body; the guard
+            # prevents WAF echo matches from triggering E-detection. BUG-E-INITIAL-400 FIX above.
             # 429 is omitted: handled by the _e_initial_429 relaxed-threshold path.
             # 503/404 require body-pattern confirmation (WAF vs legitimate error).
             try:
@@ -129267,10 +129268,10 @@ class TechniqueCascadeEngine:
                             # by the CDN in a block advisory). Treat as waf_blocked: require
                             # 2 independent non-CDN confirmations before accepting detection.
                             (520 <= _e_mp_hard_sc <= 530) or
-                            (not (_get_safe_status_code(fp) == 429) and
+                            (not (_e_mp_hard_sc == 429) and  # use safe-parsed _e_mp_hard_sc (= _fp_hard_sc)
                              WAFBlockDiscriminator.single_waf_blocked(fp))
                         )
-                        _e_initial_429 = _get_safe_status_code(fp) == 429
+                        _e_initial_429 = (_e_mp_hard_sc == 429)  # use safe-parsed value; consistent with rest of block
                         # BUG-E-429-WAF-BODY FIX (HIGH, E technique, all DBMSes):
                         # When a WAF rate-limit page (429) echoes SQL error keywords in its
                         # advisory body (e.g. "Too many requests — SQL injection detected:
@@ -129335,7 +129336,7 @@ class TechniqueCascadeEngine:
                                     _e_mp_hard_sc = int(str(_e_mp_sc_raw or 0)[:3]) if _e_mp_sc_raw is not None else 0
                                 except Exception:
                                     _e_mp_hard_sc = 0
-                                if _get_safe_status_code(_e_mp_fp) == 429:
+                                if _e_mp_hard_sc == 429:  # use safe-parsed value; consistent with CDN/WAF checks below
                                     # Rate-limited — cannot confirm or deny; treat as neutral
                                     _e_429_neutral += 1
                                 elif _e_mp_hard_sc in {400, 403, 406, 412}:
@@ -129344,7 +129345,7 @@ class TechniqueCascadeEngine:
                                     # 400 included: WAFs returning 400 echo injected payloads
                                     # in body; cannot confirm or deny injection from these.
                                     _e_429_neutral += 1
-                                elif 520 <= _get_safe_status_code(_e_mp_fp) <= 530:
+                                elif 520 <= _e_mp_hard_sc <= 530:
                                     # BUG-E-MULTIPROBE-CDN FIX: CDN/Cloudflare error codes (520-530)
                                     # are infrastructure-layer errors (origin down, timeout, invalid
                                     # response, SSL handshake failure). The SQL payload never reached
@@ -129354,6 +129355,10 @@ class TechniqueCascadeEngine:
                                     # Root cause from logs: confirmation probes returning 525 (CDN error)
                                     # matched SQL patterns in CDN error page HTML, driving _e_confirmed
                                     # to 2 — false positive from CDN infrastructure noise.
+                                    # BUG-E-MULTIPROBE-CDN-HARDSC FIX: Use _e_mp_hard_sc (string-prefix
+                                    # parsed, immune to type-conversion failure) instead of
+                                    # _get_safe_status_code() which returns 0 for non-int status_code
+                                    # types, silently missing the CDN range check.
                                     _e_429_neutral += 1
                                 elif WAFBlockDiscriminator.single_waf_blocked(_e_mp_fp):
                                     # BUG-E-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe (non-429).
@@ -129449,49 +129454,45 @@ class TechniqueCascadeEngine:
                                     _e_clean_ok = False
                                     _src = "original" if _e_clean_fallback_used else "false-condition"
                                     print(f"[*]     E clean probe ({_src}): timeout/failure — ambiguous, rejected", flush=True)
-                                elif _get_safe_status_code(_e_fp_clean) == 429:
-                                    # BUG-E-CLEAN-429-FAIL-CLOSED FIX (HIGH, all E techniques, all DBMSes):
-                                    # WAFBlockDiscriminator.single_waf_blocked() returns False for 429
-                                    # (rate-limit is handled separately from WAF blocks). A 429 clean probe
-                                    # falls through to the body-pattern check, which finds no SQL error in the
-                                    # rate-limit page → _e_clean_ok stays True → detection confirmed as false
-                                    # positive. This happens when: (a) initial + 2 confirmation probes return
-                                    # real SQL errors, then (b) the clean probe is rate-limited (429). The
-                                    # rate-limit body does not contain the SQL error pattern, so the clean probe
-                                    # appears to "pass" — but it only passes because the server rate-limited it,
-                                    # not because the false-condition is SQL-error-free. Fix: fail-closed on 429
-                                    # (rate-limited clean probe is ambiguous — we cannot verify injection-specificity).
-                                    _e_clean_ok = False
-                                    _src = "original" if _e_clean_fallback_used else "false-condition"
-                                    print(f"[*]     E clean probe ({_src}): rate-limited (429) — ambiguous, rejected", flush=True)
-                                elif 520 <= _get_safe_status_code(_e_fp_clean) <= 530:
-                                    # BUG-E-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, E technique, all DBMSes):
-                                    # CDN/Cloudflare error codes 520-530 indicate infrastructure errors
-                                    # (origin down, SSL handshake failure, connection timeout). The clean
-                                    # probe never reached the database. We cannot verify whether the
-                                    # false-condition produces a SQL error or not — the CDN intercepted
-                                    # before the DB was involved. Fail-closed: reject ambiguous CDN response.
-                                    # Scenario: true probe hits rate-limit page echoing SQL keywords
-                                    # (429+error), confirmations all return CDN errors (neutral), then
-                                    # clean probe also returns CDN error. The CDN error body lacks the
-                                    # SQL pattern so _e_clean_ok would stay True — producing a false
-                                    # positive detection without any real database execution.
-                                    _e_clean_ok = False
-                                    _src = "original" if _e_clean_fallback_used else "false-condition"
-                                    print(f"[*]     E clean probe ({_src}): CDN error ({_get_safe_status_code(_e_fp_clean)}) — ambiguous, rejected", flush=True)
                                 else:
-                                    # BUG-E-CLEAN-HARDSC-400 FIX: Compute hard status code once for
-                                    # the clean probe, immune to type-conversion failures. Use this
-                                    # before WAFBlockDiscriminator.single_waf_blocked() which relies
-                                    # on _get_safe_status_code() → may return 0 for string status codes.
+                                    # BUG-E-CLEAN-HARDSC-UNIFIED FIX: Compute the hard status code
+                                    # (string-prefix parsed, immune to type-conversion failures) ONCE
+                                    # before all status-based checks so that 429, CDN (520-530), and
+                                    # WAF-hard (400/403/406/412) all use the same safe-parsed value.
+                                    # Previously the CDN range check used _get_safe_status_code() which
+                                    # returns 0 for non-int status_code types (string "525 SSL Error",
+                                    # non-int objects), silently skipping the CDN fail-closed guard —
+                                    # a CDN error on the clean probe would not be detected, allowing a
+                                    # false positive confirmation when the CDN body lacks the SQL pattern.
                                     try:
                                         _e_clean_sc_raw = getattr(_e_fp_clean, 'status_code', None)
                                         _e_clean_hard_sc = int(str(_e_clean_sc_raw or 0)[:3]) if _e_clean_sc_raw is not None else 0
                                     except Exception:
                                         _e_clean_hard_sc = 0
-                                    if _e_clean_hard_sc in {400, 403, 406, 412}:
-                                        # Hard WAF block code — type-conversion-immune guard.
-                                        # WAF block bodies do not reproduce DBMS-specific error patterns
+                                    if _e_clean_hard_sc == 429:
+                                        # BUG-E-CLEAN-429-FAIL-CLOSED FIX (HIGH, all E techniques, all DBMSes):
+                                        # WAFBlockDiscriminator.single_waf_blocked() returns False for 429
+                                        # (rate-limit is handled separately from WAF blocks). A 429 clean probe
+                                        # falls through to the body-pattern check, which finds no SQL error in the
+                                        # rate-limit page → _e_clean_ok stays True → detection confirmed as false
+                                        # positive. Fix: fail-closed on 429 (ambiguous — cannot verify
+                                        # injection-specificity when the clean probe is rate-limited).
+                                        _e_clean_ok = False
+                                        _src = "original" if _e_clean_fallback_used else "false-condition"
+                                        print(f"[*]     E clean probe ({_src}): rate-limited (429) — ambiguous, rejected", flush=True)
+                                    elif 520 <= _e_clean_hard_sc <= 530:
+                                        # BUG-E-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, E technique, all DBMSes):
+                                        # CDN/Cloudflare error codes 520-530 indicate infrastructure errors
+                                        # (origin down, SSL handshake failure, connection timeout). The clean
+                                        # probe never reached the database. We cannot verify whether the
+                                        # false-condition produces a SQL error or not — the CDN intercepted
+                                        # before the DB was involved. Fail-closed: reject ambiguous CDN response.
+                                        _e_clean_ok = False
+                                        _src = "original" if _e_clean_fallback_used else "false-condition"
+                                        print(f"[*]     E clean probe ({_src}): CDN error ({_e_clean_hard_sc}) — ambiguous, rejected", flush=True)
+                                    elif _e_clean_hard_sc in {400, 403, 406, 412}:
+                                        # BUG-E-CLEAN-HARDSC-400 FIX: Hard WAF block code — type-conversion-immune
+                                        # guard. WAF block bodies do not reproduce DBMS-specific error patterns
                                         # (they echo the payload, but the pattern may not match). Fail-
                                         # closed: a WAF-blocked clean probe cannot confirm injection-specificity.
                                         _e_clean_ok = False
@@ -129504,7 +129505,7 @@ class TechniqueCascadeEngine:
                                         # Fail-closed: reject to prevent false positive.
                                         _e_clean_ok = False
                                         _src = "original" if _e_clean_fallback_used else "false-condition"
-                                        print(f"[*]     E clean probe ({_src}): WAF-blocked ({_get_safe_status_code(_e_fp_clean)}) — ambiguous, rejected", flush=True)
+                                        print(f"[*]     E clean probe ({_src}): WAF-blocked ({_e_clean_hard_sc}) — ambiguous, rejected", flush=True)
                                     else:
                                         pass  # fall through to body check below
                                 if _e_clean_ok:  # body check only when not already rejected
@@ -132953,11 +132954,16 @@ class TechniqueCascadeEngine:
                                 # BUG-EH-INITIAL-CDN FIX: Mirror E-technique CDN guard.
                                 # CDN/Cloudflare 520-530 error pages can contain SQL-looking
                                 # text (header value echo in block advisory). Treat as waf_blocked.
-                                (520 <= _get_safe_status_code(fp) <= 530) or
-                                (not (_get_safe_status_code(fp) == 429) and
+                                # BUG-EH-INITIAL-CDN-HARDSC FIX: Use _eh_fp_hard_sc (string-prefix
+                                # parsed, immune to type-conversion failure) instead of
+                                # _get_safe_status_code() which returns 0 for non-int status_code
+                                # types. Consistent with _eh_fp_hard_sc used for the WAF-code check
+                                # in the first clause above and at the early-return guard (line ~132870).
+                                (520 <= _eh_fp_hard_sc <= 530) or
+                                (not (_eh_fp_hard_sc == 429) and
                                  WAFBlockDiscriminator.single_waf_blocked(fp))
                             )
-                            _eh_initial_429 = _get_safe_status_code(fp) == 429
+                            _eh_initial_429 = (_eh_fp_hard_sc == 429)  # use safe-parsed value; consistent with _eh_initial_waf_blocked
                             # BUG-EH-429-WAF-BODY FIX (HIGH, EH technique, all DBMSes):
                             # Mirror BUG-E-429-WAF-BODY FIX for EH technique. WAF rate-limit pages
                             # (429) that echo injected header-value SQL error text in their body
@@ -133014,16 +133020,20 @@ class TechniqueCascadeEngine:
                                         _eh_mp_hard_sc = int(str(_eh_mp_sc_raw or 0)[:3]) if _eh_mp_sc_raw is not None else 0
                                     except Exception:
                                         _eh_mp_hard_sc = 0
-                                    if _get_safe_status_code(_eh_mp_fp) == 429:
+                                    if _eh_mp_hard_sc == 429:  # use safe-parsed value; consistent with CDN/WAF checks below
                                         _eh_429_neutral += 1
                                     elif _eh_mp_hard_sc in {400, 403, 406, 412}:
                                         # Hard WAF block: canonical WAF-block status codes that
                                         # single_waf_blocked() might miss due to type-conversion failure.
                                         _eh_429_neutral += 1
-                                    elif 520 <= _get_safe_status_code(_eh_mp_fp) <= 530:
+                                    elif 520 <= _eh_mp_hard_sc <= 530:
                                         # BUG-EH-MULTIPROBE-CDN FIX: CDN/Cloudflare error codes (520-530)
                                         # are infrastructure errors — the payload never reached the database.
                                         # Treat as neutral, same as 429: cannot confirm or deny injection.
+                                        # BUG-EH-MULTIPROBE-CDN-HARDSC FIX: Use _eh_mp_hard_sc (string-prefix
+                                        # parsed, immune to type-conversion failure) instead of
+                                        # _get_safe_status_code() which returns 0 for non-int status_code
+                                        # types, silently missing the CDN neutral classification.
                                         _eh_429_neutral += 1
                                     elif WAFBlockDiscriminator.single_waf_blocked(_eh_mp_fp):
                                         # BUG-EH-MULTIPROBE-WAF FIX: WAF-blocked confirmation probe.
@@ -133090,29 +133100,35 @@ class TechniqueCascadeEngine:
                                         _eh_clean_ok = False
                                         _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
                                         print(f"[*]     EH clean probe ({_eh_ctype}): timeout/failure — ambiguous, rejected", flush=True)
-                                    elif _get_safe_status_code(_eh_fp_clean) == 429:
-                                        # BUG-EH-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
-                                        # is ambiguous — cannot verify injection-specificity. Fail-closed.
-                                        _eh_clean_ok = False
-                                        _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
-                                        print(f"[*]     EH clean probe ({_eh_ctype}): rate-limited (429) — ambiguous, rejected", flush=True)
-                                    elif 520 <= _get_safe_status_code(_eh_fp_clean) <= 530:
-                                        # BUG-EH-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, EH technique, all DBMSes):
-                                        # CDN/Cloudflare error (520-530) on the clean probe: the false-condition
-                                        # payload never reached the database. Cannot verify whether the false
-                                        # condition produces a SQL error or not. Fail-closed to prevent a false
-                                        # positive where CDN noise in confirmation probes masks a non-injectable
-                                        # target (CDN error body lacks SQL pattern → clean_ok=True incorrectly).
-                                        _eh_clean_ok = False
-                                        _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
-                                        print(f"[*]     EH clean probe ({_eh_ctype}): CDN error ({_get_safe_status_code(_eh_fp_clean)}) — ambiguous, rejected", flush=True)
                                     else:
+                                        # BUG-EH-CLEAN-HARDSC-UNIFIED FIX: Compute hard status code ONCE
+                                        # (string-prefix parsed, immune to type-conversion failures) before
+                                        # all status-based checks. Previously the CDN range check used
+                                        # _get_safe_status_code() which returns 0 for non-int status_code
+                                        # types, silently missing CDN fail-closed guard. Use _eh_clean_hard_sc
+                                        # consistently for 429, CDN (520-530), and WAF-hard (400/403/406/412).
                                         try:
                                             _eh_clean_sc_raw = getattr(_eh_fp_clean, 'status_code', None)
                                             _eh_clean_hard_sc = int(str(_eh_clean_sc_raw or 0)[:3]) if _eh_clean_sc_raw is not None else 0
                                         except Exception:
                                             _eh_clean_hard_sc = 0
-                                        if _eh_clean_hard_sc in {400, 403, 406, 412}:
+                                        if _eh_clean_hard_sc == 429:
+                                            # BUG-EH-CLEAN-429-FAIL-CLOSED FIX: Rate-limited clean probe
+                                            # is ambiguous — cannot verify injection-specificity. Fail-closed.
+                                            _eh_clean_ok = False
+                                            _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                            print(f"[*]     EH clean probe ({_eh_ctype}): rate-limited (429) — ambiguous, rejected", flush=True)
+                                        elif 520 <= _eh_clean_hard_sc <= 530:
+                                            # BUG-EH-CLEAN-CDN-FAIL-CLOSED FIX (HIGH, EH technique, all DBMSes):
+                                            # CDN/Cloudflare error (520-530) on the clean probe: the false-condition
+                                            # payload never reached the database. Cannot verify whether the false
+                                            # condition produces a SQL error or not. Fail-closed to prevent a false
+                                            # positive where CDN noise in confirmation probes masks a non-injectable
+                                            # target (CDN error body lacks SQL pattern → clean_ok=True incorrectly).
+                                            _eh_clean_ok = False
+                                            _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
+                                            print(f"[*]     EH clean probe ({_eh_ctype}): CDN error ({_eh_clean_hard_sc}) — ambiguous, rejected", flush=True)
+                                        elif _eh_clean_hard_sc in {400, 403, 406, 412}:
                                             # BUG-EH-CLEAN-WAF-HARD-SC FIX (HIGH, EH technique, all DBMSes):
                                             # Hard status code guard is immune to type-conversion failures
                                             # (e.g. status_code="403 Forbidden" → _get_safe_status_code → 0).
@@ -133125,7 +133141,7 @@ class TechniqueCascadeEngine:
                                             # whether false-condition causes errors. Fail-closed: reject.
                                             _eh_clean_ok = False
                                             _eh_ctype = "original" if _eh_clean_fallback else "false-cond"
-                                            print(f"[*]     EH clean probe ({_eh_ctype}): WAF-blocked ({_get_safe_status_code(_eh_fp_clean)}) — ambiguous, rejected", flush=True)
+                                            print(f"[*]     EH clean probe ({_eh_ctype}): WAF-blocked ({_eh_clean_hard_sc}) — ambiguous, rejected", flush=True)
                                     if _eh_clean_ok and _eh_fp_clean:
                                         self._total_reqs += 1
                                         _eh_clean_body = _safe_decode_body(_eh_fp_clean, encoding="utf-8", errors='replace', func_name='extraction__eh_fp_clean') if _eh_fp_clean.body else ""
