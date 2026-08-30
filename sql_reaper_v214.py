@@ -41999,6 +41999,24 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                     _sql_pats = SQL_ERROR_PATTERNS.get(_detected_dbms, [])
                     if not _sql_pats:
                         _sql_pats = SQL_ERROR_PATTERNS.get("Generic", [])
+                    # BUG-DE-EXTRACTVALUE-CORROBORATION FIX (CRITICAL, detect_error E technique,
+                    # MySQL/MariaDB/TiDB): detect_error was missing the EXTRACTVALUE/UPDATEXML
+                    # corroboration check that _send_and_check() applies (see lines ~129390-129415).
+                    # Root cause: a malformed EXTRACTVALUE payload (e.g. corrupted by a tamper
+                    # that makes the SQL syntactically invalid) generates a generic MySQL syntax
+                    # error ("you have an error in your sql syntax; check the manual...") but
+                    # NOT the XPATH-tilde error that MySQL emits when EXTRACTVALUE actually executes.
+                    # Without corroboration, detect_error accepted the generic syntax error as
+                    # an E-technique confirmation, producing a false positive on every EXTRACTVALUE
+                    # payload whose tamper chain corrupts the SQL structure.
+                    # Fix: mirror _send_and_check's corroboration logic — for EXTRACTVALUE/UPDATEXML
+                    # payloads on MySQL-family DBMSes, require the XPATH-tilde pattern ("xpath
+                    # syntax error: '~") to also appear in the body unless the matched pattern
+                    # IS the XPATH-tilde pattern itself (which is self-corroborating).
+                    _de_is_ev_payload = bool(re.search(r'(?:EXTRACTVALUE|UPDATEXML)\s*\(', test_payload, re.I))
+                    _de_xpath_tilde_pat = r"xpath syntax error:\s*'~"
+                    _de_ev_corr_dbs = {"MySQL", "MariaDB", "TiDB"}
+                    _de_body_has_xpath = bool(re.search(_de_xpath_tilde_pat, fp_text, re.I)) if _de_is_ev_payload else False
                     _matched_pat = None
                     for _sp in _sql_pats:
                         try:
@@ -42006,6 +42024,22 @@ async def detect_error(engine,config,method,url,data,data_fmt,
                                 # FP guard: same DBMS-specific pattern must NOT appear in clean baseline
                                 if _baseline_body and re.search(_sp, _baseline_body, re.IGNORECASE):
                                     LOG.debug(f"[Error-DBMS] FP suppressed: DBMS pattern also in baseline: {_sp[:40]}")
+                                    continue
+                                # BUG-DE-EXTRACTVALUE-CORROBORATION FIX: for EXTRACTVALUE/UPDATEXML
+                                # payloads on MySQL-family DBMSes, skip any non-XPATH-tilde pattern
+                                # when the XPATH-tilde pattern is absent from the body. Mirroring the
+                                # same check in _send_and_check() (lines ~129405-129415). Without this,
+                                # malformed EXTRACTVALUE payloads that generate generic syntax errors
+                                # (not EXTRACTVALUE execution errors) confirm as E-technique FPs.
+                                if (_de_is_ev_payload and
+                                        _detected_dbms in _de_ev_corr_dbs and
+                                        _sp != _de_xpath_tilde_pat and
+                                        not _de_body_has_xpath):
+                                    LOG.debug(
+                                        f"[Error-DBMS] Skipping {_sp[:40]!r} for {_detected_dbms} — "
+                                        f"EXTRACTVALUE payload but no XPATH-tilde corroboration in body "
+                                        f"(likely malformed payload syntax, not actual EXTRACTVALUE execution)"
+                                    )
                                     continue
                                 _matched_pat = _sp
                                 break
