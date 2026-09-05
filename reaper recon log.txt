@@ -1,0 +1,37 @@
+Target domain: target.com
+[08:16:29] [INF] [*] SQL Reaper v3.7.4 — Target: target.com
+[08:16:29] [INF] [*] Output directory: ./target.com
+[08:17:01] [INF] [*] Phase 1: Passive OSINT — running all sources concurrently
+[08:17:01] [INF] [*] Running 1152 passive sources concurrently
+[08:20:49] [INF] [+] Passive: 134 candidates discovered
+[08:20:49] [INF]   [DNS] Testing UDP port-53 connectivity before Phase 2…
+[08:20:49] [INF]   [DNS] UDP port 53 reachable — using native UDP resolver
+[08:20:49] [INF] [*] Phase 2: DNS Enumeration
+[08:20:49] [INF] [*] Phase 2: DNS Enumeration — running 15 sub-tasks in parallel …
+[08:20:54] [INF]   [DNS] ✓ asn_reverse (1/15) | subs=171 (Δ+37) | 5.0s
+[08:21:14] [INF]   [DNS] ✓ zone_transfer (2/15) | subs=171 (Δ+37) | 19.8s
+[08:21:32] [INF]   [DNS] ✓ dns_history (3/15) | subs=173 (Δ+39) | 37.6s
+[08:21:32] [INF]   [DNS] ✓ nsec_walk (4/15) | subs=173 (Δ+39) | 37.7s
+[08:21:32] [INF]   [DNS] ✓ ptr_sweep (5/15) | subs=173 (Δ+39) | 37.7s
+[08:21:34] [INF]   [DNS] ✓ caa_tlsa (6/15) | subs=173 (Δ+39) | 39.7s
+[08:21:34] [INF]   [DNS] ✓ txt_harvest (7/15) | subs=173 (Δ+39) | 39.7s
+[08:21:34] [INF]   [DNS] ✓ dkim_selectors (8/15) | subs=173 (Δ+39) | 39.7s
+[08:21:36] [INF]   [DNS] ✓ srv_brute (9/15) | subs=173 (Δ+39) | 41.7s
+[08:21:36] [INF]   [DNS] ✓ record_types (10/15) | subs=173 (Δ+39) | 41.7s
+[08:21:37] [INF]   [DNS] ✓ tls_san (11/15) | subs=173 (Δ+39) | 42.7s
+[08:21:39] [INF]   [DNS] ✓ wildcard_probe (12/15) | subs=173 (Δ+39) | 44.7s
+[08:21:49] [INF]   [DNS] ✓ securitytxt (13/15) | subs=173 (Δ+39) | 54.7s
+[08:21:49] [INF]   [DNS] ✓ mx_records (14/15) | subs=173 (Δ+39) | 54.7s
+[08:22:05] [INF]   [DNS] ✓ ns_records (15/15) | subs=173 (Δ+39) | 70.7s
+[08:22:05] [INF] [+] DNS done in 70.7s: 173 subdomains discovered | 9 apex/zone RR values stored (A/MX/NS/TXT/CNAME/SRV/…)
+[08:22:05] [INF] [+] DNS: 9 individual record values (A/MX/NS/TXT/CNAME/SRV/…) across all enumerated hostnames | 173 total subdomains in scope now
+[08:22:05] [INF] [*] Phase 3: Generating mutations + brute-force wordlist
+[08:22:05] [INF] [+] 318446 total candidates (passive=173 + mutations=318123 + brute=489)
+[08:22:05] [INF] [*] Phase 4: Resolving 318446 candidates...
+[08:22:05] [INF]   [DNS] Testing UDP connectivity…
+[08:22:05] [INF]   [DNS] UDP port 53 reachable — using native UDP resolver
+DNS resolve:   0%|                                                                                                                                                                                           | 0/318446 [00:00<?, ?host/s] [08:22:05] [INF]   [DNS] Resolving 318,446 hosts — 2,000 workers | 169 resolvers | wildcard IPs=none
+DNS resolve:   0%|▌                                                                                                                                               | 1345/318446 [01:48<5:35:06, 15.77host/s] , live=0, resolved=1300/318446^C[08:23:59] [INF] 
+[!] Interrupted by user.
+DNS resolve:   0%|▋                                                                                                                                               | 1546/318446 [01:54<6:29:33, 13.56host/s] , live=0, resolved=1500/318446
+^C
