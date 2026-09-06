@@ -1,0 +1,19 @@
+Target domain: target.com
+[15:09:42] [INF] [*] SQL Reaper v3.7.4 — Target: target.com
+[15:09:42] [INF] [*] Output directory: ./target.com
+[15:09:53] [INF] [*] Phase 1: Passive OSINT — running all sources concurrently
+[15:09:53] [INF] [*] Running 1179 passive sources concurrently
+[15:11:21] [INF] [+] Passive: 44 candidates discovered
+[15:11:21] [INF]   [DNS] Testing UDP port-53 connectivity before Phase 2…
+[15:11:21] [INF]   [DNS] UDP port 53 reachable — using native UDP resolver
+[15:11:21] [INF] [*] Phase 2: DNS Enumeration
+[15:11:21] [INF] [*] Phase 2: DNS Enumeration — running 15 sub-tasks in parallel …
+[15:11:21] [INF]   [DNS-2a] Seeding ip_ranges: enumerate_records + asn_reverse …
+[15:11:33] [INF]   [DNS-2a] ip_ranges seeded: 1 IPs in 11.8s — now launching remaining 13 tasks
+[15:11:33] [INF]   [DNS] ✓ zone_transfer (1/13) | subs=44 (Δ±0) | 11.9s
+[15:11:35] [INF]   [DNS] ✓ nsec_walk (2/13) | subs=44 (Δ±0) | 13.8s
+[15:11:42] [INF]   [DNS] ✓ dns_history (3/13) | subs=85 (Δ+41) | 20.9s
+[15:11:56] [INF]   [DNS] ✓ ptr_sweep (4/13) | subs=85 (Δ+41) | 35.3s
+[15:12:03] [INF]   [DNS] ✓ dkim_selectors (5/13) | subs=85 (Δ+41) | 41.8s
+[15:12:03] [INF]   [DNS] ✓ tls_san (6/13) | subs=85 (Δ+41) | 42.3s
+zsh: killed     python3 /home/kali/Desktop/reaper_recon.py
