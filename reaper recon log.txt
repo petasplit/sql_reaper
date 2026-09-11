@@ -1,300 +1,345 @@
-[13:55:01] [INF] [*] SQL Reaper v12.5.0 — Target: target.fr
-[13:55:01] [INF] [*] Output directory: ./target.fr
-[13:55:01] [INF]   [DNS] Testing UDP port-53 connectivity before Phase 0…
-[13:55:01] [INF]   [DNS] UDP port 53 reachable — using native UDP resolver
-[13:55:08] [INF]   [MEM] RSS before Phase 1: 183 MB
-[13:55:08] [INF] [*] Phase 1: Passive OSINT — running all sources concurrently
-[13:55:08] [INF] [*] Running 1416 passive sources (max 100 concurrent)
-[13:55:13] [INF]   [PASSIVE]   0.6%  src=9/1416  subdomains=1  ETA=13m01s  current=loc_gov_archive
-[13:55:18] [INF]   [PASSIVE]   1.4%  src=20/1416  subdomains=1  ETA=11m38s  current=hackertarget
-[13:55:23] [INF]   [PASSIVE]   1.6%  src=23/1416  subdomains=1  ETA=15m08s  current=massdns_api
-[13:55:28] [INF]   [PASSIVE]   3.5%  src=50/1416  subdomains=1  ETA=9m06s  current=agnios
-[13:55:33] [INF]   [PASSIVE]   3.5%  src=50/1416  subdomains=4  ETA=11m23s  current=agnios
-[13:55:38] [INF]   [PASSIVE]   3.5%  src=50/1416  subdomains=4  ETA=13m39s  current=agnios
-[13:55:45] [INF]   [PASSIVE]   3.5%  src=50/1416  subdomains=4  ETA=15m56s  current=agnios
-[13:55:50] [INF]   [PASSIVE]   3.6%  src=51/1416  subdomains=4  ETA=17m50s  current=recondev
-[13:55:55] [INF]   [PASSIVE]   3.8%  src=54/1416  subdomains=4  ETA=18m55s  current=spyonweb
-[13:56:00] [INF]   [PASSIVE]   4.1%  src=58/1416  subdomains=4  ETA=19m31s  current=whoisjson
-[13:56:05] [INF]   [PASSIVE]   4.1%  src=58/1416  subdomains=4  ETA=21m28s  current=whoisjson
-[13:56:10] [INF]   [PASSIVE]   4.2%  src=59/1416  subdomains=4  ETA=23m00s  current=intelx
-[13:56:17] [INF]   [PASSIVE]   4.4%  src=62/1416  subdomains=4  ETA=23m40s  current=riskiq_pdns
-[13:56:22] [INF]   [PASSIVE]   4.5%  src=64/1416  subdomains=4  ETA=24m39s  current=passivedns_mnemonic
-[13:56:27] [INF]   [PASSIVE]   4.7%  src=67/1416  subdomains=4  ETA=25m10s  current=sslbl
-[13:56:32] [INF]   [PASSIVE]   4.9%  src=70/1416  subdomains=4  ETA=25m38s  current=spyse2
-[13:56:37] [INF]   [PASSIVE]   5.6%  src=79/1416  subdomains=17  ETA=23m58s  current=startpage
-[13:56:42] [INF]   [PASSIVE]   6.4%  src=90/1416  subdomains=17  ETA=22m06s  current=searx2
-[13:56:47] [INF]   [PASSIVE]   7.3%  src=104/1416  subdomains=17  ETA=19m58s  current=bitbucket
-[13:56:55] [INF]   [PASSIVE]   7.7%  src=109/1416  subdomains=17  ETA=19m59s  current=searchcode
-[13:57:00] [INF]   [PASSIVE]   8.1%  src=114/1416  subdomains=17  ETA=19m59s  current=sourcegraph_search
-[13:57:05] [INF]   [PASSIVE]   8.6%  src=122/1416  subdomains=17  ETA=19m27s  current=cloudflare_radar
-[13:57:08] [INF]   [BUCKET] No direct CNAME links to cloud bucket providers found; scanning name-matched candidates only (seeds containing 'target' or 'target-fr')
-[13:57:44] [INF]   [BUCKET-v10] Scanning 66088970 virtual-hosted + 5481216 path-style candidates with 5000+5000 workers …
-[13:57:46] [INF]   [PASSIVE]   9.3%  src=132/1416  subdomains=516  ETA=24m09s  current=subdomaincenter
-[13:57:51] [INF]   [PASSIVE]  10.9%  src=154/1416  subdomains=516  ETA=21m02s  current=dnszones
-[13:57:56] [INF]   [PASSIVE]  11.1%  src=157/1416  subdomains=516  ETA=21m15s  current=teamcymru
-[13:58:04] [INF]   [PASSIVE]  11.7%  src=166/1416  subdomains=516  ETA=20m35s  current=dnspedia
-[13:58:09] [INF]   [PASSIVE]  11.9%  src=169/1416  subdomains=516  ETA=20m47s  current=commonssl
-[13:58:14] [INF]   [PASSIVE]  12.6%  src=178/1416  subdomains=516  ETA=20m10s  current=cloakquest3r
-[13:58:19] [INF]   [PASSIVE]  13.7%  src=194/1416  subdomains=516  ETA=18m47s  current=myip_ms
-[13:58:24] [INF]   [PASSIVE]  14.5%  src=206/1416  subdomains=516  ETA=18m01s  current=comodo_ct
-[13:58:29] [INF]   [PASSIVE]  14.8%  src=210/1416  subdomains=516  ETA=18m05s  current=digicert_ct2
-[13:58:36] [INF]   [PASSIVE]  15.3%  src=216/1416  subdomains=966  ETA=17m58s  current=oldweb_today
-[13:58:41] [INF]   [PASSIVE]  15.4%  src=218/1416  subdomains=966  ETA=18m14s  current=webrecorder_io
-[13:58:46] [INF]   [PASSIVE]  16.2%  src=230/1416  subdomains=966  ETA=17m32s  current=circl2
-[13:58:51] [INF]   [PASSIVE]  17.3%  src=245/1416  subdomains=966  ETA=16m39s  current=urlscan6
-[13:58:56] [INF]   [PASSIVE]  17.5%  src=248/1416  subdomains=966  ETA=16m48s  current=hackertarget4
-[13:59:01] [INF]   [PASSIVE]  18.4%  src=260/1416  subdomains=966  ETA=16m14s  current=dnsmap_io2
-[13:59:06] [INF]   [PASSIVE]  19.3%  src=273/1416  subdomains=966  ETA=15m38s  current=mojeek2
-[13:59:14] [INF]   [PASSIVE]  20.1%  src=285/1416  subdomains=966  ETA=15m09s  current=github3
-[13:59:19] [INF]   [PASSIVE]  20.6%  src=291/1416  subdomains=966  ETA=15m04s  current=pastebin2
-[13:59:24] [INF]   [PASSIVE]  20.6%  src=291/1416  subdomains=966  ETA=15m24s  current=pastebin2
-[13:59:29] [INF]   [PASSIVE]  20.8%  src=294/1416  subdomains=966  ETA=15m31s  current=hex_pm
-[13:59:34] [INF]   [PASSIVE]  20.8%  src=294/1416  subdomains=967  ETA=15m50s  current=hex_pm
-[13:59:39] [INF]   [PASSIVE]  21.0%  src=297/1416  subdomains=967  ETA=15m57s  current=crates2
-[13:59:46] [INF]   [PASSIVE]  21.0%  src=297/1416  subdomains=967  ETA=16m16s  current=crates2
-[13:59:51] [INF]   [PASSIVE]  21.0%  src=297/1416  subdomains=967  ETA=16m35s  current=crates2
-[13:59:56] [INF]   [PASSIVE]  21.0%  src=298/1416  subdomains=967  ETA=16m49s  current=dockerhub2
-[14:00:01] [INF]   [PASSIVE]  21.0%  src=298/1416  subdomains=967  ETA=17m08s  current=dockerhub2
-[14:00:06] [INF]   [PASSIVE]  21.0%  src=298/1416  subdomains=967  ETA=17m27s  current=dockerhub2
-[14:00:11] [INF]   [PASSIVE]  21.0%  src=298/1416  subdomains=967  ETA=17m45s  current=dockerhub2
-[14:00:16] [INF]   [PASSIVE]  21.0%  src=298/1416  subdomains=967  ETA=18m04s  current=dockerhub2
-[14:00:22] [INF]   [PASSIVE]  21.3%  src=302/1416  subdomains=967  ETA=18m04s  current=gist_search2
-[14:00:27] [INF]   [PASSIVE]  22.0%  src=312/1416  subdomains=967  ETA=17m38s  current=findomain_api
-[14:00:32] [INF]   [PASSIVE]  23.1%  src=327/1416  subdomains=977  ETA=16m52s  current=ripe2
-[14:00:37] [INF]   [PASSIVE]  23.4%  src=331/1416  subdomains=977  ETA=16m53s  current=bgpview3
-[14:00:42] [INF]   [PASSIVE]  23.7%  src=335/1416  subdomains=977  ETA=16m53s  current=ipvoid2
-[14:00:47] [INF]   [PASSIVE]  24.1%  src=341/1416  subdomains=977  ETA=16m46s  current=mozilla_observatory
-[14:00:55] [INF]   [PASSIVE]  25.1%  src=356/1416  subdomains=977  ETA=16m05s  current=domain_glass
-[14:01:00] [INF]   [PASSIVE]  26.3%  src=373/1416  subdomains=1168  ETA=15m20s  current=pulsedive3_ext
-[14:01:05] [INF]   [PASSIVE]  27.8%  src=393/1416  subdomains=1168  ETA=14m29s  current=digicert_ct3
-[14:01:10] [INF]   [PASSIVE]  28.9%  src=409/1416  subdomains=1168  ETA=13m54s  current=hackertarget6
-[14:01:15] [INF]   [PASSIVE]  29.4%  src=416/1416  subdomains=1168  ETA=13m47s  current=dnsbufferover6
-[14:01:20] [INF]   [PASSIVE]  29.5%  src=418/1416  subdomains=1168  ETA=13m53s  current=dnsgrep4
-[14:01:25] [INF]   [PASSIVE]  29.9%  src=424/1416  subdomains=1578  ETA=13m48s  current=dnsscan4
-[14:01:32] [INF]   [PASSIVE]  31.2%  src=442/1416  subdomains=1948  ETA=13m11s  current=dnsdb3
-[14:01:37] [INF]   [PASSIVE]  32.6%  src=462/1416  subdomains=1948  ETA=12m31s  current=bing5
-[14:01:42] [INF]   [PASSIVE]  33.1%  src=468/1416  subdomains=1948  ETA=12m27s  current=duckduckgo3
-[14:01:47] [INF]   [PASSIVE]  33.5%  src=475/1416  subdomains=1948  ETA=12m21s  current=searx7
-[14:01:52] [INF]   [PASSIVE]  33.5%  src=475/1416  subdomains=1948  ETA=12m31s  current=searx7
-[14:01:57] [INF]   [PASSIVE]  33.7%  src=477/1416  subdomains=1948  ETA=12m36s  current=brave4
-[14:02:04] [INF]   [PASSIVE]  33.7%  src=477/1416  subdomains=1948  ETA=12m46s  current=brave4
-[14:02:09] [INF]   [PASSIVE]  33.7%  src=477/1416  subdomains=1948  ETA=12m55s  current=brave4
-[14:02:14] [INF]   [PASSIVE]  34.0%  src=481/1416  subdomains=1948  ETA=12m55s  current=qwant4
-[14:02:19] [INF]   [PASSIVE]  34.0%  src=482/1416  subdomains=1948  ETA=13m03s  current=mojeek3
-[14:02:24] [INF]   [PASSIVE]  34.3%  src=486/1416  subdomains=1948  ETA=13m02s  current=millionshort2
-[14:02:29] [INF]   [PASSIVE]  35.0%  src=495/1416  subdomains=1948  ETA=12m50s  current=cisco_talos3
-[14:02:36] [INF]   [PASSIVE]  35.5%  src=503/1416  subdomains=1948  ETA=12m40s  current=urlhaus5
-[14:02:41] [INF]   [PASSIVE]  36.2%  src=512/1416  subdomains=1948  ETA=12m28s  current=hybridanalysis3
-[14:02:46] [INF]   [PASSIVE]  37.4%  src=530/1416  subdomains=1948  ETA=11m57s  current=scamalytics2
-[14:02:51] [INF]   [PASSIVE]  37.9%  src=537/1416  subdomains=1948  ETA=11m50s  current=github7
-[14:02:56] [INF]   [PASSIVE]  38.0%  src=538/1416  subdomains=1948  ETA=11m56s  current=github8
-[14:03:01] [INF]   [PASSIVE]  38.6%  src=547/1416  subdomains=1948  ETA=11m45s  current=sourcegraph4
-[14:03:07] [INF]   [PASSIVE]  39.1%  src=553/1416  subdomains=1948  ETA=11m42s  current=gist_search4
-[14:03:15] [INF]   [PASSIVE]  39.3%  src=556/1416  subdomains=1948  ETA=11m44s  current=stackoverflow4
-[14:03:20] [INF]   [PASSIVE]  40.3%  src=570/1416  subdomains=1948  ETA=11m23s  current=azure_websites3
-[14:03:25] [INF]   [PASSIVE]  41.6%  src=589/1416  subdomains=1948  ETA=10m53s  current=peeringdb3
-[14:03:30] [INF]   [PASSIVE]  41.9%  src=593/1416  subdomains=1948  ETA=10m52s  current=shadowserver3
-[14:03:35] [INF]   [PASSIVE]  42.7%  src=604/1416  subdomains=1948  ETA=10m38s  current=ripe4
-[14:03:40] [INF]   [PASSIVE]  43.4%  src=614/1416  subdomains=1955  ETA=10m27s  current=whoxy3
-[14:03:47] [INF]   [PASSIVE]  44.1%  src=624/1416  subdomains=1955  ETA=10m15s  current=spyonweb5
-[14:03:52] [INF]   [PASSIVE]  45.3%  src=641/1416  subdomains=1956  ETA=9m52s  current=archive_it2
-[14:03:57] [INF]   [PASSIVE]  45.8%  src=649/1416  subdomains=1956  ETA=9m45s  current=fofa6
-[14:04:02] [INF]   [PASSIVE]  47.5%  src=672/1416  subdomains=1956  ETA=9m13s  current=shrewdeye3
-[14:04:07] [INF]   [PASSIVE]  48.4%  src=685/1416  subdomains=1956  ETA=8m59s  current=pentest_tools_dns2
-[14:04:12] [INF]   [PASSIVE]  49.1%  src=695/1416  subdomains=1956  ETA=8m49s  current=sitedossier3
-[14:04:17] [INF]   [PASSIVE]  50.6%  src=717/1416  subdomains=1956  ETA=8m22s  current=intelligencex3
-[14:04:24] [INF]   [PASSIVE]  51.5%  src=729/1416  subdomains=1956  ETA=8m10s  current=sslmate3
-[14:04:29] [INF]   [PASSIVE]  51.7%  src=732/1416  subdomains=1957  ETA=8m10s  current=cyberatlas2
-[14:04:34] [INF]   [PASSIVE]  52.3%  src=740/1416  subdomains=1957  ETA=8m04s  current=mwdb3
-[14:04:39] [INF]   [PASSIVE]  52.6%  src=745/1416  subdomains=1957  ETA=8m02s  current=sublist3r_api2
-[14:04:44] [INF]   [PASSIVE]  52.8%  src=747/1416  subdomains=1957  ETA=8m03s  current=cybercrime_tracker2
-[14:04:49] [INF]   [PASSIVE]  53.2%  src=753/1416  subdomains=1957  ETA=8m00s  current=aggr_net2
-[14:04:57] [INF]   [PASSIVE]  53.4%  src=756/1416  subdomains=1957  ETA=8m00s  current=chaos7
-[14:05:02] [INF]   [PASSIVE]  53.7%  src=761/1416  subdomains=1957  ETA=7m57s  current=bgphacking4
-[14:05:07] [INF]   [PASSIVE]  53.7%  src=761/1416  subdomains=1957  ETA=8m02s  current=bgphacking4
-[14:05:12] [INF]   [PASSIVE]  54.7%  src=774/1416  subdomains=2306  ETA=7m48s  current=dnschecker3
-[14:05:17] [INF]   [PASSIVE]  55.6%  src=788/1416  subdomains=2306  ETA=7m34s  current=ip_location2
-[14:05:22] [INF]   [PASSIVE]  56.7%  src=803/1416  subdomains=2306  ETA=7m19s  current=pulsedive7
-[14:05:29] [INF]   [PASSIVE]  56.9%  src=806/1416  subdomains=2306  ETA=7m19s  current=netlas9
-[14:05:34] [INF]   [PASSIVE]  57.7%  src=817/1416  subdomains=2306  ETA=7m09s  current=crtwatch2
-[14:05:39] [INF]   [PASSIVE]  58.2%  src=824/1416  subdomains=2306  ETA=7m04s  current=domaintools5
-[14:05:44] [INF]   [PASSIVE]  58.3%  src=825/1416  subdomains=2306  ETA=7m06s  current=domaintools6
-[14:05:49] [INF]   [PASSIVE]  58.3%  src=825/1416  subdomains=2306  ETA=7m09s  current=domaintools6
-[14:05:54] [INF]   [PASSIVE]  58.3%  src=825/1416  subdomains=2306  ETA=7m13s  current=domaintools6
-[14:05:59] [INF]   [PASSIVE]  58.3%  src=825/1416  subdomains=2306  ETA=7m17s  current=domaintools6
-[14:06:07] [INF]   [PASSIVE]  58.5%  src=828/1416  subdomains=2344  ETA=7m16s  current=grayhatwarfare3
-[14:06:12] [INF]   [PASSIVE]  58.5%  src=829/1416  subdomains=2344  ETA=7m19s  current=grayhatwarfare4
-[14:06:17] [INF]   [PASSIVE]  59.0%  src=835/1416  subdomains=2344  ETA=7m15s  current=heroku_apps
-[14:06:22] [INF]   [PASSIVE]  60.1%  src=851/1416  subdomains=2638  ETA=6m58s  current=zendesk_sites
-[14:06:27] [INF]   [PASSIVE]  60.9%  src=862/1416  subdomains=2638  ETA=6m48s  current=s3_public
-[14:06:32] [INF]   [PASSIVE]  61.7%  src=873/1416  subdomains=2638  ETA=6m38s  current=zoomeye8
-[14:06:39] [INF]   [PASSIVE]  62.1%  src=880/1416  subdomains=2638  ETA=6m33s  current=passive_dns_nl
-[14:06:44] [INF]   [PASSIVE]  62.6%  src=887/1416  subdomains=2638  ETA=6m27s  current=github_gist_search
-[14:06:49] [INF]   [PASSIVE]  63.5%  src=899/1416  subdomains=2639  ETA=6m16s  current=researchgate_search
-[14:06:54] [INF]   [PASSIVE]  63.7%  src=902/1416  subdomains=2639  ETA=6m16s  current=reddit5
-[14:06:59] [INF]   [PASSIVE]  64.3%  src=911/1416  subdomains=2639  ETA=6m08s  current=wikipedia_search
-[14:07:04] [INF]   [PASSIVE]  64.5%  src=913/1416  subdomains=2639  ETA=6m09s  current=openstreetmap
-[14:07:09] [INF]   [PASSIVE]  65.1%  src=922/1416  subdomains=2639  ETA=6m01s  current=dnstrails2
-[14:07:16] [INF]   [PASSIVE]  65.3%  src=924/1416  subdomains=2639  ETA=6m02s  current=subfinder_api2
-[14:07:21] [INF]   [PASSIVE]  65.3%  src=924/1416  subdomains=2639  ETA=6m04s  current=subfinder_api2
-[14:07:26] [INF]   [PASSIVE]  65.3%  src=924/1416  subdomains=2639  ETA=6m07s  current=subfinder_api2
-[14:07:31] [INF]   [PASSIVE]  65.3%  src=924/1416  subdomains=2639  ETA=6m10s  current=subfinder_api2
-[14:07:36] [INF]   [PASSIVE]  65.9%  src=933/1416  subdomains=2639  ETA=6m02s  current=certspotter7
-[14:07:41] [INF]   [PASSIVE]  66.3%  src=939/1416  subdomains=2639  ETA=5m58s  current=leakix11
-[14:07:48] [INF]   [PASSIVE]  67.1%  src=950/1416  subdomains=2639  ETA=5m48s  current=merklemap_v2
-[14:07:53] [INF]   [PASSIVE]  68.1%  src=964/1416  subdomains=2640  ETA=5m35s  current=rapiddns_cname
-[14:07:58] [INF]   [PASSIVE]  68.7%  src=973/1416  subdomains=2640  ETA=5m27s  current=alienvault_malware
-[14:08:03] [INF]   [PASSIVE]  69.8%  src=988/1416  subdomains=2640  ETA=5m14s  current=google_doh_txt
-[14:08:08] [INF]   [PASSIVE]  71.5%  src=1013/1416  subdomains=2640  ETA=4m50s  current=whatsmydns_search
-[14:08:13] [INF]   [PASSIVE]  73.2%  src=1036/1416  subdomains=2640  ETA=4m29s  current=bgpview_search2
-[14:08:18] [INF]   [PASSIVE]  74.6%  src=1056/1416  subdomains=2641  ETA=4m12s  current=domcop_search
-[14:08:25] [INF]   [PASSIVE]  75.3%  src=1066/1416  subdomains=2641  ETA=4m04s  current=mvnrepository_search
-[14:08:30] [INF]   [PASSIVE]  76.6%  src=1084/1416  subdomains=2642  ETA=3m49s  current=alienvault_geo_passive
-[14:08:35] [INF]   [PASSIVE]  76.9%  src=1089/1416  subdomains=2642  ETA=3m46s  current=google_doh_any_types
-[14:08:40] [INF]   [PASSIVE]  77.9%  src=1103/1416  subdomains=2642  ETA=3m35s  current=leakix_v2_free
-[14:08:45] [INF]   [PASSIVE]  78.5%  src=1112/1416  subdomains=2642  ETA=3m29s  current=pulsedive_domain
-[14:08:47] [INF]   [CLOUDBRUTE] Starting — 85560 candidates (target='target')
-[14:08:50] [INF]   [PASSIVE]  79.0%  src=1119/1416  subdomains=2642  ETA=3m24s  current=urlvoid_lookup
-[14:08:55] [INF]   [PASSIVE]  79.2%  src=1122/1416  subdomains=2642  ETA=3m23s  current=wayback_txt_records
-[14:08:57] [INF]   [CLOUDBRUTE]   0.4%  done=322/85560  found=0  ETA=44m08s  → https://ap-northeast-1-target-fr.s3.ap-southeast-1.amazonaws.com
-[14:09:00] [INF]   [PASSIVE]  79.2%  src=1122/1416  subdomains=2642  ETA=3m24s  current=wayback_txt_records
-[14:09:05] [INF]   [PASSIVE]  79.2%  src=1122/1416  subdomains=2642  ETA=3m25s  current=wayback_txt_records
-[14:09:07] [INF]   [CLOUDBRUTE]   0.8%  done=655/85560  found=0  ETA=43m13s  → https://api-gateway-target.nyc3.digitaloceanspaces.com
-[14:09:10] [INF]   [PASSIVE]  79.3%  src=1123/1416  subdomains=2642  ETA=3m26s  current=hackertarget_zonetransfer_attempt
-[14:09:15] [INF]   [PASSIVE]  79.4%  src=1125/1416  subdomains=2642  ETA=3m25s  current=anubis_db_full
-[14:09:17] [INF]   [CLOUDBRUTE]   1.2%  done=1014/85560  found=0  ETA=41m42s  → https://archive-target-fr.s3.wasabisys.com
-[14:09:20] [INF]   [PASSIVE]  79.9%  src=1131/1416  subdomains=2642  ETA=3m21s  current=dnorepo
-[14:09:25] [INF]   [PASSIVE]  80.2%  src=1136/1416  subdomains=2642  ETA=3m18s  current=trickest_cloud
-[14:09:27] [INF]   [CLOUDBRUTE]   1.6%  done=1356/85560  found=0  ETA=41m24s  → https://assets-target-fr.sfo3.digitaloceanspaces.com
-[14:09:30] [INF]   [PASSIVE]  80.4%  src=1138/1416  subdomains=2642  ETA=3m17s  current=validin_api
-[14:09:35] [INF]   [PASSIVE]  80.4%  src=1139/1416  subdomains=2642  ETA=3m18s  current=dnsdumpster_api
-[14:09:37] [INF]   [CLOUDBRUTE]   2.0%  done=1717/85560  found=0  ETA=40m42s  → https://audit-account-target.s3.ap-southeast-1.amazonaws.com
-[14:09:46] [INF]   [PASSIVE]  80.5%  src=1140/1416  subdomains=2642  ETA=3m18s  current=alienvault_otx_v2
-[14:09:51] [INF]   [PASSIVE]  81.3%  src=1151/1416  subdomains=2642  ETA=3m10s  current=chaos_intelligence
-[14:09:52] [INF]   [CLOUDBRUTE]   2.4%  done=2059/85560  found=0  ETA=40m33s  → https://backup-target-fr-test.s3.ap-southeast-1.amazonaws.com
-[14:09:56] [INF]   [PASSIVE]  81.3%  src=1151/1416  subdomains=2642  ETA=3m11s  current=chaos_intelligence
-[14:10:01] [INF]   [PASSIVE]  81.9%  src=1160/1416  subdomains=2642  ETA=3m04s  current=urlscan_advanced
-[14:10:02] [INF]   [CLOUDBRUTE]   2.8%  done=2415/85560  found=0  ETA=40m10s  → https://batch-job-output-target.ams3.digitaloceanspaces.com
-[14:10:06] [INF]   [PASSIVE]  81.9%  src=1160/1416  subdomains=2642  ETA=3m05s  current=urlscan_advanced
-[14:10:11] [INF]   [PASSIVE]  82.1%  src=1162/1416  subdomains=2642  ETA=3m04s  current=wayback_machine_calendar
-[14:10:12] [INF]   [CLOUDBRUTE]   3.2%  done=2765/85560  found=0  ETA=39m55s  → https://biotech-target.s3-website-us-east-1.amazonaws.com
-[14:10:16] [INF]   [PASSIVE]  82.1%  src=1163/1416  subdomains=2642  ETA=3m04s  current=commoncrawl_index_api
-[14:10:21] [INF]   [PASSIVE]  82.2%  src=1164/1416  subdomains=2642  ETA=3m05s  current=spf_dmarc_advanced
-[14:10:22] [INF]   [CLOUDBRUTE]   3.6%  done=3116/85560  found=0  ETA=39m41s  → https://builds-target.s3.eu-west-2.amazonaws.com
-[14:10:26] [INF]   [PASSIVE]  82.9%  src=1174/1416  subdomains=2642  ETA=2m57s  current=urlscan_asn_search
-[14:10:31] [INF]   [PASSIVE]  83.8%  src=1187/1416  subdomains=2642  ETA=2m46s  current=wayback_cdx_v5
-[14:10:32] [INF]   [CLOUDBRUTE]   4.1%  done=3477/85560  found=0  ETA=39m21s  → https://certs-target.r2.cloudflarestorage.com
-[14:10:36] [INF]   [PASSIVE]  84.0%  src=1189/1416  subdomains=2642  ETA=2m46s  current=hackertarget_v5
-[14:10:41] [INF]   [PASSIVE]  84.1%  src=1191/1416  subdomains=2642  ETA=2m45s  current=certstream_v5
-[14:10:42] [INF]   [CLOUDBRUTE]   4.5%  done=3842/85560  found=0  ETA=39m00s  → https://cloudfront-target-fr.ams3.digitaloceanspaces.com
-[14:10:46] [INF]   [PASSIVE]  84.2%  src=1192/1416  subdomains=2642  ETA=2m45s  current=ct_log_multi_v5
-[14:10:51] [INF]   [PASSIVE]  84.5%  src=1197/1416  subdomains=2642  ETA=2m41s  current=robtex_v5
-[14:10:52] [INF]   [CLOUDBRUTE]   4.9%  done=4195/85560  found=0  ETA=38m47s  → https://cloudwatch-logs-export-target.s3.ap-northeast-1.amazonaws.co…
-[14:10:56] [INF]   [PASSIVE]  84.7%  src=1199/1416  subdomains=2642  ETA=2m41s  current=rapiddns_v5
-[14:11:01] [INF]   [PASSIVE]  84.7%  src=1200/1416  subdomains=2642  ETA=2m41s  current=subdomains_io_v5
-[14:11:02] [INF]   [CLOUDBRUTE]   5.3%  done=4554/85560  found=0  ETA=38m32s  → https://codecommit-backup-target.ams3.digitaloceanspaces.com
-[14:11:06] [INF]   [PASSIVE]  85.2%  src=1207/1416  subdomains=2642  ETA=2m35s  current=pulsedive_v5
-[14:11:11] [INF]   [PASSIVE]  85.2%  src=1207/1416  subdomains=2642  ETA=2m36s  current=pulsedive_v5
-[14:11:12] [INF]   [CLOUDBRUTE]   5.7%  done=4893/85560  found=0  ETA=38m28s  → https://common-target.us-east-1.linodeobjects.com
-[14:11:21] [INF]   [PASSIVE]  85.4%  src=1209/1416  subdomains=2642  ETA=2m35s  current=xforce_v5
-[14:11:26] [INF]   [PASSIVE]  85.7%  src=1213/1416  subdomains=2642  ETA=2m33s  current=synapsint_v5
-[14:11:28] [INF]   [CLOUDBRUTE]   6.1%  done=5254/85560  found=0  ETA=38m13s  → https://config-target-fr-staging.s3.eu-west-1.amazonaws.com
-[14:11:31] [INF]   [PASSIVE]  85.9%  src=1217/1416  subdomains=2642  ETA=2m30s  current=host_io_v5
-[14:11:36] [INF]   [PASSIVE]  86.2%  src=1221/1416  subdomains=2642  ETA=2m27s  current=otx_v5_pulse
-[14:11:38] [INF]   [CLOUDBRUTE]   6.6%  done=5612/85560  found=0  ETA=37m59s  → https://controller-target.eu-central-1.linodeobjects.com
-[14:11:41] [INF]   [PASSIVE]  86.6%  src=1226/1416  subdomains=2642  ETA=2m24s  current=subdomain_sh_v6
-[14:11:46] [INF]   [PASSIVE]  86.7%  src=1227/1416  subdomains=2642  ETA=2m24s  current=recon_cloud_v6
-[14:11:48] [INF]   [CLOUDBRUTE]   7.0%  done=5955/85560  found=0  ETA=37m52s  → https://courseware-target-fr.fra1.digitaloceanspaces.com
-[14:11:51] [INF]   [PASSIVE]  86.7%  src=1227/1416  subdomains=2642  ETA=2m24s  current=recon_cloud_v6
-[14:11:56] [INF]   [PASSIVE]  86.9%  src=1230/1416  subdomains=2642  ETA=2m22s  current=dnorepo_v6
-[14:11:58] [INF]   [CLOUDBRUTE]   7.4%  done=6318/85560  found=0  ETA=37m37s  → https://curated-target.storage.googleapis.com
-[14:12:01] [INF]   [PASSIVE]  87.2%  src=1235/1416  subdomains=2642  ETA=2m19s  current=shodaninternet_v6
-[14:12:06] [INF]   [PASSIVE]  87.6%  src=1240/1416  subdomains=2642  ETA=2m15s  current=github_code_v6
-[14:12:10] [INF]   [CLOUDBRUTE]   7.8%  done=6680/85560  found=0  ETA=37m53s  → https://data-target.s3.amazonaws.com
-[14:12:11] [INF]   [PASSIVE]  87.6%  src=1241/1416  subdomains=2642  ETA=2m15s  current=tranco_list_v6
-[14:12:16] [INF]   [PASSIVE]  87.9%  src=1245/1416  subdomains=2642  ETA=2m12s  current=cloudflare_radar_v6
-[14:12:20] [INF]   [CLOUDBRUTE]   8.3%  done=7091/85560  found=0  ETA=37m20s  → https://demo-target-fr.sfo3.digitaloceanspaces.com
-[14:12:21] [INF]   [PASSIVE]  88.1%  src=1248/1416  subdomains=2642  ETA=2m10s  current=alienvault_url_list_v6
-[14:12:26] [INF]   [PASSIVE]  88.3%  src=1251/1416  subdomains=2642  ETA=2m08s  current=dnsbufferover_v6
-[14:12:34] [INF]   [CLOUDBRUTE]   8.7%  done=7431/85560  found=0  ETA=37m14s  → https://dev-02-target.s3.wasabisys.com
-[14:12:35] [INF]   [PASSIVE]  88.6%  src=1254/1416  subdomains=2642  ETA=2m06s  current=trickest_v7
-[14:12:40] [INF]   [PASSIVE]  88.6%  src=1255/1416  subdomains=2642  ETA=2m06s  current=reconcloud_v7
-[14:12:44] [INF]   [CLOUDBRUTE]   9.1%  done=7785/85560  found=0  ETA=37m02s  → https://devsecops-target.nyc3.digitaloceanspaces.com
-[14:12:45] [INF]   [PASSIVE]  88.7%  src=1256/1416  subdomains=2642  ETA=2m06s  current=owasp_amass_v7
-[14:12:50] [INF]   [PASSIVE]  88.7%  src=1256/1416  subdomains=2642  ETA=2m06s  current=owasp_amass_v7
-[14:12:54] [INF]   [CLOUDBRUTE]   9.5%  done=8138/85560  found=0  ETA=36m51s  → https://doc-target-fr.s3.eu-west-2.amazonaws.com
-[14:12:55] [INF]   [PASSIVE]  88.8%  src=1257/1416  subdomains=2642  ETA=2m06s  current=certsh_wildcard_v7
-[14:13:00] [INF]   [PASSIVE]  88.8%  src=1257/1416  subdomains=2642  ETA=2m07s  current=certsh_wildcard_v7
-[14:13:04] [INF]   [CLOUDBRUTE]   9.9%  done=8494/85560  found=0  ETA=36m40s  → https://target-01.digitaloceanspaces.com
-[14:13:05] [INF]   [PASSIVE]  88.8%  src=1257/1416  subdomains=2642  ETA=2m07s  current=certsh_wildcard_v7
-[14:13:10] [INF]   [PASSIVE]  89.8%  src=1271/1416  subdomains=2642  ETA=1m55s  current=validin_v7
-[14:13:14] [INF]   [CLOUDBRUTE]  10.3%  done=8847/85560  found=0  ETA=36m29s  → https://target-10.s3.ap-southeast-1.amazonaws.com
-[14:13:15] [INF]   [PASSIVE]  90.1%  src=1276/1416  subdomains=2642  ETA=1m51s  current=trello_leak_v7
-[14:13:20] [INF]   [PASSIVE]  90.1%  src=1276/1416  subdomains=2642  ETA=1m52s  current=trello_leak_v7
-[14:13:24] [INF]   [CLOUDBRUTE]  10.8%  done=9208/85560  found=0  ETA=36m16s  → https://target-19.eu-central-1.linodeobjects.com
-[14:13:25] [INF]   [PASSIVE]  90.2%  src=1277/1416  subdomains=2642  ETA=1m52s  current=jira_leak_v7
-[14:13:30] [INF]   [PASSIVE]  90.2%  src=1277/1416  subdomains=2642  ETA=1m52s  current=jira_leak_v7
-[14:13:34] [INF]   [CLOUDBRUTE]  11.2%  done=9566/85560  found=0  ETA=36m04s  → https://target-2018-export.s3.us-east-1.wasabisys.com
-[14:13:35] [INF]   [PASSIVE]  90.2%  src=1277/1416  subdomains=2642  ETA=1m53s  current=jira_leak_v7
-[14:13:40] [INF]   [PASSIVE]  90.3%  src=1278/1416  subdomains=2642  ETA=1m52s  current=confluence_leak_v7
-[14:13:44] [INF]   [CLOUDBRUTE]  11.6%  done=9907/85560  found=0  ETA=35m57s  → https://target-2020-archive.s3.us-east-1.wasabisys.com
-[14:13:45] [INF]   [PASSIVE]  90.3%  src=1278/1416  subdomains=2642  ETA=1m53s  current=confluence_leak_v7
-[14:13:50] [INF]   [PASSIVE]  90.3%  src=1278/1416  subdomains=2642  ETA=1m53s  current=confluence_leak_v7
-[14:13:54] [INF]   [CLOUDBRUTE]  12.0%  done=10271/85560  found=0  ETA=35m44s  → https://target-2021-report.s3.ap-northeast-1.amazonaws.com
-[14:13:55] [INF]   [PASSIVE]  90.3%  src=1279/1416  subdomains=2642  ETA=1m53s  current=notion_leak_v7
-[14:14:00] [INF]   [PASSIVE]  90.5%  src=1281/1416  subdomains=2642  ETA=1m52s  current=swaggerhub_v7
-[14:14:10] [INF]   [CLOUDBRUTE]  12.4%  done=10639/85560  found=0  ETA=35m30s  → https://target-2023-export.s3-website-us-east-1.amazonaws.com
-[14:14:11] [INF]   [PASSIVE]  90.5%  src=1282/1416  subdomains=2642  ETA=1m51s  current=apigee_v7
-[14:14:16] [INF]   [PASSIVE]  90.6%  src=1283/1416  subdomains=2642  ETA=1m51s  current=kong_admin_v7
-[14:14:20] [INF]   [CLOUDBRUTE]  12.8%  done=10981/85560  found=0  ETA=35m22s  → https://target-2025-archive.s3-website-us-west-2.amazonaws.com
-[14:14:21] [INF]   [PASSIVE]  90.7%  src=1284/1416  subdomains=2642  ETA=1m51s  current=aws_api_gw_v7
-[14:14:26] [INF]   [PASSIVE]  90.7%  src=1284/1416  subdomains=2642  ETA=1m51s  current=aws_api_gw_v7
-[14:14:30] [INF]   [CLOUDBRUTE]  13.3%  done=11342/85560  found=0  ETA=35m10s  → https://target-25.web.core.windows.net
-[14:14:31] [INF]   [PASSIVE]  90.7%  src=1285/1416  subdomains=2642  ETA=1m51s  current=gcp_endpoints_v7
-[14:14:36] [INF]   [PASSIVE]  90.8%  src=1286/1416  subdomains=2642  ETA=1m50s  current=azure_apim_v7
-[14:14:40] [INF]   [CLOUDBRUTE]  13.7%  done=11714/85560  found=0  ETA=34m56s  → https://target-8.web.core.windows.net
-[14:14:41] [INF]   [PASSIVE]  91.0%  src=1289/1416  subdomains=2642  ETA=1m48s  current=dnsbufferover_v8
-[14:14:47] [INF]   [PASSIVE]  91.0%  src=1289/1416  subdomains=2642  ETA=1m48s  current=dnsbufferover_v8
-[14:14:51] [INF]   [CLOUDBRUTE]  14.1%  done=12064/85560  found=0  ETA=34m46s  → https://target-akamai.r2.cloudflarestorage.com
-[14:14:52] [INF]   [PASSIVE]  91.0%  src=1289/1416  subdomains=2642  ETA=1m49s  current=dnsbufferover_v8
-[14:14:57] [INF]   [PASSIVE]  91.1%  src=1290/1416  subdomains=2642  ETA=1m48s  current=rapiddns_v8
-[14:15:01] [INF]   [CLOUDBRUTE]  14.5%  done=12424/85560  found=0  ETA=34m35s  → https://target-ap-south-1.sgp1.digitaloceanspaces.com
-[14:15:02] [INF]   [PASSIVE]  91.1%  src=1290/1416  subdomains=2642  ETA=1m49s  current=rapiddns_v8
-[14:15:07] [INF]   [PASSIVE]  91.2%  src=1291/1416  subdomains=2642  ETA=1m48s  current=sitedossier_v8
-[14:15:11] [INF]   [CLOUDBRUTE]  14.9%  done=12763/85560  found=0  ETA=34m27s  → https://target-apps.s3.wasabisys.com
-[14:15:12] [INF]   [PASSIVE]  91.4%  src=1294/1416  subdomains=2642  ETA=1m46s  current=shrewdeye_v8
-[14:15:17] [INF]   [PASSIVE]  91.6%  src=1297/1416  subdomains=2642  ETA=1m44s  current=gist_github_passive_v8
-[14:15:21] [INF]   [CLOUDBRUTE]  15.3%  done=13123/85560  found=0  ETA=34m16s  → https://target-attachments.s3.ap-northeast-1.amazonaws.com
-[14:15:22] [INF]   [PASSIVE]  91.7%  src=1298/1416  subdomains=2642  ETA=1m43s  current=common_crawl_index_v8
-[14:15:27] [INF]   [PASSIVE]  91.7%  src=1298/1416  subdomains=2642  ETA=1m44s  current=common_crawl_index_v8
-[14:15:31] [INF]   [CLOUDBRUTE]  15.8%  done=13481/85560  found=0  ETA=34m05s  → https://target-backend.web.core.windows.net
-[14:15:32] [INF]   [PASSIVE]  91.7%  src=1298/1416  subdomains=2642  ETA=1m44s  current=common_crawl_index_v8
-[14:15:37] [INF]   [PASSIVE]  91.7%  src=1298/1416  subdomains=2642  ETA=1m45s  current=common_crawl_index_v8
-[14:15:41] [INF]   [CLOUDBRUTE]  16.2%  done=13833/85560  found=0  ETA=33m55s  → https://target-bff.s3-website-us-west-2.amazonaws.com
-[14:15:42] [INF]   [PASSIVE]  92.4%  src=1309/1416  subdomains=2642  ETA=1m34s  current=urlscan_page_domain_v8
-[14:15:47] [INF]   [PASSIVE]  92.6%  src=1311/1416  subdomains=2642  ETA=1m33s  current=pulsedive_v8
-[14:15:51] [INF]   [CLOUDBRUTE]  16.6%  done=14185/85560  found=0  ETA=33m45s  → https://target-build-artifacts.s3.us-east-1.wasabisys.com
-[14:15:52] [INF]   [PASSIVE]  92.6%  src=1311/1416  subdomains=2642  ETA=1m33s  current=pulsedive_v8
-[14:15:57] [INF]   [PASSIVE]  92.6%  src=1311/1416  subdomains=2642  ETA=1m34s  current=pulsedive_v8
-[14:16:01] [INF]   [CLOUDBRUTE]  17.0%  done=14541/85560  found=0  ETA=33m34s  → https://target-cdn.file.core.windows.net
-[14:16:02] [INF]   [PASSIVE]  92.6%  src=1311/1416  subdomains=2642  ETA=1m34s  current=pulsedive_v8
-[14:16:07] [INF]   [PASSIVE]  92.6%  src=1311/1416  subdomains=2642  ETA=1m34s  current=pulsedive_v8
-[14:16:11] [INF]   [CLOUDBRUTE]  17.4%  done=14897/85560  found=0  ETA=33m24s  → https://target-clickstream-data.s3.us-east-1.amazonaws.com
-[14:16:12] [INF]   [PASSIVE]  92.6%  src=1311/1416  subdomains=2642  ETA=1m35s  current=pulsedive_v8
-[14:16:17] [INF]   [PASSIVE]  93.1%  src=1318/1416  subdomains=2642  ETA=1m28s  current=ipinfo_domains_v8
-[14:16:21] [INF]   [CLOUDBRUTE]  17.8%  done=15264/85560  found=0  ETA=33m11s  → https://target-codebuild.s3.ap-southeast-1.amazonaws.com
-[14:16:22] [INF]   [PASSIVE]  93.1%  src=1318/1416  subdomains=2642  ETA=1m29s  current=ipinfo_domains_v8
-[14:16:27] [INF]   [PASSIVE]  93.1%  src=1318/1416  subdomains=2642  ETA=1m29s  current=ipinfo_domains_v8
-[14:16:31] [INF]   [CLOUDBRUTE]  18.3%  done=15617/85560  found=0  ETA=33m01s  → https://target-compliance.sgp1.digitaloceanspaces.com
-[14:16:32] [INF]   [PASSIVE]  93.1%  src=1318/1416  subdomains=2642  ETA=1m30s  current=ipinfo_domains_v8
-[14:16:37] [INF]   [PASSIVE]  93.1%  src=1318/1416  subdomains=2642  ETA=1m30s  current=ipinfo_domains_v8
-[14:16:41] [INF]   [CLOUDBRUTE]  18.7%  done=15979/85560  found=0  ETA=32m50s  → https://target-contract-docs.s3.eu-central-1.wasabisys.com
-[14:16:42] [INF]   [PASSIVE]  93.1%  src=1318/1416  subdomains=2642  ETA=1m30s  current=ipinfo_domains_v8
-[14:16:47] [INF]   [PASSIVE]  93.1%  src=1319/1416  subdomains=2642  ETA=1m30s  current=ipinfo_domains_v8
-[14:16:51] [INF]   [CLOUDBRUTE]  19.1%  done=16328/85560  found=0  ETA=32m41s  → https://target-cross-region-backup.s3.wasabisys.com
-[14:16:52] [INF]   [PASSIVE]  93.2%  src=1320/1416  subdomains=2642  ETA=1m29s  current=ipinfo_domains_v8
-[14:17:03] [INF]   [PASSIVE]  93.4%  src=1322/1416  subdomains=2642  ETA=1m27s  current=ipinfo_domains_v8
-[14:17:07] [INF]   [CLOUDBRUTE]  19.5%  done=16686/85560  found=0  ETA=32m30s  → https://target-data-platform.s3-website.us-east-1.amazonaws.com
-^C[14:17:07] [INF]   [CLOUDBRUTE] Complete — 100.0%  done=16686/85560  elapsed=472.6s
-[14:17:07] [INF]   [PASSIVE] Complete — 93.4%  src=1322/1416  subdomains=2642  elapsed=1239.4s
-[14:17:07] [INF] 
+[15:18:44] [INF]   [DNS] Testing UDP port-53 connectivity before Phase 0…
+[15:18:44] [INF]   [DNS] UDP port 53 reachable — using native UDP resolver
+[15:18:48] [INF]   [MEM] RSS before Phase 1: 184 MB
+[15:18:48] [INF] [*] Phase 1: Passive OSINT — running all sources concurrently
+[15:18:48] [INF] [*] Running 1410 passive sources (max 100 concurrent)  [bucket scanners (6) deferred until passive completes]
+[15:18:53] [INF]   [PASSIVE]   0.5%  src=7/1410  subdomains=0  ETA=16m42s  current=arquivo_pt
+[15:18:58] [INF]   [PASSIVE]   1.0%  src=14/1410  subdomains=0  ETA=16m37s  current=mwdb_cert
+[15:19:03] [INF]   [PASSIVE]   1.7%  src=24/1410  subdomains=0  ETA=14m26s  current=crt_sh_wildcard
+[15:19:11] [INF]   [PASSIVE]   3.7%  src=52/1410  subdomains=0  ETA=8m42s  current=c99
+[15:19:16] [INF]   [PASSIVE]   3.7%  src=52/1410  subdomains=0  ETA=10m53s  current=c99
+[15:19:21] [INF]   [PASSIVE]   3.7%  src=52/1410  subdomains=0  ETA=13m03s  current=c99
+[15:19:26] [INF]   [PASSIVE]   3.8%  src=54/1410  subdomains=3  ETA=14m39s  current=spyonweb
+[15:19:31] [INF]   [PASSIVE]   4.0%  src=57/1410  subdomains=3  ETA=15m49s  current=rdap_io
+[15:19:36] [INF]   [PASSIVE]   4.1%  src=58/1410  subdomains=3  ETA=17m29s  current=whoisjson
+[15:19:43] [INF]   [PASSIVE]   4.1%  src=58/1410  subdomains=3  ETA=19m25s  current=whoisjson
+[15:19:48] [INF]   [PASSIVE]   4.2%  src=59/1410  subdomains=3  ETA=20m59s  current=intelx
+[15:19:53] [INF]   [PASSIVE]   4.2%  src=59/1410  subdomains=3  ETA=22m54s  current=intelx
+[15:19:58] [INF]   [PASSIVE]   4.2%  src=59/1410  subdomains=3  ETA=24m48s  current=intelx
+[15:20:03] [INF]   [PASSIVE]   4.4%  src=62/1410  subdomains=3  ETA=25m22s  current=riskiq_pdns
+[15:20:08] [INF]   [PASSIVE]   4.4%  src=62/1410  subdomains=3  ETA=27m11s  current=riskiq_pdns
+[15:20:13] [INF]   [PASSIVE]   4.4%  src=62/1410  subdomains=3  ETA=28m59s  current=riskiq_pdns
+[15:20:21] [INF]   [PASSIVE]   4.4%  src=62/1410  subdomains=3  ETA=stalled 15s (per-source timeout in 105s)  current=riskiq_pdns
+[15:20:26] [INF]   [PASSIVE]   4.5%  src=64/1410  subdomains=3  ETA=31m33s  current=passivedns_mnemonic
+[15:20:31] [INF]   [PASSIVE]   5.0%  src=70/1410  subdomains=14  ETA=30m19s  current=spyse2
+[15:20:36] [INF]   [PASSIVE]   5.3%  src=75/1410  subdomains=16  ETA=29m40s  current=yahoo
+[15:20:41] [INF]   [PASSIVE]   5.5%  src=78/1410  subdomains=16  ETA=29m53s  current=baidu
+[15:20:46] [INF]   [PASSIVE]   6.1%  src=86/1410  subdomains=16  ETA=28m14s  current=qwant
+[15:20:53] [INF]   [PASSIVE]   6.7%  src=95/1410  subdomains=16  ETA=26m32s  current=gibiru_search
+[15:20:58] [INF]   [PASSIVE]   7.5%  src=106/1410  subdomains=16  ETA=24m36s  current=publicwww
+[15:21:03] [INF]   [PASSIVE]   8.4%  src=119/1410  subdomains=16  ETA=22m36s  current=sitedossier
+[15:21:08] [INF]   [PASSIVE]   9.9%  src=140/1410  subdomains=16  ETA=19m39s  current=certdb_com
+[15:21:13] [INF]   [PASSIVE]  12.2%  src=172/1410  subdomains=16  ETA=16m11s  current=sucuri_sitecheck
+[15:21:18] [INF]   [PASSIVE]  13.8%  src=195/1410  subdomains=16  ETA=14m32s  current=pulsedive4
+[15:21:23] [INF]   [PASSIVE]  14.5%  src=205/1410  subdomains=16  ETA=14m12s  current=comodo_ct
+[15:21:31] [INF]   [PASSIVE]  15.6%  src=220/1410  subdomains=16  ETA=13m31s  current=archive_it
+[15:21:36] [INF]   [PASSIVE]  16.2%  src=228/1410  subdomains=515  ETA=13m23s  current=threatcrowd2
+[15:21:41] [INF]   [PASSIVE]  16.5%  src=232/1410  subdomains=515  ETA=13m32s  current=alienvault_otx2
+[15:21:46] [INF]   [PASSIVE]  17.0%  src=240/1410  subdomains=515  ETA=13m24s  current=triage2
+[15:21:51] [INF]   [PASSIVE]  18.1%  src=255/1410  subdomains=515  ETA=12m50s  current=dnsgrep2
+[15:21:56] [INF]   [PASSIVE]  18.4%  src=260/1410  subdomains=515  ETA=12m54s  current=subfinder2
+[15:22:03] [INF]   [PASSIVE]  19.6%  src=277/1410  subdomains=515  ETA=12m16s  current=searx3
+[15:22:08] [INF]   [PASSIVE]  20.7%  src=292/1410  subdomains=515  ETA=11m48s  current=pypi2
+[15:22:13] [INF]   [PASSIVE]  21.1%  src=297/1410  subdomains=515  ETA=11m52s  current=dockerhub2
+[15:22:18] [INF]   [PASSIVE]  21.2%  src=299/1410  subdomains=515  ETA=12m04s  current=codeberg
+[15:22:23] [INF]   [PASSIVE]  21.3%  src=301/1410  subdomains=515  ETA=12m17s  current=gist_search2
+[15:22:28] [INF]   [PASSIVE]  21.7%  src=306/1410  subdomains=515  ETA=12m19s  current=firebase2
+[15:22:33] [INF]   [PASSIVE]  21.8%  src=307/1410  subdomains=515  ETA=12m34s  current=azure_websites2
+[15:22:41] [INF]   [PASSIVE]  22.1%  src=311/1410  subdomains=516  ETA=12m40s  current=webanalyze
+[15:22:46] [INF]   [PASSIVE]  22.5%  src=317/1410  subdomains=516  ETA=12m38s  current=leakix4
+[15:22:51] [INF]   [PASSIVE]  22.6%  src=319/1410  subdomains=516  ETA=12m49s  current=crt_sh3
+[15:22:56] [INF]   [PASSIVE]  22.6%  src=319/1410  subdomains=516  ETA=13m06s  current=crt_sh3
+[15:23:01] [INF]   [PASSIVE]  22.6%  src=319/1410  subdomains=516  ETA=13m23s  current=crt_sh3
+[15:23:06] [INF]   [PASSIVE]  22.7%  src=320/1410  subdomains=516  ETA=13m37s  current=subdomainradar
+[15:23:13] [INF]   [PASSIVE]  22.7%  src=320/1410  subdomains=516  ETA=13m54s  current=subdomainradar
+[15:23:18] [INF]   [PASSIVE]  22.7%  src=320/1410  subdomains=516  ETA=14m11s  current=subdomainradar
+[15:23:23] [INF]   [PASSIVE]  23.3%  src=329/1410  subdomains=516  ETA=13m58s  current=bgpview3
+[15:23:28] [INF]   [PASSIVE]  23.9%  src=337/1410  subdomains=516  ETA=13m48s  current=bgphacking2
+[15:23:33] [INF]   [PASSIVE]  25.3%  src=357/1410  subdomains=527  ETA=13m01s  current=ipinfo4
+[15:23:38] [INF]   [PASSIVE]  26.5%  src=373/1410  subdomains=527  ETA=12m30s  current=intelx3
+[15:23:45] [INF]   [PASSIVE]  27.9%  src=394/1410  subdomains=979  ETA=11m49s  current=ssl_com_ct2
+[15:23:50] [INF]   [PASSIVE]  29.1%  src=410/1410  subdomains=979  ETA=11m23s  current=dnslytics5
+[15:23:55] [INF]   [PASSIVE]  30.4%  src=429/1410  subdomains=1398  ETA=10m51s  current=dnseye4
+[15:24:00] [INF]   [PASSIVE]  31.3%  src=442/1410  subdomains=1777  ETA=10m35s  current=circl3
+[15:24:05] [INF]   [PASSIVE]  32.1%  src=453/1410  subdomains=1777  ETA=10m23s  current=dnstable3
+[15:24:10] [INF]   [PASSIVE]  33.0%  src=466/1410  subdomains=1777  ETA=10m07s  current=duckduckgo3
+[15:24:15] [INF]   [PASSIVE]  33.1%  src=467/1410  subdomains=1777  ETA=10m16s  current=duckduckgo4
+[15:24:22] [INF]   [PASSIVE]  33.5%  src=473/1410  subdomains=1777  ETA=10m14s  current=searx7
+[15:24:27] [INF]   [PASSIVE]  34.2%  src=482/1410  subdomains=1777  ETA=10m06s  current=metager_search2
+[15:24:32] [INF]   [PASSIVE]  34.5%  src=486/1410  subdomains=1777  ETA=10m08s  current=gigablast2
+[15:24:37] [INF]   [PASSIVE]  34.8%  src=490/1410  subdomains=1777  ETA=10m10s  current=trendmicro_ti
+[15:24:42] [INF]   [PASSIVE]  35.1%  src=495/1410  subdomains=1777  ETA=10m10s  current=ibm_xforce4
+[15:24:47] [INF]   [PASSIVE]  36.3%  src=512/1410  subdomains=1777  ETA=9m47s  current=any_run4
+[15:24:54] [INF]   [PASSIVE]  37.2%  src=524/1410  subdomains=1777  ETA=9m35s  current=pulsedive6
+[15:24:59] [INF]   [PASSIVE]  38.1%  src=537/1410  subdomains=1777  ETA=9m21s  current=gitlab4
+[15:25:04] [INF]   [PASSIVE]  38.4%  src=541/1410  subdomains=1777  ETA=9m22s  current=bitbucket4
+[15:25:09] [INF]   [PASSIVE]  38.4%  src=541/1410  subdomains=1777  ETA=9m30s  current=bitbucket4
+[15:25:14] [INF]   [PASSIVE]  38.4%  src=542/1410  subdomains=1777  ETA=9m36s  current=codeberg2
+[15:25:19] [INF]   [PASSIVE]  38.4%  src=542/1410  subdomains=1777  ETA=9m44s  current=codeberg2
+[15:25:24] [INF]   [PASSIVE]  38.4%  src=542/1410  subdomains=1777  ETA=9m52s  current=codeberg2
+[15:25:31] [INF]   [PASSIVE]  38.7%  src=545/1410  subdomains=1777  ETA=9m55s  current=sourcegraph4
+[15:25:36] [INF]   [PASSIVE]  40.0%  src=564/1410  subdomains=1777  ETA=9m30s  current=dockerhub4
+[15:25:41] [INF]   [PASSIVE]  41.8%  src=589/1410  subdomains=1777  ETA=8m56s  current=shadowserver3
+[15:25:46] [INF]   [PASSIVE]  43.9%  src=619/1410  subdomains=1777  ETA=8m18s  current=spyonweb5
+[15:25:51] [INF]   [PASSIVE]  44.9%  src=633/1410  subdomains=1777  ETA=8m05s  current=uk_web_archive2
+[15:25:56] [INF]   [PASSIVE]  46.7%  src=659/1410  subdomains=1777  ETA=7m36s  current=chaos6
+[15:26:04] [INF]   [PASSIVE]  48.6%  src=685/1410  subdomains=1777  ETA=7m08s  current=myssl2
+[15:26:09] [INF]   [PASSIVE]  49.7%  src=701/1410  subdomains=1777  ETA=6m54s  current=urlscan7
+[15:26:14] [INF]   [PASSIVE]  51.1%  src=720/1410  subdomains=1777  ETA=6m37s  current=publicwww2_ext
+[15:26:19] [INF]   [PASSIVE]  51.6%  src=727/1410  subdomains=1777  ETA=6m34s  current=riskiq_pdns2
+[15:26:24] [INF]   [PASSIVE]  51.8%  src=730/1410  subdomains=1777  ETA=6m36s  current=inquest3
+[15:26:29] [INF]   [PASSIVE]  52.0%  src=733/1410  subdomains=1778  ETA=6m37s  current=amass_api2
+[15:26:34] [INF]   [PASSIVE]  52.6%  src=742/1410  subdomains=1778  ETA=6m31s  current=internet_nl2
+[15:26:41] [INF]   [PASSIVE]  52.8%  src=745/1410  subdomains=1778  ETA=6m32s  current=dnshistory3
+[15:26:46] [INF]   [PASSIVE]  53.3%  src=751/1410  subdomains=1778  ETA=6m30s  current=subdomaincenter4
+[15:26:51] [INF]   [PASSIVE]  53.4%  src=753/1410  subdomains=1778  ETA=6m32s  current=chaos8
+[15:26:56] [INF]   [PASSIVE]  53.7%  src=757/1410  subdomains=1778  ETA=6m32s  current=bgphacking4
+[15:27:01] [INF]   [PASSIVE]  54.0%  src=761/1410  subdomains=1778  ETA=6m32s  current=spur_io4
+[15:27:06] [INF]   [PASSIVE]  54.5%  src=768/1410  subdomains=2141  ETA=6m28s  current=mxtoolbox3
+[15:27:13] [INF]   [PASSIVE]  55.6%  src=784/1410  subdomains=2141  ETA=6m15s  current=ip_location2
+[15:27:18] [INF]   [PASSIVE]  56.9%  src=802/1410  subdomains=2141  ETA=6m00s  current=netlas9
+[15:27:23] [INF]   [PASSIVE]  57.1%  src=805/1410  subdomains=2141  ETA=6m00s  current=ripe5
+[15:27:28] [INF]   [PASSIVE]  57.8%  src=815/1410  subdomains=2141  ETA=5m54s  current=certspotter5
+[15:27:33] [INF]   [PASSIVE]  58.4%  src=823/1410  subdomains=2141  ETA=5m49s  current=bucketfinder2
+[15:27:38] [INF]   [PASSIVE]  58.5%  src=825/1410  subdomains=2141  ETA=5m51s  current=grayhatwarfare4
+[15:27:43] [INF]   [PASSIVE]  58.5%  src=825/1410  subdomains=2141  ETA=5m54s  current=grayhatwarfare4
+[15:27:51] [INF]   [PASSIVE]  58.5%  src=825/1410  subdomains=2141  ETA=5m58s  current=grayhatwarfare4
+[15:27:56] [INF]   [PASSIVE]  58.6%  src=826/1410  subdomains=2141  ETA=6m00s  current=firebase5
+[15:28:01] [INF]   [PASSIVE]  58.8%  src=829/1410  subdomains=2141  ETA=6m01s  current=netlify_sites
+[15:28:06] [INF]   [PASSIVE]  59.2%  src=835/1410  subdomains=2141  ETA=5m58s  current=digitalocean_apps
+[15:28:11] [INF]   [PASSIVE]  60.0%  src=846/1410  subdomains=2141  ETA=5m50s  current=zendesk_sites
+[15:28:16] [INF]   [PASSIVE]  61.6%  src=869/1410  subdomains=2455  ETA=5m30s  current=zoomeye9
+[15:28:23] [INF]   [PASSIVE]  62.4%  src=880/1410  subdomains=2455  ETA=5m22s  current=stretchoid3
+[15:28:28] [INF]   [PASSIVE]  63.6%  src=897/1410  subdomains=2457  ETA=5m08s  current=reddit5
+[15:28:33] [INF]   [PASSIVE]  63.8%  src=900/1410  subdomains=2457  ETA=5m08s  current=producthunt2
+[15:28:38] [INF]   [PASSIVE]  64.4%  src=908/1410  subdomains=2457  ETA=5m04s  current=openstreetmap
+[15:28:43] [INF]   [PASSIVE]  64.6%  src=911/1410  subdomains=2457  ETA=5m04s  current=censys_view2
+[15:28:48] [INF]   [PASSIVE]  64.7%  src=912/1410  subdomains=2457  ETA=5m05s  current=hunter_email2
+[15:28:56] [INF]   [PASSIVE]  65.1%  src=918/1410  subdomains=2457  ETA=5m02s  current=dnstrails3
+[15:29:01] [INF]   [PASSIVE]  65.4%  src=922/1410  subdomains=2457  ETA=5m01s  current=viewdns6
+[15:29:06] [INF]   [PASSIVE]  65.4%  src=922/1410  subdomains=2457  ETA=5m04s  current=viewdns6
+[15:29:11] [INF]   [PASSIVE]  65.4%  src=922/1410  subdomains=2457  ETA=5m07s  current=viewdns6
+[15:29:16] [INF]   [PASSIVE]  65.9%  src=929/1410  subdomains=2457  ETA=5m02s  current=urlscan11
+[15:29:21] [INF]   [PASSIVE]  66.2%  src=934/1410  subdomains=2457  ETA=5m00s  current=leakix11
+[15:29:26] [INF]   [PASSIVE]  66.7%  src=940/1410  subdomains=2457  ETA=4m57s  current=criminalip7
+[15:29:33] [INF]   [PASSIVE]  67.8%  src=956/1410  subdomains=2457  ETA=4m45s  current=hackertarget_whois
+[15:29:38] [INF]   [PASSIVE]  68.6%  src=967/1410  subdomains=2458  ETA=4m37s  current=dnsspy_ns
+[15:29:43] [INF]   [PASSIVE]  69.6%  src=982/1410  subdomains=2458  ETA=4m25s  current=google_doh_mx
+[15:29:48] [INF]   [PASSIVE]  70.9%  src=999/1410  subdomains=2458  ETA=4m13s  current=apnic_search
+[15:29:53] [INF]   [PASSIVE]  73.1%  src=1031/1410  subdomains=2461  ETA=3m47s  current=bgpview_search2
+[15:29:58] [INF]   [PASSIVE]  74.6%  src=1052/1410  subdomains=2466  ETA=3m32s  current=emailformat_search
+[15:30:06] [INF]   [PASSIVE]  75.7%  src=1068/1410  subdomains=2466  ETA=3m21s  current=shodan_ssl
+[15:30:11] [INF]   [PASSIVE]  76.7%  src=1081/1410  subdomains=2466  ETA=3m13s  current=commoncrawl_subdomains
+[15:30:16] [INF]   [PASSIVE]  77.4%  src=1092/1410  subdomains=2467  ETA=3m06s  current=publicdns_cn_lookup
+[15:30:21] [INF]   [PASSIVE]  78.3%  src=1104/1410  subdomains=2467  ETA=2m58s  current=afrinic_whois_passive
+[15:30:26] [INF]   [PASSIVE]  79.3%  src=1118/1410  subdomains=2467  ETA=2m49s  current=spyse_passive
+[15:30:31] [INF]   [PASSIVE]  82.8%  src=1168/1410  subdomains=2467  ETA=2m15s  current=urlscan_asn_search
+[15:30:36] [INF]   [PASSIVE]  84.5%  src=1192/1410  subdomains=2467  ETA=2m00s  current=dnsdumpster_v5
+[15:30:43] [INF]   [PASSIVE]  85.7%  src=1209/1410  subdomains=2467  ETA=1m50s  current=dnsintel_v5
+[15:30:48] [INF]   [PASSIVE]  87.0%  src=1227/1410  subdomains=2467  ETA=1m39s  current=urlscan_dom_v6
+[15:30:53] [INF]   [PASSIVE]  88.7%  src=1251/1410  subdomains=2467  ETA=1m25s  current=certsh_wildcard_v7
+[15:30:58] [INF]   [PASSIVE]  90.4%  src=1275/1410  subdomains=2467  ETA=1m12s  current=swaggerhub_v7
+[15:31:03] [INF]   [PASSIVE]  90.4%  src=1275/1410  subdomains=2467  ETA=1m12s  current=swaggerhub_v7
+[15:31:08] [INF]   [PASSIVE]  91.0%  src=1283/1410  subdomains=2467  ETA=1m08s  current=dnsbufferover_v8
+[15:31:15] [INF]   [PASSIVE]  91.4%  src=1289/1410  subdomains=2467  ETA=1m05s  current=riddler_io_v8
+[15:31:20] [INF]   [PASSIVE]  92.4%  src=1303/1410  subdomains=2467  ETA=0m57s  current=urlscan_page_domain_v8
+[15:31:25] [INF]   [PASSIVE]  93.0%  src=1311/1410  subdomains=2467  ETA=0m53s  current=ipinfo_domains_v8
+[15:31:30] [INF]   [PASSIVE]  93.3%  src=1316/1410  subdomains=2467  ETA=0m50s  current=ipinfo_domains_v8
+[15:31:35] [INF]   [PASSIVE]  93.5%  src=1318/1410  subdomains=2467  ETA=0m49s  current=ipinfo_domains_v8
+[15:31:40] [INF]   [PASSIVE]  93.5%  src=1319/1410  subdomains=2467  ETA=0m49s  current=ipinfo_domains_v8
+[15:31:45] [INF]   [PASSIVE]  93.8%  src=1322/1410  subdomains=2467  ETA=0m48s  current=ipinfo_domains_v8
+[15:31:52] [INF]   [PASSIVE]  93.9%  src=1324/1410  subdomains=2493  ETA=0m47s  current=ipinfo_domains_v8
+[15:31:57] [INF]   [PASSIVE]  93.9%  src=1324/1410  subdomains=2493  ETA=0m47s  current=ipinfo_domains_v8
+[15:32:02] [INF]   [PASSIVE]  94.6%  src=1334/1410  subdomains=2493  ETA=0m42s  current=ipinfo_domains_v8
+[15:32:07] [INF]   [PASSIVE]  95.2%  src=1342/1410  subdomains=2493  ETA=0m37s  current=ipinfo_domains_v8
+[15:32:12] [INF]   [PASSIVE]  96.0%  src=1354/1410  subdomains=2494  ETA=0m31s  current=ipinfo_domains_v8
+[15:32:17] [INF]   [PASSIVE]  97.4%  src=1373/1410  subdomains=2494  ETA=0m20s  current=ipinfo_domains_v8
+[15:32:24] [INF]   [PASSIVE]  98.7%  src=1391/1410  subdomains=2795  ETA=0m10s  current=ipinfo_domains_v8
+[15:32:29] [INF]   [PASSIVE]  98.9%  src=1395/1410  subdomains=2795  ETA=0m08s  current=ipinfo_domains_v8
+[15:32:34] [INF]   [PASSIVE]  99.1%  src=1398/1410  subdomains=2795  ETA=0m06s  current=ipinfo_domains_v8
+[15:32:39] [INF]   [PASSIVE]  99.5%  src=1403/1410  subdomains=2795  ETA=0m03s  current=ipinfo_domains_v8
+[15:32:44] [INF]   [PASSIVE]  99.8%  src=1407/1410  subdomains=2795  ETA=0m01s  current=ipinfo_domains_v8
+[15:32:49] [INF]   [PASSIVE]  99.8%  src=1407/1410  subdomains=2795  ETA=0m01s  current=ipinfo_domains_v8
+[15:32:54] [INF]   [PASSIVE]  99.9%  src=1408/1410  subdomains=2795  ETA=0m01s  current=ipinfo_domains_v8
+[15:33:02] [INF]   [PASSIVE]  99.9%  src=1409/1410  subdomains=2795  ETA=0m00s  current=ipinfo_domains_v8
+[15:33:05] [INF]   [PASSIVE] Complete — 100.0%  src=1410/1410  subdomains=2795  elapsed=798.9s
+[15:33:05] [INF] [*] Bucket phase: launching 6 bucket scanner(s) (all passive sources finished — 2795 subdomains collected)
+[15:33:09] [INF]   [BUCKET] No direct CNAME links to cloud bucket providers found; scanning name-matched candidates only (seeds containing 'target' or 'target-fr')
+[15:33:46] [INF]   [BUCKET-v10] Scanning 66088970 virtual-hosted + 5481216 path-style candidates with 5000+5000 workers …
+[15:39:20] [INF]   [CLOUDBRUTE] Starting — 408075 candidates (target='target')
+[15:39:30] [INF]   [CLOUDBRUTE]   0.5%  done=2195/408075  found=0  ETA=30m58s  → https://ap-south-1-target.s3-website-us-east-1.amazonaws.com
+[15:39:40] [INF]   [CLOUDBRUTE]   1.1%  done=4463/408075  found=0  ETA=30m13s  → https://api-target.s3.ap-southeast-3.amazonaws.com
+[15:39:50] [INF]   [CLOUDBRUTE]   1.7%  done=6996/408075  found=0  ETA=28m42s  → https://argocd-target.s3-website-us-west-2.amazonaws.com
+[15:40:00] [INF]   [CLOUDBRUTE]   2.3%  done=9401/408075  found=0  ETA=28m18s  → https://audit-account-target.s3.amazonaws.com
+[15:40:10] [INF]   [CLOUDBRUTE]   2.9%  done=11847/408075  found=0  ETA=27m54s  → https://auth-target-fr-uat.tor1.digitaloceanspaces.com
+[15:40:20] [INF]   [CLOUDBRUTE]   3.5%  done=14282/408075  found=0  ETA=27m35s  → https://backup-target-fr-sandbox.s3.ap-south-1.amazonaws.com
+[15:40:30] [INF]   [CLOUDBRUTE]   4.1%  done=16632/408075  found=0  ETA=27m28s  → https://billing-target-fr-sandbox.s3.us-east-1.wasabisys.com
+[15:40:40] [INF]   [CLOUDBRUTE]   4.6%  done=18818/408075  found=0  ETA=27m35s  → https://bronze-target.sgp1.digitaloceanspaces.com
+[15:40:50] [INF]   [CLOUDBRUTE]   5.2%  done=21332/408075  found=0  ETA=27m12s  → https://cdn-target-test.s3.ap-south-1.amazonaws.com
+[15:41:00] [INF]   [CLOUDBRUTE]   5.8%  done=23809/408075  found=0  ETA=26m54s  → https://cloudtrail-insight-target.s3.ap-south-1.amazonaws.com
+[15:41:16] [INF]   [CLOUDBRUTE]   6.4%  done=26245/408075  found=0  ETA=26m41s  → https://codepipeline-target.table.core.windows.net
+[15:41:26] [INF]   [CLOUDBRUTE]   7.0%  done=28603/408075  found=0  ETA=26m32s  → https://config-target-fr-qa.s3.amazonaws.com
+[15:41:36] [INF]   [CLOUDBRUTE]   7.6%  done=31065/408075  found=0  ETA=26m18s  → https://crossplane-target-fr.objectstorage.eu-frankfurt-1.oci.custom…
+[15:41:46] [INF]   [CLOUDBRUTE]   8.2%  done=33484/408075  found=0  ETA=26m06s  → https://data-fabric-target-fr.s3.ap-south-2.amazonaws.com
+[15:41:56] [INF]   [CLOUDBRUTE]   8.8%  done=35942/408075  found=0  ETA=25m53s  → https://demo-target-app.queue.core.windows.net
+[15:42:06] [INF]   [CLOUDBRUTE]   9.4%  done=38393/408075  found=0  ETA=25m41s  → https://demo-target-fr-gateway.storage.googleapis.com
+[15:42:16] [INF]   [CLOUDBRUTE]  10.0%  done=40813/408075  found=0  ETA=25m30s  → https://desktop-target-fr.objectstorage.ap-tokyo-1.oci.customer-oci.…
+[15:42:26] [INF]   [CLOUDBRUTE]  10.6%  done=43233/408075  found=0  ETA=25m19s  → https://dev-target-fr-audit.s3.ap-northeast-3.amazonaws.com
+[15:42:36] [INF]   [CLOUDBRUTE]  11.2%  done=45692/408075  found=0  ETA=25m07s  → https://dev-target-ml.objectstorage.us-phoenix-1.oci.customer-oci.co…
+[15:42:46] [INF]   [CLOUDBRUTE]  11.8%  done=48137/408075  found=0  ETA=24m55s  → https://dms-tasks-target.s3.us-west-1.amazonaws.com
+[15:43:02] [INF]   [CLOUDBRUTE]  12.4%  done=50589/408075  found=0  ETA=24m44s  → https://target-15.s3.ap-southeast-4.amazonaws.com
+[15:43:12] [INF]   [CLOUDBRUTE]  13.0%  done=53062/408075  found=0  ETA=24m32s  → https://target-2011-07.s3.ap-southeast-3.amazonaws.com
+[15:43:22] [INF]   [CLOUDBRUTE]  13.6%  done=55521/408075  found=0  ETA=24m20s  → https://target-2013-06.s3-website-us-west-2.amazonaws.com
+[15:43:32] [INF]   [CLOUDBRUTE]  14.2%  done=57957/408075  found=0  ETA=24m10s  → https://target-2015-04.s3.us-east-1.wasabisys.com
+[15:43:42] [INF]   [CLOUDBRUTE]  14.8%  done=60418/408075  found=0  ETA=23m58s  → https://target-2017-03.s3.eu-central-1.wasabisys.com
+[15:43:53] [INF]   [CLOUDBRUTE]  15.4%  done=62879/408075  found=0  ETA=23m47s  → https://target-2018-q2.s3.ap-northeast-1.wasabisys.com
+[15:44:03] [INF]   [CLOUDBRUTE]  16.0%  done=65343/408075  found=0  ETA=23m36s  → https://target-2020-06.r2.cloudflarestorage.com
+[15:44:13] [INF]   [CLOUDBRUTE]  16.6%  done=67797/408075  found=0  ETA=23m25s  → https://target-2021-data.us-east-1.linodeobjects.com
+[15:44:23] [INF]   [CLOUDBRUTE]  17.2%  done=70238/408075  found=0  ETA=23m15s  → https://target-2023-02.s3.ap-southeast-4.amazonaws.com
+[15:44:33] [INF]   [CLOUDBRUTE]  17.8%  done=72700/408075  found=0  ETA=23m04s  → https://target-2024-12.s3.af-south-1.amazonaws.com
+[15:44:43] [INF]   [CLOUDBRUTE]  18.4%  done=75167/408075  found=0  ETA=22m53s  → https://target-2025-report.queue.core.windows.net
+[15:44:53] [INF]   [CLOUDBRUTE]  19.0%  done=77619/408075  found=0  ETA=22m42s  → https://target-32.sfo3.digitaloceanspaces.com
+[15:45:03] [INF]   [CLOUDBRUTE]  19.6%  done=80056/408075  found=0  ETA=22m32s  → https://target-accounting.s3.ap-northeast-3.amazonaws.com
+[15:45:13] [INF]   [CLOUDBRUTE]  20.2%  done=82525/408075  found=0  ETA=22m21s  → https://target-api-docs.s3.af-south-1.amazonaws.com
+[15:45:23] [INF]   [CLOUDBRUTE]  20.8%  done=84993/408075  found=0  ETA=22m10s  → https://target-australiaeast.r2.cloudflarestorage.com
+[15:45:33] [INF]   [CLOUDBRUTE]  21.4%  done=87438/408075  found=0  ETA=22m00s  → https://target-broadcast.s3.us-west-1.amazonaws.com
+[15:45:43] [INF]   [CLOUDBRUTE]  22.0%  done=89865/408075  found=0  ETA=21m50s  → https://target-checkout.objectstorage.eu-frankfurt-1.oci.customer-oc…
+[15:45:53] [INF]   [CLOUDBRUTE]  22.6%  done=92314/408075  found=0  ETA=21m40s  → https://target-cold-storage.s3.us-west-2.amazonaws.com
+[15:46:03] [INF]   [CLOUDBRUTE]  23.2%  done=94754/408075  found=0  ETA=21m29s  → https://target-cross-account.s3.ap-northeast-1.amazonaws.com
+[15:46:13] [INF]   [CLOUDBRUTE]  23.8%  done=97218/408075  found=0  ETA=21m19s  → https://target-datasets.queue.core.windows.net
+[15:46:23] [INF]   [CLOUDBRUTE]  24.4%  done=99641/408075  found=0  ETA=21m09s  → https://target-demo-notifications.s3.ca-central-1.amazonaws.com
+[15:46:33] [INF]   [CLOUDBRUTE]  25.0%  done=102100/408075  found=0  ETA=20m58s  → https://target-dev-config.s3.af-south-1.amazonaws.com
+[15:46:43] [INF]   [CLOUDBRUTE]  25.6%  done=104522/408075  found=0  ETA=20m49s  → https://target-dist.s3.eu-north-1.amazonaws.com
+[15:46:53] [INF]   [CLOUDBRUTE]  26.2%  done=106970/408075  found=0  ETA=20m38s  → https://target-ecs-task-definitions.s3-website-eu-west-1.amazonaws.c…
+[15:47:03] [INF]   [CLOUDBRUTE]  26.8%  done=109416/408075  found=0  ETA=20m28s  → https://target-eu-central-2.sfo3.digitaloceanspaces.com
+[15:47:13] [INF]   [CLOUDBRUTE]  27.4%  done=111845/408075  found=0  ETA=20m18s  → https://target-financial-reports.s3-website-us-east-1.amazonaws.com
+[15:47:23] [INF]   [CLOUDBRUTE]  28.0%  done=114280/408075  found=0  ETA=20m08s  → https://target-fr-100.s3.me-south-1.amazonaws.com
+[15:47:33] [INF]   [CLOUDBRUTE]  28.6%  done=116707/408075  found=0  ETA=19m58s  → https://target-fr-2010.dfs.core.windows.net
+[15:47:43] [INF]   [CLOUDBRUTE]  29.2%  done=119149/408075  found=0  ETA=19m48s  → https://target-fr-2012-q3.s3.eu-west-1.wasabisys.com
+[15:47:53] [INF]   [CLOUDBRUTE]  29.8%  done=121578/408075  found=0  ETA=19m38s  → https://target-fr-2014-q2.backblazeb2.com
+[15:48:03] [INF]   [CLOUDBRUTE]  30.4%  done=123994/408075  found=0  ETA=19m28s  → https://target-fr-2016-12.s3-website-eu-west-1.amazonaws.com
+[15:48:13] [INF]   [CLOUDBRUTE]  31.0%  done=126431/408075  found=0  ETA=19m18s  → https://target-fr-2018-10.s3.us-east-1.amazonaws.com
+[15:48:23] [INF]   [CLOUDBRUTE]  31.6%  done=128857/408075  found=0  ETA=19m08s  → https://target-fr-2019-q3.dfs.core.windows.net
+[15:48:33] [INF]   [CLOUDBRUTE]  32.2%  done=131268/408075  found=0  ETA=18m58s  → https://target-fr-2021-06.r2.cloudflarestorage.com
+[15:48:43] [INF]   [CLOUDBRUTE]  32.8%  done=133716/408075  found=0  ETA=18m48s  → https://target-fr-2022-data.sfo3.digitaloceanspaces.com
+[15:48:53] [INF]   [CLOUDBRUTE]  33.4%  done=136134/408075  found=0  ETA=18m38s  → https://target-fr-2024-02.eu-central-1.linodeobjects.com
+[15:49:12] [INF]   [CLOUDBRUTE]  34.0%  done=138582/408075  found=0  ETA=18m28s  → https://target-fr-2025-11.s3.me-south-1.amazonaws.com
+[15:49:22] [INF]   [CLOUDBRUTE]  34.6%  done=141012/408075  found=0  ETA=18m18s  → https://target-fr-24.nyc3.digitaloceanspaces.com
+[15:49:32] [INF]   [CLOUDBRUTE]  35.1%  done=143438/408075  found=0  ETA=18m08s  → https://target-fr-6.s3.ap-southeast-2.amazonaws.com
+[15:49:42] [INF]   [CLOUDBRUTE]  35.7%  done=145869/408075  found=0  ETA=17m58s  → https://target-fr-ansible.storage.googleapis.com
+[15:49:52] [INF]   [CLOUDBRUTE]  36.3%  done=148273/408075  found=0  ETA=17m49s  → https://target-fr-asset.us-southeast-1.linodeobjects.com
+[15:50:02] [INF]   [CLOUDBRUTE]  36.9%  done=150714/408075  found=0  ETA=17m38s  → https://target-fr-bff.s3.ap-southeast-4.amazonaws.com
+[15:50:12] [INF]   [CLOUDBRUTE]  37.5%  done=153153/408075  found=0  ETA=17m28s  → https://target-fr-cdn-origin.backblazeb2.com
+[15:50:22] [INF]   [CLOUDBRUTE]  38.1%  done=155559/408075  found=0  ETA=17m19s  → https://target-fr-cn.eu-central-1.linodeobjects.com
+[15:50:32] [INF]   [CLOUDBRUTE]  38.7%  done=157990/408075  found=0  ETA=17m09s  → https://target-fr-contents.s3.ca-west-1.amazonaws.com
+[15:50:46] [INF]   [CLOUDBRUTE]  39.3%  done=160438/408075  found=0  ETA=16m58s  → https://target-fr-data-pipeline.nyc3.digitaloceanspaces.com
+[15:50:56] [INF]   [CLOUDBRUTE]  39.9%  done=162848/408075  found=0  ETA=16m49s  → https://target-fr-demo-compliance.s3-website.eu-central-1.amazonaws.…
+[15:51:06] [INF]   [CLOUDBRUTE]  40.5%  done=165302/408075  found=0  ETA=16m38s  → https://target-fr-dev-analytics.ap-south-1.linodeobjects.com
+[15:51:16] [INF]   [CLOUDBRUTE]  41.1%  done=167718/408075  found=0  ETA=16m28s  → https://target-fr-dev-team.r2.cloudflarestorage.com
+[15:51:26] [INF]   [CLOUDBRUTE]  41.7%  done=170158/408075  found=0  ETA=16m18s  → https://target-fr-dr.s3.us-east-2.amazonaws.com
+[15:51:36] [INF]   [CLOUDBRUTE]  42.3%  done=172584/408075  found=0  ETA=16m08s  → https://target-fr-emr-logs.eu-central-1.linodeobjects.com
+[15:51:46] [INF]   [CLOUDBRUTE]  42.9%  done=175008/408075  found=0  ETA=15m59s  → https://target-fr-exports.s3.ap-south-2.amazonaws.com
+[15:51:56] [INF]   [CLOUDBRUTE]  43.5%  done=177451/408075  found=0  ETA=15m48s  → https://target-fr-functions.ams3.digitaloceanspaces.com
+[15:52:06] [INF]   [CLOUDBRUTE]  44.1%  done=179868/408075  found=0  ETA=15m39s  → https://target-fr-healthcare.r2.cloudflarestorage.com
+[15:52:16] [INF]   [CLOUDBRUTE]  44.7%  done=182304/408075  found=0  ETA=15m28s  → https://target-fr-inspector-findings.s3.il-central-1.amazonaws.com
+[15:52:26] [INF]   [CLOUDBRUTE]  45.3%  done=184729/408075  found=0  ETA=15m19s  → https://target-fr-kinesis.backblazeb2.com
+[15:52:36] [INF]   [CLOUDBRUTE]  45.9%  done=187150/408075  found=0  ETA=15m09s  → https://target-fr-logstash.s3.af-south-1.amazonaws.com
+[15:52:46] [INF]   [CLOUDBRUTE]  46.5%  done=189585/408075  found=0  ETA=14m59s  → https://target-fr-mobile.s3.us-west-001.backblazeb2.com
+[15:52:56] [INF]   [CLOUDBRUTE]  47.1%  done=192004/408075  found=0  ETA=14m49s  → https://target-fr-notebooks.blob.core.windows.net
+[15:53:06] [INF]   [CLOUDBRUTE]  47.6%  done=194421/408075  found=0  ETA=14m39s  → https://target-fr-payroll-data.s3-website-us-east-1.amazonaws.com
+[15:53:16] [INF]   [CLOUDBRUTE]  48.2%  done=196840/408075  found=0  ETA=14m29s  → https://target-fr-prod-02.s3.ca-west-1.amazonaws.com
+[15:53:26] [INF]   [CLOUDBRUTE]  48.8%  done=199269/408075  found=0  ETA=14m19s  → https://target-fr-prod-reports.syd1.digitaloceanspaces.com
+[15:53:36] [INF]   [CLOUDBRUTE]  49.4%  done=201684/408075  found=0  ETA=14m09s  → https://target-fr-puppet.eu-central-1.linodeobjects.com
+[15:53:46] [INF]   [CLOUDBRUTE]  50.0%  done=204112/408075  found=0  ETA=13m59s  → https://target-fr-qa-payments.s3.ap-southeast-2.amazonaws.com
+[15:53:56] [INF]   [CLOUDBRUTE]  50.6%  done=206525/408075  found=0  ETA=13m49s  → https://target-fr-rekognition.s3.eu-west-2.amazonaws.com
+[15:54:06] [INF]   [CLOUDBRUTE]  51.2%  done=208952/408075  found=0  ETA=13m39s  → https://target-fr-sandbox-01.ams3.digitaloceanspaces.com
+[15:54:16] [INF]   [CLOUDBRUTE]  51.8%  done=211362/408075  found=0  ETA=13m29s  → https://target-fr-sandbox-static.nyc3.digitaloceanspaces.com
+[15:54:26] [INF]   [CLOUDBRUTE]  52.4%  done=213791/408075  found=0  ETA=13m19s  → https://target-fr-shared-data.s3.ca-west-1.amazonaws.com
+[15:54:36] [INF]   [CLOUDBRUTE]  53.0%  done=216212/408075  found=0  ETA=13m09s  → https://target-fr-staging-admin.s3.us-west-1.amazonaws.com
+[15:54:46] [INF]   [CLOUDBRUTE]  53.6%  done=218628/408075  found=0  ETA=12m59s  → https://target-fr-staging-static.backblazeb2.com
+[15:54:56] [INF]   [CLOUDBRUTE]  54.2%  done=221036/408075  found=0  ETA=12m50s  → https://target-fr-temp-processing.fra1.digitaloceanspaces.com
+[15:55:06] [INF]   [CLOUDBRUTE]  54.8%  done=223462/408075  found=0  ETA=12m40s  → https://target-fr-test-notifications.s3.ap-southeast-3.amazonaws.com
+[15:55:16] [INF]   [CLOUDBRUTE]  55.4%  done=225893/408075  found=0  ETA=12m30s  → https://target-fr-translate.storage.googleapis.com
+[15:55:26] [INF]   [CLOUDBRUTE]  55.9%  done=228309/408075  found=0  ETA=12m20s  → https://target-fr-uat-mobile.digitaloceanspaces.com
+[15:55:36] [INF]   [CLOUDBRUTE]  56.5%  done=230728/408075  found=0  ETA=12m10s  → https://target-fr-v10.s3.ap-northeast-1.amazonaws.com
+[15:55:46] [INF]   [CLOUDBRUTE]  57.1%  done=233181/408075  found=0  ETA=12m00s  → https://target-fr-website-assets.ca-central-1.linodeobjects.com
+[15:55:56] [INF]   [CLOUDBRUTE]  57.7%  done=235590/408075  found=0  ETA=11m50s  → https://target-github-actions.objectstorage.us-ashburn-1.oci.custome…
+[15:56:06] [INF]   [CLOUDBRUTE]  58.3%  done=238046/408075  found=0  ETA=11m40s  → https://target-hu.table.core.windows.net
+[15:56:16] [INF]   [CLOUDBRUTE]  58.9%  done=240454/408075  found=0  ETA=11m30s  → https://target-ios.blob.core.windows.net
+[15:56:26] [INF]   [CLOUDBRUTE]  59.5%  done=242871/408075  found=0  ETA=11m20s  → https://target-lambda-deployments.s3-website-us-west-2.amazonaws.com
+[15:56:36] [INF]   [CLOUDBRUTE]  60.1%  done=245336/408075  found=0  ETA=11m10s  → https://target-mart.file.core.windows.net
+[15:56:55] [INF]   [CLOUDBRUTE]  60.7%  done=247739/408075  found=0  ETA=11m00s  → https://target-msk-connect-data.objectstorage.ap-tokyo-1.oci.custome…
+[15:57:05] [INF]   [CLOUDBRUTE]  61.3%  done=250172/408075  found=0  ETA=10m50s  → https://target-opensearch-snapshots.s3.eu-north-1.amazonaws.com
+[15:57:15] [INF]   [CLOUDBRUTE]  61.9%  done=252612/408075  found=0  ETA=10m40s  → https://target-pip-packages.nyc3.digitaloceanspaces.com
+[15:57:25] [INF]   [CLOUDBRUTE]  62.5%  done=255049/408075  found=0  ETA=10m30s  → https://target-prod-backup.s3.eu-west-1.amazonaws.com
+[15:57:35] [INF]   [CLOUDBRUTE]  63.1%  done=257473/408075  found=0  ETA=10m20s  → https://target-product-catalog.us-southeast-1.linodeobjects.com
+[15:57:45] [INF]   [CLOUDBRUTE]  63.7%  done=259891/408075  found=0  ETA=10m10s  → https://target-qa-auth.objectstorage.us-phoenix-1.oci.customer-oci.c…
+[15:57:55] [INF]   [CLOUDBRUTE]  64.3%  done=262319/408075  found=0  ETA=10m00s  → https://target-raw-data-lake.s3.eu-central-1.wasabisys.com
+[15:58:05] [INF]   [CLOUDBRUTE]  64.9%  done=264736/408075  found=0  ETA=9m50s  → https://target-research.s3.us-east-2.wasabisys.com
+[15:58:15] [INF]   [CLOUDBRUTE]  65.5%  done=267168/408075  found=0  ETA=9m40s  → https://target-sandbox-billing.r2.cloudflarestorage.com
+[15:58:25] [INF]   [CLOUDBRUTE]  66.1%  done=269575/408075  found=0  ETA=9m30s  → https://target-secondary.s3.af-south-1.amazonaws.com
+[15:58:35] [INF]   [CLOUDBRUTE]  66.7%  done=271999/408075  found=0  ETA=9m20s  → https://target-soc.s3.eu-west-1.amazonaws.com
+[15:58:45] [INF]   [CLOUDBRUTE]  67.2%  done=274430/408075  found=0  ETA=9m10s  → https://target-staging-cdn.blob.core.windows.net
+[15:58:55] [INF]   [CLOUDBRUTE]  67.8%  done=276842/408075  found=0  ETA=9m00s  → https://target-stepfunctions-output.queue.core.windows.net
+[15:59:05] [INF]   [CLOUDBRUTE]  68.4%  done=279269/408075  found=0  ETA=8m50s  → https://target-test-assets.s3.eu-central-1.wasabisys.com
+[15:59:15] [INF]   [CLOUDBRUTE]  69.0%  done=281695/408075  found=0  ETA=8m40s  → https://target-test3.table.core.windows.net
+[15:59:25] [INF]   [CLOUDBRUTE]  69.6%  done=284108/408075  found=0  ETA=8m30s  → https://target-uat-assets.digitaloceanspaces.com
+[15:59:42] [INF]   [CLOUDBRUTE]  70.2%  done=286526/408075  found=0  ETA=8m20s  → https://target-ukwest.s3.amazonaws.com
+[15:59:52] [INF]   [CLOUDBRUTE]  70.8%  done=288975/408075  found=0  ETA=8m10s  → https://target-vector.web.core.windows.net
+[16:00:02] [INF]   [CLOUDBRUTE]  71.4%  done=291378/408075  found=0  ETA=8m00s  → https://target-z.backblazeb2.com
+[16:00:12] [INF]   [CLOUDBRUTE]  72.0%  done=293810/408075  found=0  ETA=7m50s  → https://targetfr-payments.s3.ap-southeast-1.wasabisys.com
+[16:00:22] [INF]   [CLOUDBRUTE]  72.6%  done=296247/408075  found=0  ETA=7m40s  → https://eastasia-target.us-east-1.linodeobjects.com
+[16:00:32] [INF]   [CLOUDBRUTE]  73.2%  done=298657/408075  found=0  ETA=7m30s  → https://edge-target.dfs.core.windows.net
+[16:00:42] [INF]   [CLOUDBRUTE]  73.8%  done=301092/408075  found=0  ETA=7m20s  → https://emr-output-target.s3.eu-central-1.amazonaws.com
+[16:00:52] [INF]   [CLOUDBRUTE]  74.4%  done=303524/408075  found=0  ETA=7m10s  → https://events-target-dev.us-west-1.linodeobjects.com
+[16:01:02] [INF]   [CLOUDBRUTE]  75.0%  done=305944/408075  found=0  ETA=7m00s  → https://finance-target-fr.s3-website-eu-west-1.amazonaws.com
+[16:01:12] [INF]   [CLOUDBRUTE]  75.6%  done=308397/408075  found=0  ETA=6m50s  → https://frontend-target-fr-prod.us-east-1.linodeobjects.com
+[16:01:22] [INF]   [CLOUDBRUTE]  76.2%  done=310804/408075  found=0  ETA=6m40s  → https://gateway-target-sandbox.blob.core.windows.net
+[16:01:32] [INF]   [CLOUDBRUTE]  76.8%  done=313212/408075  found=0  ETA=6m30s  → https://glue-temporary-target-fr.fra1.digitaloceanspaces.com
+[16:01:42] [INF]   [CLOUDBRUTE]  77.3%  done=315635/408075  found=0  ETA=6m20s  → https://hu-target-fr.s3.ap-southeast-1.wasabisys.com
+[16:01:52] [INF]   [CLOUDBRUTE]  77.9%  done=318067/408075  found=0  ETA=6m10s  → https://infra-target-staging.sgp1.digitaloceanspaces.com
+[16:02:02] [INF]   [CLOUDBRUTE]  78.5%  done=320481/408075  found=0  ETA=6m00s  → https://japaneast-target.blr1.digitaloceanspaces.com
+[16:02:12] [INF]   [CLOUDBRUTE]  79.1%  done=322901/408075  found=0  ETA=5m50s  → https://kubernetes-target.s3.amazonaws.com
+[16:02:22] [INF]   [CLOUDBRUTE]  79.7%  done=325327/408075  found=0  ETA=5m40s  → https://logs-target-fr-dev.s3.il-central-1.amazonaws.com
+[16:02:32] [INF]   [CLOUDBRUTE]  80.3%  done=327756/408075  found=0  ETA=5m30s  → https://media-target-demo.blr1.digitaloceanspaces.com
+[16:02:42] [INF]   [CLOUDBRUTE]  80.9%  done=330172/408075  found=0  ETA=5m20s  → https://microservice-target.s3-website.ap-southeast-1.amazonaws.com
+[16:02:52] [INF]   [CLOUDBRUTE]  81.5%  done=332597/408075  found=0  ETA=5m10s  → https://mobile-target-fr-qa.s3.eu-south-2.amazonaws.com
+[16:03:02] [INF]   [CLOUDBRUTE]  82.1%  done=335026/408075  found=0  ETA=5m00s  → https://my-target.web.core.windows.net
+[16:03:20] [INF]   [CLOUDBRUTE]  82.7%  done=337425/408075  found=0  ETA=4m51s  → https://notifications-target-fr-uat.web.core.windows.net
+[16:03:30] [INF]   [CLOUDBRUTE]  83.3%  done=339874/408075  found=0  ETA=4m40s  → https://origin-target-fr.s3.eu-west-1.wasabisys.com
+[16:03:40] [INF]   [CLOUDBRUTE]  83.9%  done=342299/408075  found=0  ETA=4m30s  → https://pe-target.us-west-1.linodeobjects.com
+[16:03:50] [INF]   [CLOUDBRUTE]  84.5%  done=344741/408075  found=0  ETA=4m20s  → https://prod-target-audit.s3.ca-central-1.amazonaws.com
+[16:04:00] [INF]   [CLOUDBRUTE]  85.1%  done=347151/408075  found=0  ETA=4m10s  → https://prod-target-fr-logs.s3.eu-west-2.amazonaws.com
+[16:04:10] [INF]   [CLOUDBRUTE]  85.7%  done=349577/408075  found=0  ETA=4m00s  → https://prod-us-east-target-fr.ams3.digitaloceanspaces.com
+[16:04:20] [INF]   [CLOUDBRUTE]  86.3%  done=351995/408075  found=0  ETA=3m51s  → https://pubsub-target-fr.s3-website-us-east-1.amazonaws.com
+[16:04:30] [INF]   [CLOUDBRUTE]  86.8%  done=354407/408075  found=0  ETA=3m41s  → https://qa-target-fr-audit.s3.ap-northeast-2.amazonaws.com
+[16:04:40] [INF]   [CLOUDBRUTE]  87.4%  done=356847/408075  found=0  ETA=3m31s  → https://qa-target-media.us-east-1.linodeobjects.com
+[16:04:50] [INF]   [CLOUDBRUTE]  88.0%  done=359251/408075  found=0  ETA=3m21s  → https://recovery-target.ams3.digitaloceanspaces.com
+[16:05:00] [INF]   [CLOUDBRUTE]  88.6%  done=361668/408075  found=0  ETA=3m11s  → https://reports-target-prod.r2.cloudflarestorage.com
+[16:05:10] [INF]   [CLOUDBRUTE]  89.2%  done=364081/408075  found=0  ETA=3m01s  → https://sagemaker-models-target.s3.ap-northeast-3.amazonaws.com
+[16:05:20] [INF]   [CLOUDBRUTE]  89.8%  done=366517/408075  found=0  ETA=2m51s  → https://sandbox-target-fr-assets.sgp1.digitaloceanspaces.com
+[16:05:30] [INF]   [CLOUDBRUTE]  90.4%  done=368941/408075  found=0  ETA=2m41s  → https://sandbox-target-media.objectstorage.us-phoenix-1.oci.customer…
+[16:05:40] [INF]   [CLOUDBRUTE]  91.0%  done=371396/408075  found=0  ETA=2m31s  → https://secrets-target-staging.table.core.windows.net
+[16:05:50] [INF]   [CLOUDBRUTE]  91.6%  done=373814/408075  found=0  ETA=2m21s  → https://siem-target.objectstorage.eu-frankfurt-1.oci.customer-oci.co…
+[16:06:00] [INF]   [CLOUDBRUTE]  92.2%  done=376257/408075  found=0  ETA=2m11s  → https://ssm-parameter-backup-target.s3.us-east-1.amazonaws.com
+[16:06:10] [INF]   [CLOUDBRUTE]  92.8%  done=378692/408075  found=0  ETA=2m01s  → https://staging-target-fr-compliance.queue.core.windows.net
+[16:06:20] [INF]   [CLOUDBRUTE]  93.4%  done=381143/408075  found=0  ETA=1m50s  → https://staging-target-reports.s3.us-west-2.amazonaws.com
+[16:06:30] [INF]   [CLOUDBRUTE]  94.0%  done=383564/408075  found=0  ETA=1m40s  → https://streaming-target.objectstorage.ap-tokyo-1.oci.customer-oci.c…
+[16:06:40] [INF]   [CLOUDBRUTE]  94.6%  done=386011/408075  found=0  ETA=1m30s  → https://test-target-fr-admin.s3.us-west-002.backblazeb2.com
+[16:06:50] [INF]   [CLOUDBRUTE]  95.2%  done=388447/408075  found=0  ETA=1m20s  → https://test-target-frontend.s3-website.ap-southeast-1.amazonaws.com
+[16:07:00] [INF]   [CLOUDBRUTE]  95.8%  done=390914/408075  found=0  ETA=1m10s  → https://training-target.objectstorage.ap-tokyo-1.oci.customer-oci.co…
+[16:07:10] [INF]   [CLOUDBRUTE]  96.4%  done=393329/408075  found=0  ETA=1m00s  → https://uat-target-edge.s3.ap-northeast-1.wasabisys.com
+[16:07:20] [INF]   [CLOUDBRUTE]  97.0%  done=395778/408075  found=0  ETA=0m50s  → https://uat-target-fr-webhooks.backblazeb2.com
+[16:07:30] [INF]   [CLOUDBRUTE]  97.6%  done=398172/408075  found=0  ETA=0m40s  → https://us-east-1-target.tor1.digitaloceanspaces.com
+[16:07:40] [INF]   [CLOUDBRUTE]  98.2%  done=400595/408075  found=0  ETA=0m30s  → https://waf-logs-target-fr.s3-website-us-east-1.amazonaws.com
+[16:07:50] [INF]   [CLOUDBRUTE]  98.8%  done=403015/408075  found=0  ETA=0m20s  → https://webhooks-target-fr-prod.s3.ca-central-1.amazonaws.com
+[16:08:00] [INF]   [CLOUDBRUTE]  99.4%  done=405431/408075  found=0  ETA=0m10s  → https://zipkin-target.web.core.windows.net
+[16:08:10] [INF]   [CLOUDBRUTE]  99.9%  done=407847/408075  found=0  ETA=0m00s  → https://zipkin-target.web.core.windows.net
+[16:08:13] [INF]   [CLOUDBRUTE] Complete — 100.0%  done=408075/408075  elapsed=1682.9s
+[16:08:13] [INF] [*] Bucket phase complete — elapsed=2032.2s
+[16:08:13] [INF] [+] Passive: 2795 candidates discovered
+[16:08:13] [INF] [*] Phase 2: DNS Enumeration
+[16:08:13] [INF] [*] Phase 2: DNS Enumeration — running 142 sub-tasks in parallel (v9.0 + Phase 2g) …
+[16:08:13] [INF]   [DNS-2a] Seeding ip_ranges: enumerate_records + asn_reverse …
+[16:08:41] [INF]   [DNS-2a] ip_ranges seeded: 1 IPs in 28.0s — now launching 140 Phase-2b/c/d/e/f/g tasks
+^C^C[17:00:06] [INF]   [DNS] ✓ nsec_walk (1/148) | subs=2795 (Δ±0) | 2915.5s
