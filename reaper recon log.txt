@@ -1,19 +1,77 @@
-Target domain: target.com
-[15:09:42] [INF] [*] SQL Reaper v3.7.4 — Target: target.com
-[15:09:42] [INF] [*] Output directory: ./target.com
-[15:09:53] [INF] [*] Phase 1: Passive OSINT — running all sources concurrently
-[15:09:53] [INF] [*] Running 1179 passive sources concurrently
-[15:11:21] [INF] [+] Passive: 44 candidates discovered
-[15:11:21] [INF]   [DNS] Testing UDP port-53 connectivity before Phase 2…
-[15:11:21] [INF]   [DNS] UDP port 53 reachable — using native UDP resolver
-[15:11:21] [INF] [*] Phase 2: DNS Enumeration
-[15:11:21] [INF] [*] Phase 2: DNS Enumeration — running 15 sub-tasks in parallel …
-[15:11:21] [INF]   [DNS-2a] Seeding ip_ranges: enumerate_records + asn_reverse …
-[15:11:33] [INF]   [DNS-2a] ip_ranges seeded: 1 IPs in 11.8s — now launching remaining 13 tasks
-[15:11:33] [INF]   [DNS] ✓ zone_transfer (1/13) | subs=44 (Δ±0) | 11.9s
-[15:11:35] [INF]   [DNS] ✓ nsec_walk (2/13) | subs=44 (Δ±0) | 13.8s
-[15:11:42] [INF]   [DNS] ✓ dns_history (3/13) | subs=85 (Δ+41) | 20.9s
-[15:11:56] [INF]   [DNS] ✓ ptr_sweep (4/13) | subs=85 (Δ+41) | 35.3s
-[15:12:03] [INF]   [DNS] ✓ dkim_selectors (5/13) | subs=85 (Δ+41) | 41.8s
-[15:12:03] [INF]   [DNS] ✓ tls_san (6/13) | subs=85 (Δ+41) | 42.3s
-zsh: killed     python3 /home/kali/Desktop/reaper_recon.py
+[18:56:35] [INF]   [DNS] UDP port 53 reachable — using native UDP resolver
+[18:56:42] [INF]   [MEM] RSS before Phase 1: 183 MB
+[18:56:42] [INF] [*] Phase 1: Passive OSINT — running all sources concurrently
+[18:56:42] [INF] [*] Running 1416 passive sources (max 1 concurrent)
+[19:16:59] [INF]   [BUCKET-v9] Scanning 66088970 virtual-hosted + 5481216 path-style candidates with 30+20 workers …
+[20:14:42] [INF]   [BUCKET] Confirmed: academia-assets.storage.googleapis.com → 142.251.143.27
+[20:20:17] [INF]   [BUCKET] Confirmed: academia.storage.googleapis.com → 142.251.36.59
+[20:36:32] [INF]   [BUCKET] Confirmed: advertising-assets.storage.googleapis.com → 142.250.69.91
+[20:42:00] [INF]   [BUCKET] Confirmed: advertising.fra1.digitaloceanspaces.com → 5.101.109.44
+[20:43:19] [INF]   [BUCKET] Confirmed: ai-api.storage.googleapis.com → 142.250.154.207
+[20:51:14] [INF]   [BUCKET] Confirmed: akamai-test.us-east-1.linodeobjects.com → 172.104.215.45
+[20:53:34] [INF]   [BUCKET] Confirmed: analytics-assets.storage.googleapis.com → 34.3.0.27
+[20:58:40] [INF]   [BUCKET] Confirmed: analytics-static.storage.googleapis.com → 142.251.141.59
+[21:27:54] [INF]   [BUCKET] Confirmed: assets.storage.googleapis.com → 104.154.125.27
+[21:27:54] [INF]   [BUCKET] Confirmed: assets.us-east-1.linodeobjects.com → 172.104.215.136
+[21:41:02] [INF]   [BUCKET] Confirmed: audio-reports.s3.amazonaws.com → 3.5.166.98
+[21:41:54] [INF]   [BUCKET] Confirmed: audio-test.s3.amazonaws.com → 52.217.93.244
+[21:41:59] [INF]   [BUCKET] Confirmed: audio-test.s3.us-east-1.amazonaws.com → 16.15.229.18
+[21:42:13] [INF]   [BUCKET] Confirmed: audio.nyc3.digitaloceanspaces.com → 162.243.189.2
+[21:47:01] [INF]   [BUCKET] Confirmed: automotive-dev.s3.amazonaws.com → 16.15.213.230
+[21:47:07] [INF]   [BUCKET] Confirmed: automotive-dev.s3.us-east-1.amazonaws.com → 16.15.223.130
+[22:07:58] [INF]   [BUCKET] Confirmed: bi-prod.storage.googleapis.com → 216.58.205.155
+[22:10:29] [INF]   [BUCKET] Confirmed: billing-api.storage.googleapis.com → 142.251.20.207
+[22:33:22] [INF]   [BUCKET] Confirmed: booking-assets.s3.amazonaws.com → 3.5.245.236
+[22:33:27] [INF]   [BUCKET] Confirmed: booking-assets.s3.eu-west-2.amazonaws.com → 52.95.142.118
+[22:37:55] [INF]   [BUCKET] Confirmed: booking-sandbox.s3.amazonaws.com → 3.5.74.3
+[22:37:59] [INF]   [BUCKET] Confirmed: booking-sandbox.s3.eu-west-1.amazonaws.com → 3.5.67.181
+[22:47:33] [INF]   [BUCKET] Confirmed: catalog-2024.s3.amazonaws.com → 3.5.90.73
+[22:47:41] [INF]   [BUCKET] Confirmed: catalog-2024.s3.us-east-2.amazonaws.com → 3.5.133.80
+[22:51:46] [INF]   [BUCKET] Confirmed: catalog-media.storage.googleapis.com → 172.217.23.59
+[22:56:28] [INF]   [BUCKET] Confirmed: cdn-artifacts.storage.googleapis.com → 142.251.141.59
+[22:56:58] [INF]   [BUCKET] Confirmed: cdn-dev.s3.amazonaws.com → 52.216.212.73
+[22:57:04] [INF]   [BUCKET] Confirmed: cdn-dev.s3.us-east-1.amazonaws.com → 52.217.201.154
+[22:57:40] [INF]   [BUCKET] Confirmed: cdn-logs.s3.eu-central-1.wasabisys.com → 130.117.252.110
+[22:58:11] [INF]   [BUCKET] Confirmed: cdn-test.s3.us-east-1.wasabisys.com → 38.27.106.152
+[22:58:12] [INF]   [BUCKET] Confirmed: cdn-test.s3.wasabisys.com → 38.27.106.131
+[22:59:48] [INF]   [BUCKET] Confirmed: chat-2023.s3.amazonaws.com → 52.219.124.16
+[22:59:51] [INF]   [BUCKET] Confirmed: chat-2023.s3.ap-southeast-1.amazonaws.com → 3.5.149.79
+[23:00:42] [INF]   [BUCKET] Confirmed: chat-assets.storage.googleapis.com → 104.154.124.27
+[23:01:21] [INF]   [BUCKET] Confirmed: chat-dev.s3.amazonaws.com → 52.217.229.49
+[23:01:27] [INF]   [BUCKET] Confirmed: chat-dev.s3.us-east-1.amazonaws.com → 52.217.174.218
+[23:05:47] [INF]   [BUCKET] Confirmed: chat-static.storage.googleapis.com → 216.58.205.155
+[23:05:48] [INF]   [BUCKET] Confirmed: chat-test.s3.amazonaws.com → 3.5.246.102
+[23:05:52] [INF]   [BUCKET] Confirmed: chat-test.s3.eu-west-2.amazonaws.com → 3.5.244.12
+[23:05:54] [INF]   [BUCKET] Confirmed: chat-test.storage.googleapis.com → 34.144.170.27
+[23:07:31] [INF]   [BUCKET] Confirmed: checkout-assets.s3.amazonaws.com → 52.219.140.5
+[23:07:34] [INF]   [BUCKET] Confirmed: checkout-assets.s3.eu-central-1.amazonaws.com → 3.5.120.44
+[23:13:46] [INF]   [BUCKET] Confirmed: checkout.nyc3.digitaloceanspaces.com → 162.243.189.2
+[23:17:02] [INF]   [BUCKET] Confirmed: cloudflare-dr.storage.googleapis.com → 142.251.141.59
+[23:33:39] [INF]   [BUCKET] Confirmed: community-test.storage.googleapis.com → 142.251.141.59
+[23:33:49] [INF]   [BUCKET] Confirmed: community.fra1.digitaloceanspaces.com → 5.101.109.44
+[23:38:38] [INF]   [BUCKET] Confirmed: compliance-media.s3.amazonaws.com → 3.5.92.72
+[23:38:47] [INF]   [BUCKET] Confirmed: compliance-media.s3.us-east-2.amazonaws.com → 3.5.89.22
+[23:43:55] [INF]   [BUCKET] Confirmed: config.nyc3.digitaloceanspaces.com → 162.243.189.2
+[23:46:35] [INF]   [BUCKET] Confirmed: controller-data.storage.googleapis.com → 104.154.124.27
+[23:55:47] [INF]   [BUCKET] Confirmed: corp-food.nyc3.digitaloceanspaces.com → 162.243.189.2
+[23:59:40] [INF]   [BUCKET] Confirmed: corp-logistics.sgp1.digitaloceanspaces.com → 103.253.144.208
+[00:08:07] [INF]   [BUCKET] Confirmed: cosmos-dev.storage.googleapis.com → 172.217.17.91
+[00:16:44] [INF]   [BUCKET] Confirmed: courseware.sfo3.digitaloceanspaces.com → 138.68.34.161
+[00:18:57] [INF]   [BUCKET] Confirmed: crm-dev.storage.googleapis.com → 142.251.140.91
+[00:21:35] [INF]   [BUCKET] Confirmed: crm-media.storage.googleapis.com → 34.144.170.27
+[00:23:03] [INF]   [BUCKET] Confirmed: crm-staging.s3.amazonaws.com → 16.15.0.44
+[00:23:10] [INF]   [BUCKET] Confirmed: crm-staging.s3.us-west-1.amazonaws.com → 16.15.4.226
+[00:23:21] [INF]   [BUCKET] Confirmed: crm-static.storage.googleapis.com → 142.251.141.187
+[00:23:49] [INF]   [BUCKET] Confirmed: crm.us-east-1.linodeobjects.com → 172.104.215.98
+[00:27:02] [INF]   [BUCKET] Confirmed: crypto-assets.s3.amazonaws.com → 52.219.148.18
+[00:30:06] [INF]   [BUCKET] Confirmed: crypto-lambda.s3.amazonaws.com → 3.5.74.77
+[00:30:10] [INF]   [BUCKET] Confirmed: crypto-lambda.s3.eu-west-1.amazonaws.com → 52.92.35.42
+[00:57:17] [INF]   [BUCKET] Confirmed: dev-aurora.storage.googleapis.com → 172.217.17.91
+[01:13:41] [INF]   [BUCKET] Confirmed: dev-media.storage.googleapis.com → 172.217.19.187
+[01:20:41] [INF]   [BUCKET] Confirmed: dev-satellite.s3.amazonaws.com → 52.219.132.196
+[01:20:44] [INF]   [BUCKET] Confirmed: dev-satellite.s3.ap-southeast-1.amazonaws.com → 52.219.124.115
+[01:24:57] [INF]   [BUCKET] Confirmed: dev-tracking.storage.googleapis.com → 172.217.171.187
+[01:51:08] [INF]   [BUCKET] Confirmed: doc-assets.storage.googleapis.com → 104.154.125.27
+[01:56:36] [INF]   [BUCKET] Confirmed: doc-prod.storage.googleapis.com → 142.251.143.27
+[02:06:34] [INF]   [BUCKET] Confirmed: doct.storage.googleapis.com → 172.217.23.59
+[05:34:15] [INF]   [BUCKET] Confirmed: doctolib-fr.storage.googleapis.com → 142.251.209.27
